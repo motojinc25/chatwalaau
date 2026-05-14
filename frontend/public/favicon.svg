@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="8" fill="#18181b"/>
+  <path d="M6 10c0-2.2 1.8-4 4-4h12c2.2 0 4 1.8 4 4v8c0 2.2-1.8 4-4 4h-3l-3 4-3-4H10c-2.2 0-4-1.8-4-4V10z" fill="#fff"/>
+  <text x="16" y="19" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" font-weight="700" fill="#18181b">Ci</text>
+</svg>

@@ -1,0 +1,52 @@
+[project]
+name = "chatwalaau"
+version = "0.50.0"
+description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Jingun Jung" }]
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Framework :: FastAPI",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "pydantic-settings>=2.9.0",
+    "python-dotenv>=1.1.0",
+    "agent-framework>=1.0.0,<2",
+    "agent-framework-ag-ui>=1.0.0b260402",
+    "agent-framework-devui>=1.0.0b260402",
+    "azure-identity>=1.23.0",
+    "httpx>=0.28.0",
+    "elevenlabs>=2.39.0",
+    "chromadb>=1.0.0",
+    "pymupdf>=1.25.0",
+    "httpx-sse>=0.4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/motojinc25/chatwalaau"
+Repository = "https://github.com/motojinc25/chatwalaau"
+Issues = "https://github.com/motojinc25/chatwalaau/issues"
+
+[project.scripts]
+chatwalaau = "app.cli:main"
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+app = ["_frontend_dist/**/*", "_frontend_dist/*", "templates/.env.template"]
+
+[dependency-groups]
+dev = ["ruff>=0.15.5", "pytest>=8.3.0", "pytest-asyncio>=1.0.0", "pyyaml>=6.0"]

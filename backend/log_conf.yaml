@@ -1,0 +1,46 @@
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  default:
+    format: "%(levelname)-8s  %(name)s - %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+  access:
+    format: "%(asctime)s %(levelname)-8s %(name)s - %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+
+handlers:
+  default:
+    class: logging.StreamHandler
+    formatter: default
+    stream: ext://sys.stderr
+  access:
+    class: logging.StreamHandler
+    formatter: access
+    stream: ext://sys.stderr
+
+loggers:
+  app.agui:
+    level: DEBUG
+  app.devui:
+    level: INFO
+  app.session:
+    level: INFO
+  app.stt:
+    level: INFO
+  app.upload:
+    level: INFO
+  app.weather:
+    level: INFO
+  uvicorn:
+    level: INFO
+  uvicorn.error:
+    level: INFO
+  uvicorn.access:
+    level: INFO
+    handlers: [access]
+    propagate: false
+
+root:
+  level: INFO
+  handlers: [default]

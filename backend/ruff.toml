@@ -1,0 +1,63 @@
+target-version = "py312"
+line-length = 120
+src = ["src"]
+exclude = ["tests", "conftest.py"]
+
+[lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG001", # unused-function-argument
+    "C901",   # too-complex
+    "SIM",    # flake8-simplify
+    "TC",     # flake8-type-checking
+    "TID252", # flake8-tidy-imports.banned-api
+    "Q",      # flake8-quotes
+    "PTH",    # flake8-use-pathlib
+    "TD",     # flake8-todos
+    "FIX",    # flake8-fixme
+    "ERA",    # eradicate
+    "PGH",    # pygrep-hooks
+    "RUF",    # Ruff-specific rules
+    "NPY",    # NumPy-specific rules
+    "PERF",   # Perflint
+    "FURB",   # refurb
+    "LOG",    # flake8-logging
+    "G",      # flake8-logging-format
+]
+ignore = [
+    "E501",   # line too long, handled by formatter
+    "B008",   # do not perform function calls in argument defaults
+    "C901",   # too complex
+    "RUF001", # String contains ambiguous Unicode characters (intentional Japanese text)
+    "RUF002", # Docstring contains ambiguous Unicode characters (intentional ʻokina in Hawaiian brand name "ChatWalaʻau")
+    "RUF003", # Comment contains ambiguous Unicode characters (intentional ʻokina in Hawaiian brand name)
+    "RUF012", # Mutable class attributes should be annotated with `typing.ClassVar`
+    "TD002",  # Missing author in TODO
+    "TD003",  # Missing issue link on the line following this TODO
+    "FIX002", # Line contains TODO, consider resolving the issue
+]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401", "F403"]
+"test_*.py" = ["ARG001", "S101"]
+"tests/*.py" = ["ARG001", "S101"]
+"**/migrations/**" = ["E501", "RUF012"]
+
+[lint.mccabe]
+max-complexity = 10
+
+[lint.isort]
+known-first-party = ["app"]
+force-sort-within-sections = true
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"

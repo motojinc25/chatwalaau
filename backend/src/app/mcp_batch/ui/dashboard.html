@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Batch Job Monitor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 13px;
+    color: var(--color-text-primary, #1a1a1a);
+    background: var(--color-background-primary, #ffffff);
+    padding: 12px;
+  }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--color-border, #e5e5e5);
+  }
+  .header h2 { font-size: 15px; font-weight: 600; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--color-border, #d4d4d4);
+    border-radius: 6px;
+    background: var(--color-background-primary, #fff);
+    color: var(--color-text-primary, #333);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .btn:hover { background: #f5f5f5; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn:disabled:hover { background: var(--color-background-primary, #fff); }
+  .btn-danger { color: #dc2626; border-color: #fca5a5; }
+  .btn-danger:hover { background: #fef2f2; }
+  .btn-warning { color: #d97706; border-color: #fcd34d; }
+  .btn-warning:hover { background: #fffbeb; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 12px;
+  }
+  th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #737373;
+    padding: 6px 8px;
+    border-bottom: 2px solid var(--color-border, #e5e5e5);
+  }
+  td {
+    padding: 8px;
+    border-bottom: 1px solid var(--color-border, #f0f0f0);
+    vertical-align: middle;
+  }
+  tr:hover td { background: #fafafa; }
+  tr.expandable { cursor: pointer; }
+
+  .status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .status-pending   { background: #f3f4f6; color: #6b7280; }
+  .status-running   { background: #dbeafe; color: #2563eb; }
+  .status-completed { background: #dcfce7; color: #16a34a; }
+  .status-failed    { background: #fee2e2; color: #dc2626; }
+  .status-cancelled { background: #f3f4f6; color: #9ca3af; }
+
+  .progress-bar {
+    width: 100%;
+    height: 8px;
+    background: #f3f4f6;
+    border-radius: 4px;
+    overflow: hidden;
+    min-width: 80px;
+  }
+  .progress-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+  }
+  .fill-running   { background: #3b82f6; }
+  .fill-completed { background: #22c55e; }
+  .fill-failed    { background: #ef4444; }
+  .fill-cancelled { background: #9ca3af; }
+  .fill-pending   { background: #d4d4d4; }
+
+  .progress-cell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 120px;
+  }
+  .progress-pct { font-size: 11px; color: #737373; min-width: 32px; text-align: right; }
+
+  .detail-row { display: none; }
+  .detail-row.open { display: table-row; }
+  .detail-row td { padding: 12px 8px; background: #fafafa; }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 16px;
+    font-size: 12px;
+  }
+  .detail-label { color: #737373; font-weight: 500; }
+  .detail-value { color: #1a1a1a; word-break: break-all; }
+
+  .summary {
+    display: flex;
+    gap: 16px;
+    font-size: 12px;
+    color: #737373;
+    padding-top: 8px;
+    border-top: 1px solid var(--color-border, #e5e5e5);
+  }
+  .summary span { font-weight: 500; }
+
+  .empty-state {
+    text-align: center;
+    padding: 32px 16px;
+    color: #9ca3af;
+  }
+  .empty-state p { margin-top: 4px; font-size: 12px; }
+
+  .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #e5e5e5;
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .id-cell {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+  }
+
+  /* Confirm dialog */
+  .confirm-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .confirm-dialog {
+    background: #fff;
+    border-radius: 10px;
+    padding: 20px 24px;
+    max-width: 340px;
+    width: 90%;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.15);
+  }
+  .confirm-dialog h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .confirm-dialog p { font-size: 12px; color: #737373; margin-bottom: 16px; }
+  .confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h2>Batch Job Monitor</h2>
+    <button class="btn" id="refreshBtn" onclick="doRefresh()">Refresh</button>
+  </div>
+
+  <div id="content">
+    <div class="empty-state">
+      <div class="spinner"></div>
+      <p>Loading jobs...</p>
+    </div>
+  </div>
+
+  <div class="summary" id="summary" style="display:none;"></div>
+  <div id="confirmContainer"></div>
+
+<script>
+(function() {
+  let jobs = [];
+  let expandedId = null;
+  let refreshTimer = null;
+  let pendingRequests = {};
+  let requestId = 0;
+  let busyButtons = {};  // buttonId -> true
+
+  // ---- PostMessage bridge (MCP Apps AppBridge protocol) ----
+
+  function sendToHost(message) {
+    window.parent.postMessage(message, '*');
+  }
+
+  function callTool(name, args) {
+    return new Promise((resolve, reject) => {
+      const id = ++requestId;
+      pendingRequests[id] = { resolve, reject };
+      sendToHost({
+        jsonrpc: '2.0',
+        id: id,
+        method: 'tools/call',
+        params: { name: name, arguments: args || {} }
+      });
+      setTimeout(() => {
+        if (pendingRequests[id]) {
+          delete pendingRequests[id];
+          reject(new Error('Tool call timeout'));
+        }
+      }, 15000);
+    });
+  }
+
+  window.addEventListener('message', (event) => {
+    const data = event.data;
+    if (!data || !data.jsonrpc) return;
+
+    if (data.id && pendingRequests[data.id]) {
+      const { resolve, reject } = pendingRequests[data.id];
+      delete pendingRequests[data.id];
+      if (data.error) {
+        reject(new Error(data.error.message || 'Tool call failed'));
+      } else {
+        resolve(data.result);
+      }
+      return;
+    }
+
+    if (data.method === 'ui/initialize') {
+      sendToHost({ jsonrpc: '2.0', method: 'initialized', params: {} });
+      return;
+    }
+    if (data.method === 'ui/tool-input') {
+      return;
+    }
+    if (data.method === 'ui/tool-result') {
+      if (data.params && data.params.result) {
+        try { handleToolResult(data.params.result); } catch(e) {}
+      }
+      return;
+    }
+    if (data.method === 'ui/resource-teardown') {
+      clearInterval(refreshTimer);
+      return;
+    }
+  });
+
+  function handleToolResult(result) {
+    try {
+      let content = result;
+      if (result.content && Array.isArray(result.content)) {
+        const textItem = result.content.find(c => c.type === 'text');
+        if (textItem) content = textItem.text;
+      }
+      const parsed = typeof content === 'string' ? JSON.parse(content) : content;
+      if (parsed.jobs) {
+        jobs = parsed.jobs;
+        render();
+      }
+    } catch(e) {}
+  }
+
+  // ---- Button helpers ----
+
+  function setBusy(btnId, busy) {
+    busyButtons[btnId] = busy;
+    const el = document.getElementById(btnId);
+    if (!el) return;
+    if (busy) {
+      el.disabled = true;
+      el._origHTML = el.innerHTML;
+      el.innerHTML = '<span class="spinner"></span>';
+    } else {
+      el.disabled = false;
+      if (el._origHTML) el.innerHTML = el._origHTML;
+    }
+  }
+
+  // ---- Confirm dialog ----
+
+  function showConfirm(title, message, onConfirm) {
+    const container = document.getElementById('confirmContainer');
+    container.innerHTML = `
+      <div class="confirm-overlay" id="confirmOverlay">
+        <div class="confirm-dialog">
+          <h3>${title}</h3>
+          <p>${message}</p>
+          <div class="confirm-actions">
+            <button class="btn" id="confirmNo">Cancel</button>
+            <button class="btn btn-danger" id="confirmYes">Confirm</button>
+          </div>
+        </div>
+      </div>`;
+    document.getElementById('confirmNo').onclick = () => { container.innerHTML = ''; };
+    document.getElementById('confirmYes').onclick = () => { container.innerHTML = ''; onConfirm(); };
+    reportSize();
+  }
+
+  // ---- Refresh ----
+
+  async function refreshSilent() {
+    try {
+      const result = await callTool('list_jobs', { status: 'all' });
+      let parsed;
+      if (result && result.content && Array.isArray(result.content)) {
+        const textItem = result.content.find(c => c.type === 'text');
+        if (textItem) parsed = JSON.parse(textItem.text);
+      } else if (typeof result === 'string') {
+        parsed = JSON.parse(result);
+      } else {
+        parsed = result;
+      }
+      if (parsed && parsed.jobs) {
+        jobs = parsed.jobs;
+        render();
+      }
+    } catch(e) {
+      console.error('Refresh failed:', e);
+    }
+  }
+
+  window.doRefresh = async function() {
+    const btnId = 'refreshBtn';
+    setBusy(btnId, true);
+    await refreshSilent();
+    setBusy(btnId, false);
+  };
+
+  refreshTimer = setInterval(refreshSilent, 3000);
+  setTimeout(refreshSilent, 500);
+
+  // ---- Actions ----
+
+  window.cancelJob = function(jobId) {
+    showConfirm(
+      'Cancel Job',
+      `Cancel job <strong>${jobId}</strong>? The job will stop at the next progress checkpoint.`,
+      async () => {
+        const btnId = 'btn-cancel-' + jobId;
+        setBusy(btnId, true);
+        try {
+          await callTool('cancel_job', { job_id: jobId });
+          await refreshSilent();
+        } catch(e) {
+          console.error('Cancel failed:', e);
+        }
+        setBusy(btnId, false);
+      }
+    );
+  };
+
+  window.deleteJob = function(jobId) {
+    showConfirm(
+      'Delete Job',
+      `Delete job <strong>${jobId}</strong>? This action cannot be undone.`,
+      async () => {
+        const btnId = 'btn-delete-' + jobId;
+        setBusy(btnId, true);
+        try {
+          await callTool('delete_job', { job_id: jobId });
+          await refreshSilent();
+        } catch(e) {
+          console.error('Delete failed:', e);
+        }
+        setBusy(btnId, false);
+      }
+    );
+  };
+
+  window.toggleDetail = function(jobId) {
+    expandedId = expandedId === jobId ? null : jobId;
+    render();
+  };
+
+  // ---- Render ----
+
+  function render() {
+    const content = document.getElementById('content');
+    const summary = document.getElementById('summary');
+
+    if (!jobs || jobs.length === 0) {
+      content.innerHTML = '<div class="empty-state"><p>No batch jobs found. Submit a job via chat to get started.</p></div>';
+      summary.style.display = 'none';
+      reportSize();
+      return;
+    }
+
+    let html = '<table><thead><tr>';
+    html += '<th>ID</th><th>Type</th><th>Status</th><th>Progress</th><th>Actions</th>';
+    html += '</tr></thead><tbody>';
+
+    for (const job of jobs) {
+      const status = job.status || 'pending';
+      const progress = job.progress || 0;
+      const shortId = job.id.length > 12 ? job.id.substring(0, 12) + '..' : job.id;
+
+      html += `<tr class="expandable" onclick="toggleDetail('${job.id}')">`;
+      html += `<td class="id-cell">${shortId}</td>`;
+      html += `<td>${job.type || '-'}</td>`;
+      html += `<td><span class="status-badge status-${status}">${status}</span></td>`;
+      html += `<td><div class="progress-cell">`;
+      html += `<div class="progress-bar"><div class="progress-fill fill-${status}" style="width:${progress}%"></div></div>`;
+      html += `<span class="progress-pct">${progress}%</span>`;
+      html += `</div></td>`;
+      html += '<td>';
+      if (status === 'running' || status === 'pending') {
+        const cid = 'btn-cancel-' + job.id;
+        const busy = busyButtons[cid];
+        html += `<button class="btn btn-warning" id="${cid}" onclick="event.stopPropagation();cancelJob('${job.id}')"${busy ? ' disabled' : ''}>${busy ? '<span class="spinner"></span>' : 'Cancel'}</button>`;
+      } else {
+        const did = 'btn-delete-' + job.id;
+        const busy = busyButtons[did];
+        html += `<button class="btn btn-danger" id="${did}" onclick="event.stopPropagation();deleteJob('${job.id}')"${busy ? ' disabled' : ''}>${busy ? '<span class="spinner"></span>' : 'Delete'}</button>`;
+      }
+      html += '</td></tr>';
+
+      const isOpen = expandedId === job.id;
+      html += `<tr class="detail-row${isOpen ? ' open' : ''}"><td colspan="5">`;
+      html += '<div class="detail-grid">';
+      html += `<span class="detail-label">Job ID</span><span class="detail-value">${job.id}</span>`;
+      html += `<span class="detail-label">Type</span><span class="detail-value">${job.type}</span>`;
+      html += `<span class="detail-label">Status</span><span class="detail-value">${status}</span>`;
+      html += `<span class="detail-label">Progress</span><span class="detail-value">${job.progress_message || progress + '%'}</span>`;
+      html += `<span class="detail-label">Params</span><span class="detail-value">${JSON.stringify(job.params || {})}</span>`;
+      html += `<span class="detail-label">Created</span><span class="detail-value">${job.created_at || '-'}</span>`;
+      if (job.started_at) html += `<span class="detail-label">Started</span><span class="detail-value">${job.started_at}</span>`;
+      if (job.completed_at) html += `<span class="detail-label">Completed</span><span class="detail-value">${job.completed_at}</span>`;
+      if (job.error) html += `<span class="detail-label">Error</span><span class="detail-value" style="color:#dc2626">${job.error}</span>`;
+      if (job.result) html += `<span class="detail-label">Result</span><span class="detail-value">${JSON.stringify(job.result)}</span>`;
+      html += '</div></td></tr>';
+    }
+
+    html += '</tbody></table>';
+    content.innerHTML = html;
+
+    const counts = {};
+    for (const job of jobs) {
+      const s = job.status || 'pending';
+      counts[s] = (counts[s] || 0) + 1;
+    }
+    let sumHtml = `Total: <span>${jobs.length}</span> jobs`;
+    for (const [s, c] of Object.entries(counts)) {
+      sumHtml += ` | ${s.charAt(0).toUpperCase() + s.slice(1)}: <span>${c}</span>`;
+    }
+    summary.innerHTML = sumHtml;
+    summary.style.display = 'flex';
+
+    reportSize();
+  }
+
+  function reportSize() {
+    const height = document.body.scrollHeight;
+    sendToHost({
+      jsonrpc: '2.0',
+      method: 'ui/size-change',
+      params: { height: height }
+    });
+  }
+})();
+</script>
+</body>
+</html>
