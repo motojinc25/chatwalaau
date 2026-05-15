@@ -62,6 +62,16 @@ chatwalaau
 
 Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 
+> **On a corporate network (TLS-intercepting proxy / in-house root CA)?**
+> Install with the `corp` extras so Python honours your OS certificate
+> store instead of the bundled `certifi`:
+>
+> ```bash
+> pip install "chatwalaau[corp]"
+> ```
+>
+> Adds `pip-system-certs`. Default installs are unaffected.
+
 ---
 
 ## Features
@@ -697,6 +707,41 @@ DevUI receives a dedicated Agent instance that reuses the main agent's
 function tools, skills, and model client but omits MCP tools and
 `rag_search` by default. This avoids cross-loop invocation between the
 DevUI daemon thread and the main FastAPI event loop.
+
+---
+
+### Corporate Networks (TLS-Intercepting Proxy)
+
+Operators behind a corporate TLS-intercepting proxy (Zscaler, Netskope,
+on-prem SSL middlebox) typically hit the following on the first
+outbound HTTPS call from the backend (Azure AD token acquisition,
+Azure OpenAI Responses, ElevenLabs, Open-Meteo, etc.):
+
+```
+httpx.ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED]
+certificate verify failed: self-signed certificate in certificate chain
+```
+
+The root cause is that Python's bundled `certifi` store does not know
+the in-house root CA that the proxy re-signs traffic with. The
+recommended remedy is to install the opt-in `corp` extras:
+
+```bash
+pip install "chatwalaau[corp]"
+```
+
+This pulls `pip-system-certs`, which routes Python's TLS validation
+through the host OS certificate store (where the corporate root CA is
+already trusted). No application source change, no env var change,
+no behaviour change for non-corporate environments.
+
+Alternative remedies (use whichever is available in your environment):
+
+```bash
+# Point Python at an explicit CA bundle
+export SSL_CERT_FILE=/path/to/corp-root-ca.pem
+export REQUESTS_CA_BUNDLE=/path/to/corp-root-ca.pem
+```
 
 ---
 

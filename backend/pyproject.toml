@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.50.1"
+version = "0.51.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -29,6 +29,13 @@ dependencies = [
     "pymupdf>=1.25.0",
     "httpx-sse>=0.4.0",
 ]
+
+[project.optional-dependencies]
+# Corporate networks behind TLS-intercepting proxies (Zscaler, Netskope,
+# on-prem SSL middlebox) need Python to honour the OS certificate store
+# so the in-house root CA is trusted. Opt-in: pip install "chatwalaau[corp]"
+# See assets/docs/guides/initial-setup.md (PRP-0054).
+corp = ["pip-system-certs>=4.0"]
 
 [project.urls]
 Homepage = "https://github.com/motojinc25/chatwalaau"
