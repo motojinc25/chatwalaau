@@ -6,9 +6,11 @@ import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { ModelSelector } from '@/components/ModelSelector'
+import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { useChat } from '@/hooks/useChat'
+import { useChatScroll } from '@/hooks/useChatScroll'
 import { useImageAttachment } from '@/hooks/useImageAttachment'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useTTS } from '@/hooks/useTTS'
@@ -28,23 +30,11 @@ interface ChatPanelProps {
   onBranchFromMessage?: (messageIndex: number) => void
 }
 
-function useAutoScroll(messages: ChatMessage[], isLoading: boolean) {
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const prevKey = useRef('')
-
+function buildStreamingKey(messages: ChatMessage[], isLoading: boolean): string {
   const lastMsg = messages.at(-1)
   const toolCallCount = lastMsg?.toolCalls?.length ?? 0
   const lastToolStatus = lastMsg?.toolCalls?.at(-1)?.status ?? ''
-  const key = `${messages.length}:${lastMsg?.content?.length ?? 0}:${toolCallCount}:${lastToolStatus}:${lastMsg?.reasoningBlocks?.length ?? 0}:${isLoading}`
-
-  if (prevKey.current !== key) {
-    prevKey.current = key
-    requestAnimationFrame(() => {
-      const el = scrollRef.current
-      if (el) el.scrollTop = el.scrollHeight
-    })
-  }
-  return scrollRef
+  return `${messages.length}:${lastMsg?.content?.length ?? 0}:${toolCallCount}:${lastToolStatus}:${lastMsg?.reasoningBlocks?.length ?? 0}:${isLoading}`
 }
 
 export function ChatPanel({
@@ -205,7 +195,12 @@ export function ChatPanel({
       .catch(() => {})
   }, [])
 
-  const scrollRef = useAutoScroll(messages, isLoading)
+  // CTR-0092 Chat Scroll Behavior (PRP-0055): autoscroll suspend on user
+  // intent, ScrollToBottom affordance, and bottom spacer sized by the
+  // observed ChatInput height.
+  const streamingKey = buildStreamingKey(messages, isLoading)
+  const { scrollRef, inputRef, showScrollToBottomButton, bottomSpacerHeightPx, scrollToBottom } =
+    useChatScroll(streamingKey)
 
   const latestUsage = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -271,7 +266,7 @@ export function ChatPanel({
       onDragOver={handleDragOver}
       onDrop={handleDrop}>
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
-        <div className={cn('mx-auto px-4 pt-4', compact ? 'max-w-full pb-4' : 'max-w-3xl pb-36')}>
+        <div className={cn('mx-auto px-4 pt-4', compact ? 'max-w-full pb-4' : 'max-w-3xl')}>
           {messages.length === 0 && (
             <div
               className={cn('flex items-center justify-center text-muted-foreground', compact ? 'h-40' : 'h-[60vh]')}>
@@ -297,6 +292,8 @@ export function ChatPanel({
               onRegenerateWithModel={regenerateWithModel}
             />
           ))}
+          {/* CTR-0092 bottom spacer: keeps the final message visible above the floating ChatInput. */}
+          {!compact && <div aria-hidden="true" style={{ height: bottomSpacerHeightPx }} />}
         </div>
       </div>
 
@@ -313,7 +310,7 @@ export function ChatPanel({
       )}
 
       {compact ? (
-        <div>
+        <div ref={inputRef}>
           <div className="flex items-center justify-end gap-1 px-4">
             <ModelSelector threadId={threadId ?? ''} onModelChange={handleModelChange} />
             <BackgroundResponsesToggle enabled={bgEnabled} onToggle={handleBgToggle} />
@@ -334,7 +331,13 @@ export function ChatPanel({
           />
         </div>
       ) : (
-        <div className="absolute inset-x-0 bottom-0 z-20">
+        <div ref={inputRef} className="absolute inset-x-0 bottom-0 z-20">
+          {/* CTR-0092 ScrollToBottom overlay: anchored above the ChatInput, horizontally centered. */}
+          <div className="pointer-events-none absolute -top-3 left-0 right-0 z-10 flex justify-center">
+            <div className="pointer-events-auto">
+              <ScrollToBottomButton visible={showScrollToBottomButton} onClick={scrollToBottom} />
+            </div>
+          </div>
           <div className="pointer-events-none bg-gradient-to-t from-background from-60% to-transparent pt-6" />
           <div className="relative bg-background">
             <div className="mx-auto flex max-w-3xl items-center justify-end gap-1 px-4">

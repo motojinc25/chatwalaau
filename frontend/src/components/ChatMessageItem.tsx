@@ -234,7 +234,7 @@ export function ChatMessageItem({
   )
 
   return (
-    <div className={cn('group/msg flex gap-3', compact ? 'px-3 py-2' : 'px-4 py-2')}>
+    <div className={cn('group/msg flex gap-3', compact ? 'px-3 py-1' : 'px-4 py-1')}>
       <Avatar className={cn('mt-0.5 shrink-0', compact ? 'h-6 w-6' : 'h-7 w-7')}>
         <AvatarFallback className={cn(isUser ? 'bg-primary text-primary-foreground' : 'bg-muted')}>
           {isUser ? (

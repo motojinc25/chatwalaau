@@ -13,6 +13,19 @@ import type {
 
 const STORAGE_KEY = 'chatwalaau-thread-id'
 
+// PRP-0055 follow-up: keep the sidebar open after a session pick on
+// desktop viewports. On narrow viewports the sidebar is an overlay
+// covering most of the chat area, so auto-close is still the right
+// behavior there. The project does not yet ship a mobile layout, but
+// this gate sets the responsive baseline so the desktop fix does not
+// regress a future mobile mode.
+const DESKTOP_BREAKPOINT_PX = 768
+
+function shouldAutoCloseSidebar(): boolean {
+  if (typeof window === 'undefined') return false
+  return !window.matchMedia(`(min-width: ${DESKTOP_BREAKPOINT_PX}px)`).matches
+}
+
 function normalizeSessionSummaries(data: unknown): SessionSummary[] {
   if (!Array.isArray(data)) return []
   return data.map((session) => ({
@@ -219,13 +232,13 @@ export function useSession() {
     setContinuationToken(null)
     setThreadId(newId)
     navigate('/chat', { replace: true })
-    setSidebarOpen(false)
+    if (shouldAutoCloseSidebar()) setSidebarOpen(false)
   }, [navigate])
 
   const switchSession = useCallback(
     async (targetThreadId: string) => {
       if (targetThreadId === threadId) {
-        setSidebarOpen(false)
+        if (shouldAutoCloseSidebar()) setSidebarOpen(false)
         return
       }
 
@@ -251,7 +264,7 @@ export function useSession() {
       switchedRef.current = true
       navigate(`/chat?session=${targetThreadId}`, { replace: true })
       setIsSwitching(false)
-      setSidebarOpen(false)
+      if (shouldAutoCloseSidebar()) setSidebarOpen(false)
     },
     [threadId, navigate],
   )

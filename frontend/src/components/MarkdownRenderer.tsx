@@ -80,7 +80,7 @@ function TableBlock({ children, ...props }: React.HTMLAttributes<HTMLTableElemen
   }, [])
 
   return (
-    <div className="group/table relative my-4 overflow-auto">
+    <div className="group/table relative my-2 overflow-auto">
       <Button
         variant="ghost"
         size="icon"
@@ -163,9 +163,13 @@ const components: Components = {
     )
   },
 
+  // CTR-0012 v1.6 (PRP-0055): compact density. Tightened block-level
+  // margins so a single viewport shows more content. HR is the most
+  // visible win because Markdown `---` previously rendered as a 2rem
+  // chasm under Tailwind prose defaults.
   p({ children, node: _, ...props }) {
     return (
-      <p className="mb-4 last:mb-0" {...props}>
+      <p className="mb-2 last:mb-0" {...props}>
         {children}
       </p>
     )
@@ -173,7 +177,7 @@ const components: Components = {
 
   h1({ children, node: _, ...props }) {
     return (
-      <h1 className="mt-6 mb-3 text-2xl font-bold first:mt-0" {...props}>
+      <h1 className="mt-4 mb-2 text-2xl font-bold first:mt-0" {...props}>
         {children}
       </h1>
     )
@@ -181,7 +185,7 @@ const components: Components = {
 
   h2({ children, node: _, ...props }) {
     return (
-      <h2 className="mt-5 mb-3 text-xl font-bold first:mt-0" {...props}>
+      <h2 className="mt-4 mb-2 text-xl font-bold first:mt-0" {...props}>
         {children}
       </h2>
     )
@@ -189,7 +193,7 @@ const components: Components = {
 
   h3({ children, node: _, ...props }) {
     return (
-      <h3 className="mt-4 mb-2 text-lg font-semibold first:mt-0" {...props}>
+      <h3 className="mt-3 mb-1.5 text-lg font-semibold first:mt-0" {...props}>
         {children}
       </h3>
     )
@@ -197,7 +201,7 @@ const components: Components = {
 
   ul({ children, node: _, ...props }) {
     return (
-      <ul className="mb-4 ml-6 list-disc last:mb-0" {...props}>
+      <ul className="mb-2 ml-6 list-disc last:mb-0" {...props}>
         {children}
       </ul>
     )
@@ -205,7 +209,7 @@ const components: Components = {
 
   ol({ children, node: _, ...props }) {
     return (
-      <ol className="mb-4 ml-6 list-decimal last:mb-0" {...props}>
+      <ol className="mb-2 ml-6 list-decimal last:mb-0" {...props}>
         {children}
       </ol>
     )
@@ -213,7 +217,7 @@ const components: Components = {
 
   li({ children, node: _, ...props }) {
     return (
-      <li className="mb-1" {...props}>
+      <li className="mb-0.5" {...props}>
         {children}
       </li>
     )
@@ -221,14 +225,14 @@ const components: Components = {
 
   blockquote({ children, node: _, ...props }) {
     return (
-      <blockquote className="my-4 border-l-4 border-border pl-4 italic text-muted-foreground" {...props}>
+      <blockquote className="my-2 border-l-4 border-border pl-4 italic text-muted-foreground" {...props}>
         {children}
       </blockquote>
     )
   },
 
   hr({ node: _, ...props }) {
-    return <hr className="my-6 border-border" {...props} />
+    return <hr className="my-3 border-border" {...props} />
   },
 }
 
@@ -244,8 +248,10 @@ function preprocessMath(text: string): string {
 }
 
 export function MarkdownRenderer({ content }: MarkdownRendererProps) {
+  // CTR-0012 v1.6 (PRP-0055): compact body text size and leading for
+  // higher information density on a single viewport.
   return (
-    <div className="[&>*:last-child]:mb-0">
+    <div className="text-[15px] leading-[1.55] [&>*:last-child]:mb-0">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[[rehypeKatex, { throwOnError: false, trust: true, strict: false }]]}

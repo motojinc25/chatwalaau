@@ -258,9 +258,12 @@ export function SessionSidebar({
         <div
           key={session.thread_id}
           className={cn(
-            'group flex w-full items-start gap-2 border-b border-border/30 px-3 py-2.5 transition-colors hover:bg-muted/50',
+            // PRP-0055 follow-up: transparent baseline left-border on every row
+            // keeps layout stable; the active row swaps it to primary for a clear
+            // affordance, combined with the stronger bg-accent fill.
+            'group flex w-full items-start gap-2 border-b border-l-2 border-l-transparent border-border/30 px-3 py-2.5 transition-colors hover:bg-muted/50',
             nested && 'border-b-0 bg-background/50 pl-9',
-            isActive && 'bg-muted',
+            isActive && 'border-l-primary bg-accent hover:bg-accent',
           )}
           draggable={!isRenaming}
           onDragStart={(event) => {
