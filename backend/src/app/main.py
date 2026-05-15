@@ -15,6 +15,7 @@
 
 from contextlib import asynccontextmanager
 import importlib.metadata
+import mimetypes
 from pathlib import Path
 import sys
 import warnings
@@ -24,6 +25,18 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
+
+# CTR-0005 v3: force-register frontend asset MIME types before Starlette
+# StaticFiles / FileResponse calls mimetypes.guess_type(). On Windows the
+# stdlib mimetypes module seeds itself from HKEY_CLASSES_ROOT, and operator
+# machines with a corrupted ".js" registry entry (text/plain, text/jscript,
+# application/x-javascript, ...) cause the browser to reject ES module
+# scripts under strict MIME checking. The explicit add_type() calls below
+# pin the correct values process-wide regardless of the host registry state.
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("application/wasm", ".wasm")
 
 from azure.identity import AzureCliCredential, get_bearer_token_provider
 from dotenv import load_dotenv
