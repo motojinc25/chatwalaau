@@ -48,6 +48,11 @@ ignore = [
 "test_*.py" = ["ARG001", "S101"]
 "tests/*.py" = ["ARG001", "S101"]
 "**/migrations/**" = ["E501", "RUF012"]
+# PRP-0053 / CTR-0005 v3: main.py MUST call mimetypes.add_type() before
+# importing FastAPI / Starlette so the explicit MIME mappings win over a
+# possibly-corrupted Windows registry seed. The post-mimetypes imports
+# are intentional, not a style violation.
+"main.py" = ["E402"]
 
 [lint.mccabe]
 max-complexity = 10

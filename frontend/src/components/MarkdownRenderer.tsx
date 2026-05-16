@@ -9,6 +9,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import { CodeBlock } from '@/components/CodeBlock'
 import { MermaidBlock } from '@/components/MermaidBlock'
+import { remarkCjkStrongEmphasisRescue } from '@/components/markdown/remarkCjkStrongEmphasisRescue'
 import { Button } from '@/components/ui/button'
 
 interface MarkdownRendererProps {
@@ -253,7 +254,7 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
   return (
     <div className="text-[15px] leading-[1.55] [&>*:last-child]:mb-0">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkPlugins={[remarkGfm, remarkMath, remarkCjkStrongEmphasisRescue]}
         rehypePlugins={[[rehypeKatex, { throwOnError: false, trust: true, strict: false }]]}
         remarkRehypeOptions={remarkRehypeOptions}
         components={components}>
