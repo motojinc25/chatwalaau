@@ -6,6 +6,7 @@ import {
   FolderOpen,
   FolderPlus,
   Loader2,
+  LogOut,
   MoreHorizontal,
   Pencil,
   Pin,
@@ -46,6 +47,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
+import { useAuth } from '@/hooks/useAuth'
 import { cn } from '@/lib/utils'
 import type { SessionFolder, SessionSummary } from '@/types/chat'
 
@@ -130,6 +132,17 @@ export function SessionSidebar({
   const [dropFolderId, setDropFolderId] = useState<string | null>(null)
   const renameRef = useRef<HTMLInputElement>(null)
   const folderNameRef = useRef<HTMLInputElement>(null)
+
+  // Web SPA auth (CTR-0096, PRP-0057): the logout entry is only meaningful
+  // when the operator has enabled the ID/PW lane AND the current visitor
+  // is authenticated via that lane. For loopback / API_KEY-only / open
+  // modes the button is hidden.
+  const auth = useAuth()
+  const showLogout = auth.mode === 'login-required' && auth.authenticated
+  const handleLogout = useCallback(async () => {
+    await auth.logout()
+    window.location.assign('/login')
+  }, [auth])
 
   const folderMap = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders])
   const rootSessions = useMemo(
@@ -427,6 +440,17 @@ export function SessionSidebar({
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onCreate} aria-label="New session">
             <Plus className="h-4 w-4" />
           </Button>
+          {showLogout && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleLogout}
+              aria-label="Sign out"
+              title={auth.username ? `Sign out (${auth.username})` : 'Sign out'}>
+              <LogOut className="h-4 w-4" />
+            </Button>
+          )}
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClose} aria-label="Close sidebar">
             <X className="h-4 w-4" />
           </Button>

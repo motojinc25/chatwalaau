@@ -112,6 +112,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Per-turn token usage display
 - OpenAI-compatible API: expose agent as `/v1/responses` endpoint for external apps via OpenAI SDK
 - Unified API authentication: single `API_KEY` Bearer token protects `/v1/responses`, every write REST endpoint, and the AG-UI chat stream for non-loopback (LAN) callers; same-machine clients always bypass
+- Web SPA authentication (optional): single-user ID/PW login with HttpOnly opaque session cookie for cloud-deployed instances; coexists with `API_KEY`
 - CLI Client: chat, session/template/model management, TTS, and upload from the command line with local preflight validation for filename, MIME type, and size
 - HTTPS/TLS support for LAN access with Secure Context (mkcert recommended)
 - Multilingual chat with browser auto-translation suppressed
@@ -247,6 +248,8 @@ The backend serves both frontend build artifacts and the API at [http://localhos
 chatwalaau                                Start the server
 chatwalaau init                           Generate .env from template
 chatwalaau init --force                   Overwrite existing .env
+chatwalaau hash-password                  Generate AUTH_PASSWORD_HASH (interactive)
+chatwalaau hash-password --stdin --quiet  Generate hash from stdin (scripted)
 chatwalaau --host 0.0.0.0                 Bind to all interfaces
 chatwalaau --port 9000                    Use custom port
 chatwalaau --skip-auth-check              Skip Azure CLI login check
@@ -582,6 +585,52 @@ sessions write, templates write, TTS, STT) **and the AG-UI chat stream
 and `API_KEY` unset: AG-UI now returns the same 503 / 401 as every other
 write endpoint. Add `API_KEY=...` to `.env`, or accept LAN exposure
 explicitly with `APP_REQUIRE_AUTH_ON_LAN=false`.
+
+---
+
+### Web SPA Authentication
+
+For deploying ChatWalaʻau as a private cloud web app where a single
+operator signs in through the browser. Coexists with `API_KEY` (which
+remains for CLI / external SDK access) and is **disabled by default** --
+operators who do not set `AUTH_USERNAME` see no behavior change.
+
+```
+AUTH_USERNAME=admin
+AUTH_PASSWORD_HASH=scrypt$N=16384,r=8,p=1$<base64-salt>$<base64-hash>
+# AUTH_SESSION_TTL_SECONDS=86400         # default 24h, sliding
+# AUTH_COOKIE_SECURE=auto                # auto / true / false
+# AUTH_COOKIE_NAME=chatwalaau_session
+```
+
+Generate `AUTH_PASSWORD_HASH` with the bundled CLI:
+
+```bash
+# Interactive (prompts twice for confirmation, hidden input)
+chatwalaau hash-password
+
+# From a secret manager / pipeline
+echo "$PASSWORD" | chatwalaau hash-password --stdin --quiet
+```
+
+When `AUTH_USERNAME` is set, the SPA renders a `/login` page; the
+server validates credentials in constant time, issues an opaque
+token, and returns it via an `HttpOnly` + `SameSite=Strict` cookie.
+The backend then accepts EITHER a Bearer `API_KEY` OR a valid
+session cookie on every write endpoint and the AG-UI chat stream.
+The `/v1/responses` external-app path stays Bearer-only.
+
+Properties:
+
+- No new Python dependency (uses stdlib `hashlib.scrypt` and
+  `secrets`)
+- Single-user model: one username + one password hash in `.env`
+- Process-local session store: no on-disk persistence, restarts
+  re-prompt the user
+- HTTPS strongly recommended for non-loopback deployments
+- Loopback CLI calls (`curl localhost`, `chatwalaau` subcommands)
+  keep their no-credential bypass so the local development
+  workflow is unaffected
 
 ---
 

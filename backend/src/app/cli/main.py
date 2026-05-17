@@ -1,8 +1,9 @@
-"""CLI entry point for ChatWalaʻau (CTR-0033 v4, PRP-0052).
+"""CLI entry point for ChatWalaʻau (CTR-0033 v5, PRP-0052, PRP-0057).
 
 Usage:
     chatwalaau                          Start the server
     chatwalaau init                     Initialize .env configuration
+    chatwalaau hash-password            Generate AUTH_PASSWORD_HASH (PRP-0057)
     chatwalaau chat "message"           Chat with the agent
     chatwalaau sessions list            List sessions
     chatwalaau templates list           List templates
@@ -204,6 +205,11 @@ def main() -> None:
     init_parser.add_argument("--output", "-o", default=".env", help="Output file path (default: .env)")
     init_parser.add_argument("--force", "-f", action="store_true", help="Overwrite existing file")
 
+    # hash-password subcommand (CTR-0093, PRP-0057)
+    from app.cli.hash_password import register_hash_password_parser
+
+    register_hash_password_parser(subparsers)
+
     # --- Client subcommands (PRP-0041) ---
 
     # chat subcommand (CTR-0081)
@@ -240,8 +246,8 @@ def main() -> None:
 
     if args.command == "init":
         _run_init(args)
-    elif args.command in ("chat", "sessions", "templates", "models", "tts", "upload"):
-        # Client subcommands
+    elif args.command in ("chat", "sessions", "templates", "models", "tts", "upload", "hash-password"):
+        # Client and utility subcommands
         args.func(args)
     else:
         _run_serve(args)

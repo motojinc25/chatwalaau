@@ -8,6 +8,7 @@
 - Mounts speech-to-text API (CTR-0021)
 - Mounts text-to-speech API (CTR-0039)
 - Mounts prompt templates API (CTR-0047)
+- Mounts Web SPA authentication API (CTR-0094, PRP-0057)
 - Manages MCP server lifecycle (CTR-0061, PRP-0031)
 - Serves frontend build artifacts (CTR-0005)
 - Loads configuration (CTR-0006)
@@ -48,6 +49,7 @@ from openai import AzureOpenAI
 
 from app.agui.agent_factory import build_devui_agent, create_agent_registry
 from app.agui.endpoint import register_agui_endpoints
+from app.auth.web_auth import router as web_auth_router
 from app.core.config import settings
 from app.devui.launcher import launch_devui_if_enabled
 from app.image_gen.router import router as image_edit_router
@@ -114,6 +116,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Web SPA Authentication API (CTR-0094, PRP-0057) -- mounted before session
+# routes so /api/auth/* takes priority over the catch-all SPA fallback.
+app.include_router(web_auth_router)
 
 # Session management API (CTR-0015)
 app.include_router(session_router)

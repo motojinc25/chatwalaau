@@ -101,6 +101,18 @@ class Settings(BaseSettings):
     api_key: str = ""
     app_require_auth_on_lan: bool = True
 
+    # Web SPA Authentication (CTR-0093, PRP-0057)
+    # Optional ID/PW + opaque session cookie lane for cloud-deployed SPAs.
+    # When AUTH_USERNAME is empty, the entire lane is disabled and
+    # verify_api_key behaves byte-for-byte as the pre-PRP-0057 inline
+    # Bearer check. When set, AUTH_PASSWORD_HASH must be a scrypt-format
+    # hash and verify_api_key additionally accepts a valid session cookie.
+    auth_username: str = ""
+    auth_password_hash: str = ""
+    auth_session_ttl_seconds: int = 86400
+    auth_cookie_secure: str = "auto"
+    auth_cookie_name: str = "chatwalaau_session"
+
     # DevUI (CTR-0024, PRP-0016, PRP-0046)
     devui_enabled: bool = False
     devui_port: int = 8080
@@ -289,6 +301,72 @@ class Settings(BaseSettings):
                     "to LAN peers; this is an operator-acknowledged insecure mode.",
                     self.app_host,
                 )
+        return self
+
+    # ---- Web SPA Authentication helpers (CTR-0093, PRP-0057) ----
+
+    @property
+    def web_auth_enabled(self) -> bool:
+        """True when AUTH_USERNAME is non-empty (web ID/PW lane active)."""
+        return bool(self.auth_username.strip())
+
+    @model_validator(mode="after")
+    def _validate_web_auth(self) -> "Settings":
+        """Validate AUTH_* settings per CTR-0093.
+
+        Startup fail-fast cases:
+        - AUTH_USERNAME set, AUTH_PASSWORD_HASH empty.
+        - AUTH_USERNAME set, AUTH_PASSWORD_HASH fails scrypt-format parse.
+        - AUTH_SESSION_TTL_SECONDS < 60.
+        - AUTH_COOKIE_SECURE not in {"auto", "true", "false"}.
+        """
+        cookie_secure = self.auth_cookie_secure.strip().lower()
+        if cookie_secure not in {"auto", "true", "false"}:
+            msg = f"AUTH_COOKIE_SECURE must be one of: auto, true, false. Got: {self.auth_cookie_secure!r}"
+            raise ValueError(msg)
+        self.auth_cookie_secure = cookie_secure
+
+        if self.web_auth_enabled:
+            if self.auth_session_ttl_seconds < 60:
+                msg = "AUTH_SESSION_TTL_SECONDS must be >= 60."
+                raise ValueError(msg)
+            if not self.auth_password_hash.strip():
+                msg = (
+                    "AUTH_USERNAME is set but AUTH_PASSWORD_HASH is empty. "
+                    "Generate a hash with the recipe in assets/docs/guides/web-auth.md."
+                )
+                raise ValueError(msg)
+            # Defer scrypt-format parse to app.auth.password; importing it
+            # here would create a circular dependency. The parse runs at
+            # router import time (which is also process startup).
+        return self
+
+    @model_validator(mode="after")
+    def _warn_on_no_auth_configured(self) -> "Settings":
+        """Extend CTR-0083 startup warning: warn when neither lane is configured.
+
+        Original PRP-0045 warning only checked API_KEY. With PRP-0057,
+        either API_KEY or AUTH_USERNAME satisfies the non-loopback
+        deployment. Warn only if BOTH are empty AND the bind is non-
+        loopback AND APP_REQUIRE_AUTH_ON_LAN is true.
+        """
+        if self.is_loopback_bind:
+            return self
+        if not self.app_require_auth_on_lan:
+            return self
+        if self.api_key or self.web_auth_enabled:
+            return self
+        # Both API_KEY and AUTH_USERNAME empty on a non-loopback bind with
+        # gating on -- the _warn_on_unauthenticated_lan validator already
+        # logs the API_KEY-side message; this one specifically calls out
+        # the new alternative.
+        _logger.warning(
+            "APP_HOST=%s is non-loopback; neither API_KEY (CLI/external) nor "
+            "AUTH_USERNAME (browser ID/PW) is set. Configure one of them in "
+            ".env or set APP_REQUIRE_AUTH_ON_LAN=false to acknowledge the "
+            "open mode.",
+            self.app_host,
+        )
         return self
 
     @model_validator(mode="after")
