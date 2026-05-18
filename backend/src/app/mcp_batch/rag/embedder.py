@@ -15,8 +15,9 @@ from __future__ import annotations
 import logging
 import os
 
-from azure.identity import AzureCliCredential, get_bearer_token_provider
 from openai import AzureOpenAI
+
+from app.azure_credential import get_azure_openai_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,11 @@ _client: AzureOpenAI | None = None
 
 
 def _create_client() -> AzureOpenAI:
-    """Create a new Azure OpenAI client using Azure CLI credentials.
+    """Create a new Azure OpenAI client for RAG embedding.
+
+    Credential resolution centralised in app.azure_credential (PRP-0058,
+    UDR-0034). AZURE_OPENAI_API_KEY set -> api_key= shape; unset ->
+    AzureCliCredential() via azure_ad_token_provider.
 
     Callers should normally prefer :func:`_get_client` to reuse the
     module-level singleton; this function stays public for tests that
@@ -42,14 +47,10 @@ def _create_client() -> AzureOpenAI:
         msg = "AZURE_OPENAI_ENDPOINT must be set for RAG embedding"
         raise ValueError(msg)
 
-    token_provider = get_bearer_token_provider(
-        AzureCliCredential(),
-        "https://cognitiveservices.azure.com/.default",
-    )
     return AzureOpenAI(
-        azure_ad_token_provider=token_provider,
         azure_endpoint=endpoint,
         api_version="2024-10-21",
+        **get_azure_openai_kwargs(),
     )
 
 

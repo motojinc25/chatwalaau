@@ -10,8 +10,8 @@ from typing import Any
 
 from agent_framework import Agent
 from agent_framework_openai import OpenAIChatClient
-from azure.identity import AzureCliCredential
 
+from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -30,13 +30,16 @@ class AgentRegistry:
         self._agents: dict[str, Agent] = {}
         self._default_model = settings.default_model
 
-        credential = AzureCliCredential()
+        # Azure OpenAI credential resolution centralised in app.azure_credential
+        # (PRP-0058, UDR-0034). AZURE_OPENAI_API_KEY set -> api_key= shape;
+        # unset -> AzureCliCredential() (cached at module scope).
+        credential_kwargs = get_chat_client_credential_kwargs()
 
         for model in settings.model_list:
             client = OpenAIChatClient(
                 model=model,
-                credential=credential,
                 azure_endpoint=settings.azure_openai_endpoint or None,
+                **credential_kwargs,
             )
 
             # Per-model reasoning effort (CTR-0069):

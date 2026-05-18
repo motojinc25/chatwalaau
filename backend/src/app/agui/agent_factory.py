@@ -22,9 +22,9 @@ from typing import Any
 
 from agent_framework import Agent
 from agent_framework_openai import OpenAIChatClient
-from azure.identity import AzureCliCredential
 
 from app.agui.agent_registry import AgentRegistry
+from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
 from app.mcp.lifecycle import get_mcp_server_names, get_mcp_tools
 from app.session.provider import FileHistoryProvider
@@ -237,11 +237,11 @@ def build_devui_agent() -> Agent | None:
     )
 
     model = settings.default_model
-    credential = AzureCliCredential()
+    # Azure OpenAI credential resolution centralised (PRP-0058, UDR-0034).
     client = OpenAIChatClient(
         model=model,
-        credential=credential,
         azure_endpoint=settings.azure_openai_endpoint or None,
+        **get_chat_client_credential_kwargs(),
     )
 
     model_options: dict[str, Any] = {}

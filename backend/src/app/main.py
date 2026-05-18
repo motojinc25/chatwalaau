@@ -39,7 +39,6 @@ mimetypes.add_type("application/javascript", ".mjs")
 mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("application/wasm", ".wasm")
 
-from azure.identity import AzureCliCredential, get_bearer_token_provider
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,6 +49,7 @@ from openai import AzureOpenAI
 from app.agui.agent_factory import build_devui_agent, create_agent_registry
 from app.agui.endpoint import register_agui_endpoints
 from app.auth.web_auth import router as web_auth_router
+from app.azure_credential import get_azure_openai_kwargs
 from app.core.config import settings
 from app.devui.launcher import launch_devui_if_enabled
 from app.image_gen.router import router as image_edit_router
@@ -107,6 +107,41 @@ app = FastAPI(
     openapi_url="/openapi.json" if settings.app_debug else None,
 )
 
+
+# TLS startup sanity check (PRP-0058 UX-1, CTR-0054 v2).
+# APP_SSL_CERTFILE / APP_SSL_KEYFILE are uvicorn-time arguments; if the operator
+# launches uvicorn directly (e.g. `uv run uvicorn app.main:app --reload`) the
+# kwargs are never injected and the server silently runs HTTP. Warn once at
+# import so the misconfiguration surfaces in startup logs.
+def _warn_if_tls_settings_unused() -> None:
+    import logging as _logging
+    import sys as _sys
+
+    if not (settings.app_ssl_certfile and settings.app_ssl_keyfile):
+        return
+    argv = _sys.argv or []
+    entry = argv[0].lower() if argv else ""
+    # `chatwalaau` CLI passes ssl_certfile/ssl_keyfile to uvicorn.run() as
+    # kwargs (no CLI flags appear in argv), so trust the entry-point name.
+    if "chatwalaau" in entry:
+        return
+    # Direct `uvicorn` / `pnpm run dev:full` paths carry the flags in argv.
+    if any("ssl-certfile" in arg for arg in argv):
+        return
+    _logging.getLogger(__name__).warning(
+        "APP_SSL_CERTFILE / APP_SSL_KEYFILE are set but the running uvicorn process "
+        "was not invoked with --ssl-certfile / --ssl-keyfile (argv=%r). "
+        "HTTPS will NOT be active. Use the `chatwalaau` CLI or `pnpm run dev:full` "
+        "(both auto-forward the SSL kwargs), or invoke uvicorn directly with "
+        "`--ssl-certfile %s --ssl-keyfile %s`.",
+        argv,
+        settings.app_ssl_certfile,
+        settings.app_ssl_keyfile,
+    )
+
+
+_warn_if_tls_settings_unused()
+
 cors_origins = [origin.strip() for origin in settings.cors_allowed_origins.split(",") if origin.strip()]
 
 app.add_middleware(
@@ -137,12 +172,12 @@ app.include_router(image_edit_router)
 app.include_router(mcp_apps_router)
 
 # Speech-to-Text API (CTR-0021)
+# Credential resolution centralised in app.azure_credential (PRP-0058, UDR-0034).
 if settings.azure_openai_endpoint:
-    token_provider = get_bearer_token_provider(AzureCliCredential(), "https://cognitiveservices.azure.com/.default")
     stt_client = AzureOpenAI(
-        azure_ad_token_provider=token_provider,
         azure_endpoint=settings.azure_openai_endpoint,
         api_version="2024-10-21",
+        **get_azure_openai_kwargs(),
     )
     set_stt_provider(AzureOpenAIWhisperProvider(stt_client, model=settings.whisper_deployment_name))
 app.include_router(stt_router)

@@ -18,10 +18,10 @@ from pathlib import Path
 from typing import Annotated
 import uuid
 
-from azure.identity import AzureCliCredential, get_bearer_token_provider
 from openai import AzureOpenAI
 from pydantic import Field
 
+from app.azure_credential import get_azure_openai_kwargs
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -34,17 +34,18 @@ _client: AzureOpenAI | None = None
 
 
 def _get_client() -> AzureOpenAI:
-    """Get or create the Azure OpenAI client for image generation."""
+    """Get or create the Azure OpenAI client for image generation.
+
+    Credential resolution centralised in app.azure_credential (PRP-0058,
+    UDR-0034). AZURE_OPENAI_API_KEY set -> api_key= shape; unset ->
+    AzureCliCredential() via azure_ad_token_provider.
+    """
     global _client
     if _client is None:
-        token_provider = get_bearer_token_provider(
-            AzureCliCredential(),
-            "https://cognitiveservices.azure.com/.default",
-        )
         _client = AzureOpenAI(
-            azure_ad_token_provider=token_provider,
             azure_endpoint=settings.azure_openai_endpoint,
             api_version="2025-04-01-preview",
+            **get_azure_openai_kwargs(),
         )
     return _client
 

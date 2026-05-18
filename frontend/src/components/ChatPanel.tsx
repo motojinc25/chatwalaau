@@ -213,8 +213,13 @@ export function ChatPanel({
     (content: string, images?: ImageRef[]) => {
       sendMessage(content, images)
       clearAttachments()
+      // PRP-0058 UX-2: user-send is the strongest "follow output" intent.
+      // Force-resume autoscroll so the new user message + assistant stream
+      // re-anchor at the bottom even if the operator had previously
+      // scrolled up to read earlier text (autoscrollRef was false).
+      scrollToBottom()
     },
-    [sendMessage, clearAttachments],
+    [sendMessage, clearAttachments, scrollToBottom],
   )
 
   const handleAddFiles = useCallback(

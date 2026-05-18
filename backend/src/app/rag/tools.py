@@ -19,10 +19,11 @@ import logging
 import os
 from typing import Annotated
 
-from azure.identity import AzureCliCredential, get_bearer_token_provider
 import chromadb
 from openai import AzureOpenAI
 from pydantic import Field
+
+from app.azure_credential import get_azure_openai_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -42,17 +43,14 @@ def init_rag_search(chroma_dir: str, collection_name: str, top_k: int) -> None:
     _default_top_k = top_k
     _embedding_model = os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-small")
 
-    # Create Azure OpenAI client for query embedding
+    # Create Azure OpenAI client for query embedding. Credential resolution
+    # centralised in app.azure_credential (PRP-0058, UDR-0034).
     endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
     if endpoint:
-        token_provider = get_bearer_token_provider(
-            AzureCliCredential(),
-            "https://cognitiveservices.azure.com/.default",
-        )
         _openai_client = AzureOpenAI(
-            azure_ad_token_provider=token_provider,
             azure_endpoint=endpoint,
             api_version="2024-10-21",
+            **get_azure_openai_kwargs(),
         )
 
     logger.info(

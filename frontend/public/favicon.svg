@@ -1,5 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="8" fill="#18181b"/>
-  <path d="M6 10c0-2.2 1.8-4 4-4h12c2.2 0 4 1.8 4 4v8c0 2.2-1.8 4-4 4h-3l-3 4-3-4H10c-2.2 0-4-1.8-4-4V10z" fill="#fff"/>
-  <text x="16" y="19" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" font-weight="700" fill="#18181b">Ci</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="ChatWala'au favicon">
+  <defs>
+    <linearGradient id="ocean" x1="0" y1="0" x2="0" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0EA5B7"/>
+      <stop offset="1" stop-color="#0E7490"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Ocean / sky silhouette -->
+  <rect width="32" height="32" rx="7.5" fill="url(#ocean)"/>
+
+  <!-- Chat bubble -->
+  <path
+    fill="#FFFFFF"
+    d="M9 7.25h14c2.9 0 5.25 2.35 5.25 5.25v5.25c0 2.9-2.35 5.25-5.25 5.25h-8.45l-5.05 5.1-.35-5.1H9c-2.9 0-5.25-2.35-5.25-5.25V12.5C3.75 9.6 6.1 7.25 9 7.25Z"/>
+
+  <!-- Hawaiian wave -->
+  <path
+    d="M7.75 16.5c2.45 2.45 5.75 2.45 8.4-.35 2.8-2.95 6.2-3.05 8.6-.55"
+    fill="none"
+    stroke="#0EA5B7"
+    stroke-width="1.95"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+
+  <!-- Sunset dot -->
+  <circle cx="24.25" cy="10.75" r="2.15" fill="#F59E0B"/>
 </svg>

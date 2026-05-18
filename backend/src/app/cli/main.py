@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import importlib.metadata
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -55,9 +56,28 @@ def _check_azure_login() -> bool:
         return False
 
 
+def _resolve_active_lane() -> str:
+    """Mirror app.azure_credential.get_active_lane() without importing it.
+
+    Importing the helper would force eager construction of azure-identity
+    credentials before uvicorn starts (and before pydantic-settings has
+    validated the env). This duplicates the precedence logic in 12 lines
+    so the CLI banner can describe the active lane without that side effect.
+    """
+    if os.environ.get("AZURE_OPENAI_API_KEY", "").strip():
+        return "api-key"
+    mode = (os.environ.get("AZURE_CREDENTIAL_MODE") or "").strip().lower()
+    return mode or "cli"
+
+
 def _run_serve(args: argparse.Namespace) -> None:
     """Start the FastAPI server via uvicorn."""
-    if not args.skip_auth_check and not _check_azure_login():
+    # PRP-0059: az-login precheck only applies to the cli credential lane.
+    # When the operator has selected api-key, managed-identity, or default
+    # mode, `az account show` is irrelevant (cloud hosts cannot run it,
+    # and the api-key lane bypasses Entra ID entirely).
+    active_lane = _resolve_active_lane()
+    if not args.skip_auth_check and active_lane == "cli" and not _check_azure_login():
         print("ERROR: Azure CLI is not logged in.")
         print()
         print("Please run:")
@@ -65,7 +85,12 @@ def _run_serve(args: argparse.Namespace) -> None:
         print()
         print("Or skip this check with:")
         print("  chatwalaau --skip-auth-check")
+        print()
+        print("Alternatively, set AZURE_OPENAI_API_KEY (api-key lane) or")
+        print("AZURE_CREDENTIAL_MODE=managed-identity / default in .env.")
         sys.exit(1)
+    if active_lane != "cli":
+        print(f"Skipping Azure CLI login check (credential lane: {active_lane})")
 
     import uvicorn
 

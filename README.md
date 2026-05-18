@@ -113,6 +113,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - OpenAI-compatible API: expose agent as `/v1/responses` endpoint for external apps via OpenAI SDK
 - Unified API authentication: single `API_KEY` Bearer token protects `/v1/responses`, every write REST endpoint, and the AG-UI chat stream for non-loopback (LAN) callers; same-machine clients always bypass
 - Web SPA authentication (optional): single-user ID/PW login with HttpOnly opaque session cookie for cloud-deployed instances; coexists with `API_KEY`
+- Azure OpenAI credential lane choice: four lanes via one helper -- `AZURE_OPENAI_API_KEY` (api-key bypass, works everywhere) or Entra ID via `AZURE_CREDENTIAL_MODE` = `cli` (default; `AzureCliCredential` / `az login`) / `managed-identity` (`ManagedIdentityCredential` for Azure App Service, Container Apps, AKS, Functions, VM) / `default` (`DefaultAzureCredential` auto-discovery chain). One INFO log line per process announces the active lane at first credential resolution; no key value is ever logged. Cloud deployment guide at `assets/docs/guides/azure-cloud-deploy.md`.
 - CLI Client: chat, session/template/model management, TTS, and upload from the command line with local preflight validation for filename, MIME type, and size
 - HTTPS/TLS support for LAN access with Secure Context (mkcert recommended)
 - Multilingual chat with browser auto-translation suppressed
@@ -146,18 +147,83 @@ The platform connects the UI and agent runtime through the AG-UI protocol.
 
 ### 1. Azure Authentication
 
-The backend authenticates to Azure OpenAI via `AzureCliCredential`.
-You must log in before starting.
+The backend supports four Azure OpenAI credential lanes selected by
+two environment variables. Pick the one that matches your deployment
+surface.
+
+| Lane | When to use | `.env` setting |
+| --- | --- | --- |
+| **api-key** | First-run / PoC / CI / container; cross-tenant Azure OpenAI | `AZURE_OPENAI_API_KEY=<key>` |
+| **cli** (default) | Localhost development with `az login` available | `AZURE_CREDENTIAL_MODE=cli` (or unset) |
+| **managed-identity** | Azure App Service, Container Apps, AKS, Functions, VM | `AZURE_CREDENTIAL_MODE=managed-identity` |
+| **default** | One image targeting multiple surfaces | `AZURE_CREDENTIAL_MODE=default` |
+
+Precedence: `AZURE_OPENAI_API_KEY` beats `AZURE_CREDENTIAL_MODE`. One
+INFO log line per process announces the active lane on first credential
+resolution; the key value is never logged.
+
+#### Option A: `az login` (default, localhost)
+
+The backend authenticates via `AzureCliCredential`. Log in before
+starting.
 
 ```bash
 az login
-```
-
-Select the subscription if needed:
-
-```bash
 az account set --subscription <subscription-id>
 ```
+
+#### Option B: `AZURE_OPENAI_API_KEY` (no Azure CLI required)
+
+For first-run / PoC / CI / container scenarios where `az login` is
+inconvenient, set the API key from your Azure OpenAI resource in
+`.env`:
+
+```
+AZURE_OPENAI_API_KEY=<your-api-key>
+```
+
+When set, every Azure OpenAI client in the backend (MAF chat, Whisper
+STT, image generation, RAG embed / search) authenticates with the key
+instead of an Entra ID credential.
+
+#### Option C: Managed Identity (Azure cloud deployments)
+
+For ChatWalaʻau deployed to Azure App Service / Container Apps / AKS /
+Functions / VM, assign a Managed Identity to the compute and grant it
+the **`Cognitive Services OpenAI User`** role on the Azure OpenAI
+resource scope, then set:
+
+```
+AZURE_CREDENTIAL_MODE=managed-identity
+# AZURE_CLIENT_ID=<user-assigned-MI-client-id>   # only if using user-assigned MI
+```
+
+User-assigned identities require `AZURE_CLIENT_ID` per the
+`azure-identity` SDK convention. AKS workloads using federated
+identity should set `AZURE_CREDENTIAL_MODE=default` instead so the
+SDK's `WorkloadIdentityCredential` is picked up automatically.
+
+#### Option D: `default` (DefaultAzureCredential auto-discovery)
+
+For container images that target multiple deployment surfaces
+(developer box, staging container, AKS pod) without changing the
+`.env`, set:
+
+```
+AZURE_CREDENTIAL_MODE=default
+```
+
+`DefaultAzureCredential` is constructed with the interactive browser
+excluded so headless cloud containers never pop a sign-in window. The
+chain order is: `Environment` -> `WorkloadIdentity` ->
+`ManagedIdentity` -> `SharedTokenCache` -> `AzureCli` ->
+`AzurePowerShell` -> `AzureDeveloperCli`. The `chatwalaau` CLI
+suppresses its `az account show` precheck automatically whenever the
+active lane is not `cli`.
+
+> See `assets/docs/guides/azure-cloud-deploy.md` for the full cloud
+> deployment walk-through (RBAC role assignment, AKS Workload Identity
+> setup, troubleshooting).
 
 ---
 

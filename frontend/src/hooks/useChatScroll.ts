@@ -1,6 +1,6 @@
-import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
+import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
-// CTR-0092 Chat Scroll Behavior (PRP-0055)
+// CTR-0092 Chat Scroll Behavior (PRP-0055, v4 per PRP-0058)
 export const NEAR_BOTTOM_PX = 64
 export const INPUT_GAP_PX = 24
 
@@ -25,6 +25,21 @@ function isNearBottom(el: HTMLElement): boolean {
  * `streamingKey` should be a string that changes on every streaming
  * delta (message length / last content length / tool-call count etc.)
  * so the effect knows when to re-apply auto-scroll.
+ *
+ * v4 timing model (PRP-0058 follow-up #2):
+ * - Body autoscroll lives in useLayoutEffect on streamingKey, so it
+ *   runs AFTER React commits the new content (scrollHeight is current)
+ *   and BEFORE the browser paints (no flicker).
+ * - Spacer-settle re-anchor lives in useLayoutEffect on
+ *   bottomSpacerHeightPx, same timing rationale.
+ * - scrollToBottom() defers the actual scrollTop assignment to
+ *   requestAnimationFrame so it runs AFTER any pending state updates
+ *   (e.g., the setMessages queued by ChatPanel.handleSend) commit.
+ *   This is critical: assigning scrollTop = scrollHeight while React
+ *   has new content pending would scroll to the OLD scrollHeight, and
+ *   the async scroll event that follows would compute isNearBottom
+ *   against the NEW (bigger) scrollHeight, flip autoscrollRef to
+ *   false, and block every subsequent streaming-delta autoscroll.
  */
 export function useChatScroll(streamingKey: string): UseChatScrollResult {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -33,21 +48,33 @@ export function useChatScroll(streamingKey: string): UseChatScrollResult {
   const [showButton, setShowButton] = useState(false)
   const [bottomSpacerHeightPx, setBottomSpacerHeightPx] = useState<number>(96)
 
-  // Auto-scroll on streaming delta (only when user has not interrupted).
-  // Using ref for autoscroll to avoid re-renders disrupting the effect.
-  const prevKeyRef = useRef('')
-  if (prevKeyRef.current !== streamingKey) {
-    prevKeyRef.current = streamingKey
-    requestAnimationFrame(() => {
-      const el = scrollRef.current
-      if (el && autoscrollRef.current) {
-        el.scrollTop = el.scrollHeight
-      }
-    })
-  }
+  // Body autoscroll on streaming delta. useLayoutEffect runs synchronously
+  // after DOM mutations (scrollHeight reflects the new content) and before
+  // the browser paints. Gated on autoscrollRef so user-suspended scroll is
+  // preserved.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: streamingKey is the re-fire trigger; its value is intentionally not read inside the effect body (scrollHeight from the DOM already reflects the new content the key encodes)
+  useLayoutEffect(() => {
+    if (!autoscrollRef.current) return
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [streamingKey])
 
-  // Track user scroll intent. A single near-bottom threshold governs
-  // both "user is reading earlier text" and "user voluntarily returned".
+  // PRP-0058 UX-3 (v4): re-anchor at bottom when the spacer settles after
+  // mount or grows mid-session. Without this, the body autoscroll uses the
+  // default spacer (96 px), then the ResizeObserver-driven spacer growth
+  // leaves scroll position above the new bottom (browsers do NOT re-anchor
+  // when scrollHeight grows). Gated on autoscrollRef.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: bottomSpacerHeightPx is the re-fire trigger; its value is intentionally not read inside the effect (the new scrollHeight already reflects the new spacer height via the DOM)
+  useLayoutEffect(() => {
+    if (!autoscrollRef.current) return
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [bottomSpacerHeightPx])
+
+  // Track user scroll intent. A single near-bottom threshold governs both
+  // "user is reading earlier text" and "user voluntarily returned".
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
@@ -59,8 +86,6 @@ export function useChatScroll(streamingKey: string): UseChatScrollResult {
     }
 
     const onUserIntent = () => {
-      // Browser updates scrollTop synchronously by the time these
-      // events fire, so a direct check is sufficient.
       updateAutoscroll()
     }
 
@@ -75,8 +100,14 @@ export function useChatScroll(streamingKey: string): UseChatScrollResult {
     el.addEventListener('touchmove', onUserIntent, { passive: true })
     window.addEventListener('keydown', onKey)
 
-    // Initial state
-    updateAutoscroll()
+    // PRP-0058 UX-2/UX-3 root cause fix (v3): no initial updateAutoscroll()
+    // call. At mount, scrollTop=0 and scrollHeight=full content height; for
+    // any tall session that would pin autoscrollRef=false BEFORE the body
+    // autoscroll could fire. autoscrollRef starts true via useRef(true);
+    // the synthetic scroll event from the body useLayoutEffect's
+    // scrollTop assignment drives updateAutoscroll() to true (we ARE near
+    // the bottom right after the assignment lands). showButton default is
+    // already false via useState(false), so no initial setState is needed.
 
     return () => {
       el.removeEventListener('scroll', onUserIntent)
@@ -86,8 +117,8 @@ export function useChatScroll(streamingKey: string): UseChatScrollResult {
     }
   }, [])
 
-  // Observe ChatInput height so the bottom spacer keeps the final
-  // visible message above the floating input even when the input grows.
+  // Observe ChatInput height so the bottom spacer keeps the final visible
+  // message above the floating input even when the input grows.
   useEffect(() => {
     const node = inputRef.current
     if (!node || typeof ResizeObserver === 'undefined') return
@@ -104,11 +135,23 @@ export function useChatScroll(streamingKey: string): UseChatScrollResult {
   }, [])
 
   const scrollToBottom = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
+    // Synchronous: re-arm autoscroll so the body useLayoutEffect that fires
+    // on the next streamingKey change (e.g., from a just-called
+    // sendMessage) actually scrolls. showButton clears immediately for UI
+    // feedback.
     autoscrollRef.current = true
-    el.scrollTop = el.scrollHeight
     setShowButton(false)
+    // PRP-0058 follow-up #2: defer the actual scroll to rAF so any pending
+    // React render commits first. Otherwise we scroll to the OLD
+    // scrollHeight (before the queued setMessages applies), and the async
+    // scroll event sees the NEW (bigger) scrollHeight and flips
+    // autoscrollRef back to false via updateAutoscroll, killing every
+    // subsequent streaming-delta autoscroll.
+    requestAnimationFrame(() => {
+      const el = scrollRef.current
+      if (!el) return
+      el.scrollTop = el.scrollHeight
+    })
   }, [])
 
   return {

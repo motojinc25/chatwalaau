@@ -22,6 +22,25 @@ class Settings(BaseSettings):
     # Azure OpenAI
     azure_openai_endpoint: str = ""
 
+    # Azure OpenAI Authentication (PRP-0058, PRP-0059, UDR-0034)
+    # When set, every Azure OpenAI client (MAF chat, image gen, STT, RAG)
+    # authenticates with this API key instead of an Entra ID credential.
+    # Default empty -> use the Entra ID lane selected by azure_credential_mode.
+    # The helper module app.azure_credential reads this value (via os.environ
+    # for cross-process compatibility with the batch MCP server).
+    azure_openai_api_key: str = ""
+
+    # Azure OpenAI Credential Mode (PRP-0059, UDR-0034)
+    # Selects the Entra ID credential class used when AZURE_OPENAI_API_KEY
+    # is unset. Allowed values (case-insensitive): cli, managed-identity,
+    # default. Defaults to "cli" (AzureCliCredential, pre-PRP-0059
+    # behaviour). "managed-identity" picks ManagedIdentityCredential for
+    # Azure-hosted compute (App Service, Container Apps, AKS, Functions,
+    # VM). "default" picks DefaultAzureCredential with the interactive
+    # browser excluded for headless cloud containers. See CTR-0006 v18
+    # and UDR-0034 decision log for the full four-way matrix.
+    azure_credential_mode: str = "cli"
+
     # Multi-Model Configuration (CTR-0069, PRP-0035)
     # Comma-separated deployment names. First entry is the default model.
     azure_openai_models: str = ""
@@ -241,6 +260,17 @@ class Settings(BaseSettings):
             )
         if not self.model_list:
             _logger.warning("AZURE_OPENAI_MODELS is empty; agent creation will be skipped.")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_credential_mode(self) -> "Settings":
+        """Reject unknown AZURE_CREDENTIAL_MODE values at startup (PRP-0059)."""
+        mode = self.azure_credential_mode.strip().lower()
+        allowed = {"cli", "managed-identity", "default"}
+        if mode and mode not in allowed:
+            raise ValueError(f"AZURE_CREDENTIAL_MODE must be one of {sorted(allowed)}, got {mode!r}")
+        # Normalise: empty -> "cli", and lowercase for downstream readers.
+        self.azure_credential_mode = mode or "cli"
         return self
 
     # ---- API Authentication helpers (CTR-0083, PRP-0045) ----
