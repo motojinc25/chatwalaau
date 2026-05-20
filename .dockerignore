@@ -1,0 +1,67 @@
+# .dockerignore
+# ============================================================
+# Docker build-context exclusion list. Mirrors `.gitignore` for
+# the parts that matter to the image build; leaves anything else
+# in so multi-stage COPY directives stay reliable.
+# Referenced by: assets/docker/Dockerfile (build context = repo root)
+# ============================================================
+
+# ---- Git internals ----
+.git/
+.gitignore
+.gitattributes
+
+# ---- Python build artifacts and caches ----
+backend/.venv/
+backend/.ruff_cache/
+backend/.pytest_cache/
+backend/dist/
+backend/build/
+backend/src/*.egg-info/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyo
+backend/**/*.pyd
+
+# Locally bundled SPA assets (stage 1 rebuilds them inside the image).
+backend/src/app/_frontend_dist/
+
+# Locally generated PyPI helper file (recreated by bundle-frontend.mjs).
+backend/LICENSE.md
+
+# ---- Node / frontend build artifacts ----
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ---- Environment / secrets ----
+**/.env
+**/.env.local
+**/.env.*.local
+# Keep the templates so operators inside the image can `chatwalaau init`:
+!backend/src/app/templates/.env.template
+!backend/.env.sample
+
+# ---- Runtime data (operator-side state) ----
+backend/.sessions/
+backend/.uploads/
+backend/.archived/
+backend/.certs/
+backend/.jobs/
+backend/.chroma/
+backend/.skills/
+backend/.templates/
+backend/batch-server.log
+
+# ---- IDE / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- Docs that are not needed in the runtime image ----
+assets/
+tests/
+RELEASE_NOTES*.md
+CHANGELOG.md
+CLAUDE.md

@@ -60,7 +60,7 @@ export function LoginPage() {
     if (result.reason === 'invalid-credentials') {
       setErrorMessage('Invalid username or password.')
     } else if (result.reason === 'disabled') {
-      setErrorMessage('Login is not configured. Ask the operator to set AUTH_USERNAME in .env.')
+      setErrorMessage('Login is not configured.')
     } else {
       setErrorMessage('Login service is unavailable. Please try again.')
     }

@@ -197,7 +197,8 @@ export function ChatMessageItem({
 
   const handleEditKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
+      // Skip while an IME composition is in progress (CJK conversion).
+      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
         e.preventDefault()
         handleSubmitEdit()
       }

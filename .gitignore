@@ -42,7 +42,8 @@ __pycache__/
 # TLS Certificates
 .certs/
 
-# MCP Servers
+# MCP Servers (PRP-0060: operator override; .default.jsonc is tracked)
+mcp_servers.jsonc
 mcp_servers.json
 
 # Batch Jobs

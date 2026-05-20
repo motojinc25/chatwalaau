@@ -1,12 +1,17 @@
-"""MCP configuration parser (CTR-0059, PRP-0031, PRP-0046).
+"""MCP configuration parser (CTR-0059, PRP-0031, PRP-0046, PRP-0060).
 
-Parses a Claude Desktop-compatible mcp_servers.json configuration file
-and returns structured server definitions for tool creation.
+Parses a Claude Desktop-compatible mcp_servers.jsonc configuration
+file and returns structured server definitions for tool creation.
 
 PRP-0046 extends the Claude Desktop format with optional fields that
 map directly to MAF ``MCPStdioTool`` / ``MCPStreamableHTTPTool``
 constructor arguments. Unknown keys in an entry are ignored so that
 Claude Desktop configs remain valid.
+
+PRP-0060 widens the accepted format from strict JSON to JSONC by
+stripping ``//`` line comments and ``/* ... */`` block comments
+before parsing. Strict-JSON contents continue to parse byte-for-byte
+because JSONC is a strict-JSON superset. No new dependency.
 """
 
 from dataclasses import dataclass, field
@@ -74,20 +79,64 @@ def _extract_optional(entry: dict, name: str) -> dict[str, Any]:
     return out
 
 
+def _strip_jsonc_comments(text: str) -> str:
+    """Remove ``//`` and ``/* */`` comments from JSONC source (PRP-0060).
+
+    Single-pass state machine that preserves double-quoted JSON string
+    contents (including escape sequences). Stripping happens entirely
+    outside strings, so strict-JSON input is returned byte-for-byte
+    identical.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_string = False
+    escape = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            j = text.find("\n", i + 2)
+            i = n if j == -1 else j
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            j = text.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def parse_mcp_config(config_path: Path) -> list[MCPServerConfig]:
     """Parse Claude Desktop-compatible MCP configuration file.
 
     Args:
-        config_path: Path to mcp_servers.json
+        config_path: Path to mcp_servers.jsonc (or any JSONC superset
+            of strict JSON; legacy mcp_servers.json contents still
+            parse unchanged via the comment-strip pass).
 
     Returns:
         List of MCPServerConfig entries. Invalid entries are skipped with warnings.
     """
     try:
         raw = config_path.read_text(encoding="utf-8")
-        config = json.loads(raw)
+        config = json.loads(_strip_jsonc_comments(raw))
     except json.JSONDecodeError:
-        logger.error("MCP config file is not valid JSON: %s", config_path)
+        logger.error("MCP config file is not valid JSON/JSONC: %s", config_path)
         return []
     except OSError:
         logger.error("Failed to read MCP config file: %s", config_path)

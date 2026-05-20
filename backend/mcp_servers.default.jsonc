@@ -1,0 +1,33 @@
+// ChatWalaʻau MCP defaults.
+//
+// This file is the bundled, git-tracked default MCP configuration.
+// To customise, create `mcp_servers.jsonc` in this directory
+// (gitignored) and the runtime will prefer it over this file.
+//
+// Supported entry shapes per server:
+//   stdio:    "command" + optional "args" + optional "env"
+//   http/sse: "url"     + optional "headers"
+// Optional MAF passthrough fields (both transports):
+//   "load_tools":      bool, default MAF (true)
+//   "load_prompts":    bool, default false (most servers are tools-only)
+//   "request_timeout": positive int seconds, default MAF
+{
+  "mcpServers": {
+    // Built-in batch processing server.
+    // Provides asynchronous job management + RAG ingestion.
+    // `env` is intentionally empty: BATCH_JOBS_DIR / RAG_CHUNK_*
+    // live in backend/.env and are loaded by the batch subprocess
+    // via load_dotenv(override=False). Add keys here only to pin
+    // a per-batch override (highest precedence).
+    "batch": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "app.mcp_batch.server"],
+      "env": {},
+      "load_prompts": false
+    },
+    // Microsoft Learn documentation MCP server (HTTP/SSE).
+    "microsoft-learn": {
+      "url": "https://learn.microsoft.com/api/mcp"
+    }
+  }
+}

@@ -136,7 +136,8 @@ export function MaskEditorDialog({ open, onOpenChange, imageUrl, onGenerate }: M
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            // Skip while an IME composition is in progress (CJK conversion).
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
               handleGenerate()
             }

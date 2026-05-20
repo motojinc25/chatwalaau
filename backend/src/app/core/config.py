@@ -11,7 +11,7 @@ class Settings(BaseSettings):
 
     app_host: str = "127.0.0.1"
     app_port: int = 8000
-    app_debug: bool = True
+    app_debug: bool = False
     frontend_dist: str = "../frontend/dist"
     cors_allowed_origins: str = "http://localhost:5173"
 
@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     upload_dir: str = ".uploads"
 
     # Speech-to-Text
-    whisper_deployment_name: str = "whisper-1"
+    whisper_deployment_name: str = ""
 
     # Model Context Window (CTR-0069, PRP-0035)
     # Per-model format: "gpt-4o:128000,o3:200000,gpt-4.1-mini:1047576"
@@ -106,8 +106,12 @@ class Settings(BaseSettings):
     rag_collection_name: str = "default"
     rag_top_k: int = 5
 
-    # MCP Integration (CTR-0059, PRP-0031)
-    mcp_config_file: str = ""
+    # MCP Integration (CTR-0059, PRP-0031, PRP-0060)
+    # PRP-0060: default is the operator override file (gitignored).
+    # When absent, lifecycle._resolve_mcp_config_path() falls back to
+    # the tracked bundle (mcp_servers.default.jsonc). Explicit empty
+    # string keeps MCP disabled (operator-acknowledged opt-out).
+    mcp_config_file: str = "mcp_servers.jsonc"
 
     # MCP Apps (CTR-0066, PRP-0034)
     mcp_apps_sandbox_port: int = 8081
@@ -146,11 +150,6 @@ class Settings(BaseSettings):
     # excludes those tools by default. Opt-in via false.
     devui_disable_mcp: bool = True
     devui_disable_rag: bool = True
-
-    # Batch Processing MCP Server (CTR-0072, PRP-0046)
-    # Sample jobs (sleep) are gated so they do not appear in production
-    # tool listings unless an operator explicitly enables them.
-    batch_enable_sample_jobs: bool = False
 
     # ---- Multi-Model helpers (CTR-0069) ----
 

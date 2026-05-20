@@ -54,6 +54,41 @@ def get_mcp_server_names() -> list[str]:
     return [s["name"] for s in _mcp_server_status]
 
 
+def _resolve_mcp_config_path() -> Path | None:
+    """Resolve the MCP config file path with two-tier fallback (PRP-0060).
+
+    Resolution order:
+      1. ``MCP_CONFIG_FILE`` empty -> MCP disabled (explicit opt-out).
+      2. Configured path if it exists -> use it (operator override).
+      3. Derived ``<stem>.default<suffix>`` sibling if it exists ->
+         use bundled default with an INFO log nudge.
+      4. Otherwise INFO log "MCP integration disabled" and return None.
+    """
+    raw = (settings.mcp_config_file or "").strip()
+    if not raw:
+        logger.info("MCP integration disabled (MCP_CONFIG_FILE explicitly empty)")
+        return None
+    override = Path(raw)
+    if not override.is_absolute():
+        override = Path.cwd() / override
+    if override.is_file():
+        return override
+    default = override.with_name(f"{override.stem}.default{override.suffix}")
+    if default.is_file():
+        logger.info(
+            "Using bundled MCP defaults at %s. Create %s to override.",
+            default,
+            override.name,
+        )
+        return default
+    logger.info(
+        "MCP integration disabled (no %s or %s found)",
+        override.name,
+        default.name,
+    )
+    return None
+
+
 def prepare_mcp() -> None:
     """Synchronous phase: parse config and create MCP tool instances.
 
@@ -68,14 +103,8 @@ def prepare_mcp() -> None:
       2. create_agent()      -- synchronous, module level (uses get_mcp_tools())
       3. activate_mcp()      -- async, FastAPI lifespan startup
     """
-    config_file = settings.mcp_config_file
-    if not config_file:
-        logger.info("MCP_CONFIG_FILE not set, MCP integration disabled")
-        return
-
-    config_path = Path(config_file)
-    if not config_path.is_file():
-        logger.warning("MCP config file not found: %s, MCP integration disabled", config_path)
+    config_path = _resolve_mcp_config_path()
+    if config_path is None:
         return
 
     server_configs = parse_mcp_config(config_path)

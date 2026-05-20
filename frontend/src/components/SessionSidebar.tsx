@@ -208,7 +208,8 @@ export function SessionSidebar({
 
   const handleRenameKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === 'Enter') {
+      // Skip while an IME composition is in progress (CJK conversion).
+      if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
         e.preventDefault()
         commitRename()
       }
@@ -229,7 +230,8 @@ export function SessionSidebar({
 
   const handleCreateFolderKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === 'Enter') {
+      // Skip while an IME composition is in progress (CJK conversion).
+      if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
         e.preventDefault()
         void handleCreateFolder()
       }

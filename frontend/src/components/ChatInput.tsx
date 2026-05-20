@@ -95,7 +95,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   }
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // Skip while an IME composition is in progress (CJK kanji/pinyin/hangul
+    // conversion). Without this, pressing Enter to commit the IME selection
+    // would submit the message instead of confirming the conversion.
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
       handleSend()
     }

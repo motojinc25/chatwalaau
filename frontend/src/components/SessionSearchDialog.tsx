@@ -105,7 +105,8 @@ export function SessionSearchDialog({ sessions, open, onOpenChange, onSelect }: 
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && displayed.length > 0) {
+    // Skip while an IME composition is in progress (CJK conversion).
+    if (e.key === 'Enter' && !e.nativeEvent.isComposing && displayed.length > 0) {
       handleSelect(displayed[0].thread_id)
     }
   }

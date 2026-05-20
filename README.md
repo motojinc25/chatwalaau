@@ -21,7 +21,7 @@ revitalization. We use this word with respect and gratitude.
 ### Why ChatWalaʻau?
 
 - **One command, full stack** -- `pip install chatwalaau` gives you Chat UI + Agent Runtime + Tools + RAG. No Docker, no cloud setup.
-- **MCP native** -- Claude Desktop-compatible config. Connect any MCP server. MCP Apps render interactive UI in chat.
+- **MCP native** -- Zero-config first run via bundled defaults. Connect any MCP server. MCP Apps render interactive UI in chat.
 - **Your data stays local** -- File-based sessions, ChromaDB vectors, and uploads never leave your machine.
 - **OpenAI-compatible API** -- Expose your agent as `/v1/responses` for any app using the OpenAI SDK.
 
@@ -490,10 +490,12 @@ Skills use progressive disclosure to minimize context window consumption (~100 t
 Connect external tools and services via [Model Context Protocol](https://modelcontextprotocol.io/) using the Claude Desktop-compatible configuration format:
 
 ```
-MCP_CONFIG_FILE=mcp_servers.json
+# Optional: defaults to mcp_servers.jsonc.
+# Set this to an explicit empty value to disable MCP.
+# MCP_CONFIG_FILE=mcp_servers.jsonc
 ```
 
-Create a `mcp_servers.json` file (see `backend/mcp_servers.sample.json`):
+ChatWalaʻau ships with `backend/mcp_servers.default.jsonc` (git-tracked bundled default). The runtime resolves the operator override `backend/mcp_servers.jsonc` (gitignored) first, then falls back to the bundled default; no manual copy is needed on first run. To customise, create `mcp_servers.jsonc` and edit freely:
 
 ```json
 {
@@ -510,6 +512,7 @@ Create a `mcp_servers.json` file (see `backend/mcp_servers.sample.json`):
 }
 ```
 
+- **JSONC** : the parser strips `//` and `/* */` comments so operators can annotate entries inline. Strict-JSON contents are accepted unchanged.
 - **stdio** servers (with `command`): ChatWalaʻau spawns the process and communicates via stdin/stdout
 - **HTTP/SSE** servers (with `url`): ChatWalaʻau connects to a running remote server
 - MCP tools appear alongside built-in tools (Weather, Coding, Image Generation)
@@ -519,7 +522,7 @@ Create a `mcp_servers.json` file (see `backend/mcp_servers.sample.json`):
   - `"load_prompts": true` -- set when your MCP server implements `prompts/list` (most community servers are tools-only; the default is `false` so filesystem, git, github, etc. connect cleanly out of the box)
   - `"load_tools": false` -- skip the `tools/list` probe for a tools-only server's prompts-only mode
   - `"request_timeout": 30` -- per-call timeout in seconds forwarded to MAF
-- Reuse your existing Claude Desktop / Claude Code / Cursor MCP configurations
+- Reuse your existing Claude Desktop / Claude Code / Cursor MCP configurations (strict-JSON files parse unchanged)
 
 ---
 
@@ -581,21 +584,24 @@ Requires the Batch Processing MCP Server to be configured (see below).
 
 Run long-running tasks (RAG ingestion, data pipelines) as background batch jobs with a real-time monitoring dashboard:
 
-1. Add `"batch"` to your `mcp_servers.json` (see `backend/mcp_servers.sample.json`)
-2. Start the server -- the batch MCP server launches automatically
-3. Ask the agent: *"Submit a sleep job for 60 seconds"*
-4. A real-time dashboard appears inline showing progress, status, and controls
+The bundled `backend/mcp_servers.default.jsonc` already registers the batch server. To customise (job dir, per-batch overrides), copy it to `backend/mcp_servers.jsonc` and edit:
 
-```json
+1. Start the server -- the batch MCP server launches automatically.
+2. Upload a PDF and ask the agent: *"Please ingest this document"*.
+3. A real-time dashboard appears inline showing progress, status, and controls.
+
+```jsonc
 {
   "mcpServers": {
     "batch": {
       "command": "uv",
       "args": ["run", "python", "-m", "app.mcp_batch.server"],
-      "env": {
-        "BATCH_JOBS_DIR": ".jobs",
-        "BATCH_ENABLE_SAMPLE_JOBS": "false"
-      }
+      // env intentionally empty: BATCH_JOBS_DIR and RAG_CHUNK_*
+      // live in backend/.env and are loaded by the batch subprocess
+      // via load_dotenv(override=False). Add keys here only to pin
+      // a per-batch override (highest precedence).
+      "env": {},
+      "load_prompts": false
     }
   }
 }
@@ -604,7 +610,7 @@ Run long-running tasks (RAG ingestion, data pipelines) as background batch jobs 
 - **Conversation-based management**: submit, monitor, cancel, delete jobs via chat
 - **MCP Apps dashboard**: auto-refreshing progress bars, cancel/delete with confirmation dialogs
 - **File-based persistence**: each job stored as a JSON file (crash-resilient)
-- **Core job types**: RAG Ingestion Pipeline (`rag-ingest`). The Phase-1 `sleep` sample job is hidden by default; set `BATCH_ENABLE_SAMPLE_JOBS=true` in the batch server env to enable it for demos or tests.
+- **Registered job types**: `rag-ingest` (Operators add new job types under `backend/src/app/mcp_batch/jobs/`)
 - **Cooperative cancellation**: jobs check cancel flag at each progress checkpoint
 
 ---

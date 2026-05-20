@@ -21,11 +21,20 @@ from app.mcp_batch.jobs import get_available_types
 from app.mcp_batch.queue import JobQueue
 from app.mcp_batch.storage import JobStorage
 
-# Load .env to inherit main server config (AZURE_OPENAI_ENDPOINT, etc.)
-# Batch MCP Server runs as a separate process via stdio, so it does not
-# automatically inherit the main server's environment variables.
-# mcp_servers.json env overrides take precedence (already set in os.environ).
-load_dotenv(override=False)
+# Resolution order (highest precedence wins, PRP-0060):
+#   1. Variables in os.environ at spawn time (mcp_servers.jsonc env block,
+#      shell exports, container env).
+#   2. backend/.env (loaded via load_dotenv(override=False) below).
+# Empty env block in mcp_servers.default.jsonc is intentional: PRP-0060
+# made backend/.env the single source of truth for BATCH_JOBS_DIR and
+# RAG_CHUNK_*. Per-batch overrides via mcp_servers.jsonc env: still win
+# because override=False does not touch keys already in os.environ.
+_BACKEND_ENV = Path(__file__).resolve().parents[3] / ".env"
+if _BACKEND_ENV.is_file():
+    load_dotenv(_BACKEND_ENV, override=False)
+else:
+    # Fallback: cwd-relative discovery for non-standard layouts.
+    load_dotenv(override=False)
 
 BATCH_JOBS_DIR = os.environ.get("BATCH_JOBS_DIR", ".jobs")
 
@@ -51,15 +60,12 @@ async def submit_job(job_type: str, params: dict | None = None) -> str:
     """Submit a new batch job for async execution.
 
     Args:
-        job_type: Type of job to run. Core types: rag-ingest. Sample
-            types (e.g. sleep) are registered only when the operator
-            sets BATCH_ENABLE_SAMPLE_JOBS=true (PRP-0046).
+        job_type: Type of job to run. Core types: rag-ingest.
         params: Job-specific parameters.
             rag-ingest: {"file_path": ".uploads/thread/file.pdf",
                          "collection": "default",
-                         "chunk_size": 800, "chunk_overlap": 200,
-                         "chunk_min_size": 200}
-            sleep (sample): {"duration": 60}
+                         "chunk_size": 1500, "chunk_overlap": 300,
+                         "chunk_min_size": 300}
 
     Returns:
         JSON with job id, type, and status.

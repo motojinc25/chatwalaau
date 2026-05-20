@@ -46,10 +46,10 @@ async def run_rag_ingest_job(
     """
     file_path = Path(job.params.get("file_path", ""))
     collection_name = job.params.get("collection", os.environ.get("RAG_COLLECTION_NAME", "default"))
-    chunk_size = int(job.params.get("chunk_size", os.environ.get("RAG_CHUNK_SIZE", "800")))
-    chunk_overlap = int(job.params.get("chunk_overlap", os.environ.get("RAG_CHUNK_OVERLAP", "200")))
+    chunk_size = int(job.params.get("chunk_size", os.environ.get("RAG_CHUNK_SIZE", "1500")))
+    chunk_overlap = int(job.params.get("chunk_overlap", os.environ.get("RAG_CHUNK_OVERLAP", "300")))
     # PRP-0047: trailing-chunk merge threshold. None -> chunker derives default.
-    chunk_min_raw = job.params.get("chunk_min_size", os.environ.get("RAG_CHUNK_MIN_SIZE"))
+    chunk_min_raw = job.params.get("chunk_min_size", os.environ.get("RAG_CHUNK_MIN_SIZE", "300"))
     chunk_min_size = int(chunk_min_raw) if chunk_min_raw not in (None, "") else None
     chroma_dir = os.environ.get("CHROMA_DIR", ".chroma")
 
