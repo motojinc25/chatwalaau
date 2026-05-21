@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.57.0"
+version = "0.58.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -28,6 +28,11 @@ dependencies = [
     "chromadb>=1.0.0",
     "pymupdf>=1.25.0",
     "httpx-sse>=0.4.0",
+    # Azure OpenAI Realtime API STT (gpt-realtime-whisper) needs a
+    # webm/Opus -> PCM16 decoder (PyAV) and a WebSocket client.
+    # Default dependencies per PRP-0061 amendment (UDR-0036 D4 revised).
+    "av>=12.0",
+    "websockets>=13.0",
 ]
 
 [project.optional-dependencies]

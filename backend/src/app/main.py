@@ -44,12 +44,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from openai import AzureOpenAI
 
 from app.agui.agent_factory import build_devui_agent, create_agent_registry
 from app.agui.endpoint import register_agui_endpoints
 from app.auth.web_auth import router as web_auth_router
-from app.azure_credential import get_azure_openai_kwargs
 from app.core.config import settings
 from app.devui.launcher import launch_devui_if_enabled
 from app.image_gen.router import router as image_edit_router
@@ -58,9 +56,9 @@ from app.mcp_apps.router import router as mcp_apps_router
 from app.openai_api.router import register_openai_api
 from app.prompt_templates.router import router as templates_router
 from app.session.router import router as session_router
+from app.stt.factory import create_stt_provider
 from app.stt.router import router as stt_router
 from app.stt.router import set_stt_provider
-from app.stt.whisper import AzureOpenAIWhisperProvider
 from app.tts.elevenlabs import ElevenLabsTTSProvider
 from app.tts.router import router as tts_router
 from app.tts.router import set_tts_provider
@@ -172,14 +170,21 @@ app.include_router(image_edit_router)
 app.include_router(mcp_apps_router)
 
 # Speech-to-Text API (CTR-0021)
-# Credential resolution centralised in app.azure_credential (PRP-0058, UDR-0034).
-if settings.azure_openai_endpoint:
-    stt_client = AzureOpenAI(
-        azure_endpoint=settings.azure_openai_endpoint,
-        api_version="2024-10-21",
-        **get_azure_openai_kwargs(),
-    )
-    set_stt_provider(AzureOpenAIWhisperProvider(stt_client, model=settings.whisper_deployment_name))
+# Provider selection delegated to app.stt.factory per UDR-0036
+# (PRP-0061): REST audio.transcriptions for whisper-1 / gpt-4o-transcribe
+# / gpt-4o-mini-transcribe, Realtime API WebSocket for
+# gpt-realtime-whisper. Credential resolution still centralised in
+# app.azure_credential (PRP-0058, UDR-0034).
+_stt_provider = create_stt_provider(
+    azure_openai_endpoint=settings.azure_openai_endpoint,
+    deployment=settings.whisper_deployment_name,
+    kind_override=settings.whisper_model_kind,
+    realtime_connection_deployment=settings.whisper_realtime_connection_deployment,
+    api_version_realtime=settings.azure_openai_realtime_api_version,
+    realtime_audio_rate=settings.whisper_realtime_audio_rate,
+)
+if _stt_provider is not None:
+    set_stt_provider(_stt_provider)
 app.include_router(stt_router)
 
 # Text-to-Speech API (CTR-0039)

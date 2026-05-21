@@ -65,8 +65,53 @@ class Settings(BaseSettings):
     # File Upload
     upload_dir: str = ".uploads"
 
-    # Speech-to-Text
+    # Speech-to-Text (CTR-0021, PRP-0012)
     whisper_deployment_name: str = ""
+
+    # STT Model-Kind Dispatch (CTR-0021 v3, PRP-0061, UDR-0036)
+    # Selects which transport drives the STT provider:
+    # - "auto" (default): infer from WHISPER_DEPLOYMENT_NAME -- substring
+    #   "realtime" -> realtime, otherwise rest.
+    # - "rest": force REST audio.transcriptions path (whisper-1,
+    #   gpt-4o-transcribe, gpt-4o-mini-transcribe).
+    # - "realtime": force Realtime API WebSocket path
+    #   (gpt-realtime-whisper). Requires `pip install
+    #   "chatwalaau[realtime]"` for the PCM decoder.
+    # Unknown values are treated as "auto" (no hard failure on typo).
+    whisper_model_kind: str = "auto"
+
+    # Azure OpenAI Realtime API version (PRP-0061, UDR-0036).
+    # Only consumed when WHISPER_MODEL_KIND resolves to "realtime".
+    # Empty (default) selects the GA path:
+    #   wss://<host>/openai/v1/realtime?model=<connection-deployment>
+    # This is the path required by gpt-realtime-whisper and any
+    # 2025-08-28+ Realtime model.
+    # A non-empty value (e.g. "2025-04-01-preview") selects the
+    # preview path for legacy models such as gpt-4o-realtime-preview:
+    #   wss://<host>/openai/realtime?api-version=<v>&deployment=<d>
+    azure_openai_realtime_api_version: str = ""
+
+    # Realtime API WebSocket connection deployment (PRP-0061, UDR-0036).
+    # Azure deviation: the `?model=` URL query parameter must name a
+    # *voice* Realtime deployment (gpt-realtime / gpt-realtime-mini /
+    # gpt-realtime-1.5) per Microsoft Learn `realtime-audio-websockets`.
+    # `gpt-realtime-whisper` is a TRANSCRIPTION-ONLY model and is NOT
+    # accepted as a connection model -- using it on the URL returns
+    # HTTP 400 at handshake.
+    # Resolution:
+    #   - When this value is non-empty -> use it as the URL `?model=`.
+    #   - When empty -> fall back to WHISPER_DEPLOYMENT_NAME (the
+    #     legacy single-deployment shape; works for `gpt-4o-realtime-*`
+    #     style models that handle both connection and transcription).
+    # Set this to your voice Realtime deployment name (e.g. "gpt-realtime")
+    # whenever WHISPER_DEPLOYMENT_NAME is a transcription-only model
+    # such as `gpt-realtime-whisper`.
+    whisper_realtime_connection_deployment: str = ""
+
+    # Realtime API input audio sample rate in Hz (PRP-0061, UDR-0036).
+    # The browser MediaRecorder Opus stream is resampled to this rate
+    # before `input_audio_buffer.append`. Allowed values: 16000, 24000.
+    whisper_realtime_audio_rate: int = 24000
 
     # Model Context Window (CTR-0069, PRP-0035)
     # Per-model format: "gpt-4o:128000,o3:200000,gpt-4.1-mini:1047576"

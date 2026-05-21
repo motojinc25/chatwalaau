@@ -82,7 +82,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Rich message rendering: Markdown, code blocks, math (KaTeX), Mermaid diagrams
 - LLM reasoning visualization with collapsible thinking blocks
 - Web search with inline citation links
-- Voice input via microphone with Whisper transcription
+- Voice input via microphone with Whisper transcription (supports `whisper`, `gpt-4o-transcribe`, and `gpt-realtime-whisper` via Realtime API)
 - Text-to-Speech playback and download via ElevenLabs
 - Multimodal image analysis (file attachment, drag-and-drop, URL)
 - Session management: save, search, pin, archive, fork, rename
@@ -746,6 +746,68 @@ for event in stream:
 - API sessions appear in the chat sidebar with an **API** badge
 - Streaming (SSE) and non-streaming response modes
 - For HTTPS/LAN access, see [OpenAI API Setup Guide](assets/docs/guides/openai-api-setup.md)
+
+---
+
+### Voice Input via Realtime STT
+
+ChatWalaʻau supports two transcription transport paths for the
+`POST /api/transcribe` endpoint, selected automatically by the
+configured deployment name:
+
+```
+# REST audio.transcriptions path (default, classic Whisper / gpt-4o-transcribe / gpt-4o-mini-transcribe)
+WHISPER_DEPLOYMENT_NAME=whisper
+
+# Realtime API WebSocket path (gpt-realtime-whisper)
+WHISPER_DEPLOYMENT_NAME=gpt-realtime-whisper
+WHISPER_REALTIME_CONNECTION_DEPLOYMENT=gpt-realtime-mini
+```
+
+#### REST path (zero-config)
+
+Set `WHISPER_DEPLOYMENT_NAME` to a deployment of `whisper-1`,
+`whisper`, `gpt-4o-transcribe`, or `gpt-4o-mini-transcribe`. The
+backend calls `POST /audio/transcriptions` synchronously and
+returns the transcript. No extra deployments needed.
+
+#### Realtime path (gpt-realtime-whisper)
+
+Per Microsoft Learn `realtime-audio-websockets`, the Realtime API
+URL `?model=` query accepts only VOICE Realtime deployments
+(`gpt-realtime` / `gpt-realtime-mini` / `gpt-realtime-1.5`).
+`gpt-realtime-whisper` is a transcription-only model and runs
+alongside a voice model. Two deployments are required:
+
+1. Deploy a voice Realtime model in Azure Foundry, e.g.
+   `gpt-realtime-mini` (cheapest).
+2. Deploy `gpt-realtime-whisper` for transcription.
+3. Set both in `.env`:
+   ```
+   WHISPER_DEPLOYMENT_NAME=gpt-realtime-whisper
+   WHISPER_REALTIME_CONNECTION_DEPLOYMENT=gpt-realtime-mini
+   ```
+
+Transport is auto-selected by the `WHISPER_DEPLOYMENT_NAME`
+substring (`realtime` -> Realtime, otherwise REST). Override with
+`WHISPER_MODEL_KIND=rest|realtime` if your deployment name
+violates the convention.
+
+Optional knobs (defaults work out of the box):
+
+```
+# Empty default selects the GA URL path /openai/v1/realtime?model=...
+# Set this to a preview value (e.g. 2025-04-01-preview) only for
+# legacy models such as gpt-4o-realtime-preview.
+AZURE_OPENAI_REALTIME_API_VERSION=
+
+# Browser webm/Opus is resampled to this PCM rate server-side.
+# Allowed: 16000, 24000 (24000 is the OpenAI Realtime default).
+WHISPER_REALTIME_AUDIO_RATE=24000
+```
+
+No SPA / `useVoiceInput` change -- the `POST /api/transcribe`
+contract is byte-for-byte identical across both transports.
 
 ---
 

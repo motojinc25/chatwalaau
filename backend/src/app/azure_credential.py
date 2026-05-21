@@ -210,6 +210,32 @@ def get_azure_openai_kwargs() -> dict[str, Any]:
     return {"azure_ad_token_provider": provider}
 
 
+def get_realtime_websocket_auth_header() -> tuple[str, str]:
+    """Return a `(header_name, header_value)` pair for Realtime API WebSocket auth.
+
+    Used by `app.stt.realtime.AzureOpenAIRealtimeWhisperProvider`
+    (PRP-0061, UDR-0036). The Realtime API endpoint authenticates the
+    initial HTTP upgrade request, NOT WebSocket frames -- which means
+    we need a single header pair at `websockets.connect()` call time.
+
+    Returns:
+        ("api-key", <key>)             when AZURE_OPENAI_API_KEY is set
+        ("Authorization", "Bearer <t>") otherwise (Entra ID lane)
+
+    The Bearer token is acquired by invoking the cached bearer-token
+    provider callable; subsequent calls within the provider's TTL are
+    served from azure-identity's own internal cache. Per UDR-0034
+    Decision 7, the active lane is logged once per process at INFO.
+    """
+    key = _api_key()
+    if key:
+        _log_active_lane("api-key")
+        return ("api-key", key)
+    provider = _get_token_provider()
+    _log_active_lane(_mode())
+    return ("Authorization", f"Bearer {provider()}")
+
+
 def reset_for_tests() -> None:
     """Discard module-level caches and forget logged lanes.
 
