@@ -343,7 +343,7 @@ export function ChatPanel({
               <ScrollToBottomButton visible={showScrollToBottomButton} onClick={scrollToBottom} />
             </div>
           </div>
-          <div className="pointer-events-none bg-gradient-to-t from-background from-60% to-transparent pt-6" />
+          <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
           <div className="relative bg-background">
             <div className="mx-auto flex max-w-3xl items-center justify-end gap-1 px-4">
               <ModelSelector threadId={threadId ?? ''} onModelChange={handleModelChange} />
@@ -368,7 +368,7 @@ export function ChatPanel({
       )}
 
       {isDragging && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-xs">
           <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-primary p-12">
             <ImageIcon className="h-10 w-10 text-primary" />
             <p className="text-sm font-medium text-primary">Drop images here to attach</p>

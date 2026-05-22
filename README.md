@@ -137,7 +137,7 @@ The platform connects the UI and agent runtime through the AG-UI protocol.
 
 | Tool      | Version | Install                                                                                                            |
 | --------- | ------- | ------------------------------------------------------------------------------------------------------------------ |
-| Node.js   | 22+     | [https://nodejs.org/](https://nodejs.org/)                                                                         |
+| Node.js   | 20.19+ / 22.12+ | [https://nodejs.org/](https://nodejs.org/)                                                                 |
 | pnpm      | 10+     | `npm install -g pnpm`                                                                                              |
 | Python    | 3.12+   | [https://www.python.org/](https://www.python.org/)                                                                 |
 | uv        | 0.9+    | [https://docs.astral.sh/uv/](https://docs.astral.sh/uv/)                                                           |

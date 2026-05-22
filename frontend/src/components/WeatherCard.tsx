@@ -73,7 +73,7 @@ function getConditionIcon(condition: string): string {
 
 function CurrentWeatherCard({ data }: { data: WeatherData }) {
   return (
-    <div className="my-2 w-full max-w-md rounded-xl border border-blue-200/50 bg-gradient-to-br from-blue-50 to-sky-50 p-4 shadow-sm dark:border-blue-800/50 dark:from-blue-950/30 dark:to-sky-950/30">
+    <div className="my-2 w-full max-w-md rounded-xl border border-blue-200/50 bg-linear-to-br from-blue-50 to-sky-50 p-4 shadow-xs dark:border-blue-800/50 dark:from-blue-950/30 dark:to-sky-950/30">
       <div className="mb-3 flex items-center gap-2 text-base font-semibold">
         <MapPin className="h-4 w-4 text-blue-600 dark:text-blue-400" />
         {data.location}
@@ -113,7 +113,7 @@ function CurrentWeatherCard({ data }: { data: WeatherData }) {
 
 function ForecastCard({ data }: { data: ForecastData }) {
   return (
-    <div className="my-2 w-full max-w-lg rounded-xl border border-indigo-200/50 bg-gradient-to-br from-indigo-50 to-purple-50 p-4 shadow-sm dark:border-indigo-800/50 dark:from-indigo-950/30 dark:to-purple-950/30">
+    <div className="my-2 w-full max-w-lg rounded-xl border border-indigo-200/50 bg-linear-to-br from-indigo-50 to-purple-50 p-4 shadow-xs dark:border-indigo-800/50 dark:from-indigo-950/30 dark:to-purple-950/30">
       <div className="mb-3 flex items-center gap-2 text-base font-semibold">
         <Calendar className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
         {data.location}
@@ -143,7 +143,7 @@ function ForecastCard({ data }: { data: ForecastData }) {
 
 function LocationCard({ data }: { data: LocationData }) {
   return (
-    <div className="my-2 w-full max-w-md rounded-xl border border-green-200/50 bg-gradient-to-br from-green-50 to-emerald-50 px-4 py-3 shadow-sm dark:border-green-800/50 dark:from-green-950/30 dark:to-emerald-950/30">
+    <div className="my-2 w-full max-w-md rounded-xl border border-green-200/50 bg-linear-to-br from-green-50 to-emerald-50 px-4 py-3 shadow-xs dark:border-green-800/50 dark:from-green-950/30 dark:to-emerald-950/30">
       <div className="flex items-center gap-3">
         <MapPin className="h-5 w-5 text-green-600 dark:text-green-400" />
         <div>

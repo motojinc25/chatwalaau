@@ -220,7 +220,7 @@ export function ChatMessageItem({
         value={editValue}
         onChange={(e) => setEditValue(e.target.value)}
         onKeyDown={handleEditKeyDown}
-        className="w-full resize-none rounded-lg border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="w-full resize-none rounded-lg border bg-background px-3 py-2 text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
         rows={3}
       />
       <div className="flex gap-2">
@@ -271,7 +271,7 @@ export function ChatMessageItem({
                         alt="Attached"
                         className={
                           isGenerated
-                            ? 'max-w-full rounded-lg border border-border/50 shadow-sm transition-shadow hover:shadow-md'
+                            ? 'max-w-full rounded-lg border border-border/50 shadow-xs transition-shadow hover:shadow-md'
                             : 'max-h-48 max-w-xs rounded-lg border object-contain'
                         }
                       />

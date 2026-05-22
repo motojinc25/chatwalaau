@@ -42,7 +42,7 @@ function ImageResultCard({ toolCall, onMaskEdit }: { toolCall: ToolCall; onMaskE
               <img
                 src={img.url}
                 alt={img.revised_prompt ?? 'Generated image'}
-                className="max-w-full rounded-lg border border-border/50 shadow-sm transition-shadow hover:shadow-md"
+                className="max-w-full rounded-lg border border-border/50 shadow-xs transition-shadow hover:shadow-md"
               />
             </a>
             {onMaskEdit && (

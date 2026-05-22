@@ -222,7 +222,7 @@ export function McpAppView({ event, toolResult, toolArgs }: McpAppViewProps) {
 
   if (isFullscreen) {
     return (
-      <div className="fixed inset-0 z-[1000] flex flex-col bg-background">
+      <div className="fixed inset-0 z-1000 flex flex-col bg-background">
         <div className="flex items-center justify-between border-b px-4 py-2">
           <div className="flex items-center gap-2 text-sm font-medium">
             <AppWindow className="h-4 w-4" />

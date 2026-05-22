@@ -20,7 +20,7 @@ export function ScrollToBottomButton({ visible, onClick, className }: ScrollToBo
       aria-hidden={!visible}
       tabIndex={visible ? 0 : -1}
       className={cn(
-        'h-9 w-9 rounded-full border bg-background shadow-md transition-opacity duration-[120ms]',
+        'h-9 w-9 rounded-full border bg-background shadow-md transition-opacity duration-120',
         visible ? 'opacity-100' : 'pointer-events-none opacity-0',
         className,
       )}>

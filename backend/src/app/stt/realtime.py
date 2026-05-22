@@ -109,9 +109,7 @@ class AzureOpenAIRealtimeWhisperProvider:
         host = parsed.netloc.rstrip("/")
         if self._api_version:
             return (
-                f"wss://{host}/openai/realtime"
-                f"?api-version={self._api_version}"
-                f"&deployment={self._connection_deployment}"
+                f"wss://{host}/openai/realtime?api-version={self._api_version}&deployment={self._connection_deployment}"
             )
         # GA path -- preferred for gpt-realtime-whisper.
         return f"wss://{host}/openai/v1/realtime?model={self._connection_deployment}"
@@ -119,7 +117,10 @@ class AzureOpenAIRealtimeWhisperProvider:
     async def transcribe(self, audio_data: bytes, content_type: str) -> str:
         """Synchronous-looking transcription over an async Realtime session."""
         pcm = await asyncio.to_thread(
-            decode_to_pcm16, audio_data, content_type, self._audio_rate,
+            decode_to_pcm16,
+            audio_data,
+            content_type,
+            self._audio_rate,
         )
         header_name, header_value = get_realtime_websocket_auth_header()
         url = self.ws_url
@@ -184,28 +185,36 @@ class AzureOpenAIRealtimeWhisperProvider:
         #    `turn_detection = null` keeps us in manual-commit mode;
         #    the SPA microphone UX is press-and-release so we send the
         #    full clip then commit ourselves.
-        await ws.send(json.dumps({
-            "type": "session.update",
-            "session": {
-                "type": "realtime",
-                "output_modalities": ["text"],
-                "audio": {
-                    "input": {
-                        "format": {"type": "audio/pcm", "rate": self._audio_rate},
-                        "transcription": {"model": self._deployment},
-                        "turn_detection": None,
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "realtime",
+                        "output_modalities": ["text"],
+                        "audio": {
+                            "input": {
+                                "format": {"type": "audio/pcm", "rate": self._audio_rate},
+                                "transcription": {"model": self._deployment},
+                                "turn_detection": None,
+                            },
+                        },
                     },
-                },
-            },
-        }))
+                }
+            )
+        )
 
         # 3. Stream the decoded PCM as base64 in bounded chunks.
         b64 = base64.b64encode(pcm).decode("ascii")
         for offset in range(0, len(b64), _APPEND_CHUNK_B64_BYTES):
-            await ws.send(json.dumps({
-                "type": "input_audio_buffer.append",
-                "audio": b64[offset : offset + _APPEND_CHUNK_B64_BYTES],
-            }))
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "input_audio_buffer.append",
+                        "audio": b64[offset : offset + _APPEND_CHUNK_B64_BYTES],
+                    }
+                )
+            )
 
         # 4. Commit the buffer so the server starts transcribing the
         #    delimited utterance. response.create is NOT sent: this is

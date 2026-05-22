@@ -1,4 +1,4 @@
-import { File, FileText, Loader2, Mic, Paperclip, Plus, SendHorizonal, Square } from 'lucide-react'
+import { File, FileText, Loader2, Mic, Paperclip, Plus, SendHorizontal, Square } from 'lucide-react'
 import { forwardRef, type KeyboardEvent, useCallback, useImperativeHandle, useRef, useState } from 'react'
 import { ImageThumbnails } from '@/components/ImageThumbnails'
 import { PdfFileCard } from '@/components/PdfFileCard'
@@ -231,7 +231,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 className={cn(
                   'flex-1 resize-none bg-transparent px-3 py-2 text-sm',
                   'placeholder:text-muted-foreground',
-                  'focus-visible:outline-none',
+                  'focus-visible:outline-hidden',
                   'disabled:cursor-not-allowed disabled:opacity-50',
                   !onAddFiles && 'pl-3',
                 )}
@@ -268,7 +268,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                       onClick={handleSend}
                       disabled={(!value.trim() && attachments.length === 0) || isTranscribing || isUploading}
                       aria-label="Send message">
-                      <SendHorizonal className="h-4 w-4" />
+                      <SendHorizontal className="h-4 w-4" />
                     </Button>
                   </>
                 )}
