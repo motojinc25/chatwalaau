@@ -330,7 +330,7 @@ export function SessionSidebar({
                 <span
                   role="button"
                   tabIndex={-1}
-                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100"
+                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                   aria-label="Session options">
                   <MoreHorizontal className="h-3 w-3" />
                 </span>
@@ -526,7 +526,7 @@ export function SessionSidebar({
                       <span
                         role="button"
                         tabIndex={-1}
-                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100"
+                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                         aria-label="Folder options">
                         {deletingFolderId === folder.id ? (
                           <Loader2 className="h-3 w-3 animate-spin" />

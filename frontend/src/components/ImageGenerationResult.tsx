@@ -49,7 +49,7 @@ function ImageResultCard({ toolCall, onMaskEdit }: { toolCall: ToolCall; onMaskE
               <Button
                 variant="secondary"
                 size="sm"
-                className="absolute bottom-2 right-2 h-7 gap-1 px-2 text-xs opacity-0 shadow-md transition-opacity group-hover/img:opacity-100"
+                className="absolute bottom-2 right-2 h-7 gap-1 px-2 text-xs opacity-70 shadow-md transition-opacity group-hover/img:opacity-100"
                 onClick={(e) => {
                   e.preventDefault()
                   e.stopPropagation()

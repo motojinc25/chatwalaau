@@ -1,5 +1,15 @@
 @import 'tailwindcss';
 
+/*
+  Tailwind CSS v4 gates `hover:` / `group-hover:` behind
+  `@media (hover: hover)`, so hover-reveal action menus never appear on
+  touch-capable devices (incl. Windows 2-in-1 / touchscreen laptops whose
+  browser reports a coarse primary pointer). Restore the v3 behaviour --
+  hover applies whenever the element is hovered -- so the per-message
+  action bars stay reachable. See UDR-0037 / PRP-0062.
+*/
+@custom-variant hover (&:hover);
+
 @theme {
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));

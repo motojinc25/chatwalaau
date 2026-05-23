@@ -13,7 +13,7 @@ from collections.abc import AsyncGenerator
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 import uuid
 
 from ag_ui.core import (
@@ -50,6 +50,13 @@ from app.image_gen.tools import current_thread_id as _image_gen_thread_id
 
 logger = logging.getLogger(__name__)
 
+# ag-ui-protocol changed ReasoningMessageStartEvent.role from
+# Literal["assistant"] (<= 0.1.13) to Literal["reasoning"] (newer releases).
+# Reasoning models such as gpt-5.5 stream text_reasoning content, which hits
+# this event; hardcoding either value breaks on the other version. Derive the
+# accepted literal from the installed schema so the event always validates.
+_REASONING_MESSAGE_ROLE = get_args(ReasoningMessageStartEvent.model_fields["role"].annotation)[0]
+
 
 class AGUIRequest(BaseModel):
     """AG-UI protocol request (mirrors agent_framework_ag_ui._types.AGUIRequest)."""
@@ -65,6 +72,27 @@ class AGUIRequest(BaseModel):
 
 def _generate_id() -> str:
     return str(uuid.uuid4())
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """Detect an Azure/OpenAI 429 (rate limit) anywhere in the exception chain.
+
+    A 429 may arrive at request start (typed openai.RateLimitError) or
+    mid-stream (a plain openai.APIError carrying "Too Many Requests"), and
+    agent-framework wraps it in ChatClientException, so inspect the whole
+    __cause__ / __context__ chain by type name, status code, and message.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if type(cur).__name__ == "RateLimitError" or getattr(cur, "status_code", None) == 429:
+            return True
+        text = str(cur).lower()
+        if "too many requests" in text or "rate limit" in text or "error code: 429" in text:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def _strip_pdf_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -274,7 +302,7 @@ async def _stream_with_reasoning(
                             ReasoningMessageStartEvent(
                                 type=EventType.REASONING_MESSAGE_START,
                                 message_id=reasoning_msg_id,
-                                role="assistant",
+                                role=_REASONING_MESSAGE_ROLE,
                             )
                         )
                     yield encoder.encode(
@@ -438,6 +466,15 @@ async def _stream_with_reasoning(
         if continuation_token:
             error_message = "Background response token not found or expired. Please resend your message."
             logger.warning("Continuation token error for thread %s: %s", thread_id, exc)
+        elif _is_rate_limit_error(exc):
+            error_message = (
+                "Rate limited by the model provider (429 Too Many Requests). "
+                "High REASONING_EFFORT generates many tokens quickly and is the "
+                "most common trigger for the Azure OpenAI per-minute (TPM) limit. "
+                "Please wait a moment and retry, lower REASONING_EFFORT, or raise "
+                "the deployment quota."
+            )
+            logger.warning("AG-UI stream rate limited (429) for thread %s: %s", thread_id, exc)
         else:
             error_message = "An internal error occurred during agent execution."
             logger.exception("AG-UI stream error")
