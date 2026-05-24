@@ -83,6 +83,10 @@
 		--input: 0 0% 89.8%;
 		--ring: 0 0% 3.9%;
 		--radius: 0.5rem;
+		/* Width of the always-visible scrollbar (see scrollbar block below).
+		   The floating ChatInput insets its right edge by this value so the
+		   chat scrollbar is never covered by the input overlay (CTR-0092). */
+		--app-scrollbar-width: 10px;
 	}
 }
 
@@ -92,5 +96,54 @@
 	}
 	body {
 		@apply bg-background text-foreground overflow-hidden;
+	}
+}
+
+/*
+  Always-visible scrollbars (CAP-001; chat message area per CTR-0092).
+  The SPA delegates scrolling to inner containers (body is overflow-hidden);
+  the chat message area, session sidebar, and dialogs use overflow-*-auto.
+  On OSes whose default is overlay / auto-hiding scrollbars (Windows 11,
+  macOS), those inner scrollbars stay invisible at rest, leaving the message
+  UI with no scroll affordance. Styling the scrollbar opts the element out of
+  the OS overlay style so the bar renders whenever a region is scrollable.
+
+  IMPORTANT: Chromium 121+ ignores `::-webkit-scrollbar` whenever the
+  standard `scrollbar-width` / `scrollbar-color` properties are ALSO set on
+  the element, reverting to the Fluent overlay (auto-hiding) bar. So the two
+  mechanisms must not coexist on the same engine. The `::-webkit-scrollbar`
+  rules are applied unconditionally (Firefox ignores the unknown
+  pseudo-elements); the standard properties are confined to Firefox via
+  `@supports (-moz-appearance: none)` -- a Gecko-only query (Chromium does
+  not implement `-moz-appearance`, so it never enters the block and never
+  sees `scrollbar-width`). NOTE: do NOT gate with
+  `@supports selector(::-webkit-scrollbar)` -- Chromium reports that
+  non-standard selector as UNsupported, so a `not selector(...)` guard would
+  (wrongly) apply `scrollbar-width` in Chromium and re-break the bar.
+*/
+@layer base {
+	/* Chromium / Edge / Safari: classic, always-visible (non-overlay) scrollbar */
+	::-webkit-scrollbar {
+		width: var(--app-scrollbar-width);
+		height: var(--app-scrollbar-width);
+	}
+	::-webkit-scrollbar-track {
+		background: transparent;
+	}
+	::-webkit-scrollbar-thumb {
+		background-color: hsl(var(--muted-foreground) / 0.4);
+		border: 2px solid transparent;
+		background-clip: padding-box;
+		border-radius: 9999px;
+	}
+	::-webkit-scrollbar-thumb:hover {
+		background-color: hsl(var(--muted-foreground) / 0.6);
+	}
+	/* Firefox only (Gecko-exclusive query; never matches Chromium). */
+	@supports (-moz-appearance: none) {
+		* {
+			scrollbar-width: thin;
+			scrollbar-color: hsl(var(--muted-foreground) / 0.4) transparent;
+		}
 	}
 }

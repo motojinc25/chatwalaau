@@ -336,7 +336,9 @@ export function ChatPanel({
           />
         </div>
       ) : (
-        <div ref={inputRef} className="absolute inset-x-0 bottom-0 z-20">
+        // right edge inset by the scrollbar width so the always-visible chat
+        // scrollbar is never covered by this floating input overlay (CTR-0092)
+        <div ref={inputRef} className="absolute bottom-0 left-0 right-[var(--app-scrollbar-width)] z-20">
           {/* CTR-0092 ScrollToBottom overlay: anchored above the ChatInput, horizontally centered. */}
           <div className="pointer-events-none absolute -top-3 left-0 right-0 z-10 flex justify-center">
             <div className="pointer-events-auto">
