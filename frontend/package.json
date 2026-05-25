@@ -1,6 +1,6 @@
 {
   "name": "chatwalaau-ui",
-  "version": "0.60.1",
+  "version": "0.61.0",
   "type": "module",
   "engines": {
     "node": ">=20.19.0"

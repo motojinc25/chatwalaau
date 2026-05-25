@@ -986,7 +986,7 @@ wheels = [
 
 [[package]]
 name = "chatwalaau"
-version = "0.60.1"
+version = "0.61.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework" },

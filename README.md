@@ -115,6 +115,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Web SPA authentication (optional): single-user ID/PW login with HttpOnly opaque session cookie for cloud-deployed instances; coexists with `API_KEY`
 - Azure OpenAI credential lane choice: four lanes via one helper -- `AZURE_OPENAI_API_KEY` (api-key bypass, works everywhere) or Entra ID via `AZURE_CREDENTIAL_MODE` = `cli` (default; `AzureCliCredential` / `az login`) / `managed-identity` (`ManagedIdentityCredential` for Azure App Service, Container Apps, AKS, Functions, VM) / `default` (`DefaultAzureCredential` auto-discovery chain). One INFO log line per process announces the active lane at first credential resolution; no key value is ever logged. Cloud deployment guide at `assets/docs/guides/azure-cloud-deploy.md`.
 - CLI Client: chat, session/template/model management, TTS, and upload from the command line with local preflight validation for filename, MIME type, and size
+- `.env` upgrade tooling: `chatwalaau env diff` reports settings added / removed since your `.env` was generated, and `chatwalaau env sync` re-renders `.env` to the new release's template (keys, comments, order) while preserving your values and keeping a timestamped backup
 - HTTPS/TLS support for LAN access with Secure Context (mkcert recommended)
 - Multilingual chat with browser auto-translation suppressed
 - Three layout scenarios: Chat, Popup, Sidebar
@@ -314,6 +315,9 @@ The backend serves both frontend build artifacts and the API at [http://localhos
 chatwalaau                                Start the server
 chatwalaau init                           Generate .env from template
 chatwalaau init --force                   Overwrite existing .env
+chatwalaau env diff                       Report .env drift vs the bundled template
+chatwalaau env sync                       Re-render .env to the template (dry-run)
+chatwalaau env sync --write               Apply (creates a timestamped backup first)
 chatwalaau hash-password                  Generate AUTH_PASSWORD_HASH (interactive)
 chatwalaau hash-password --stdin --quiet  Generate hash from stdin (scripted)
 chatwalaau --host 0.0.0.0                 Bind to all interfaces
@@ -941,6 +945,45 @@ Alternative remedies (use whichever is available in your environment):
 export SSL_CERT_FILE=/path/to/corp-root-ca.pem
 export REQUESTS_CA_BUNDLE=/path/to/corp-root-ca.pem
 ```
+
+---
+
+### Upgrading `.env` Across Releases
+
+Most releases add value through new **opt-in** settings that default off,
+so the server keeps working after `pip install -U chatwalaau` with no
+`.env` edits. But you cannot tell from your own `.env` which new settings
+became available, and old keys pile up. Two offline commands reconcile
+your `.env` against the template bundled with the installed release:
+
+```bash
+# See what this release added (new settings) or removed (no longer read)
+chatwalaau env diff
+chatwalaau env diff --json        # machine-readable, for scripts
+
+# Preview the reconciliation as a unified diff (writes nothing)
+chatwalaau env sync
+
+# Apply: re-render .env to the template's keys / comments / order,
+# preserving your values, after writing a timestamped backup
+chatwalaau env sync --write
+```
+
+- **Your values are preserved verbatim** (quoting, `export`, inline
+  comments included); only the layout and per-key documentation are
+  refreshed to match the installed release.
+- **Nothing is deleted.** Keys in your `.env` that the template no longer
+  has (removed or custom) are moved into an `Unmanaged keys` section.
+- **A timestamped backup** (`.env.<UTC>.bak`) is always written before
+  `--write`, and never overwrites a prior backup.
+- `env sync` is a **dry-run by default**; review the diff before applying.
+- On startup, the server logs one line when your `.env` is missing keys
+  the installed release added, pointing you to `chatwalaau env diff`.
+
+> Note: `env sync --write` replaces hand-written comments on
+> template-managed keys with the template's comments (your values stay).
+> Custom keys are preserved in the `Unmanaged keys` section, and the
+> backup lets you recover anything.
 
 ---
 

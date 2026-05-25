@@ -140,6 +140,38 @@ def _warn_if_tls_settings_unused() -> None:
 
 _warn_if_tls_settings_unused()
 
+
+# .env drift advisory (PRP-0064, CTR-0097, UDR-0039 D8).
+# Most releases add value through new opt-in env vars that default OFF, so the
+# runtime keeps working after `pip install -U` without .env edits -- but the
+# operator cannot discover the new knobs from their own .env. Emit ONE INFO
+# line at startup when the bundled template declares keys the operator's .env
+# is missing. Log-only and non-failing: an advisory must never block startup.
+def _advise_env_drift() -> None:
+    import logging as _logging
+
+    try:
+        from app.core.env_template import compute_drift, read_template_text
+
+        env_file = Path(".env")
+        if not env_file.exists():
+            return
+        drift = compute_drift(read_template_text(), env_file.read_text(encoding="utf-8"))
+        if not drift.added:
+            return
+        preview = ", ".join(drift.added[:8]) + (", ..." if len(drift.added) > 8 else "")
+        _logging.getLogger(__name__).info(
+            "%d new setting(s) are available since your .env was generated (%s). "
+            "Run `chatwalaau env diff` to review, then `chatwalaau env sync` to apply.",
+            len(drift.added),
+            preview,
+        )
+    except Exception:  # advisory must never block startup
+        _logging.getLogger(__name__).debug("env drift advisory skipped", exc_info=True)
+
+
+_advise_env_drift()
+
 cors_origins = [origin.strip() for origin in settings.cors_allowed_origins.split(",") if origin.strip()]
 
 app.add_middleware(

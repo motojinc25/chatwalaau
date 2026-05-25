@@ -3,6 +3,8 @@
 Usage:
     chatwalaau                          Start the server
     chatwalaau init                     Initialize .env configuration
+    chatwalaau env diff                 Report .env drift vs the template (PRP-0064)
+    chatwalaau env sync                 Re-render .env to the template (PRP-0064)
     chatwalaau hash-password            Generate AUTH_PASSWORD_HASH (PRP-0057)
     chatwalaau chat "message"           Chat with the agent
     chatwalaau sessions list            List sessions
@@ -130,7 +132,9 @@ def _run_init(args: argparse.Namespace) -> None:
     env_path = Path(args.output)
     if env_path.exists() and not args.force:
         print(f"ERROR: {env_path} already exists.")
-        print("Use --force to overwrite.")
+        print("To reconcile it with this release's template without losing your")
+        print("values, run `chatwalaau env diff` then `chatwalaau env sync`.")
+        print("Use --force only to discard the existing file and regenerate it.")
         sys.exit(1)
 
     template_path = Path(__file__).resolve().parent.parent / "templates" / ".env.template"
@@ -183,6 +187,15 @@ def _add_client_options(parser: argparse.ArgumentParser) -> None:
 
 def main() -> None:
     """CLI entry point."""
+    # Ensure UTF-8 stdout/stderr on Windows so template-derived output
+    # (e.g. the okina U+02BB in the .env template header printed by
+    # `env diff` / `env sync`) does not crash under the cp1252 console
+    # default. Mirrors the reconfigure in app.main.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
     from dotenv import load_dotenv
 
     load_dotenv()
@@ -235,6 +248,11 @@ def main() -> None:
 
     register_hash_password_parser(subparsers)
 
+    # env subcommand: .env reconciliation (CTR-0097, PRP-0064)
+    from app.cli.env_tools import register_env_parser
+
+    register_env_parser(subparsers)
+
     # --- Client subcommands (PRP-0041) ---
 
     # chat subcommand (CTR-0081)
@@ -271,7 +289,7 @@ def main() -> None:
 
     if args.command == "init":
         _run_init(args)
-    elif args.command in ("chat", "sessions", "templates", "models", "tts", "upload", "hash-password"):
+    elif args.command in ("chat", "sessions", "templates", "models", "tts", "upload", "hash-password", "env"):
         # Client and utility subcommands
         args.func(args)
     else:
