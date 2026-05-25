@@ -83,7 +83,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - LLM reasoning visualization with collapsible thinking blocks
 - Web search with inline citation links
 - Voice input via microphone with Whisper transcription (supports `whisper`, `gpt-4o-transcribe`, and `gpt-realtime-whisper` via Realtime API)
-- Text-to-Speech playback and download via ElevenLabs
+- Text-to-Speech playback and download, with a selectable provider: ElevenLabs or Azure OpenAI Realtime voice models (e.g. `gpt-realtime-2`)
 - Multimodal image analysis (file attachment, drag-and-drop, URL)
 - Session management: save, search, pin, archive, fork, rename
 - Context window consumption display with warning levels
@@ -450,15 +450,31 @@ tells the agent how to paginate with `offset=N`.
 
 ### Text-to-Speech
 
-Enable on-demand TTS for messages via [ElevenLabs](https://elevenlabs.io/):
+Enable on-demand TTS for messages. Pick the provider with `TTS_PROVIDER`
+(default `elevenlabs`).
+
+Option A -- [ElevenLabs](https://elevenlabs.io/):
 
 ```
+TTS_PROVIDER=elevenlabs
 ELEVENLABS_API_KEY=your-api-key
 TTS_MODEL_ID=eleven_multilingual_v2
 TTS_VOICE_ID=your-voice-id
 ```
 
-Speaker button plays audio, download button saves MP3 file. Audio is cached to avoid duplicate API calls.
+Option B -- Azure OpenAI Realtime voice (e.g. `gpt-realtime-2`), reusing your
+existing `AZURE_OPENAI_ENDPOINT` and credentials:
+
+```
+TTS_PROVIDER=azure-realtime
+TTS_REALTIME_DEPLOYMENT=gpt-realtime-2
+TTS_REALTIME_VOICE=alloy
+#TTS_REALTIME_AUDIO_RATE=24000
+```
+
+Either way the speaker button plays audio and the download button saves an MP3
+file; audio is cached to avoid duplicate API calls. The Azure Realtime lane
+reads the message text verbatim (it does not converse), matching ElevenLabs.
 
 ---
 

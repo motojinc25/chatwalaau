@@ -59,7 +59,7 @@ from app.session.router import router as session_router
 from app.stt.factory import create_stt_provider
 from app.stt.router import router as stt_router
 from app.stt.router import set_stt_provider
-from app.tts.elevenlabs import ElevenLabsTTSProvider
+from app.tts.factory import create_tts_provider
 from app.tts.router import router as tts_router
 from app.tts.router import set_tts_provider
 from app.upload.router import router as upload_router
@@ -188,14 +188,24 @@ if _stt_provider is not None:
 app.include_router(stt_router)
 
 # Text-to-Speech API (CTR-0039)
-if settings.elevenlabs_api_key and settings.tts_voice_id:
-    set_tts_provider(
-        ElevenLabsTTSProvider(
-            api_key=settings.elevenlabs_api_key,
-            voice_id=settings.tts_voice_id,
-            model_id=settings.tts_model_id,
-        )
-    )
+# Provider selection delegated to app.tts.factory per UDR-0038
+# (PRP-0063): ElevenLabs (default) or Azure OpenAI Realtime
+# (gpt-realtime-2). The realtime lane reuses the centralised credential
+# resolution in app.azure_credential (PRP-0058, UDR-0034) and the
+# shared Realtime URL shape introduced for STT (PRP-0061).
+_tts_provider = create_tts_provider(
+    provider=settings.tts_provider,
+    elevenlabs_api_key=settings.elevenlabs_api_key,
+    tts_voice_id=settings.tts_voice_id,
+    tts_model_id=settings.tts_model_id,
+    azure_openai_endpoint=settings.azure_openai_endpoint,
+    realtime_deployment=settings.tts_realtime_deployment,
+    realtime_voice=settings.tts_realtime_voice,
+    realtime_api_version=settings.azure_openai_realtime_api_version,
+    realtime_audio_rate=settings.tts_realtime_audio_rate,
+)
+if _tts_provider is not None:
+    set_tts_provider(_tts_provider)
 app.include_router(tts_router)
 
 # Prepare MCP tools synchronously before agent creation (CTR-0060, PRP-0031)

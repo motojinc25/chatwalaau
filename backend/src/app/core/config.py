@@ -127,6 +127,32 @@ class Settings(BaseSettings):
     tts_model_id: str = "eleven_multilingual_v2"
     tts_voice_id: str = ""
 
+    # TTS Provider Selection (CTR-0039 v3, PRP-0063, UDR-0038)
+    # Selects which provider backs POST /api/tts:
+    # - "elevenlabs" (default): ElevenLabs SDK (uses ELEVENLABS_API_KEY,
+    #   TTS_MODEL_ID, TTS_VOICE_ID).
+    # - "azure-realtime": Azure OpenAI Realtime API voice model
+    #   (e.g. gpt-realtime-2) over a WebSocket session; PCM16 output is
+    #   encoded to MP3. Uses AZURE_OPENAI_ENDPOINT, the shared credential
+    #   lane (UDR-0034), and the TTS_REALTIME_* settings below plus the
+    #   shared AZURE_OPENAI_REALTIME_API_VERSION (reused from the STT lane).
+    # Unknown values resolve to "elevenlabs" (no hard failure on typo).
+    tts_provider: str = "elevenlabs"
+
+    # Azure OpenAI Realtime TTS voice deployment (PRP-0063, UDR-0038).
+    # The voice Realtime deployment name; goes directly into the URL
+    # `?model=` query. gpt-realtime-2 is itself a voice model, so unlike
+    # the STT whisper case there is no transcription/voice deployment
+    # split. Required when TTS_PROVIDER=azure-realtime.
+    tts_realtime_deployment: str = ""
+
+    # Azure OpenAI Realtime TTS voice name (e.g. alloy / marin / cedar).
+    tts_realtime_voice: str = "alloy"
+
+    # Azure OpenAI Realtime TTS output PCM sample rate in Hz. The
+    # streamed PCM16 is encoded to MP3 at this rate. Allowed: 16000, 24000.
+    tts_realtime_audio_rate: int = 24000
+
     # Image Generation (CTR-0049, CTR-0050, PRP-0027)
     image_deployment_name: str = ""
 
