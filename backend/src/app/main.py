@@ -40,6 +40,37 @@ mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("application/wasm", ".wasm")
 
 from dotenv import load_dotenv
+
+# Load .env early -- before the agent_framework-importing imports below -- so the
+# import-time SHOW_EXPERIMENTAL_WARNINGS toggle honors a value set in .env.
+load_dotenv()
+
+
+def _suppress_experimental_warnings_unless_opted_in() -> None:
+    """Hide MAF staged-feature (ExperimentalWarning) startup noise by default.
+
+    Microsoft Agent Framework's @experimental decorator warns (once each, via
+    warnings.warn with an ExperimentalWarning -> FutureWarning category) when
+    experimental classes (MemoryStore, SkillResource) are instantiated /
+    subclassed during the agent / skills setup triggered by the imports below.
+    This filter MUST be installed before those imports (PRP-0065 / UDR-0040).
+    It is narrow by design: it matches only the staged-feature message, never a
+    blanket ignore, and never suppresses ChatWalaʻau's own warnings. Operators
+    restore the warnings with SHOW_EXPERIMENTAL_WARNINGS=true.
+    """
+    import os
+
+    if (os.environ.get("SHOW_EXPERIMENTAL_WARNINGS") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*is experimental and may change or be removed.*",
+        category=FutureWarning,
+    )
+
+
+_suppress_experimental_warnings_unless_opted_in()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -67,7 +98,7 @@ from app.upload.router import router as upload_router
 # Suppress pydantic warnings from agent-framework-ag-ui's Field(validation_alias=...) usage
 warnings.filterwarnings("ignore", category=UserWarning, module=r"pydantic\._internal\._generate_schema")
 
-load_dotenv()
+# (.env was already loaded near the top of the module, before the imports above.)
 
 # Logging is configured via log_conf.yaml (passed to uvicorn --log-config)
 
