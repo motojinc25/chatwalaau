@@ -1002,7 +1002,7 @@ wheels = [
 
 [[package]]
 name = "chatwalaau"
-version = "0.63.0"
+version = "0.64.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework" },
@@ -1037,7 +1037,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-framework", specifier = ">=1.0.0,<2" },
+    { name = "agent-framework", specifier = ">=1.6.0,<2" },
     { name = "agent-framework-ag-ui", specifier = ">=1.0.0b260402" },
     { name = "agent-framework-devui", specifier = ">=1.0.0b260402" },
     { name = "av", specifier = ">=12.0" },

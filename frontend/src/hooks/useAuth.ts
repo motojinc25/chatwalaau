@@ -12,12 +12,17 @@ import { useCallback, useEffect, useState } from 'react'
 
 export type AuthMode = 'open' | 'api-key-only' | 'login-required'
 
+/** PRP-0067 / CTR-0094 v4 -- runtime tool-approval policy. */
+export type ToolApprovalMode = 'skip' | 'auto' | 'always'
+
 export interface AuthState {
   mode: AuthMode | null
   authenticated: boolean
   username: string | null
   /** PRP-0066 / CTR-0094 v3: backend DEMO_MODE flag. SPA renders a "DEMO" badge when true. */
   demoMode: boolean
+  /** PRP-0067 / CTR-0094 v4: backend TOOL_APPROVAL_MODE. "skip" renders PermissionsDisabledBanner. */
+  toolApprovalMode: ToolApprovalMode
   loading: boolean
 }
 
@@ -35,6 +40,8 @@ interface StatusPayload {
   username: string | null
   /** Optional in older backend builds; defaults to false (PRP-0066, CTR-0094 v3). */
   demo_mode?: boolean
+  /** Optional in older backend builds; defaults to "auto" (PRP-0067, CTR-0094 v4). */
+  tool_approval_mode?: ToolApprovalMode
 }
 
 const STATUS_URL = '/api/auth/status'
@@ -57,6 +64,7 @@ export function useAuth(): AuthState & AuthActions {
     authenticated: false,
     username: null,
     demoMode: false,
+    toolApprovalMode: 'auto',
     loading: true,
   })
 
@@ -66,7 +74,14 @@ export function useAuth(): AuthState & AuthActions {
       // Network error -- best-effort: treat as open so the user is not
       // trapped on /login when the backend is unreachable. The 401
       // interceptor still catches subsequent failures.
-      setState({ mode: 'open', authenticated: true, username: null, demoMode: false, loading: false })
+      setState({
+        mode: 'open',
+        authenticated: true,
+        username: null,
+        demoMode: false,
+        toolApprovalMode: 'auto',
+        loading: false,
+      })
       return
     }
     setState({
@@ -74,6 +89,10 @@ export function useAuth(): AuthState & AuthActions {
       authenticated: payload.authenticated,
       username: payload.username,
       demoMode: payload.demo_mode === true,
+      toolApprovalMode:
+        payload.tool_approval_mode === 'skip' || payload.tool_approval_mode === 'always'
+          ? payload.tool_approval_mode
+          : 'auto',
       loading: false,
     })
   }, [])
@@ -112,6 +131,7 @@ export function useAuth(): AuthState & AuthActions {
       authenticated: false,
       username: null,
       demoMode: prev.demoMode,
+      toolApprovalMode: prev.toolApprovalMode,
       loading: false,
     }))
   }, [])

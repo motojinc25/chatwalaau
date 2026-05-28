@@ -7,8 +7,19 @@ _emit_content() skips text_reasoning; this endpoint handles it directly.
 Session management is enabled via FileHistoryProvider (CTR-0014).
 Agent selection is done via AgentRegistry using state.model (CTR-0070, PRP-0035).
 Background Responses support via CTR-0045 (PRP-0025).
+
+PRP-0067 / UDR-0043 (CTR-0009 v12): the endpoint also translates MAF's
+``function_approval_request`` content into a CUSTOM
+``tool_approval_request`` event, parks the stream on an
+``asyncio.Event`` from ``app.agent.approval.approval_store``, and after
+the operator POSTs to ``/api/tool-approval`` (or the timeout fires)
+re-runs the agent with an appended ``function_approval_response``
+message so MAF resumes execution / short-circuits with the rejection
+text. The full handshake is ephemeral -- nothing about the approval
+request/response is persisted to session JSON.
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 import json
 import logging
@@ -34,7 +45,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 from ag_ui.encoder import EventEncoder
-from agent_framework import AgentSession, Content
+from agent_framework import AgentSession, Content, Message
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -43,6 +54,11 @@ from fastapi.responses import StreamingResponse
 from openai import NotFoundError as OpenAINotFoundError
 from pydantic import AliasChoices, BaseModel, Field
 
+from app.agent.approval import (
+    ApprovalRecord,
+    approval_store,
+    truncate_arguments_preview,
+)
 from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key
 from app.core.config import settings
@@ -192,6 +208,24 @@ def _inject_image_content(
                 target.contents.append(Content.from_text(text=pdf_info))
 
 
+def _arguments_to_dict(raw: Any) -> dict[str, Any]:
+    """Best-effort decode of FunctionCallContent.arguments to a dict.
+
+    MAF emits arguments either as a parsed dict or as a streaming JSON
+    string; the approval preview wants a dict so the SPA can render
+    structured fields.
+    """
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {"_raw": raw}
+        return decoded if isinstance(decoded, dict) else {"_value": decoded}
+    return {}
+
+
 async def _stream_with_reasoning(
     agent_registry: AgentRegistry,
     request_body: AGUIRequest,
@@ -201,6 +235,12 @@ async def _stream_with_reasoning(
     Iterates the MAF agent response stream directly to emit reasoning events
     that agent-framework-ag-ui's _emit_content() would otherwise skip.
     Selects the Agent from the registry based on state.model (CTR-0070).
+
+    PRP-0067 (CTR-0009 v12): when MAF emits ``function_approval_request``
+    content the loop translates it to a CUSTOM
+    ``tool_approval_request`` event, parks on the approval store, and
+    re-runs the agent with an appended ``function_approval_response``
+    message once the approval is resolved (UDR-0043 D1+D6+D7).
     """
     encoder = EventEncoder()
     thread_id = request_body.thread_id or _generate_id()
@@ -266,200 +306,319 @@ async def _stream_with_reasoning(
         # Set thread_id for image generation tools (CTR-0050, PRP-0027)
         _image_gen_thread_id.set(thread_id)
 
-        # Run agent with streaming
-        response_stream = agent.run(
-            messages,
-            stream=True,
-            session=session,
-            options=run_options or None,
-        )
-        stream = await _normalize_response_stream(response_stream)
+        # PRP-0067 approval loop. The first iteration runs the original
+        # messages. If MAF emits function_approval_request contents, the
+        # inner loop collects them, parks on the asyncio.Event for each,
+        # then appends a fresh "user" message bundling the resolved
+        # responses and re-runs the agent. The loop terminates when an
+        # iteration finishes without producing any approval request.
+        iteration_messages: list[Any] = list(messages)
+        max_approval_iterations = 16
+        for _iteration in range(max_approval_iterations):
+            pending_approvals: list[tuple[ApprovalRecord, Content]] = []
 
-        async for update in stream:
-            # Emit continuation_token if present (CTR-0045, PRP-0025)
-            if background:
-                update_ct = getattr(update, "continuation_token", None)
-                if update_ct is not None:
-                    yield encoder.encode(
-                        CustomEvent(
-                            type=EventType.CUSTOM,
-                            name="continuation_token",
-                            value=dict(update_ct) if hasattr(update_ct, "__iter__") else {"token": update_ct},
-                        )
-                    )
+            response_stream = agent.run(
+                iteration_messages,
+                stream=True,
+                session=session,
+                options=run_options or None,
+            )
+            stream = await _normalize_response_stream(response_stream)
 
-            contents = getattr(update, "contents", None) or []
-            for content in contents:
-                content_type = getattr(content, "type", None)
-
-                if content_type == "text_reasoning":
-                    text = getattr(content, "text", None)
-                    if not text:
-                        continue
-                    if reasoning_msg_id is None:
-                        reasoning_msg_id = _generate_id()
+            async for update in stream:
+                # Emit continuation_token if present (CTR-0045, PRP-0025)
+                if background:
+                    update_ct = getattr(update, "continuation_token", None)
+                    if update_ct is not None:
                         yield encoder.encode(
-                            ReasoningMessageStartEvent(
-                                type=EventType.REASONING_MESSAGE_START,
-                                message_id=reasoning_msg_id,
-                                role=_REASONING_MESSAGE_ROLE,
-                            )
-                        )
-                    yield encoder.encode(
-                        ReasoningMessageContentEvent(
-                            type=EventType.REASONING_MESSAGE_CONTENT,
-                            message_id=reasoning_msg_id,
-                            delta=text,
-                        )
-                    )
-
-                elif content_type == "text":
-                    text = getattr(content, "text", None)
-                    if not text:
-                        continue
-                    # Close any open reasoning block before text
-                    if reasoning_msg_id is not None:
-                        yield encoder.encode(
-                            ReasoningMessageEndEvent(
-                                type=EventType.REASONING_MESSAGE_END,
-                                message_id=reasoning_msg_id,
-                            )
-                        )
-                        reasoning_msg_id = None
-                    if msg_id is None:
-                        msg_id = _generate_id()
-                        yield encoder.encode(
-                            TextMessageStartEvent(
-                                type=EventType.TEXT_MESSAGE_START,
-                                message_id=msg_id,
-                                role="assistant",
-                            )
-                        )
-                    yield encoder.encode(
-                        TextMessageContentEvent(
-                            type=EventType.TEXT_MESSAGE_CONTENT,
-                            message_id=msg_id,
-                            delta=text,
-                        )
-                    )
-
-                elif content_type == "function_call":
-                    # Close reasoning block before tool call
-                    if reasoning_msg_id is not None:
-                        yield encoder.encode(
-                            ReasoningMessageEndEvent(
-                                type=EventType.REASONING_MESSAGE_END,
-                                message_id=reasoning_msg_id,
-                            )
-                        )
-                        reasoning_msg_id = None
-
-                    tc_id = getattr(content, "call_id", None) or _generate_id()
-                    tc_name = getattr(content, "name", None)
-                    if tc_name and tc_id != tool_call_id:
-                        tool_call_id = tc_id
-                        tc_name_current = tc_name
-                        yield encoder.encode(
-                            ToolCallStartEvent(
-                                type=EventType.TOOL_CALL_START,
-                                tool_call_id=tc_id,
-                                tool_call_name=tc_name,
-                                parent_message_id=msg_id,
-                            )
-                        )
-                    tc_args = getattr(content, "arguments", None)
-                    if tc_args:
-                        delta = tc_args if isinstance(tc_args, str) else json.dumps(tc_args)
-                        yield encoder.encode(
-                            ToolCallArgsEvent(
-                                type=EventType.TOOL_CALL_ARGS,
-                                tool_call_id=tc_id,
-                                delta=delta,
+                            CustomEvent(
+                                type=EventType.CUSTOM,
+                                name="continuation_token",
+                                value=dict(update_ct) if hasattr(update_ct, "__iter__") else {"token": update_ct},
                             )
                         )
 
-                elif content_type == "function_result":
-                    tc_id = getattr(content, "call_id", None)
-                    if tc_id:
-                        yield encoder.encode(
-                            ToolCallEndEvent(
-                                type=EventType.TOOL_CALL_END,
-                                tool_call_id=tc_id,
-                            )
-                        )
-                        raw_result = getattr(content, "result", "") or ""
-                        result_str = raw_result if isinstance(raw_result, str) else json.dumps(raw_result)
-                        yield encoder.encode(
-                            ToolCallResultEvent(
-                                type=EventType.TOOL_CALL_RESULT,
-                                message_id=_generate_id(),
-                                tool_call_id=tc_id,
-                                content=result_str,
-                                role="tool",
-                            )
-                        )
-                        # MCP Apps: check if this tool has UI resource (CTR-0067, PRP-0034)
-                        from app.mcp_apps.manager import fetch_ui_resource, get_ui_tool_metadata, store_app_html
+                contents = getattr(update, "contents", None) or []
+                for content in contents:
+                    content_type = getattr(content, "type", None)
 
-                        ui_meta = get_ui_tool_metadata(tc_name_current)
-                        if ui_meta:
-                            try:
-                                # Find the MCP tool instance
-                                from app.mcp.lifecycle import _mcp_server_status, _mcp_tools
-
-                                mcp_tool = None
-                                for idx, status in enumerate(_mcp_server_status):
-                                    if status["name"] == ui_meta.server_name and idx < len(_mcp_tools):
-                                        mcp_tool = _mcp_tools[idx]
-                                        break
-
-                                if mcp_tool:
-                                    ui_resource = await fetch_ui_resource(mcp_tool, ui_meta.resource_uri)
-                                    if ui_resource:
-                                        ref_id = tc_id or _generate_id()
-                                        html_filename = store_app_html(thread_id, ref_id, ui_resource.html)
-                                        yield encoder.encode(
-                                            CustomEvent(
-                                                type=EventType.CUSTOM,
-                                                name="mcp_app",
-                                                value={
-                                                    "server_name": ui_meta.server_name,
-                                                    "tool_name": ui_meta.tool_name,
-                                                    "resource_uri": ui_meta.resource_uri,
-                                                    "html_ref": f"/api/mcp-apps/html/{thread_id}/{html_filename}",
-                                                    "csp": ui_resource.csp,
-                                                    "permissions": ui_resource.permissions,
-                                                    "call_id": ref_id,
-                                                },
-                                            )
-                                        )
-                            except Exception:
-                                logger.warning("Failed to fetch MCP App UI for %s", tc_name_current, exc_info=True)
-
-                        tool_call_id = None
-                        # Reset text message after tool result (allows new text block)
-                        if msg_id is not None:
+                    if content_type == "text_reasoning":
+                        text = getattr(content, "text", None)
+                        if not text:
+                            continue
+                        if reasoning_msg_id is None:
+                            reasoning_msg_id = _generate_id()
                             yield encoder.encode(
-                                TextMessageEndEvent(
-                                    type=EventType.TEXT_MESSAGE_END,
-                                    message_id=msg_id,
+                                ReasoningMessageStartEvent(
+                                    type=EventType.REASONING_MESSAGE_START,
+                                    message_id=reasoning_msg_id,
+                                    role=_REASONING_MESSAGE_ROLE,
                                 )
                             )
-                            msg_id = None
-
-                elif content_type == "usage":
-                    usage_details = getattr(content, "usage_details", None) or {}
-                    usage_value = dict(usage_details)
-                    model_name = selected_model or agent_registry.default_model
-                    usage_value["max_context_tokens"] = settings.get_max_context_tokens(model_name)
-                    usage_value["model"] = model_name
-                    yield encoder.encode(
-                        CustomEvent(
-                            type=EventType.CUSTOM,
-                            name="usage",
-                            value=usage_value,
+                        yield encoder.encode(
+                            ReasoningMessageContentEvent(
+                                type=EventType.REASONING_MESSAGE_CONTENT,
+                                message_id=reasoning_msg_id,
+                                delta=text,
+                            )
                         )
+
+                    elif content_type == "text":
+                        text = getattr(content, "text", None)
+                        if not text:
+                            continue
+                        # Close any open reasoning block before text
+                        if reasoning_msg_id is not None:
+                            yield encoder.encode(
+                                ReasoningMessageEndEvent(
+                                    type=EventType.REASONING_MESSAGE_END,
+                                    message_id=reasoning_msg_id,
+                                )
+                            )
+                            reasoning_msg_id = None
+                        if msg_id is None:
+                            msg_id = _generate_id()
+                            yield encoder.encode(
+                                TextMessageStartEvent(
+                                    type=EventType.TEXT_MESSAGE_START,
+                                    message_id=msg_id,
+                                    role="assistant",
+                                )
+                            )
+                        yield encoder.encode(
+                            TextMessageContentEvent(
+                                type=EventType.TEXT_MESSAGE_CONTENT,
+                                message_id=msg_id,
+                                delta=text,
+                            )
+                        )
+
+                    elif content_type == "function_call":
+                        # Close reasoning block before tool call
+                        if reasoning_msg_id is not None:
+                            yield encoder.encode(
+                                ReasoningMessageEndEvent(
+                                    type=EventType.REASONING_MESSAGE_END,
+                                    message_id=reasoning_msg_id,
+                                )
+                            )
+                            reasoning_msg_id = None
+
+                        tc_id = getattr(content, "call_id", None) or _generate_id()
+                        tc_name = getattr(content, "name", None)
+                        if tc_name and tc_id != tool_call_id:
+                            tool_call_id = tc_id
+                            tc_name_current = tc_name
+                            yield encoder.encode(
+                                ToolCallStartEvent(
+                                    type=EventType.TOOL_CALL_START,
+                                    tool_call_id=tc_id,
+                                    tool_call_name=tc_name,
+                                    parent_message_id=msg_id,
+                                )
+                            )
+                        tc_args = getattr(content, "arguments", None)
+                        if tc_args:
+                            delta = tc_args if isinstance(tc_args, str) else json.dumps(tc_args)
+                            yield encoder.encode(
+                                ToolCallArgsEvent(
+                                    type=EventType.TOOL_CALL_ARGS,
+                                    tool_call_id=tc_id,
+                                    delta=delta,
+                                )
+                            )
+
+                    elif content_type == "function_approval_request":
+                        # PRP-0067 / UDR-0043 D1: MAF paused before executing
+                        # this tool. Register the approval, emit a CUSTOM
+                        # event with the parsed arguments preview, and
+                        # accumulate the record so the post-stream phase
+                        # parks on its asyncio.Event.
+                        fn_call = getattr(content, "function_call", None)
+                        if fn_call is None:
+                            logger.warning("function_approval_request without function_call payload; skipping")
+                            continue
+                        tool_name_pending = getattr(fn_call, "name", "") or "<unknown>"
+                        call_id_pending = getattr(fn_call, "call_id", "") or _generate_id()
+                        raw_args = getattr(fn_call, "arguments", None)
+                        full_args = _arguments_to_dict(raw_args)
+                        preview_args = truncate_arguments_preview(full_args)
+                        record = await approval_store.register(
+                            thread_id=thread_id,
+                            tool_name=tool_name_pending,
+                            call_id=call_id_pending,
+                            arguments_preview=preview_args,
+                        )
+                        # Check session-scoped cache (UDR-0043 D8). A hit
+                        # bypasses the UI roundtrip: we resolve the record
+                        # immediately with source="session-cache".
+                        cached = await approval_store.lookup_session_cache(
+                            thread_id=thread_id,
+                            tool_name=tool_name_pending,
+                        )
+                        if cached is not None:
+                            await approval_store.resolve(record.id, approved=cached, source="session-cache")
+                        yield encoder.encode(
+                            CustomEvent(
+                                type=EventType.CUSTOM,
+                                name="tool_approval_request",
+                                value={
+                                    "id": record.id,
+                                    "call_id": call_id_pending,
+                                    "tool_name": tool_name_pending,
+                                    "arguments": preview_args,
+                                    "expires_at_unix": record.expires_at,
+                                    "cached_decision": cached,
+                                },
+                            )
+                        )
+                        pending_approvals.append((record, content))
+
+                    elif content_type == "function_result":
+                        tc_id = getattr(content, "call_id", None)
+                        if tc_id:
+                            yield encoder.encode(
+                                ToolCallEndEvent(
+                                    type=EventType.TOOL_CALL_END,
+                                    tool_call_id=tc_id,
+                                )
+                            )
+                            raw_result = getattr(content, "result", "") or ""
+                            result_str = raw_result if isinstance(raw_result, str) else json.dumps(raw_result)
+                            yield encoder.encode(
+                                ToolCallResultEvent(
+                                    type=EventType.TOOL_CALL_RESULT,
+                                    message_id=_generate_id(),
+                                    tool_call_id=tc_id,
+                                    content=result_str,
+                                    role="tool",
+                                )
+                            )
+                            # MCP Apps: check if this tool has UI resource (CTR-0067, PRP-0034)
+                            from app.mcp_apps.manager import fetch_ui_resource, get_ui_tool_metadata, store_app_html
+
+                            ui_meta = get_ui_tool_metadata(tc_name_current)
+                            if ui_meta:
+                                try:
+                                    # Find the MCP tool instance
+                                    from app.mcp.lifecycle import _mcp_server_status, _mcp_tools
+
+                                    mcp_tool = None
+                                    for idx, status in enumerate(_mcp_server_status):
+                                        if status["name"] == ui_meta.server_name and idx < len(_mcp_tools):
+                                            mcp_tool = _mcp_tools[idx]
+                                            break
+
+                                    if mcp_tool:
+                                        ui_resource = await fetch_ui_resource(mcp_tool, ui_meta.resource_uri)
+                                        if ui_resource:
+                                            ref_id = tc_id or _generate_id()
+                                            html_filename = store_app_html(thread_id, ref_id, ui_resource.html)
+                                            yield encoder.encode(
+                                                CustomEvent(
+                                                    type=EventType.CUSTOM,
+                                                    name="mcp_app",
+                                                    value={
+                                                        "server_name": ui_meta.server_name,
+                                                        "tool_name": ui_meta.tool_name,
+                                                        "resource_uri": ui_meta.resource_uri,
+                                                        "html_ref": f"/api/mcp-apps/html/{thread_id}/{html_filename}",
+                                                        "csp": ui_resource.csp,
+                                                        "permissions": ui_resource.permissions,
+                                                        "call_id": ref_id,
+                                                    },
+                                                )
+                                            )
+                                except Exception:
+                                    logger.warning("Failed to fetch MCP App UI for %s", tc_name_current, exc_info=True)
+
+                            tool_call_id = None
+                            # Reset text message after tool result (allows new text block)
+                            if msg_id is not None:
+                                yield encoder.encode(
+                                    TextMessageEndEvent(
+                                        type=EventType.TEXT_MESSAGE_END,
+                                        message_id=msg_id,
+                                    )
+                                )
+                                msg_id = None
+
+                    elif content_type == "usage":
+                        usage_details = getattr(content, "usage_details", None) or {}
+                        usage_value = dict(usage_details)
+                        model_name = selected_model or agent_registry.default_model
+                        usage_value["max_context_tokens"] = settings.get_max_context_tokens(model_name)
+                        usage_value["model"] = model_name
+                        yield encoder.encode(
+                            CustomEvent(
+                                type=EventType.CUSTOM,
+                                name="usage",
+                                value=usage_value,
+                            )
+                        )
+
+            # End of inner async-for. If no approvals are pending the agent
+            # finished naturally and we exit the outer loop. Otherwise wait
+            # on each pending record, build approval-response contents, and
+            # append a fresh "user" message so MAF resumes on the next
+            # iteration (PRP-0067 / UDR-0043 D1).
+            if not pending_approvals:
+                break
+
+            approval_response_contents: list[Content] = []
+            for record, request_content in pending_approvals:
+                if record.resolution is None:
+                    try:
+                        await asyncio.wait_for(
+                            record.event.wait(),
+                            timeout=float(settings.tool_approval_timeout_sec),
+                        )
+                    except TimeoutError:
+                        await approval_store.resolve(record.id, approved=False, source="timeout")
+                resolution = record.resolution
+                approved = bool(resolution and resolution.approved)
+                source = resolution.source if resolution else "timeout"
+                if source == "timeout":
+                    logger.warning(
+                        "approval timed out after %ds for tool=%s (call_id=%s, thread_id=%s)",
+                        settings.tool_approval_timeout_sec,
+                        record.tool_name,
+                        record.call_id,
+                        thread_id,
                     )
+                # Emit the AG-UI tool_approval_response event so the SPA
+                # collapses the inline card into a chip immediately, even
+                # before MAF re-streams the function_result.
+                yield encoder.encode(
+                    CustomEvent(
+                        type=EventType.CUSTOM,
+                        name="tool_approval_response",
+                        value={
+                            "id": record.id,
+                            "approved": approved,
+                            "source": source,
+                        },
+                    )
+                )
+                # Build the MAF response content from the original request
+                # so MAF can match by content.id on the next agent.run().
+                approval_response_contents.append(request_content.to_function_approval_response(approved=approved))
+                # The approval is fully resolved; the parked Event is no
+                # longer needed. Drop the record so the GC sweeper has
+                # less work to do.
+                await approval_store.drop(record.id)
+
+            # Append one user message bundling every approval response and
+            # loop back through agent.run() to let MAF replace the parked
+            # function_calls with their results (or rejection text).
+            iteration_messages = [*iteration_messages, Message(role="user", contents=approval_response_contents)]
+        else:
+            # The for-else fires when max_approval_iterations is exhausted
+            # without a `break`. Defensive: emit a RUN_ERROR so the SPA
+            # surfaces the run as failed instead of silently terminating.
+            run_error = True
+            error_message = f"Tool approval loop exceeded {max_approval_iterations} rounds; aborting run."
+            logger.warning("approval loop exceeded for thread %s", thread_id)
 
     except (OpenAINotFoundError, ChatClientException, TypeError) as exc:
         run_error = True

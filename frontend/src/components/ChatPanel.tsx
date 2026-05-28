@@ -7,12 +7,14 @@ import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { ModelSelector } from '@/components/ModelSelector'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
+import { ToolApprovalList } from '@/components/ToolApprovalCard'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { useChat } from '@/hooks/useChat'
 import { useChatScroll } from '@/hooks/useChatScroll'
 import { useImageAttachment } from '@/hooks/useImageAttachment'
 import { useTemplates } from '@/hooks/useTemplates'
+import { useToolApproval } from '@/hooks/useToolApproval'
 import { useTTS } from '@/hooks/useTTS'
 import { cn } from '@/lib/utils'
 import type { ChatMessage, ImageRef } from '@/types/chat'
@@ -79,6 +81,12 @@ export function ChatPanel({
     }
   }, [])
 
+  // PRP-0067 / CTR-0100: tool approval state lives outside useChat so
+  // both ChatPanel and the SSE handler can read it. The hook is also
+  // responsible for resetting state on session switch (the parent key={threadId}
+  // remount handles that automatically here).
+  const approvalApi = useToolApproval()
+
   const {
     messages,
     isLoading,
@@ -96,6 +104,7 @@ export function ChatPanel({
     onStreamComplete,
     bgEnabled,
     selectedModel,
+    onCustomEvent: approvalApi.ingestCustomEvent,
   })
 
   // Auto-resume from continuation_token (page reload or sidebar switch).
@@ -297,6 +306,10 @@ export function ChatPanel({
               onRegenerateWithModel={regenerateWithModel}
             />
           ))}
+          {/* CTR-0100: approval cards render inline at the tail of the
+              message flow (the tool-call position) so they scroll with
+              the conversation instead of covering the scroll area. */}
+          <ToolApprovalList api={approvalApi} />
           {/* CTR-0092 bottom spacer: keeps the final message visible above the floating ChatInput. */}
           {!compact && <div aria-hidden="true" style={{ height: bottomSpacerHeightPx }} />}
         </div>

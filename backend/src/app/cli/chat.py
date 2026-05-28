@@ -121,6 +121,39 @@ def _chat_via_agui(
         _agui_stream(client, args, payload)
 
 
+def _maybe_auto_approve(
+    client: ChatWalaauClient,
+    args: argparse.Namespace,
+    event_type: str,
+    data: dict[str, Any],
+) -> None:
+    """PRP-0067 / UDR-0043 D5 -- CLI auto-approve helper.
+
+    When the AG-UI backend emits a ``CUSTOM tool_approval_request`` event
+    (because the agent called an approval-gated tool), the CLI has no
+    human-in-the-loop UI. Immediately POST ``approved=true`` back to
+    ``/api/tool-approval`` so the parked AG-UI stream resumes.
+    """
+    if event_type != "CUSTOM":
+        return
+    if data.get("name") != "tool_approval_request":
+        return
+    value = data.get("value") or {}
+    approval_id = value.get("id")
+    tool_name = value.get("tool_name", "<unknown>")
+    if not approval_id:
+        return
+    try:
+        client.post("/api/tool-approval", json_data={"id": approval_id, "approved": True})
+    except SystemExit:  # client._handle_http_error -> sys.exit
+        raise
+    except Exception as exc:
+        print(f"Warning: failed to auto-approve tool={tool_name}: {exc}", file=sys.stderr)
+        return
+    if not args.json_output:
+        print(f"[auto-approved tool: {tool_name}]", file=sys.stderr)
+
+
 def _agui_stream(
     client: ChatWalaauClient,
     args: argparse.Namespace,
@@ -132,6 +165,10 @@ def _agui_stream(
         for event in client.stream_sse("/ag-ui/", payload):
             event_type = event.get("event", "")
             data = event.get("data", {})
+
+            # PRP-0067 / UDR-0043 D5 -- auto-approve any approval requests
+            # before rendering, so the parked stream resumes immediately.
+            _maybe_auto_approve(client, args, event_type, data)
 
             if args.json_output:
                 output_jsonl(event)
@@ -182,6 +219,9 @@ def _agui_no_stream(
         events.append(event)
         event_type = event.get("event", "")
         data = event.get("data", {})
+
+        # PRP-0067 / UDR-0043 D5 -- non-streaming CLI mode auto-approver.
+        _maybe_auto_approve(client, args, event_type, data)
 
         if event_type == "TEXT_MESSAGE_CONTENT":
             accumulated_text += data.get("delta", "")

@@ -24,6 +24,12 @@ interface UseChatOptions {
   onStreamComplete?: () => void
   bgEnabled?: boolean
   selectedModel?: string
+  /**
+   * PRP-0067 / CTR-0100. Receives AG-UI CUSTOM events that useChat does
+   * not itself act on (e.g., tool_approval_request /
+   * tool_approval_response). useToolApproval supplies this callback.
+   */
+  onCustomEvent?: (name: string | undefined, value: Record<string, unknown> | undefined) => void
 }
 
 /**
@@ -39,6 +45,7 @@ export function useChat(options?: UseChatOptions) {
   const onStreamCompleteRef = useRef(options?.onStreamComplete)
   const bgEnabledRef = useRef(options?.bgEnabled ?? false)
   const selectedModelRef = useRef(options?.selectedModel ?? '')
+  const onCustomEventRef = useRef(options?.onCustomEvent)
 
   useEffect(() => {
     if (options?.threadId) {
@@ -66,6 +73,10 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     selectedModelRef.current = options?.selectedModel ?? ''
   }, [options?.selectedModel])
+
+  useEffect(() => {
+    onCustomEventRef.current = options?.onCustomEvent
+  }, [options?.onCustomEvent])
 
   const streamResponse = useCallback(
     async (
@@ -342,6 +353,12 @@ export function useChat(options?: UseChatOptions) {
                   break
                 }
                 case 'CUSTOM': {
+                  // PRP-0067 / CTR-0100: forward every CUSTOM event to
+                  // the optional handler before useChat acts on the ones
+                  // it owns. This lets useToolApproval react to the
+                  // tool_approval_request / tool_approval_response pair
+                  // without duplicating SSE parsing.
+                  onCustomEventRef.current?.(event.name, event.value)
                   if (event.name === 'usage' && event.value) {
                     completedUsage = event.value as UsageInfo
                     const usageModel = (event.value as Record<string, unknown>).model as string | undefined

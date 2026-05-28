@@ -76,6 +76,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.agent.router import router as tool_approval_router
 from app.agui.agent_factory import build_devui_agent, create_agent_registry
 from app.agui.endpoint import register_agui_endpoints
 from app.auth.web_auth import router as web_auth_router
@@ -224,6 +225,9 @@ app.add_middleware(
 # Web SPA Authentication API (CTR-0094, PRP-0057) -- mounted before session
 # routes so /api/auth/* takes priority over the catch-all SPA fallback.
 app.include_router(web_auth_router)
+
+# Tool Approval REST endpoint (CTR-0099, PRP-0067)
+app.include_router(tool_approval_router)
 
 # Session management API (CTR-0015)
 app.include_router(session_router)

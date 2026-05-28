@@ -22,6 +22,8 @@ from typing import Any
 
 from agent_framework import Agent
 
+from app.agent.approval import resolve_require_set, wrap_with_approval
+from app.agent.compaction import resolve_compaction_strategy
 from app.agui.agent_registry import AgentRegistry, _build_chat_client
 from app.core.config import settings
 from app.demo import is_demo_mode, resolve_demo_models
@@ -79,12 +81,21 @@ def _build_tools_and_instructions(
     *,
     include_mcp: bool,
     include_rag: bool,
+    apply_approval: bool = True,
 ) -> tuple[list[Any], list[Any], str]:
     """Assemble (tools, context_providers, instructions) from current settings.
 
     PRP-0046 introduces the ``include_mcp`` / ``include_rag`` flags so
     DevUI can build an agent without the loop-bound MCP tools and
     ChromaDB-backed rag_search tool.
+
+    PRP-0067 / UDR-0043 D1+D5 adds ``apply_approval``: when ``True``
+    (default), tools whose ``__name__`` is in
+    ``app.agent.approval.resolve_require_set()`` are wrapped with
+    ``@tool(approval_mode="always_require")``. When ``False``, no tool
+    is wrapped -- used by ``build_devui_agent()`` so the DevUI loop
+    (which has no human-in-the-loop UI) keeps the pre-PRP-0067
+    behaviour (UDR-0043 D5 DevUI clause).
     """
     from agent_framework_openai import OpenAIChatClient as _OpenAIChatClient  # local alias for static method
 
@@ -195,6 +206,16 @@ def _build_tools_and_instructions(
             )
             logger.info("MCP tools added to agent: %d tool(s) from servers: %s", len(mcp_tools), servers_list)
 
+    # Tool approval gating (PRP-0067, CTR-0099, UDR-0043 D1).
+    # The agent factory is the single chokepoint where bare Python
+    # callables are turned into MAF tool surfaces; this is the right
+    # place to decorate destructive tools with approval_mode. Skip mode
+    # / DevUI bypass produce an empty require-set so wrap_with_approval
+    # is a no-op for every entry.
+    if apply_approval:
+        require_set = resolve_require_set()
+        tools = [wrap_with_approval(t, require_set) for t in tools]
+
     # Context providers (CTR-0043, PRP-0024)
     context_providers: list[Any] = [history_provider]
     skills_provider = create_skills_provider()
@@ -209,11 +230,14 @@ def create_agent_registry() -> AgentRegistry:
     tools, context_providers, instructions = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
+        apply_approval=True,
     )
+    compaction_strategy = resolve_compaction_strategy()
     return AgentRegistry(
         tools=tools,
         context_providers=context_providers,
         instructions=instructions,
+        compaction_strategy=compaction_strategy,
     )
 
 
@@ -245,9 +269,14 @@ def build_devui_agent() -> Agent | None:
     include_mcp = not settings.devui_disable_mcp
     include_rag = not settings.devui_disable_rag
 
+    # UDR-0043 D5 (DevUI clause): DevUI runs in a daemon thread with no
+    # human-in-the-loop approval UI, so we register the unwrapped tools
+    # regardless of TOOL_APPROVAL_MODE. The factory still applies
+    # compaction (UDR-0042 D1) -- compaction has no UI dependency.
     tools, context_providers, instructions = _build_tools_and_instructions(
         include_mcp=include_mcp,
         include_rag=include_rag,
+        apply_approval=False,
     )
 
     # DEMO_MODE: DemoChatClient; LIVE: OpenAIChatClient with credential lane.
@@ -266,6 +295,7 @@ def build_devui_agent() -> Agent | None:
         tools=tools,
         context_providers=context_providers,
         default_options=model_options or None,
+        compaction_strategy=resolve_compaction_strategy(),
     )
     logger.info(
         "DevUI agent built (model=%s, include_mcp=%s, include_rag=%s, demo=%s)",

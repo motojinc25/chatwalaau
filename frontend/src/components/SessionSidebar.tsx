@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react'
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { PermissionsDisabledBanner } from '@/components/PermissionsDisabledBanner'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
 import {
   AlertDialog,
@@ -465,6 +466,12 @@ export function SessionSidebar({
           </Button>
         </div>
       </div>
+
+      {auth.toolApprovalMode === 'skip' && (
+        <div className="border-b px-3 pt-3">
+          <PermissionsDisabledBanner />
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto">
         <section className="border-b border-border/50 py-2">

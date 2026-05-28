@@ -96,6 +96,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Image generation, editing, and Canvas mask editor via Azure OpenAI gpt-image-1.5
 - Weather tools with rich card widgets (Open-Meteo, no API key)
 - Coding tools (file read/write, shell execution, file search)
+- Tool approval workflow: destructive coding tools (`bash_execute`, `file_write`) pause for an inline Approve / Reject decision by default; one env var (`TOOL_APPROVAL_MODE=skip`) restores autonomous execution
 - Prompt Templates: save, manage, and insert reusable prompts from "+" menu and message actions
 - Agent Skills: portable domain knowledge packages with progressive disclosure
 
@@ -108,6 +109,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Multi-model switching: switch between OpenAI models mid-conversation with per-model reasoning and context window
 - Session management: save, search, organize into folders, pin, archive, fork, rename
 - Background Responses: long-running agent timeout prevention with stream resumption
+- Conversation compaction: long sessions are auto-compacted before each model call (sliding-window by default) so the agent keeps responding instead of failing at the context-window limit; disable with `COMPACTION_STRATEGY=none`
 - Context window consumption display with warning levels
 - Per-turn token usage display
 - OpenAI-compatible API: expose agent as `/v1/responses` endpoint for external apps via OpenAI SDK
@@ -449,6 +451,46 @@ CODING_WORKSPACE_DIR=C:\path\to\workspace
 limit is hit, the response ends with an explicit
 `[TRUNCATED BY BYTES: ...]` / `[TRUNCATED BY LIMIT: ...]` marker that
 tells the agent how to paginate with `offset=N`.
+
+---
+
+### Tool Approval & Conversation Compaction (Agent Harness)
+
+Two Microsoft Agent Framework harness primitives, configured entirely
+via `.env`.
+
+**Tool approval** gates destructive coding tools behind an operator
+decision. By default (`TOOL_APPROVAL_MODE=auto`), the agent's first
+`bash_execute` or `file_write` call shows an inline approval card with
+**Approve / Reject / Approve for this session**; read-only tools
+(`file_read`, `file_glob`, `file_grep`) never require approval.
+
+```
+# auto (default) -> gate bash_execute + file_write
+# always         -> gate every non-read-only tool
+# skip           -> disable approval (autonomous, like before)
+TOOL_APPROVAL_MODE=auto
+TOOL_APPROVAL_REQUIRE_LIST=bash_execute,file_write
+TOOL_APPROVAL_TIMEOUT_SEC=300
+```
+
+Set `TOOL_APPROVAL_MODE=skip` for the pre-approval "no friction"
+behaviour on a trusted single-user machine (analogous to Claude Code's
+`--dangerously-skip-permissions`). While skip mode is active the SPA
+shows a persistent "Tool approval is DISABLED" banner. Headless lanes
+(OpenAI Responses API, the `chatwalaau chat` CLI, and DevUI) auto-approve
+every request and log a WARNING per auto-approval.
+
+**Conversation compaction** keeps long sessions within the model's
+context budget by compacting in-memory history before each model call
+(the on-disk session JSON is never altered):
+
+```
+# none | sliding-window (default) | selective-tool-call | tool-result
+COMPACTION_STRATEGY=sliding-window
+COMPACTION_KEEP_LAST_GROUPS=4
+COMPACTION_PRESERVE_SYSTEM=true
+```
 
 ---
 

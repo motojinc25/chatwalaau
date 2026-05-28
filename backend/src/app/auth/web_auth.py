@@ -139,6 +139,11 @@ class StatusResponse(BaseModel):
     # can render a "DEMO" badge. Always serialised; defaults to false so
     # older SPA builds that ignore the field are unaffected.
     demo_mode: bool = False
+    # PRP-0067 / CTR-0094 v4 / UDR-0043 D3: report the currently active
+    # tool-approval mode so the SPA can render the
+    # PermissionsDisabledBanner when the value is "skip". Always
+    # serialised; v3 clients that ignore the field see no behaviour change.
+    tool_approval_mode: Literal["skip", "auto", "always"] = "auto"
 
 
 class MeResponse(BaseModel):
@@ -236,6 +241,9 @@ async def status(request: Request) -> StatusResponse:
     of the ``DEMO_MODE`` setting) so the SPA can render a "DEMO" badge.
     """
     demo = bool(settings.demo_mode)
+    # PRP-0067 / CTR-0094 v4: settings.tool_approval_mode is normalized
+    # to one of {"skip", "auto", "always"} by the Settings validator.
+    approval_mode = settings.tool_approval_mode  # type: ignore[assignment]
     if settings.web_auth_enabled:
         token_value = request.cookies.get(settings.auth_cookie_name, "")
         if token_value:
@@ -247,17 +255,34 @@ async def status(request: Request) -> StatusResponse:
                     authenticated=True,
                     username=record.username,
                     demo_mode=demo,
+                    tool_approval_mode=approval_mode,
                 )
-        return StatusResponse(mode="login-required", authenticated=False, demo_mode=demo)
+        return StatusResponse(
+            mode="login-required",
+            authenticated=False,
+            demo_mode=demo,
+            tool_approval_mode=approval_mode,
+        )
 
     client_host = request.client.host if request.client else None
     is_loopback = is_client_loopback(client_host)
 
     if is_loopback or not settings.app_require_auth_on_lan:
-        return StatusResponse(mode="open", authenticated=True, username=None, demo_mode=demo)
+        return StatusResponse(
+            mode="open",
+            authenticated=True,
+            username=None,
+            demo_mode=demo,
+            tool_approval_mode=approval_mode,
+        )
 
     # No web auth lane; Bearer API_KEY required for non-loopback callers.
-    return StatusResponse(mode="api-key-only", authenticated=False, demo_mode=demo)
+    return StatusResponse(
+        mode="api-key-only",
+        authenticated=False,
+        demo_mode=demo,
+        tool_approval_mode=approval_mode,
+    )
 
 
 __all__ = ["router"]

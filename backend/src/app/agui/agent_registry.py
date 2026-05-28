@@ -42,7 +42,13 @@ def _build_chat_client(model: str) -> Any:
 
 
 class AgentRegistry:
-    """Per-model Agent instance registry (CTR-0070)."""
+    """Per-model Agent instance registry (CTR-0070).
+
+    PRP-0067 / UDR-0042 D1: an optional ``compaction_strategy`` is
+    passed through to every per-model Agent. The strategy is a stateless
+    MAF object so sharing one instance across models is safe and matches
+    the factory chokepoint pattern used for tools / context_providers.
+    """
 
     def __init__(
         self,
@@ -50,8 +56,10 @@ class AgentRegistry:
         tools: list[Any],
         context_providers: list[Any],
         instructions: str,
+        compaction_strategy: Any | None = None,
     ) -> None:
         self._agents: dict[str, Agent] = {}
+        self._compaction_strategy = compaction_strategy
 
         if is_demo_mode():
             models = resolve_demo_models()
@@ -83,6 +91,7 @@ class AgentRegistry:
                 tools=tools,
                 context_providers=context_providers,
                 default_options=model_options or None,
+                compaction_strategy=self._compaction_strategy,
             )
             self._agents[model] = agent
             logger.info(

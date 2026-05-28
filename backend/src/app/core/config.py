@@ -243,6 +243,67 @@ class Settings(BaseSettings):
     # [0, 500] at use time.
     demo_latency_ms: int = 40
 
+    # ---- Conversation Compaction (CTR-0006 v23, PRP-0067, UDR-0042) ----
+    # Resolved by app.agent.compaction.resolve_compaction_strategy() at
+    # AgentRegistry construction time and passed to every Agent in the
+    # registry (CTR-0070, CTR-0098). Compaction is purely in-memory --
+    # the on-disk session JSON (FileHistoryProvider, CTR-0014) is NOT
+    # mutated, so switching back to "none" fully restores the model's
+    # view of history (UDR-0042 D4).
+    #
+    # Allowed values (case-insensitive, unknown -> sliding-window):
+    # - "none" / "off" / "disabled" / empty -> compaction disabled
+    # - "sliding-window" (default) -> SlidingWindowStrategy
+    # - "selective-tool-call" -> SelectiveToolCallCompactionStrategy
+    # - "tool-result" -> ToolResultCompactionStrategy
+    compaction_strategy: str = "sliding-window"
+
+    # Number of trailing message groups retained verbatim by the
+    # selected strategy. For sliding-window this is the "keep_last_groups"
+    # constructor parameter; for the two tool-call-aware variants it is
+    # the "keep_last_tool_call_groups" parameter. Range 1..32 (pydantic
+    # validator below).
+    compaction_keep_last_groups: int = 4
+
+    # Preserve the system / instructions message during sliding-window
+    # compaction. Only consumed by sliding-window (the other two strategies
+    # ignore this flag; the resolver logs an INFO note when it is set
+    # under those strategies).
+    compaction_preserve_system: bool = True
+
+    # ---- Tool Approval (CTR-0006 v23, PRP-0067, UDR-0043) ----
+    # Resolved by app.agent.approval.resolve_require_set() at tool-
+    # registration time inside app.agui.agent_factory. The resolved set
+    # is passed to wrap_with_approval() which decorates matching tool
+    # functions with @tool(approval_mode="always_require") (CTR-0099).
+    #
+    # Modes (case-insensitive, unknown -> auto):
+    # - "skip"   -- NO tool wrapped; pre-PRP-0067 byte-for-byte behaviour.
+    #               SPA renders PermissionsDisabledBanner (UDR-0043 D3).
+    # - "auto"   -- (default) Tools listed in TOOL_APPROVAL_REQUIRE_LIST
+    #               wrapped; the default list is "bash_execute,file_write".
+    # - "always" -- Every non-readonly tool on the agent is wrapped;
+    #               TOOL_APPROVAL_REQUIRE_LIST is ignored.
+    tool_approval_mode: str = "auto"
+
+    # Comma-separated tool __name__ list. Only consumed when
+    # tool_approval_mode == "auto". Empty / whitespace-only falls back to
+    # the documented default ("bash_execute,file_write").
+    tool_approval_require_list: str = "bash_execute,file_write"
+
+    # Maximum seconds the parked AG-UI stream waits for a matching
+    # POST /api/tool-approval before auto-rejecting with source="timeout"
+    # (UDR-0043 D7). Range 5..86400. The asyncio.Event resolver removes
+    # the approval record within this window + 60s grace.
+    tool_approval_timeout_sec: int = 300
+
+    # Per-argument-field truncation cap on the tool_approval_request
+    # CUSTOM event preview (PRP-0067 risk-assessment mitigation). The
+    # full argument value still reaches the tool on approval; only the
+    # operator-visible preview is shortened to avoid AG-UI events that
+    # carry e.g. a 1 MiB file_write content string. Range 64..65536.
+    tool_approval_arg_max_chars: int = 4096
+
     # ---- Multi-Model helpers (CTR-0069) ----
 
     @property
@@ -502,6 +563,61 @@ class Settings(BaseSettings):
             self.app_host,
         )
         return self
+
+    # ---- Conversation Compaction + Tool Approval validators (PRP-0067) ----
+
+    @model_validator(mode="after")
+    def _validate_compaction(self) -> "Settings":
+        """Normalize compaction settings and reject out-of-range values."""
+        name = (self.compaction_strategy or "").strip().lower()
+        allowed = {"", "none", "off", "disabled", "sliding-window", "selective-tool-call", "tool-result"}
+        if name and name not in allowed:
+            _logger.warning(
+                "COMPACTION_STRATEGY=%r is not recognised; will fall back to sliding-window. Allowed: %s",
+                self.compaction_strategy,
+                sorted(a for a in allowed if a),
+            )
+        # Store normalized value so downstream readers compare lowercased.
+        self.compaction_strategy = name
+        if not (1 <= self.compaction_keep_last_groups <= 32):
+            msg = f"COMPACTION_KEEP_LAST_GROUPS must be in 1..32; got {self.compaction_keep_last_groups}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_tool_approval(self) -> "Settings":
+        """Normalize tool-approval settings and reject out-of-range values."""
+        mode = (self.tool_approval_mode or "").strip().lower()
+        allowed = {"skip", "auto", "always"}
+        if mode and mode not in allowed:
+            _logger.warning(
+                "TOOL_APPROVAL_MODE=%r is not recognised; will fall back to 'auto'. Allowed: %s",
+                self.tool_approval_mode,
+                sorted(allowed),
+            )
+            mode = "auto"
+        self.tool_approval_mode = mode or "auto"
+        if not (5 <= self.tool_approval_timeout_sec <= 86400):
+            msg = f"TOOL_APPROVAL_TIMEOUT_SEC must be in 5..86400; got {self.tool_approval_timeout_sec}"
+            raise ValueError(msg)
+        if not (64 <= self.tool_approval_arg_max_chars <= 65536):
+            msg = f"TOOL_APPROVAL_ARG_MAX_CHARS must be in 64..65536; got {self.tool_approval_arg_max_chars}"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def tool_approval_require_set(self) -> frozenset[str]:
+        """Parse TOOL_APPROVAL_REQUIRE_LIST into a frozenset (skip mode -> empty)."""
+        if self.tool_approval_mode == "skip":
+            return frozenset()
+        raw = (self.tool_approval_require_list or "").strip()
+        items = [s.strip() for s in raw.split(",") if s.strip()] if raw else []
+        # Empty / whitespace-only falls back to the documented default
+        # ("bash_execute,file_write"). The default is itself two entries
+        # so this returns a non-empty frozenset.
+        if not items:
+            items = ["bash_execute", "file_write"]
+        return frozenset(items)
 
     @model_validator(mode="after")
     def _validate_ssl_pair(self) -> "Settings":

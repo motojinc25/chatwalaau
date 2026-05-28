@@ -651,6 +651,17 @@ async def delete_session(thread_id: str) -> dict[str, str]:
             shutil.rmtree(upload_dir, ignore_errors=True)
             logger.info("Deleted upload directory: %s", upload_dir)
 
+        # Cascade clear in-process tool-approval session cache (UDR-0043 D8).
+        # Best-effort: a missing store entry is fine; we just avoid leaving
+        # a stale "approve for this session" decision keyed by a thread_id
+        # whose session JSON has been deleted.
+        try:
+            from app.agent.approval import approval_store
+
+            await approval_store.clear_session(thread_id)
+        except Exception:
+            logger.debug("approval_store.clear_session failed", exc_info=True)
+
         logger.info("Deleted session: %s", thread_id)
         return {"status": "deleted", "thread_id": thread_id}
     except OSError as e:

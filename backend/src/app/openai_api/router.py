@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any
 
-from agent_framework import AgentSession
+from agent_framework import AgentSession, Message
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -92,91 +92,124 @@ async def _stream_responses(
     msg_started = False
 
     try:
-        response_stream = agent.run(
-            messages,
-            stream=True,
-            session=session,
-            options=run_options or None,
-        )
-        stream = await _normalize_response_stream(response_stream)
+        # PRP-0067 / UDR-0043 D5: headless consumer auto-approve loop.
+        # The OpenAI Responses API has no human-in-the-loop UI. If MAF
+        # emits function_approval_request we approve it inline with a
+        # WARNING log line so the audit trail survives in process logs,
+        # then re-run with the appended approval_response. The loop is
+        # bounded the same way as the AG-UI side to defend against
+        # pathological tool chains.
+        iteration_messages = list(messages)
+        max_iter = 16
+        completed_naturally = False
+        for _ in range(max_iter):
+            pending_responses = []
+            response_stream = agent.run(
+                iteration_messages,
+                stream=True,
+                session=session,
+                options=run_options or None,
+            )
+            stream = await _normalize_response_stream(response_stream)
 
-        async for update in stream:
-            contents = getattr(update, "contents", None) or []
-            for content in contents:
-                content_type = getattr(content, "type", None)
+            async for update in stream:
+                contents = getattr(update, "contents", None) or []
+                for content in contents:
+                    content_type = getattr(content, "type", None)
 
-                if content_type == "text":
-                    text = getattr(content, "text", "")
-                    if not text:
-                        continue
-                    if not msg_started:
-                        msg_started = True
-                        item_added = {
-                            "type": "response.output_item.added",
-                            "output_index": len(output_items),
-                            "item": {"type": "message", "role": "assistant", "content": []},
-                        }
-                        yield f"event: response.output_item.added\ndata: {json.dumps(item_added)}\n\n"
-                        part_added = {
-                            "type": "response.content_part.added",
+                    if content_type == "function_approval_request":
+                        # Auto-approve. Log so a release-time audit can find it.
+                        fn_call = getattr(content, "function_call", None)
+                        tool_name = getattr(fn_call, "name", "<unknown>") if fn_call else "<unknown>"
+                        call_id_log = getattr(fn_call, "call_id", "") if fn_call else ""
+                        logger.warning(
+                            "approval auto-granted for tool=%s by API consumer (call_id=%s)",
+                            tool_name,
+                            call_id_log,
+                        )
+                        pending_responses.append(content.to_function_approval_response(approved=True))
+
+                    elif content_type == "text":
+                        text = getattr(content, "text", "")
+                        if not text:
+                            continue
+                        if not msg_started:
+                            msg_started = True
+                            item_added = {
+                                "type": "response.output_item.added",
+                                "output_index": len(output_items),
+                                "item": {"type": "message", "role": "assistant", "content": []},
+                            }
+                            yield f"event: response.output_item.added\ndata: {json.dumps(item_added)}\n\n"
+                            part_added = {
+                                "type": "response.content_part.added",
+                                "output_index": len(output_items),
+                                "content_index": 0,
+                                "part": {"type": "output_text", "text": ""},
+                            }
+                            yield f"event: response.content_part.added\ndata: {json.dumps(part_added)}\n\n"
+                        text_parts.append(text)
+                        delta_event = {
+                            "type": "response.output_text.delta",
                             "output_index": len(output_items),
                             "content_index": 0,
-                            "part": {"type": "output_text", "text": ""},
+                            "delta": text,
                         }
-                        yield f"event: response.content_part.added\ndata: {json.dumps(part_added)}\n\n"
-                    text_parts.append(text)
-                    delta_event = {
-                        "type": "response.output_text.delta",
-                        "output_index": len(output_items),
-                        "content_index": 0,
-                        "delta": text,
-                    }
-                    yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
+                        yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
 
-                elif content_type == "function_call":
-                    call_id = getattr(content, "call_id", "")
-                    name = getattr(content, "name", "")
-                    arguments = getattr(content, "arguments", "")
-                    if isinstance(arguments, dict):
-                        arguments = json.dumps(arguments)
-                    if name:
-                        fc_item = {
-                            "type": "function_call",
-                            "name": name,
-                            "arguments": arguments or "",
-                            "call_id": call_id,
-                        }
-                        output_items.append(fc_item)
-                        fc_added = {
+                    elif content_type == "function_call":
+                        call_id = getattr(content, "call_id", "")
+                        name = getattr(content, "name", "")
+                        arguments = getattr(content, "arguments", "")
+                        if isinstance(arguments, dict):
+                            arguments = json.dumps(arguments)
+                        if name:
+                            fc_item = {
+                                "type": "function_call",
+                                "name": name,
+                                "arguments": arguments or "",
+                                "call_id": call_id,
+                            }
+                            output_items.append(fc_item)
+                            fc_added = {
+                                "type": "response.output_item.added",
+                                "output_index": len(output_items) - 1,
+                                "item": fc_item,
+                            }
+                            yield f"event: response.output_item.added\ndata: {json.dumps(fc_added)}\n\n"
+
+                    elif content_type == "function_result":
+                        call_id = getattr(content, "call_id", "")
+                        result = getattr(content, "result", "")
+                        if not isinstance(result, str):
+                            result = json.dumps(result)
+                        fr_item = {"type": "function_call_output", "call_id": call_id, "output": result}
+                        output_items.append(fr_item)
+                        fr_added = {
                             "type": "response.output_item.added",
                             "output_index": len(output_items) - 1,
-                            "item": fc_item,
+                            "item": fr_item,
                         }
-                        yield f"event: response.output_item.added\ndata: {json.dumps(fc_added)}\n\n"
+                        yield f"event: response.output_item.added\ndata: {json.dumps(fr_added)}\n\n"
 
-                elif content_type == "function_result":
-                    call_id = getattr(content, "call_id", "")
-                    result = getattr(content, "result", "")
-                    if not isinstance(result, str):
-                        result = json.dumps(result)
-                    fr_item = {"type": "function_call_output", "call_id": call_id, "output": result}
-                    output_items.append(fr_item)
-                    fr_added = {
-                        "type": "response.output_item.added",
-                        "output_index": len(output_items) - 1,
-                        "item": fr_item,
-                    }
-                    yield f"event: response.output_item.added\ndata: {json.dumps(fr_added)}\n\n"
+                    elif content_type == "usage":
+                        usage_details = getattr(content, "usage_details", None) or {}
+                        usage["input_tokens"] = getattr(usage_details, "input_token_count", 0) or usage_details.get(
+                            "input_token_count", 0
+                        )
+                        usage["output_tokens"] = getattr(usage_details, "output_token_count", 0) or usage_details.get(
+                            "output_token_count", 0
+                        )
+                        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
 
-                elif content_type == "usage":
-                    usage_details = getattr(content, "usage_details", None) or {}
-                    usage["input_tokens"] = getattr(usage_details, "input_token_count", 0) or usage_details.get(
-                        "input_token_count", 0
-                    )
-                    usage["output_tokens"] = getattr(usage_details, "output_token_count", 0) or usage_details.get(
-                        "output_token_count", 0
-                    )
-                    usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+            if not pending_responses:
+                completed_naturally = True
+                break
+
+            iteration_messages = [*iteration_messages, Message(role="user", contents=pending_responses)]
+
+        if not completed_naturally:
+            logger.warning("OpenAI API approval loop exceeded %d iterations; returning partial response", max_iter)
 
     except (OpenAINotFoundError, ChatClientException, TypeError, Exception):
         logger.exception("OpenAI API stream error")
@@ -303,18 +336,40 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
         _image_gen_thread_id.set(thread_id)
 
         try:
-            response_stream = agent.run(
-                messages,
-                stream=True,
-                session=session,
-                options=run_options or None,
-            )
-            stream = await _normalize_response_stream(response_stream)
-
+            # PRP-0067 / UDR-0043 D5: non-streaming consumer auto-approve.
+            # Same shape as the streaming branch: re-run agent.run() with
+            # appended function_approval_response messages until no
+            # approval request is left.
+            iteration_messages = list(messages)
+            max_iter = 16
             all_contents: list[Any] = []
-            async for update in stream:
-                contents = getattr(update, "contents", None) or []
-                all_contents.extend(contents)
+            for _ in range(max_iter):
+                pending_responses: list[Any] = []
+                response_stream = agent.run(
+                    iteration_messages,
+                    stream=True,
+                    session=session,
+                    options=run_options or None,
+                )
+                stream = await _normalize_response_stream(response_stream)
+                async for update in stream:
+                    contents = getattr(update, "contents", None) or []
+                    for content in contents:
+                        if getattr(content, "type", None) == "function_approval_request":
+                            fn_call = getattr(content, "function_call", None)
+                            tool_name = getattr(fn_call, "name", "<unknown>") if fn_call else "<unknown>"
+                            call_id_log = getattr(fn_call, "call_id", "") if fn_call else ""
+                            logger.warning(
+                                "approval auto-granted for tool=%s by API consumer (call_id=%s)",
+                                tool_name,
+                                call_id_log,
+                            )
+                            pending_responses.append(content.to_function_approval_response(approved=True))
+                            continue
+                        all_contents.append(content)
+                if not pending_responses:
+                    break
+                iteration_messages = [*iteration_messages, Message(role="user", contents=pending_responses)]
 
         except (OpenAINotFoundError, ChatClientException, TypeError, Exception) as exc:
             logger.exception("OpenAI API error")
