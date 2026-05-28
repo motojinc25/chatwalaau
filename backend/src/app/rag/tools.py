@@ -37,33 +37,52 @@ _default_top_k: int = 5
 
 def init_rag_search(chroma_dir: str, collection_name: str, top_k: int) -> None:
     """Initialize RAG search module state. Called once at startup."""
+    from app.demo import is_demo_mode
+
     global _chroma_client, _openai_client, _embedding_model, _default_collection, _default_top_k
     _chroma_client = chromadb.PersistentClient(path=chroma_dir)
     _default_collection = collection_name
     _default_top_k = top_k
     _embedding_model = os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-small")
 
-    # Create Azure OpenAI client for query embedding. Credential resolution
-    # centralised in app.azure_credential (PRP-0058, UDR-0034).
-    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
-    if endpoint:
-        _openai_client = AzureOpenAI(
-            azure_endpoint=endpoint,
-            api_version="2024-10-21",
-            **get_azure_openai_kwargs(),
-        )
+    # PRP-0066: skip Azure client construction in demo mode -- DemoEmbedder
+    # has no client dependency. Avoids needless credential resolution and
+    # network probes on a demo host with no Azure OpenAI endpoint set.
+    if not is_demo_mode():
+        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+        if endpoint:
+            _openai_client = AzureOpenAI(
+                azure_endpoint=endpoint,
+                api_version="2024-10-21",
+                **get_azure_openai_kwargs(),
+            )
 
     logger.info(
-        "RAG search initialized (chroma_dir=%s, collection=%s, top_k=%d, embedding=%s)",
+        "RAG search initialized (chroma_dir=%s, collection=%s, top_k=%d, embedding=%s, demo=%s)",
         chroma_dir,
         collection_name,
         top_k,
         _embedding_model,
+        is_demo_mode(),
     )
 
 
 def _embed_query(text: str) -> list[float]:
-    """Embed a query text using Azure OpenAI Embedding API."""
+    """Embed a query text.
+
+    PRP-0066 / UDR-0041: when DEMO_MODE=true, DemoEmbedder replaces
+    the Azure call so the same 1536-dim deterministic-hash vectors used
+    by the demo ingest pipeline are used here too. Mixing demo and
+    live vectors in the same collection is forbidden -- the deploy
+    guide tells operators to use a fresh CHROMA_DIR on the demo host.
+    """
+    from app.demo import is_demo_mode
+
+    if is_demo_mode():
+        from app.demo.embedder import embed_demo
+
+        return embed_demo(text)
+
     if _openai_client is None:
         msg = "Azure OpenAI client not initialized for query embedding"
         raise RuntimeError(msg)

@@ -80,6 +80,7 @@ from app.agui.agent_factory import build_devui_agent, create_agent_registry
 from app.agui.endpoint import register_agui_endpoints
 from app.auth.web_auth import router as web_auth_router
 from app.core.config import settings
+from app.demo import is_demo_mode
 from app.devui.launcher import launch_devui_if_enabled
 from app.image_gen.router import router as image_edit_router
 from app.mcp.lifecycle import activate_mcp, prepare_mcp, shutdown_mcp
@@ -122,6 +123,13 @@ async def lifespan(_app: FastAPI):
     # Startup: activate MCP servers (CTR-0061, PRP-0031)
     # prepare_mcp() was already called at module level before create_agent()
     await activate_mcp()
+    # Demo Mode bootstrap (PRP-0066, UDR-0041 D6): auto-seed the bundled
+    # demo RAG corpus into ChromaDB when the collection is empty. The
+    # helper is non-failing and idempotent.
+    if is_demo_mode():
+        from app.demo.bootstrap import seed_rag_corpus_if_needed
+
+        await seed_rag_corpus_if_needed()
     yield
     # Shutdown: stop MCP servers
     await shutdown_mcp()

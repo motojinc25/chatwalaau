@@ -135,6 +135,10 @@ class StatusResponse(BaseModel):
     mode: Literal["open", "api-key-only", "login-required"]
     authenticated: bool
     username: str | None = None
+    # PRP-0066 / CTR-0094 v3 / UDR-0041 D9: additive demo flag so the SPA
+    # can render a "DEMO" badge. Always serialised; defaults to false so
+    # older SPA builds that ignore the field are unaffected.
+    demo_mode: bool = False
 
 
 class MeResponse(BaseModel):
@@ -227,7 +231,11 @@ async def status(request: Request) -> StatusResponse:
     2. Loopback peer or ``APP_REQUIRE_AUTH_ON_LAN=false`` -> ``mode = "open"``.
        Same as the pre-PRP-0057 behavior.
     3. Otherwise -> ``mode = "api-key-only"``.
+
+    PRP-0066 / CTR-0094 v3: the response carries ``demo_mode`` (the value
+    of the ``DEMO_MODE`` setting) so the SPA can render a "DEMO" badge.
     """
+    demo = bool(settings.demo_mode)
     if settings.web_auth_enabled:
         token_value = request.cookies.get(settings.auth_cookie_name, "")
         if token_value:
@@ -238,17 +246,18 @@ async def status(request: Request) -> StatusResponse:
                     mode="login-required",
                     authenticated=True,
                     username=record.username,
+                    demo_mode=demo,
                 )
-        return StatusResponse(mode="login-required", authenticated=False)
+        return StatusResponse(mode="login-required", authenticated=False, demo_mode=demo)
 
     client_host = request.client.host if request.client else None
     is_loopback = is_client_loopback(client_host)
 
     if is_loopback or not settings.app_require_auth_on_lan:
-        return StatusResponse(mode="open", authenticated=True, username=None)
+        return StatusResponse(mode="open", authenticated=True, username=None, demo_mode=demo)
 
     # No web auth lane; Bearer API_KEY required for non-loopback callers.
-    return StatusResponse(mode="api-key-only", authenticated=False)
+    return StatusResponse(mode="api-key-only", authenticated=False, demo_mode=demo)
 
 
 __all__ = ["router"]

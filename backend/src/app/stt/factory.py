@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ModelKind = Literal["rest", "realtime"]
+ModelKind = Literal["rest", "realtime", "demo"]
 
 
 def resolve_kind(deployment: str, override: str) -> ModelKind:
@@ -39,7 +39,7 @@ def resolve_kind(deployment: str, override: str) -> ModelKind:
     Pure function -- safe to unit-test without environment fixtures.
     """
     norm_override = (override or "").strip().lower()
-    if norm_override in {"rest", "realtime"}:
+    if norm_override in {"rest", "realtime", "demo"}:
         return norm_override  # type: ignore[return-value]
     if "realtime" in (deployment or "").lower():
         return "realtime"
@@ -65,7 +65,18 @@ def create_stt_provider(
     The function is intentionally synchronous and side-effect-free
     apart from one INFO log emission per call -- it is invoked from
     `app.main` at process import time.
+
+    PRP-0066 / UDR-0041: when DEMO_MODE is enabled the demo lane is
+    chosen regardless of azure_openai_endpoint or kind_override.
     """
+    from app.demo import is_demo_mode
+
+    if is_demo_mode() or (kind_override or "").strip().lower() == "demo":
+        from app.demo.stt import DemoSTTProvider
+
+        logger.info("STT lane: demo (DEMO_MODE=%s, WHISPER_MODEL_KIND=%r)", is_demo_mode(), kind_override)
+        return DemoSTTProvider()
+
     if not azure_openai_endpoint:
         return None
 

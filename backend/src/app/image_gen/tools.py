@@ -204,6 +204,17 @@ async def generate_image(
     n: Annotated[int, Field(description="Number of images to generate (1-4)")] = 1,
 ) -> str:
     """Generate an image from a text description using AI."""
+    # PRP-0066 / UDR-0041 D3: demo lane returns bundled placeholder PNGs.
+    from app.demo import is_demo_mode
+
+    if is_demo_mode():
+        from app.demo.image_gen import demo_generate_image
+
+        thread_id = current_thread_id.get("")
+        if not thread_id:
+            return json.dumps({"error": "No active session (thread_id not set)"})
+        return await demo_generate_image(prompt=prompt, n=n, thread_id=thread_id)
+
     return await asyncio.to_thread(
         _generate_image_sync,
         prompt,
@@ -227,6 +238,22 @@ async def edit_image(
     n: Annotated[int, Field(description="Number of edited images to generate (1-4)")] = 1,
 ) -> str:
     """Edit an existing image based on a text description (full image edit, no mask)."""
+    # PRP-0066 / UDR-0041 D3: demo lane returns bundled placeholder PNG.
+    from app.demo import is_demo_mode
+
+    if is_demo_mode():
+        from app.demo.image_gen import demo_edit_image
+
+        thread_id = current_thread_id.get("")
+        if not thread_id:
+            return json.dumps({"error": "No active session (thread_id not set)"})
+        return await demo_edit_image(
+            prompt=prompt,
+            n=n,
+            thread_id=thread_id,
+            image_filename=image_filename,
+        )
+
     return await asyncio.to_thread(
         _edit_image_sync,
         prompt,

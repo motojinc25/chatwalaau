@@ -77,13 +77,29 @@ async def edit_image_with_mask(
     The frontend composites the source image with the user-drawn mask:
     painted areas become transparent (alpha=0) in the PNG. The Azure
     OpenAI Images Edit API treats transparent pixels as areas to regenerate.
+
+    PRP-0066 / UDR-0041 D3: when DEMO_MODE=true, the bundled "edited"
+    placeholder PNG is returned. The mask payload is read-and-discarded
+    so request validation paths are still exercised.
     """
-    if not settings.image_deployment_name:
+    from app.demo import is_demo_mode
+
+    # In demo mode we skip the IMAGE_DEPLOYMENT_NAME requirement; the
+    # operator typically does not configure it on the demo host.
+    if not is_demo_mode() and not settings.image_deployment_name:
         raise HTTPException(status_code=503, detail="Image generation not configured (IMAGE_DEPLOYMENT_NAME)")
 
     image_bytes = await image.read()
     if not image_bytes:
         raise HTTPException(status_code=400, detail="Image file is empty")
+
+    if is_demo_mode():
+        from app.demo.image_gen import demo_mask_edit_sync
+
+        result = await asyncio.to_thread(demo_mask_edit_sync, prompt=prompt, thread_id=thread_id)
+        if not result.get("images"):  # defensive; should never happen
+            raise HTTPException(status_code=502, detail="Demo mask edit produced no image")
+        return result
 
     try:
         result = await asyncio.to_thread(

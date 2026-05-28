@@ -1,8 +1,13 @@
-"""Multi-Model Agent Registry (CTR-0070, PRP-0035).
+"""Multi-Model Agent Registry (CTR-0070, PRP-0035, PRP-0066).
 
 Maintains one Agent instance per configured deployment name.
 All agents share the same Tools, Skills, MCP tools, and context_providers.
-Only the underlying OpenAIChatClient differs.
+Only the underlying ChatClient differs.
+
+When DEMO_MODE=true (PRP-0066, UDR-0041), the underlying client is
+replaced by DemoChatClient and the model list is taken from
+DEMO_MODELS so the model selector UI surface is exercised without
+any live Azure OpenAI deployment being configured.
 """
 
 import logging
@@ -13,8 +18,27 @@ from agent_framework_openai import OpenAIChatClient
 
 from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
+from app.demo import is_demo_mode, resolve_demo_models
 
 logger = logging.getLogger(__name__)
+
+
+def _build_chat_client(model: str) -> Any:
+    """Return a ChatClient for the model -- live or demo (PRP-0066, UDR-0041 D3).
+
+    The MAF ``ChatClient`` Protocol already exists; no new seam is
+    introduced. ``DemoChatClient`` is a fully MAF-compatible client so
+    the Agent layer above is unaware of the swap.
+    """
+    if is_demo_mode():
+        from app.demo.chat_client import DemoChatClient
+
+        return DemoChatClient(model=model)
+    return OpenAIChatClient(
+        model=model,
+        azure_endpoint=settings.azure_openai_endpoint or None,
+        **get_chat_client_credential_kwargs(),
+    )
 
 
 class AgentRegistry:
@@ -28,27 +52,29 @@ class AgentRegistry:
         instructions: str,
     ) -> None:
         self._agents: dict[str, Agent] = {}
-        self._default_model = settings.default_model
 
-        # Azure OpenAI credential resolution centralised in app.azure_credential
-        # (PRP-0058, UDR-0034). AZURE_OPENAI_API_KEY set -> api_key= shape;
-        # unset -> AzureCliCredential() (cached at module scope).
-        credential_kwargs = get_chat_client_credential_kwargs()
+        if is_demo_mode():
+            models = resolve_demo_models()
+            self._default_model = models[0]
+        else:
+            models = settings.model_list
+            self._default_model = settings.default_model
 
-        for model in settings.model_list:
-            client = OpenAIChatClient(
-                model=model,
-                azure_endpoint=settings.azure_openai_endpoint or None,
-                **credential_kwargs,
-            )
+        self._configured_models = list(models)
+
+        for model in models:
+            client = _build_chat_client(model)
 
             # Per-model reasoning effort (CTR-0069):
             # Only models explicitly listed in REASONING_EFFORT get the parameter.
             # Models not listed receive None -> no reasoning option sent.
+            # DEMO_MODE: skip reasoning options (DemoChatClient ignores them
+            # and the model names don't match anything in REASONING_EFFORT).
             model_options: dict[str, Any] = {}
-            effort = settings.get_reasoning_effort(model)
-            if effort:
-                model_options["reasoning"] = {"effort": effort, "summary": "detailed"}
+            if not is_demo_mode():
+                effort = settings.get_reasoning_effort(model)
+                if effort:
+                    model_options["reasoning"] = {"effort": effort, "summary": "detailed"}
 
             agent = Agent(
                 name=f"ChatWalaau-Agent-{model}",
@@ -60,15 +86,16 @@ class AgentRegistry:
             )
             self._agents[model] = agent
             logger.info(
-                "Agent created for model: %s (reasoning=%s)",
+                "Agent created for model: %s (demo=%s)",
                 model,
-                effort or "disabled",
+                is_demo_mode(),
             )
 
         logger.info(
-            "AgentRegistry initialized: %d model(s), default=%s",
+            "AgentRegistry initialized: %d model(s), default=%s, demo=%s",
             len(self._agents),
             self._default_model,
+            is_demo_mode(),
         )
 
     def get(self, model: str | None = None) -> Agent:
@@ -85,8 +112,8 @@ class AgentRegistry:
 
     @property
     def available_models(self) -> list[str]:
-        """Return ordered list of configured model names."""
-        return settings.model_list
+        """Return ordered list of configured model names (demo or live)."""
+        return list(self._configured_models)
 
     @property
     def default_model(self) -> str:

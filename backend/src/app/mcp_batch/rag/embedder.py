@@ -71,6 +71,18 @@ def reset_client_for_tests() -> None:
     _client = None
 
 
+def _is_demo_mode_env() -> bool:
+    """Return True when DEMO_MODE is enabled (env-only check).
+
+    The batch MCP server runs in a child process so it cannot import
+    ``app.demo`` reliably (it would need a fresh ``Settings``
+    construction). Check the env var directly -- the value is the
+    same string format pydantic parses for ``bool`` Settings fields.
+    """
+    raw = (os.environ.get("DEMO_MODE") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def embed_texts(
     texts: list[str],
     model: str | None = None,
@@ -86,9 +98,20 @@ def embed_texts(
 
     Returns:
         List of embedding vectors (same order as input texts).
+
+    PRP-0066 / UDR-0041: when DEMO_MODE=true the deterministic hash-based
+    DemoEmbedder replaces the Azure call -- same dimensionality (1536),
+    same return shape, zero outbound traffic.
     """
     if not texts:
         return []
+
+    if _is_demo_mode_env():
+        from app.demo.embedder import embed_demo_batch
+
+        embeddings = embed_demo_batch(texts)
+        logger.info("Embedded %d texts via DemoEmbedder (1536-dim hash)", len(embeddings))
+        return embeddings
 
     deployment = model or os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-small")
     azure_client = client if client is not None else _get_client()

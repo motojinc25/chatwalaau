@@ -222,6 +222,27 @@ class Settings(BaseSettings):
     devui_disable_mcp: bool = True
     devui_disable_rag: bool = True
 
+    # Demo Mode for Cloud Deployment (CTR-0006 v22, PRP-0066, UDR-0041)
+    # When truthy every metered external provider (chat / STT / TTS /
+    # image generation / RAG embedder) routes to an in-process
+    # deterministic dummy implementation. Default false preserves
+    # v0.62.0 byte-for-byte. Single toggle (UDR-0041 D1); per-provider
+    # opt-ins are forbidden.
+    demo_mode: bool = False
+
+    # Demo model list (CTR-0006 v22, PRP-0066). Only consumed when
+    # demo_mode is true; populates AgentRegistry so the model selector
+    # UI is non-trivially exercised. Comma-separated. Empty falls back
+    # to a single "chatwalaau-demo" entry.
+    demo_models: str = "gpt-4o-demo,gpt-4o-mini-demo,o3-demo"
+
+    # Demo per-token streaming delay in milliseconds (CTR-0006 v22,
+    # PRP-0066). Used by DemoChatClient to pace ChatResponseUpdate
+    # emission so the streaming UI (token-by-token render,
+    # ScrollToBottom suspend, abort button) is exercised. Clamped to
+    # [0, 500] at use time.
+    demo_latency_ms: int = 40
+
     # ---- Multi-Model helpers (CTR-0069) ----
 
     @property
@@ -315,6 +336,19 @@ class Settings(BaseSettings):
 
         target = model or self.default_model
         return pairs.get(target)  # None if model not listed -> no reasoning
+
+    # ---- Demo Mode helpers (CTR-0006 v22, PRP-0066, UDR-0041) ----
+
+    @property
+    def demo_model_list(self) -> list[str]:
+        """Parse DEMO_MODELS into an ordered list of deployment names."""
+        parsed = [m.strip() for m in self.demo_models.split(",") if m.strip()]
+        return parsed or ["chatwalaau-demo"]
+
+    @property
+    def demo_latency_ms_clamped(self) -> int:
+        """DEMO_LATENCY_MS clamped to the documented [0, 500] range."""
+        return max(0, min(500, self.demo_latency_ms))
 
     # ---- Validators ----
 

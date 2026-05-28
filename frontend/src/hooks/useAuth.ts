@@ -16,6 +16,8 @@ export interface AuthState {
   mode: AuthMode | null
   authenticated: boolean
   username: string | null
+  /** PRP-0066 / CTR-0094 v3: backend DEMO_MODE flag. SPA renders a "DEMO" badge when true. */
+  demoMode: boolean
   loading: boolean
 }
 
@@ -31,6 +33,8 @@ interface StatusPayload {
   mode: AuthMode
   authenticated: boolean
   username: string | null
+  /** Optional in older backend builds; defaults to false (PRP-0066, CTR-0094 v3). */
+  demo_mode?: boolean
 }
 
 const STATUS_URL = '/api/auth/status'
@@ -52,6 +56,7 @@ export function useAuth(): AuthState & AuthActions {
     mode: null,
     authenticated: false,
     username: null,
+    demoMode: false,
     loading: true,
   })
 
@@ -61,13 +66,14 @@ export function useAuth(): AuthState & AuthActions {
       // Network error -- best-effort: treat as open so the user is not
       // trapped on /login when the backend is unreachable. The 401
       // interceptor still catches subsequent failures.
-      setState({ mode: 'open', authenticated: true, username: null, loading: false })
+      setState({ mode: 'open', authenticated: true, username: null, demoMode: false, loading: false })
       return
     }
     setState({
       mode: payload.mode,
       authenticated: payload.authenticated,
       username: payload.username,
+      demoMode: payload.demo_mode === true,
       loading: false,
     })
   }, [])
@@ -101,12 +107,13 @@ export function useAuth(): AuthState & AuthActions {
     } catch {
       // Best-effort logout; cookie may already be gone.
     }
-    setState({
+    setState((prev) => ({
       mode: 'login-required',
       authenticated: false,
       username: null,
+      demoMode: prev.demoMode,
       loading: false,
-    })
+    }))
   }, [])
 
   useEffect(() => {

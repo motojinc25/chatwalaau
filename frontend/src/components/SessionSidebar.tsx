@@ -429,6 +429,13 @@ export function SessionSidebar({
         <div className="flex items-center gap-2">
           <img src="/favicon.svg" alt="ChatWalaʻau" className="h-5 w-5" />
           <span className="text-sm font-medium">ChatWalaʻau</span>
+          {auth.demoMode && (
+            <span
+              className="rounded-sm bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-300"
+              title="Demo Mode: every LLM / TTS / STT / image / embedding call is scripted. Open-Meteo (Weather) is the only live external API.">
+              Demo
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1">
           <Button

@@ -21,11 +21,10 @@ import platform
 from typing import Any
 
 from agent_framework import Agent
-from agent_framework_openai import OpenAIChatClient
 
-from app.agui.agent_registry import AgentRegistry
-from app.azure_credential import get_chat_client_credential_kwargs
+from app.agui.agent_registry import AgentRegistry, _build_chat_client
 from app.core.config import settings
+from app.demo import is_demo_mode, resolve_demo_models
 from app.mcp.lifecycle import get_mcp_server_names, get_mcp_tools
 from app.session.provider import FileHistoryProvider
 from app.skills.provider import create_skills_provider
@@ -159,8 +158,10 @@ def _build_tools_and_instructions(
         except Exception:
             logger.exception("Failed to initialize RAG search tool")
 
-    # Conditionally register image generation tools (CTR-0050, PRP-0027)
-    if settings.image_deployment_name:
+    # Conditionally register image generation tools (CTR-0050, PRP-0027).
+    # PRP-0066 / UDR-0041: also enabled in demo mode (no deployment name
+    # is required because the tools route to DemoImageProvider).
+    if settings.image_deployment_name or is_demo_mode():
         from app.image_gen.tools import edit_image, generate_image
 
         tools.extend([generate_image, edit_image])
@@ -170,7 +171,11 @@ def _build_tools_and_instructions(
             "of an uploaded or previously generated image. "
             "After generating or editing an image, describe what was created."
         )
-        logger.info("Image generation tools enabled (deployment=%s)", settings.image_deployment_name)
+        logger.info(
+            "Image generation tools enabled (deployment=%s, demo=%s)",
+            settings.image_deployment_name or "<demo>",
+            is_demo_mode(),
+        )
 
     # MCP tools (CTR-0060, PRP-0031) -- excluded when include_mcp=False
     if include_mcp:
@@ -213,7 +218,7 @@ def create_agent_registry() -> AgentRegistry:
 
 
 def build_devui_agent() -> Agent | None:
-    """Build a single Agent for DevUI (PRP-0046).
+    """Build a single Agent for DevUI (PRP-0046, PRP-0066).
 
     DevUI runs in a daemon thread with its own asyncio event loop. To
     avoid cross-loop invocation of MCP tools (whose async context is
@@ -224,9 +229,18 @@ def build_devui_agent() -> Agent | None:
 
     Returns ``None`` when there are no configured models; the caller
     should fall back to the default-model registry agent in that case.
+
+    DEMO_MODE (PRP-0066): DevUI is recommended-disabled on the demo
+    deploy target (UDR-0041 D5), but the factory still works -- it
+    builds against the demo model list and DemoChatClient.
     """
-    if not settings.model_list:
-        return None
+    if is_demo_mode():
+        models = resolve_demo_models()
+        model = models[0]
+    else:
+        if not settings.model_list:
+            return None
+        model = settings.default_model
 
     include_mcp = not settings.devui_disable_mcp
     include_rag = not settings.devui_disable_rag
@@ -236,18 +250,14 @@ def build_devui_agent() -> Agent | None:
         include_rag=include_rag,
     )
 
-    model = settings.default_model
-    # Azure OpenAI credential resolution centralised (PRP-0058, UDR-0034).
-    client = OpenAIChatClient(
-        model=model,
-        azure_endpoint=settings.azure_openai_endpoint or None,
-        **get_chat_client_credential_kwargs(),
-    )
+    # DEMO_MODE: DemoChatClient; LIVE: OpenAIChatClient with credential lane.
+    client = _build_chat_client(model)
 
     model_options: dict[str, Any] = {}
-    effort = settings.get_reasoning_effort(model)
-    if effort:
-        model_options["reasoning"] = {"effort": effort, "summary": "detailed"}
+    if not is_demo_mode():
+        effort = settings.get_reasoning_effort(model)
+        if effort:
+            model_options["reasoning"] = {"effort": effort, "summary": "detailed"}
 
     agent = Agent(
         name=f"ChatWalaau-DevUI-{model}",
@@ -258,9 +268,10 @@ def build_devui_agent() -> Agent | None:
         default_options=model_options or None,
     )
     logger.info(
-        "DevUI agent built (model=%s, include_mcp=%s, include_rag=%s)",
+        "DevUI agent built (model=%s, include_mcp=%s, include_rag=%s, demo=%s)",
         model,
         include_mcp,
         include_rag,
+        is_demo_mode(),
     )
     return agent

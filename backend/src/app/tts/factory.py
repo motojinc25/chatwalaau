@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ProviderName = Literal["elevenlabs", "azure-realtime"]
+ProviderName = Literal["elevenlabs", "azure-realtime", "demo"]
 
 
 def resolve_provider(name: str) -> ProviderName:
@@ -45,7 +45,7 @@ def resolve_provider(name: str) -> ProviderName:
     Unknown / empty resolves to "elevenlabs" (back-compat default).
     """
     norm = (name or "").strip().lower()
-    if norm in ("elevenlabs", "azure-realtime"):
+    if norm in ("elevenlabs", "azure-realtime", "demo"):
         return norm  # type: ignore[return-value]
     return "elevenlabs"
 
@@ -68,7 +68,18 @@ def create_tts_provider(
     then returns 503). The function is intentionally synchronous and
     side-effect-free apart from one INFO log emission per call -- it is
     invoked from `app.main` at process import time.
+
+    PRP-0066 / UDR-0041: when DEMO_MODE is enabled the demo provider
+    is chosen regardless of TTS_PROVIDER.
     """
+    from app.demo import is_demo_mode
+
+    if is_demo_mode() or (provider or "").strip().lower() == "demo":
+        from app.demo.tts import DemoTTSProvider
+
+        logger.info("TTS lane: demo (DEMO_MODE=%s, TTS_PROVIDER=%r)", is_demo_mode(), provider)
+        return DemoTTSProvider()
+
     selected = resolve_provider(provider)
 
     if selected == "azure-realtime":
