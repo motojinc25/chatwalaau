@@ -31,8 +31,14 @@ from app.auth.password import (
 )
 from app.auth.session_store import get_session_store
 from app.core.config import settings
+from app.core.version import get_app_version
 
 _logger = logging.getLogger(__name__)
+
+# PRP-0068 / CTR-0094 v5 / UDR-0044 D2: the running app version is resolved
+# once at import time from the single shared helper and reported on
+# /api/auth/status so the SPA sidebar footer can display it.
+_APP_VERSION = get_app_version()
 
 router = APIRouter(prefix="/api/auth", tags=["Web Auth"])
 
@@ -144,6 +150,11 @@ class StatusResponse(BaseModel):
     # PermissionsDisabledBanner when the value is "skip". Always
     # serialised; v3 clients that ignore the field see no behaviour change.
     tool_approval_mode: Literal["skip", "auto", "always"] = "auto"
+    # PRP-0068 / CTR-0094 v5 / UDR-0044 D1: running app version (equals
+    # backend/pyproject.toml [project].version). Always serialised; v4
+    # clients that ignore the field see no behaviour change. The SPA
+    # sidebar footer renders "v{version}" when non-empty.
+    version: str = _APP_VERSION
 
 
 class MeResponse(BaseModel):

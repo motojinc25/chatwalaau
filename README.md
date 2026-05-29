@@ -90,6 +90,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Per-turn token usage display
 - Three layout scenarios: Chat, Popup, Sidebar
 - Multilingual chat with browser auto-translation suppressed
+- Sidebar footer showing the running version, with an **About** dialog (overview, framework, developer, and backer)
 
 ### Agent Tools
 

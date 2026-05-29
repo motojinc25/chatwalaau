@@ -27,7 +27,6 @@ import zlib
 import av
 import fitz  # PyMuPDF
 
-
 ASSET_DIR = Path(__file__).resolve().parent.parent / "src" / "app" / "demo" / "assets"
 
 

@@ -15,7 +15,6 @@
 """
 
 from contextlib import asynccontextmanager
-import importlib.metadata
 import mimetypes
 from pathlib import Path
 import sys
@@ -81,6 +80,7 @@ from app.agui.agent_factory import build_devui_agent, create_agent_registry
 from app.agui.endpoint import register_agui_endpoints
 from app.auth.web_auth import router as web_auth_router
 from app.core.config import settings
+from app.core.version import get_app_version
 from app.demo import is_demo_mode
 from app.devui.launcher import launch_devui_if_enabled
 from app.image_gen.router import router as image_edit_router
@@ -104,18 +104,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module=r"pydantic\._inte
 
 # Logging is configured via log_conf.yaml (passed to uvicorn --log-config)
 
-# Read version: importlib.metadata (pip install) -> pyproject.toml fallback (dev)
-try:
-    _app_version = importlib.metadata.version("chatwalaau")
-except importlib.metadata.PackageNotFoundError:
-    import tomllib
-
-    _pyproject_path = Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
-    if _pyproject_path.exists():
-        with _pyproject_path.open("rb") as _f:
-            _app_version = tomllib.load(_f).get("project", {}).get("version", "0.0.0")
-    else:
-        _app_version = "0.0.0"
+# Running app version (CTR-0094 v5, UDR-0044 D2): single shared helper.
+_app_version = get_app_version()
 
 
 @asynccontextmanager

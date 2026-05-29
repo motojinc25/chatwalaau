@@ -5,6 +5,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Info,
   Loader2,
   LogOut,
   MoreHorizontal,
@@ -17,6 +18,7 @@ import {
   X,
 } from 'lucide-react'
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AboutDialog } from '@/components/AboutDialog'
 import { PermissionsDisabledBanner } from '@/components/PermissionsDisabledBanner'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
 import {
@@ -124,6 +126,7 @@ export function SessionSidebar({
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
   const [deleteFolderTarget, setDeleteFolderTarget] = useState<SessionFolder | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [aboutOpen, setAboutOpen] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
@@ -589,6 +592,19 @@ export function SessionSidebar({
         </section>
       </div>
 
+      {/* App info footer (CTR-0101, FEAT-0029): version label + About button */}
+      <div className="flex h-9 shrink-0 items-center justify-between border-t px-3">
+        <span className="text-[11px] text-muted-foreground">{auth.version ? `v${auth.version}` : ''}</span>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 text-muted-foreground"
+          onClick={() => setAboutOpen(true)}
+          aria-label="About ChatWalaʻau">
+          <Info className="h-4 w-4" />
+        </Button>
+      </div>
+
       <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -684,6 +700,8 @@ export function SessionSidebar({
       </Dialog>
 
       <SessionSearchDialog sessions={sessions} open={searchOpen} onOpenChange={setSearchOpen} onSelect={onSwitch} />
+
+      <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} version={auth.version} />
     </aside>
   )
 }

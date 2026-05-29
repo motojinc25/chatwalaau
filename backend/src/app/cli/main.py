@@ -17,24 +17,17 @@ Usage:
 """
 
 import argparse
-import importlib.metadata
 import os
 from pathlib import Path
 import subprocess
 import sys
 
+from app.core.version import get_app_version
+
 
 def _get_version() -> str:
-    try:
-        return importlib.metadata.version("chatwalaau")
-    except importlib.metadata.PackageNotFoundError:
-        import tomllib
-
-        pyproject = Path(__file__).resolve().parent.parent.parent.parent / "pyproject.toml"
-        if pyproject.exists():
-            with pyproject.open("rb") as f:
-                return tomllib.load(f).get("project", {}).get("version", "0.0.0")
-        return "0.0.0"
+    # UDR-0044 D2: delegate to the single shared version helper.
+    return get_app_version()
 
 
 def _check_azure_login() -> bool:

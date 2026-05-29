@@ -23,6 +23,8 @@ export interface AuthState {
   demoMode: boolean
   /** PRP-0067 / CTR-0094 v4: backend TOOL_APPROVAL_MODE. "skip" renders PermissionsDisabledBanner. */
   toolApprovalMode: ToolApprovalMode
+  /** PRP-0068 / CTR-0094 v5: running backend app version. null when the backend omits it. */
+  version: string | null
   loading: boolean
 }
 
@@ -42,6 +44,8 @@ interface StatusPayload {
   demo_mode?: boolean
   /** Optional in older backend builds; defaults to "auto" (PRP-0067, CTR-0094 v4). */
   tool_approval_mode?: ToolApprovalMode
+  /** Optional in older backend builds; null when absent (PRP-0068, CTR-0094 v5). */
+  version?: string
 }
 
 const STATUS_URL = '/api/auth/status'
@@ -65,6 +69,7 @@ export function useAuth(): AuthState & AuthActions {
     username: null,
     demoMode: false,
     toolApprovalMode: 'auto',
+    version: null,
     loading: true,
   })
 
@@ -80,6 +85,7 @@ export function useAuth(): AuthState & AuthActions {
         username: null,
         demoMode: false,
         toolApprovalMode: 'auto',
+        version: null,
         loading: false,
       })
       return
@@ -93,6 +99,7 @@ export function useAuth(): AuthState & AuthActions {
         payload.tool_approval_mode === 'skip' || payload.tool_approval_mode === 'always'
           ? payload.tool_approval_mode
           : 'auto',
+      version: payload.version && payload.version.length > 0 ? payload.version : null,
       loading: false,
     })
   }, [])
@@ -132,6 +139,7 @@ export function useAuth(): AuthState & AuthActions {
       username: null,
       demoMode: prev.demoMode,
       toolApprovalMode: prev.toolApprovalMode,
+      version: prev.version,
       loading: false,
     }))
   }, [])
