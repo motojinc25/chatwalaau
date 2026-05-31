@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import type {
-  ActivityEntry,
-  ChatMessage,
-  ImageRef,
-  ReasoningBlock,
-  SessionFolder,
-  SessionSummary,
-  ToolCall,
-  UsageInfo,
+import {
+  type ActivityEntry,
+  type ChatMessage,
+  DEFAULT_FOLDER_COLOR,
+  FOLDER_COLORS,
+  type FolderColor,
+  type ImageRef,
+  type ReasoningBlock,
+  type SessionFolder,
+  type SessionSummary,
+  type ToolCall,
+  type UsageInfo,
 } from '@/types/chat'
 
 const STORAGE_KEY = 'chatwalaau-thread-id'
@@ -34,6 +37,12 @@ function normalizeSessionSummaries(data: unknown): SessionSummary[] {
   }))
 }
 
+function normalizeFolderColor(value: unknown): FolderColor {
+  return typeof value === 'string' && (FOLDER_COLORS as readonly string[]).includes(value)
+    ? (value as FolderColor)
+    : DEFAULT_FOLDER_COLOR
+}
+
 function normalizeFolder(input: unknown): SessionFolder | null {
   if (!input || typeof input !== 'object') return null
   const candidate = input as Partial<SessionFolder>
@@ -41,6 +50,8 @@ function normalizeFolder(input: unknown): SessionFolder | null {
   return {
     id: candidate.id,
     name: candidate.name,
+    color: normalizeFolderColor(candidate.color),
+    order: typeof candidate.order === 'number' ? candidate.order : 0,
     created_at: typeof candidate.created_at === 'string' ? candidate.created_at : '',
     updated_at: typeof candidate.updated_at === 'string' ? candidate.updated_at : '',
   }
@@ -151,6 +162,7 @@ export function useSession() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null)
+  const [updatingFolderId, setUpdatingFolderId] = useState<string | null>(null)
   const [movingSessionId, setMovingSessionId] = useState<string | null>(null)
   const abortRef = useRef<(() => void) | null>(null)
   const switchedRef = useRef(false)
@@ -362,7 +374,7 @@ export function useSession() {
   }, [])
 
   const createFolder = useCallback(
-    async (name: string) => {
+    async (name: string, color: FolderColor = DEFAULT_FOLDER_COLOR) => {
       const trimmed = name.trim()
       if (!trimmed) return false
 
@@ -371,18 +383,22 @@ export function useSession() {
       const optimisticFolder: SessionFolder = {
         id: tempFolderId,
         name: trimmed,
+        color,
+        // New folders append to the end of the order; the server assigns the
+        // authoritative value and the refresh/replace below reconciles it.
+        order: Number.MAX_SAFE_INTEGER,
         created_at: now,
         updated_at: now,
       }
 
       setIsCreatingFolder(true)
-      setFolders((prev) => [optimisticFolder, ...prev])
+      setFolders((prev) => [...prev, optimisticFolder])
 
       try {
         const res = await fetch('/api/sessions/folders', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: trimmed }),
+          body: JSON.stringify({ name: trimmed, color }),
         })
         if (!res.ok) throw new Error('Failed to create folder')
 
@@ -402,6 +418,64 @@ export function useSession() {
       }
     },
     [refreshFolders],
+  )
+
+  const updateFolderColor = useCallback(
+    async (folderId: string, color: FolderColor) => {
+      const previousFolders = folders
+      setUpdatingFolderId(folderId)
+      setFolders((prev) => prev.map((folder) => (folder.id === folderId ? { ...folder, color } : folder)))
+
+      try {
+        const res = await fetch(`/api/sessions/folders/${folderId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ color }),
+        })
+        if (!res.ok) throw new Error('Failed to update folder color')
+
+        const folder = normalizeFolder(await res.json())
+        if (folder) {
+          setFolders((prev) => prev.map((item) => (item.id === folderId ? folder : item)))
+        }
+        return true
+      } catch {
+        setFolders(previousFolders)
+        return false
+      } finally {
+        setUpdatingFolderId(null)
+      }
+    },
+    [folders],
+  )
+
+  const reorderFolders = useCallback(
+    async (orderedIds: string[]) => {
+      const previousFolders = folders
+      // Optimistically reflect the new order locally.
+      const byId = new Map(previousFolders.map((folder) => [folder.id, folder]))
+      const reordered = orderedIds
+        .map((id) => byId.get(id))
+        .filter((folder): folder is SessionFolder => folder !== undefined)
+        .map((folder, index) => ({ ...folder, order: index }))
+      setFolders(reordered)
+
+      try {
+        const res = await fetch('/api/sessions/folders/order', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ folder_ids: orderedIds }),
+        })
+        if (!res.ok) throw new Error('Failed to reorder folders')
+
+        setFolders(normalizeFolders(await res.json()))
+        return true
+      } catch {
+        setFolders(previousFolders)
+        return false
+      }
+    },
+    [folders],
   )
 
   const deleteFolder = useCallback(
@@ -472,12 +546,15 @@ export function useSession() {
     setSidebarOpen,
     isCreatingFolder,
     deletingFolderId,
+    updatingFolderId,
     movingSessionId,
     createSession,
     createFolder,
     switchSession,
     deleteSession,
     deleteFolder,
+    updateFolderColor,
+    reorderFolders,
     forkSession,
     moveSessionToFolder,
     renameSession,

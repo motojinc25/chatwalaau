@@ -1,14 +1,34 @@
 import {
+  closestCenter,
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import {
   Archive,
+  Check,
   ChevronDown,
   ChevronRight,
   Folder,
   FolderOpen,
   FolderPlus,
+  GripVertical,
   Info,
   Loader2,
   LogOut,
   MoreHorizontal,
+  Palette,
   Pencil,
   Pin,
   PinOff,
@@ -17,7 +37,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AboutDialog } from '@/components/AboutDialog'
 import { PermissionsDisabledBanner } from '@/components/PermissionsDisabledBanner'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
@@ -52,7 +72,13 @@ import {
 import { Input } from '@/components/ui/input'
 import { useAuth } from '@/hooks/useAuth'
 import { cn } from '@/lib/utils'
-import type { SessionFolder, SessionSummary } from '@/types/chat'
+import {
+  DEFAULT_FOLDER_COLOR,
+  FOLDER_COLORS,
+  type FolderColor,
+  type SessionFolder,
+  type SessionSummary,
+} from '@/types/chat'
 
 interface SessionSidebarProps {
   sessions: SessionSummary[]
@@ -60,17 +86,53 @@ interface SessionSidebarProps {
   currentThreadId: string
   creatingFolder: boolean
   deletingFolderId: string | null
+  updatingFolderId: string | null
   movingSessionId: string | null
   onSwitch: (threadId: string) => void
   onDelete: (threadId: string) => void
   onDeleteFolder: (folderId: string) => Promise<boolean>
-  onCreateFolder: (name: string) => Promise<boolean>
+  onCreateFolder: (name: string, color: FolderColor) => Promise<boolean>
+  onUpdateFolderColor: (folderId: string, color: FolderColor) => Promise<boolean>
+  onReorderFolders: (orderedIds: string[]) => Promise<boolean>
   onMoveToFolder: (threadId: string, folderId: string | null) => Promise<boolean>
   onRename: (threadId: string, title: string) => void
   onArchive: (threadId: string) => void
   onPin: (threadId: string, pinned: boolean) => void
   onCreate: () => void
   onClose: () => void
+}
+
+// Per-device open/closed state (UDR-0046 D4): the set of explicitly-expanded
+// folder ids is stored here; unknown / new folders default collapsed.
+const FOLDER_EXPANDED_STORAGE_KEY = 'chatwalaau:folders-expanded'
+
+// Palette token -> theme-controlled classes (UDR-0046 D2). Written as literal
+// strings so the Tailwind scanner includes them. `neutral` is the uncolored
+// (pre-PRP-0070) look.
+const FOLDER_COLOR_CLASSES: Record<FolderColor, { border: string; icon: string; swatch: string }> = {
+  neutral: { border: 'border-l-transparent', icon: 'text-muted-foreground', swatch: 'bg-muted-foreground/40' },
+  red: { border: 'border-l-red-500', icon: 'text-red-500', swatch: 'bg-red-500' },
+  orange: { border: 'border-l-orange-500', icon: 'text-orange-500', swatch: 'bg-orange-500' },
+  amber: { border: 'border-l-amber-500', icon: 'text-amber-500', swatch: 'bg-amber-500' },
+  green: { border: 'border-l-green-500', icon: 'text-green-500', swatch: 'bg-green-500' },
+  blue: { border: 'border-l-blue-500', icon: 'text-blue-500', swatch: 'bg-blue-500' },
+  violet: { border: 'border-l-violet-500', icon: 'text-violet-500', swatch: 'bg-violet-500' },
+  pink: { border: 'border-l-pink-500', icon: 'text-pink-500', swatch: 'bg-pink-500' },
+}
+
+function loadExpandedFolderIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(FOLDER_EXPANDED_STORAGE_KEY)
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.filter((id): id is string => typeof id === 'string'))
+    }
+  } catch {
+    // Corrupt localStorage value -> ignore and fall back to default-collapsed
+    // (HEAL-1 client side); the next persist overwrites it with a clean value.
+  }
+  return new Set()
 }
 
 function formatDateTime(iso: string): string {
@@ -104,17 +166,177 @@ function getSessionMeta(session: SessionSummary): string {
     .join(' · ')
 }
 
+interface PaletteSwatchesProps {
+  value: FolderColor
+  onSelect: (color: FolderColor) => void
+  disabled?: boolean
+}
+
+function PaletteSwatches({ value, onSelect, disabled }: PaletteSwatchesProps) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {FOLDER_COLORS.map((color) => (
+        <button
+          key={color}
+          type="button"
+          disabled={disabled}
+          onClick={() => onSelect(color)}
+          aria-label={`Color ${color}`}
+          aria-pressed={value === color}
+          className={cn(
+            'flex h-7 w-7 items-center justify-center rounded-full border transition-transform hover:scale-110 disabled:opacity-50',
+            FOLDER_COLOR_CLASSES[color].swatch,
+            value === color ? 'ring-2 ring-ring ring-offset-1 ring-offset-background' : 'border-transparent',
+          )}>
+          {value === color && <Check className="h-3.5 w-3.5 text-white drop-shadow" />}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+interface FolderGroupProps {
+  folder: SessionFolder
+  groupedSessions: SessionSummary[]
+  isCollapsed: boolean
+  isDropTarget: boolean
+  deletingFolderId: string | null
+  updatingFolderId: string | null
+  draggedSessionId: string | null
+  onToggle: (folderId: string) => void
+  onDragOverFolder: (folderId: string) => void
+  onDragLeaveFolder: (folderId: string) => void
+  onDropSession: (folderId: string) => void
+  onOpenColor: (folder: SessionFolder) => void
+  onDeleteFolder: (folder: SessionFolder) => void
+  renderSessionRow: (session: SessionSummary, nested?: boolean) => ReactNode
+}
+
+function FolderGroup({
+  folder,
+  groupedSessions,
+  isCollapsed,
+  isDropTarget,
+  deletingFolderId,
+  updatingFolderId,
+  draggedSessionId,
+  onToggle,
+  onDragOverFolder,
+  onDragLeaveFolder,
+  onDropSession,
+  onOpenColor,
+  onDeleteFolder,
+  renderSessionRow,
+}: FolderGroupProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id })
+  const colorClasses = FOLDER_COLOR_CLASSES[folder.color] ?? FOLDER_COLOR_CLASSES[DEFAULT_FOLDER_COLOR]
+  const style = { transform: CSS.Transform.toString(transform), transition }
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn('border-t border-border/20 first:border-t-0', isDragging && 'z-10 opacity-80')}>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: folder row is a drag target for native session DnD */}
+      <div
+        className={cn(
+          'group flex items-center gap-1 border-l-2 px-2 py-2 transition-colors',
+          colorClasses.border,
+          isDropTarget && 'bg-accent/80',
+        )}
+        onDragOver={(event) => {
+          if (!draggedSessionId) return
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'move'
+          onDragOverFolder(folder.id)
+        }}
+        onDragLeave={() => onDragLeaveFolder(folder.id)}
+        onDrop={(event) => {
+          if (!draggedSessionId) return
+          event.preventDefault()
+          onDropSession(folder.id)
+        }}>
+        {/* @dnd-kit drag handle: `attributes` injects role="button" + aria-roledescription at runtime, which Biome cannot see statically. */}
+        {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: role is supplied at runtime by @dnd-kit `attributes` */}
+        <span
+          aria-label="Reorder folder"
+          className="flex h-6 w-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground/60 hover:text-foreground active:cursor-grabbing"
+          {...attributes}
+          {...listeners}>
+          <GripVertical className="h-3.5 w-3.5" />
+        </span>
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          onClick={() => onToggle(folder.id)}>
+          {isCollapsed ? (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          )}
+          <Folder className={cn('h-3.5 w-3.5 shrink-0', colorClasses.icon)} />
+          <span className="truncate text-sm font-medium">{folder.name}</span>
+          <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {groupedSessions.length}
+          </span>
+        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            {/* biome-ignore lint/a11y/useSemanticElements: nested interactive, span is intentional */}
+            <span
+              role="button"
+              tabIndex={-1}
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              aria-label="Folder options">
+              {deletingFolderId === folder.id || updatingFolderId === folder.id ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <MoreHorizontal className="h-3 w-3" />
+              )}
+            </span>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-40">
+            <DropdownMenuItem onClick={() => onOpenColor(folder)}>
+              <Palette className="mr-2 h-3.5 w-3.5" />
+              Change color
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-destructive focus:text-destructive"
+              disabled={deletingFolderId === folder.id}
+              onClick={() => onDeleteFolder(folder)}>
+              <Trash2 className="mr-2 h-3.5 w-3.5" />
+              Delete folder
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      {!isCollapsed && (
+        <div className="pb-1">
+          {groupedSessions.length > 0 ? (
+            groupedSessions.map((session) => renderSessionRow(session, true))
+          ) : (
+            <div className="px-9 py-2 text-xs text-muted-foreground">Drop chats here or use the menu</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function SessionSidebar({
   sessions,
   folders,
   currentThreadId,
   creatingFolder,
   deletingFolderId,
+  updatingFolderId,
   movingSessionId,
   onSwitch,
   onDelete,
   onDeleteFolder,
   onCreateFolder,
+  onUpdateFolderColor,
+  onReorderFolders,
   onMoveToFolder,
   onRename,
   onArchive,
@@ -125,17 +347,26 @@ export function SessionSidebar({
   const sortedSessions = useMemo(() => sortSessions(sessions), [sessions])
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
   const [deleteFolderTarget, setDeleteFolderTarget] = useState<SessionFolder | null>(null)
+  const [colorTarget, setColorTarget] = useState<SessionFolder | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [folderName, setFolderName] = useState('')
-  const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => new Set())
+  const [newFolderColor, setNewFolderColor] = useState<FolderColor>(DEFAULT_FOLDER_COLOR)
+  // UDR-0046 D4: default collapsed. We track the explicitly-EXPANDED set, so a
+  // new / unknown folder defaults collapsed without an extra write.
+  const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(loadExpandedFolderIds)
   const [draggedSessionId, setDraggedSessionId] = useState<string | null>(null)
   const [dropFolderId, setDropFolderId] = useState<string | null>(null)
   const renameRef = useRef<HTMLInputElement>(null)
   const folderNameRef = useRef<HTMLInputElement>(null)
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
 
   // Web SPA auth (CTR-0096, PRP-0057): the logout entry is only meaningful
   // when the operator has enabled the ID/PW lane AND the current visitor
@@ -153,22 +384,25 @@ export function SessionSidebar({
     () => sortedSessions.filter((session) => !session.folder_id || !folderMap.has(session.folder_id)),
     [folderMap, sortedSessions],
   )
-  const folderGroups = useMemo(() => {
-    return folders
-      .map((folder) => ({
+  // Folders keep their persisted manual order (UDR-0046 D1/D6); `folders`
+  // already arrives sorted by `order` ascending from CTR-0015.
+  const folderGroups = useMemo(
+    () =>
+      folders.map((folder) => ({
         folder,
         sessions: sortedSessions.filter((session) => session.folder_id === folder.id),
-      }))
-      .sort((a, b) => {
-        if (a.sessions.length === 0 && b.sessions.length === 0) return a.folder.name.localeCompare(b.folder.name)
-        if (a.sessions.length === 0) return 1
-        if (b.sessions.length === 0) return -1
-        return a.sessions[0].updated_at > b.sessions[0].updated_at ? -1 : 1
-      })
-  }, [folders, sortedSessions])
+      })),
+    [folders, sortedSessions],
+  )
   const deleteFolderSessionCount = useMemo(
     () => folderGroups.find((group) => group.folder.id === deleteFolderTarget?.id)?.sessions.length ?? 0,
     [deleteFolderTarget?.id, folderGroups],
+  )
+
+  // Keep the color modal's preview in sync with the live folder record.
+  const colorTargetLive = useMemo(
+    () => (colorTarget ? (folderMap.get(colorTarget.id) ?? colorTarget) : null),
+    [colorTarget, folderMap],
   )
 
   useEffect(() => {
@@ -179,13 +413,23 @@ export function SessionSidebar({
     if (createFolderOpen) folderNameRef.current?.focus()
   }, [createFolderOpen])
 
+  // Persist the expanded set to localStorage (per device, UDR-0046 D4).
+  useEffect(() => {
+    try {
+      localStorage.setItem(FOLDER_EXPANDED_STORAGE_KEY, JSON.stringify([...expandedFolderIds]))
+    } catch {
+      // ignore storage failures (private mode / quota)
+    }
+  }, [expandedFolderIds])
+
+  // Auto-expand the active session's folder so the current chat is always visible.
   useEffect(() => {
     const activeFolderId = sessions.find((session) => session.thread_id === currentThreadId)?.folder_id
     if (!activeFolderId) return
-    setCollapsedFolderIds((prev) => {
-      if (!prev.has(activeFolderId)) return prev
+    setExpandedFolderIds((prev) => {
+      if (prev.has(activeFolderId)) return prev
       const next = new Set(prev)
-      next.delete(activeFolderId)
+      next.add(activeFolderId)
       return next
     })
   }, [currentThreadId, sessions])
@@ -226,11 +470,12 @@ export function SessionSidebar({
   )
 
   const handleCreateFolder = useCallback(async () => {
-    const created = await onCreateFolder(folderName)
+    const created = await onCreateFolder(folderName, newFolderColor)
     if (!created) return
     setCreateFolderOpen(false)
     setFolderName('')
-  }, [folderName, onCreateFolder])
+    setNewFolderColor(DEFAULT_FOLDER_COLOR)
+  }, [folderName, newFolderColor, onCreateFolder])
 
   const handleCreateFolderKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>) => {
@@ -249,13 +494,35 @@ export function SessionSidebar({
   )
 
   const toggleFolder = useCallback((folderId: string) => {
-    setCollapsedFolderIds((prev) => {
+    setExpandedFolderIds((prev) => {
       const next = new Set(prev)
       if (next.has(folderId)) next.delete(folderId)
       else next.add(folderId)
       return next
     })
   }, [])
+
+  const handleFolderDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event
+      if (!over || active.id === over.id) return
+      const ids = folderGroups.map((group) => group.folder.id)
+      const oldIndex = ids.indexOf(active.id as string)
+      const newIndex = ids.indexOf(over.id as string)
+      if (oldIndex < 0 || newIndex < 0) return
+      void onReorderFolders(arrayMove(ids, oldIndex, newIndex))
+    },
+    [folderGroups, onReorderFolders],
+  )
+
+  const handleColorSelect = useCallback(
+    async (color: FolderColor) => {
+      if (!colorTarget) return
+      const ok = await onUpdateFolderColor(colorTarget.id, color)
+      if (ok) setColorTarget(null)
+    },
+    [colorTarget, onUpdateFolderColor],
+  )
 
   const handleSessionDragStart = useCallback((threadId: string) => {
     setDraggedSessionId(threadId)
@@ -265,6 +532,21 @@ export function SessionSidebar({
     setDraggedSessionId(null)
     setDropFolderId(null)
   }, [])
+
+  const handleDragOverFolder = useCallback((folderId: string) => setDropFolderId(folderId), [])
+  const handleDragLeaveFolder = useCallback(
+    (folderId: string) => setDropFolderId((prev) => (prev === folderId ? null : prev)),
+    [],
+  )
+  const handleDropSession = useCallback(
+    (folderId: string) => {
+      setDropFolderId(null)
+      const sessionId = draggedSessionId
+      setDraggedSessionId(null)
+      if (sessionId) void onMoveToFolder(sessionId, folderId)
+    },
+    [draggedSessionId, onMoveToFolder],
+  )
 
   const renderSessionRow = useCallback(
     (session: SessionSummary, nested = false) => {
@@ -370,7 +652,12 @@ export function SessionSidebar({
                             key={folder.id}
                             disabled={movingSessionId === session.thread_id}
                             onClick={() => void onMoveToFolder(session.thread_id, folder.id)}>
-                            <Folder className="mr-2 h-3.5 w-3.5" />
+                            <Folder
+                              className={cn(
+                                'mr-2 h-3.5 w-3.5',
+                                (FOLDER_COLOR_CLASSES[folder.color] ?? FOLDER_COLOR_CLASSES[DEFAULT_FOLDER_COLOR]).icon,
+                              )}
+                            />
                             {folder.name}
                           </DropdownMenuItem>
                         ))
@@ -494,87 +781,31 @@ export function SessionSidebar({
             </Button>
           </div>
           {folderGroups.length === 0 && <div className="px-3 py-2 text-xs text-muted-foreground">No folders yet</div>}
-          {folderGroups.map(({ folder, sessions: groupedSessions }) => {
-            const isCollapsed = collapsedFolderIds.has(folder.id)
-            const isDropTarget = dropFolderId === folder.id
-
-            return (
-              <div key={folder.id} className="border-t border-border/20 first:border-t-0">
-                {/* biome-ignore lint/a11y/noStaticElementInteractions: folder row is a drag target for native DnD */}
-                <div
-                  className={cn(
-                    'group flex items-center gap-2 px-3 py-2 transition-colors',
-                    isDropTarget && 'bg-accent/80',
-                  )}
-                  onDragOver={(event) => {
-                    if (!draggedSessionId) return
-                    event.preventDefault()
-                    event.dataTransfer.dropEffect = 'move'
-                    setDropFolderId(folder.id)
-                  }}
-                  onDragLeave={() => {
-                    if (dropFolderId === folder.id) setDropFolderId(null)
-                  }}
-                  onDrop={(event) => {
-                    if (!draggedSessionId) return
-                    event.preventDefault()
-                    setDropFolderId(null)
-                    setDraggedSessionId(null)
-                    void onMoveToFolder(draggedSessionId, folder.id)
-                  }}>
-                  <button
-                    type="button"
-                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                    onClick={() => toggleFolder(folder.id)}>
-                    {isCollapsed ? (
-                      <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    ) : (
-                      <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    )}
-                    <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate text-sm font-medium">{folder.name}</span>
-                    <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                      {groupedSessions.length}
-                    </span>
-                  </button>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      {/* biome-ignore lint/a11y/useSemanticElements: nested interactive, span is intentional */}
-                      <span
-                        role="button"
-                        tabIndex={-1}
-                        className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                        aria-label="Folder options">
-                        {deletingFolderId === folder.id ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <MoreHorizontal className="h-3 w-3" />
-                        )}
-                      </span>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-40">
-                      <DropdownMenuItem
-                        className="text-destructive focus:text-destructive"
-                        disabled={deletingFolderId === folder.id}
-                        onClick={() => setDeleteFolderTarget(folder)}>
-                        <Trash2 className="mr-2 h-3.5 w-3.5" />
-                        Delete folder
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
-                {!isCollapsed && (
-                  <div className="pb-1">
-                    {groupedSessions.length > 0 ? (
-                      groupedSessions.map((session) => renderSessionRow(session, true))
-                    ) : (
-                      <div className="px-9 py-2 text-xs text-muted-foreground">Drop chats here or use the menu</div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          })}
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleFolderDragEnd}>
+            <SortableContext
+              items={folderGroups.map((group) => group.folder.id)}
+              strategy={verticalListSortingStrategy}>
+              {folderGroups.map(({ folder, sessions: groupedSessions }) => (
+                <FolderGroup
+                  key={folder.id}
+                  folder={folder}
+                  groupedSessions={groupedSessions}
+                  isCollapsed={!expandedFolderIds.has(folder.id)}
+                  isDropTarget={dropFolderId === folder.id}
+                  deletingFolderId={deletingFolderId}
+                  updatingFolderId={updatingFolderId}
+                  draggedSessionId={draggedSessionId}
+                  onToggle={toggleFolder}
+                  onDragOverFolder={handleDragOverFolder}
+                  onDragLeaveFolder={handleDragLeaveFolder}
+                  onDropSession={handleDropSession}
+                  onOpenColor={setColorTarget}
+                  onDeleteFolder={setDeleteFolderTarget}
+                  renderSessionRow={renderSessionRow}
+                />
+              ))}
+            </SortableContext>
+          </DndContext>
         </section>
 
         <section className="py-2">
@@ -666,7 +897,10 @@ export function SessionSidebar({
         open={createFolderOpen}
         onOpenChange={(open) => {
           setCreateFolderOpen(open)
-          if (!open) setFolderName('')
+          if (!open) {
+            setFolderName('')
+            setNewFolderColor(DEFAULT_FOLDER_COLOR)
+          }
         }}>
         <DialogContent>
           <DialogHeader>
@@ -681,6 +915,10 @@ export function SessionSidebar({
             placeholder="Folder name"
             maxLength={100}
           />
+          <div className="space-y-2">
+            <span className="text-xs font-medium text-muted-foreground">Color</span>
+            <PaletteSwatches value={newFolderColor} onSelect={setNewFolderColor} disabled={creatingFolder} />
+          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateFolderOpen(false)} disabled={creatingFolder}>
               Cancel
@@ -694,6 +932,31 @@ export function SessionSidebar({
               ) : (
                 'Create folder'
               )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={colorTarget !== null} onOpenChange={(open) => !open && setColorTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Folder color</DialogTitle>
+            <DialogDescription>Pick a color for &quot;{colorTargetLive?.name || 'Folder'}&quot;.</DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center gap-3 py-2">
+            <PaletteSwatches
+              value={colorTargetLive?.color ?? DEFAULT_FOLDER_COLOR}
+              onSelect={(color) => void handleColorSelect(color)}
+              disabled={updatingFolderId === colorTarget?.id}
+            />
+            {updatingFolderId === colorTarget?.id && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setColorTarget(null)}
+              disabled={updatingFolderId === colorTarget?.id}>
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>

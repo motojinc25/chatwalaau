@@ -61,9 +61,20 @@ export interface PromptTemplate {
   updated_at: string
 }
 
+// Preset folder palette tokens (UDR-0046 D2). The record stores the KEY; the
+// sidebar maps it to theme-controlled classes. Keep in sync with the backend
+// FOLDER_COLORS tuple in app/session/storage.py.
+export const FOLDER_COLORS = ['neutral', 'red', 'orange', 'amber', 'green', 'blue', 'violet', 'pink'] as const
+
+export type FolderColor = (typeof FOLDER_COLORS)[number]
+
+export const DEFAULT_FOLDER_COLOR: FolderColor = 'neutral'
+
 export interface SessionFolder {
   id: string
   name: string
+  color: FolderColor
+  order: number
   created_at: string
   updated_at: string
 }

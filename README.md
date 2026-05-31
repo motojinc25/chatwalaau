@@ -108,6 +108,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Batch Processing: async job queue via Core MCP Server with real-time MCP Apps dashboard
 - Multi-provider, multi-model switching: switch between **Azure OpenAI** and **Anthropic (Claude)** models mid-conversation with per-model reasoning and context window. Each provider owns its credentials and reasoning shape (OpenAI `reasoning.effort` vs Anthropic `thinking.budget_tokens`); add Claude models with `ANTHROPIC_MODELS` and they appear in the existing model selector. Both Anthropic hostings supported: **Direct** (Anthropic public API) and **Foundry** (Anthropic on Azure AI Foundry)
 - Session management: save, search, organize into folders, pin, archive, fork, rename
+- Sidebar folders: assign a color from a preset palette (set on create or change later via the folder menu), reorder folders by drag-and-drop, and collapse folders by default (open/closed state remembered per device); the folder list self-heals if its saved color/order values are ever corrupted
 - Background Responses: long-running agent timeout prevention with stream resumption
 - Conversation compaction: long sessions are auto-compacted before each model call (sliding-window by default) so the agent keeps responding instead of failing at the context-window limit; disable with `COMPACTION_STRATEGY=none`
 - Context window consumption display with warning levels

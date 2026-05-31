@@ -19,14 +19,18 @@ from pydantic import BaseModel
 from app.auth import verify_api_key
 from app.core.config import settings
 from app.session.storage import (
+    DEFAULT_FOLDER_COLOR,
+    FOLDER_COLORS,
     FOLDER_NAME_MAX_LENGTH,
     create_folder_record,
     ensure_session_defaults,
     read_folder_index,
     read_session_json,
+    reorder_folders,
     session_path,
     sessions_dir,
     touch_folder_record,
+    update_folder_record,
     write_folder_index,
     write_json_atomic,
     write_session_json,
@@ -125,6 +129,16 @@ async def init_session(thread_id: str, body: InitSessionRequest) -> dict[str, An
 
 class CreateFolderRequest(BaseModel):
     name: str
+    color: str = DEFAULT_FOLDER_COLOR
+
+
+class FolderUpdateRequest(BaseModel):
+    name: str | None = None
+    color: str | None = None
+
+
+class FolderOrderRequest(BaseModel):
+    folder_ids: list[str]
 
 
 class AssignFolderRequest(BaseModel):
@@ -132,11 +146,12 @@ class AssignFolderRequest(BaseModel):
 
 
 def _read_folder_records() -> list[dict[str, Any]]:
-    """Read folder registry or raise a HTTP 500 on corruption."""
-    try:
-        return read_folder_index()
-    except (OSError, ValueError, json.JSONDecodeError) as e:
-        raise HTTPException(status_code=500, detail="Failed to read folder registry") from e
+    """Read the folder registry.
+
+    The reader self-heals recoverable corruption (UDR-0046 D5), so a malformed
+    registry no longer raises -- it returns the normalized (and repaired) list.
+    """
+    return read_folder_index()
 
 
 def _read_session_or_404(thread_id: str) -> dict[str, Any]:
@@ -160,29 +175,73 @@ def _write_session_or_500(thread_id: str, data: dict[str, Any]) -> None:
 
 @router.get("/folders")
 async def list_folders() -> list[dict[str, Any]]:
-    """List all folder records."""
+    """List all folder records sorted by manual order ascending (CTR-0015 v1.12)."""
     folders = _read_folder_records()
-    folders.sort(key=lambda folder: folder.get("updated_at", ""), reverse=True)
+    folders.sort(key=lambda folder: folder.get("order", 0))
     return folders
+
+
+def _validate_folder_name(name: str) -> str:
+    """Trim and validate a folder name, raising HTTP 400 on violations."""
+    trimmed = name.strip()
+    if not trimmed:
+        raise HTTPException(status_code=400, detail="Folder name cannot be empty")
+    if len(trimmed) > FOLDER_NAME_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Folder name must be {FOLDER_NAME_MAX_LENGTH} characters or fewer",
+        )
+    return trimmed
+
+
+def _validate_folder_color(color: str) -> None:
+    """Reject colors outside the preset palette (UDR-0046 D2)."""
+    if color not in FOLDER_COLORS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Folder color must be one of: {', '.join(FOLDER_COLORS)}",
+        )
 
 
 @router.post("/folders", dependencies=[Depends(verify_api_key)])
 async def create_folder(body: CreateFolderRequest) -> dict[str, Any]:
     """Create a new folder record."""
-    name = body.name.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Folder name cannot be empty")
-    if len(name) > FOLDER_NAME_MAX_LENGTH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Folder name must be {FOLDER_NAME_MAX_LENGTH} characters or fewer",
-        )
+    name = _validate_folder_name(body.name)
+    _validate_folder_color(body.color)
 
     try:
-        folder = create_folder_record(name)
+        folder = create_folder_record(name, body.color)
     except OSError as e:
         raise HTTPException(status_code=500, detail="Failed to create folder") from e
     logger.info("Created folder %s", folder["id"])
+    return folder
+
+
+@router.put("/folders/order", dependencies=[Depends(verify_api_key)])
+async def reorder_folder_records(body: FolderOrderRequest) -> list[dict[str, Any]]:
+    """Reassign folder order from an explicit id sequence (CTR-0015 v1.12)."""
+    try:
+        folders = reorder_folders(body.folder_ids)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail="Failed to reorder folders") from e
+    logger.info("Reordered %d folders", len(folders))
+    return folders
+
+
+@router.patch("/folders/{folder_id}", dependencies=[Depends(verify_api_key)])
+async def update_folder(folder_id: str, body: FolderUpdateRequest) -> dict[str, Any]:
+    """Update a folder's name and/or color (CTR-0015 v1.12)."""
+    name = _validate_folder_name(body.name) if body.name is not None else None
+    if body.color is not None:
+        _validate_folder_color(body.color)
+
+    try:
+        folder = update_folder_record(folder_id, name=name, color=body.color)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail="Failed to update folder") from e
+    if folder is None:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    logger.info("Updated folder %s", folder_id)
     return folder
 
 

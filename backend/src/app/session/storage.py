@@ -2,13 +2,38 @@
 
 from datetime import UTC, datetime
 import json
+import logging
 from pathlib import Path
 from typing import Any
 import uuid
 
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
+
 FOLDER_NAME_MAX_LENGTH = 100
+
+# Preset folder colors (UDR-0046 D2). The record stores the token KEY, never a
+# raw hex value, so the rendered color stays under theme / dark-mode control on
+# the frontend. "neutral" renders as the uncolored (pre-PRP-0070) look.
+FOLDER_COLORS: tuple[str, ...] = (
+    "neutral",
+    "red",
+    "orange",
+    "amber",
+    "green",
+    "blue",
+    "violet",
+    "pink",
+)
+DEFAULT_FOLDER_COLOR = "neutral"
+
+
+def normalize_folder_color(value: Any) -> str:
+    """Coerce an arbitrary value to a known palette token (UDR-0046 D2/D5)."""
+    if isinstance(value, str) and value in FOLDER_COLORS:
+        return value
+    return DEFAULT_FOLDER_COLOR
 
 
 def sessions_dir() -> Path:
@@ -59,27 +84,109 @@ def ensure_session_defaults(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def read_folder_index() -> list[dict[str, Any]]:
-    """Read folder registry entries."""
-    path = folder_index_path()
-    if not path.is_file():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list):
-        msg = "Folder registry is malformed"
-        raise ValueError(msg)
-    folders: list[dict[str, Any]] = []
+def _backup_corrupt_folder_index(path: Path) -> None:
+    """Move an unparseable folder index aside so it is never silently lost.
+
+    Mirrors the PRP-0064 .env-sync backup rule (UDR-0046 D5): a whole-file
+    failure is preserved as index.corrupt-<timestamp>.json before the registry
+    restarts empty.
+    """
+    try:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+        backup = path.parent / f"index.corrupt-{stamp}.json"
+        path.replace(backup)
+        logger.warning("Folder registry was unparseable; backed up to %s and reset to empty", backup)
+    except OSError:
+        logger.warning("Folder registry was unparseable and could not be backed up: %s", path)
+
+
+def _normalize_folder_records(data: list[Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Normalize raw folder entries per field (UDR-0046 D5).
+
+    Returns the cleaned records (sorted by ascending order) plus a flag
+    indicating whether anything changed, so the caller can write the repaired
+    list back once (self-heal).
+
+    - An entry missing an ``id`` is skipped.
+    - An invalid / unknown ``color`` falls back to the default palette token.
+    - A missing / duplicate / non-integer ``order`` is reassigned
+      deterministically (stable sort by existing order then ``updated_at`` desc,
+      reindexed 0..n-1).
+    """
+    changed = False
+    cleaned: list[dict[str, Any]] = []
+    seen_orders: set[int] = set()
     for item in data:
         if not isinstance(item, dict):
+            changed = True
             continue
-        folders.append(
+        folder_id = str(item.get("id", ""))
+        if not folder_id:
+            changed = True
+            continue
+
+        color = normalize_folder_color(item.get("color"))
+        if color != item.get("color"):
+            changed = True
+
+        raw_order = item.get("order")
+        order: int | None = raw_order if isinstance(raw_order, int) and not isinstance(raw_order, bool) else None
+        if order is None or order in seen_orders:
+            order = None  # defer to deterministic reindex below
+            changed = True
+        else:
+            seen_orders.add(order)
+
+        cleaned.append(
             {
-                "id": str(item.get("id", "")),
+                "id": folder_id,
                 "name": str(item.get("name", "")),
+                "color": color,
+                "order": order,
                 "created_at": str(item.get("created_at", "")),
                 "updated_at": str(item.get("updated_at", "")),
             }
         )
+
+    # Deterministic order: entries with a valid explicit order first (ascending),
+    # then entries whose order had to be dropped, by recency (updated_at desc).
+    with_order = sorted((f for f in cleaned if f["order"] is not None), key=lambda f: f["order"])
+    without_order = sorted((f for f in cleaned if f["order"] is None), key=lambda f: f["updated_at"], reverse=True)
+    cleaned = [*with_order, *without_order]
+    for index, folder in enumerate(cleaned):
+        if folder["order"] != index:
+            changed = True
+        folder["order"] = index
+    return cleaned, changed
+
+
+def read_folder_index() -> list[dict[str, Any]]:
+    """Read folder registry entries, normalizing and self-healing on the fly.
+
+    Tolerant and self-healing (UDR-0046 D5): a recoverable per-field problem is
+    repaired and written back once; a whole-file parse failure is backed up and
+    the registry restarts empty. Never raises for a recoverable malformed file.
+    """
+    path = folder_index_path()
+    if not path.is_file():
+        return []
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        _backup_corrupt_folder_index(path)
+        return []
+
+    if not isinstance(data, list):
+        _backup_corrupt_folder_index(path)
+        return []
+
+    folders, changed = _normalize_folder_records(data)
+    if changed:
+        try:
+            write_folder_index(folders)
+        except OSError:
+            logger.warning("Failed to write back self-healed folder registry: %s", path)
     return folders
 
 
@@ -93,19 +200,70 @@ def list_folder_ids() -> set[str]:
     return {folder["id"] for folder in read_folder_index() if folder.get("id")}
 
 
-def create_folder_record(name: str) -> dict[str, Any]:
-    """Create and persist a new folder record."""
+def create_folder_record(name: str, color: str = DEFAULT_FOLDER_COLOR) -> dict[str, Any]:
+    """Create and persist a new folder record appended to the end of the order."""
     now = datetime.now(UTC).isoformat()
+    folders = read_folder_index()
+    next_order = max((f["order"] for f in folders), default=-1) + 1
     folder = {
         "id": str(uuid.uuid4()),
         "name": name,
+        "color": normalize_folder_color(color),
+        "order": next_order,
         "created_at": now,
         "updated_at": now,
     }
-    folders = read_folder_index()
     folders.append(folder)
     write_folder_index(folders)
     return folder
+
+
+def update_folder_record(
+    folder_id: str,
+    name: str | None = None,
+    color: str | None = None,
+) -> dict[str, Any] | None:
+    """Update a folder's name and/or color. Returns the record or None if absent."""
+    folders = read_folder_index()
+    updated: dict[str, Any] | None = None
+    for folder in folders:
+        if folder.get("id") != folder_id:
+            continue
+        if name is not None:
+            folder["name"] = name
+        if color is not None:
+            folder["color"] = normalize_folder_color(color)
+        folder["updated_at"] = datetime.now(UTC).isoformat()
+        updated = folder
+        break
+    if updated is not None:
+        write_folder_index(folders)
+    return updated
+
+
+def reorder_folders(folder_ids: list[str]) -> list[dict[str, Any]]:
+    """Reassign folder order from an explicit id sequence (UDR-0046 D6).
+
+    Idempotent bulk set: unknown ids are ignored; registered ids absent from
+    ``folder_ids`` are appended preserving their prior relative order.
+    """
+    folders = read_folder_index()
+    by_id = {folder["id"]: folder for folder in folders}
+
+    ordered: list[dict[str, Any]] = []
+    consumed: set[str] = set()
+    for folder_id in folder_ids:
+        folder = by_id.get(folder_id)
+        if folder is not None and folder_id not in consumed:
+            ordered.append(folder)
+            consumed.add(folder_id)
+    # Append registered ids missing from the request, preserving prior order.
+    ordered.extend(folder for folder in folders if folder["id"] not in consumed)
+
+    for index, folder in enumerate(ordered):
+        folder["order"] = index
+    write_folder_index(ordered)
+    return ordered
 
 
 def touch_folder_record(folder_id: str) -> None:

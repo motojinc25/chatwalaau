@@ -91,6 +91,29 @@ def _generate_id() -> str:
     return str(uuid.uuid4())
 
 
+def _is_previous_response_not_found(exc: BaseException) -> bool:
+    """Detect an Azure/OpenAI 400 ``previous_response_not_found`` in the chain.
+
+    The Responses API raises this when a ``previous_response_id`` points at a
+    response the service can no longer find -- e.g. an approval-interrupted
+    response that was never committed server-side, server-side eviction, or a
+    cross-resource reference. agent-framework wraps it in ChatClientException,
+    so inspect the whole ``__cause__`` / ``__context__`` chain by error code
+    and message text.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if getattr(cur, "code", None) == "previous_response_not_found":
+            return True
+        text = str(cur).lower()
+        if "previous_response_not_found" in text or "previous response with id" in text:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def _is_rate_limit_error(exc: BaseException) -> bool:
     """Detect an Azure/OpenAI 429 (rate limit) anywhere in the exception chain.
 
@@ -650,6 +673,19 @@ async def _stream_with_reasoning(
             # which is neutral or beneficial (no model behaviour change).
             iter_synthetic_messages = iter_accumulator.build_iteration_messages(approval_response_contents)
             iteration_messages = [*iteration_messages, *iter_synthetic_messages]
+            # Reset server-side response chaining before the post-approval
+            # re-run. The approval handshake interrupts the iteration-N
+            # response stream, so the resp_... id MAF stored on the session
+            # (store=True is OpenAIChatClient.STORES_BY_DEFAULT) may name a
+            # response Azure never committed -> the next agent.run sends it as
+            # previous_response_id and the Responses API returns 400
+            # previous_response_not_found. The next iteration already carries
+            # the full, explicit context (iteration_messages built above +
+            # FileHistoryProvider history injected by before_run), so clearing
+            # service_session_id makes the re-run rely on that explicit context
+            # for every provider -- the same structurally-explicit path the
+            # PRP-0069 follow-up established for Anthropic.
+            session.service_session_id = None
         else:
             # The for-else fires when max_approval_iterations is exhausted
             # without a `break`. Defensive: emit a RUN_ERROR so the SPA
@@ -663,6 +699,12 @@ async def _stream_with_reasoning(
         if continuation_token:
             error_message = "Background response token not found or expired. Please resend your message."
             logger.warning("Continuation token error for thread %s: %s", thread_id, exc)
+        elif _is_previous_response_not_found(exc):
+            error_message = (
+                "The conversation's server-side response reference expired or "
+                "was not found. Please resend your message to continue."
+            )
+            logger.warning("AG-UI previous_response_not_found for thread %s: %s", thread_id, exc)
         elif _is_rate_limit_error(exc):
             error_message = (
                 "Rate limited by the model provider (429 Too Many Requests). "

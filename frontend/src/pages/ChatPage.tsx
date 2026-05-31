@@ -19,12 +19,15 @@ export function ChatPage() {
     setSidebarOpen,
     isCreatingFolder,
     deletingFolderId,
+    updatingFolderId,
     movingSessionId,
     createSession,
     createFolder,
     switchSession,
     deleteSession,
     deleteFolder,
+    updateFolderColor,
+    reorderFolders,
     forkSession,
     moveSessionToFolder,
     renameSession,
@@ -54,11 +57,14 @@ export function ChatPage() {
           currentThreadId={threadId}
           creatingFolder={isCreatingFolder}
           deletingFolderId={deletingFolderId}
+          updatingFolderId={updatingFolderId}
           movingSessionId={movingSessionId}
           onSwitch={switchSession}
           onDelete={deleteSession}
           onDeleteFolder={deleteFolder}
           onCreateFolder={createFolder}
+          onUpdateFolderColor={updateFolderColor}
+          onReorderFolders={reorderFolders}
           onMoveToFolder={moveSessionToFolder}
           onRename={renameSession}
           onArchive={archiveSession}
