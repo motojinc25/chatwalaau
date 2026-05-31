@@ -45,7 +45,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 from ag_ui.encoder import EventEncoder
-from agent_framework import AgentSession, Content, Message
+from agent_framework import AgentSession, Content
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -59,6 +59,7 @@ from app.agent.approval import (
     approval_store,
     truncate_arguments_preview,
 )
+from app.agent.approval_iteration import IterationContentAccumulator
 from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key
 from app.core.config import settings
@@ -314,8 +315,20 @@ async def _stream_with_reasoning(
         # iteration finishes without producing any approval request.
         iteration_messages: list[Any] = list(messages)
         max_approval_iterations = 16
+        logger.info(
+            "AG-UI run start: thread=%s model=%s input_msgs=%d",
+            thread_id,
+            selected_model or "<default>",
+            len(iteration_messages),
+        )
         for _iteration in range(max_approval_iterations):
             pending_approvals: list[tuple[ApprovalRecord, Content]] = []
+            # PRP-0069 follow-up: capture this iteration's stream content so
+            # the next iteration's agent.run input pairs the originating
+            # function_call (assistant role) with the approval response (user
+            # role). Without it, MAF's Anthropic connector emits an orphan
+            # tool_result -> HTTP 400. See app.agent.approval_iteration.
+            iter_accumulator = IterationContentAccumulator()
 
             response_stream = agent.run(
                 iteration_messages,
@@ -343,6 +356,9 @@ async def _stream_with_reasoning(
                     content_type = getattr(content, "type", None)
 
                     if content_type == "text_reasoning":
+                        # PRP-0069 follow-up: capture each delta (and the
+                        # Anthropic thinking signature) for iter N+1 reconstruction.
+                        iter_accumulator.observe_text_reasoning(content)
                         text = getattr(content, "text", None)
                         if not text:
                             continue
@@ -364,6 +380,8 @@ async def _stream_with_reasoning(
                         )
 
                     elif content_type == "text":
+                        # PRP-0069 follow-up: capture each delta for iter N+1.
+                        iter_accumulator.observe_text(content)
                         text = getattr(content, "text", None)
                         if not text:
                             continue
@@ -417,6 +435,10 @@ async def _stream_with_reasoning(
                                     parent_message_id=msg_id,
                                 )
                             )
+                        # PRP-0069 follow-up: capture every non-gated function_call
+                        # for iter N+1 so the model does not re-execute it (avoids
+                        # an agent loop that exhausts Anthropic's rate limit).
+                        iter_accumulator.observe_function_call(content)
                         tc_args = getattr(content, "arguments", None)
                         if tc_args:
                             delta = tc_args if isinstance(tc_args, str) else json.dumps(tc_args)
@@ -438,6 +460,10 @@ async def _stream_with_reasoning(
                         if fn_call is None:
                             logger.warning("function_approval_request without function_call payload; skipping")
                             continue
+                        # PRP-0069 follow-up: keep the originating function_call so
+                        # iter N+1's input has the matching tool_use (Anthropic
+                        # rejects orphan tool_results from approval responses).
+                        iter_accumulator.observe_function_call_from_approval(fn_call)
                         tool_name_pending = getattr(fn_call, "name", "") or "<unknown>"
                         call_id_pending = getattr(fn_call, "call_id", "") or _generate_id()
                         raw_args = getattr(fn_call, "arguments", None)
@@ -475,6 +501,10 @@ async def _stream_with_reasoning(
                         pending_approvals.append((record, content))
 
                     elif content_type == "function_result":
+                        # PRP-0069 follow-up: capture every executed result for
+                        # iter N+1 (pairs with the matching function_call so
+                        # Anthropic sees complete tool_use/tool_result pairs).
+                        iter_accumulator.observe_function_result(content)
                         tc_id = getattr(content, "call_id", None)
                         if tc_id:
                             yield encoder.encode(
@@ -608,10 +638,18 @@ async def _stream_with_reasoning(
                 # less work to do.
                 await approval_store.drop(record.id)
 
-            # Append one user message bundling every approval response and
-            # loop back through agent.run() to let MAF replace the parked
-            # function_calls with their results (or rejection text).
-            iteration_messages = [*iteration_messages, Message(role="user", contents=approval_response_contents)]
+            # PRP-0069 follow-up: append BOTH the iter-N synthetic assistant
+            # message (carrying the originating function_call(s) plus the
+            # accumulated reasoning + text, with the Anthropic thinking signature
+            # preserved) AND the user message bundling every approval response.
+            # Without the synthetic assistant, MAF's Anthropic connector emits a
+            # tool_result block with no preceding tool_use (HTTP 400 orphan
+            # tool_result). OpenAI tolerated the missing context; Anthropic
+            # enforces strict tool_use/tool_result pairing. The construction is
+            # provider-agnostic -- OpenAI sees a structurally explicit context,
+            # which is neutral or beneficial (no model behaviour change).
+            iter_synthetic_messages = iter_accumulator.build_iteration_messages(approval_response_contents)
+            iteration_messages = [*iteration_messages, *iter_synthetic_messages]
         else:
             # The for-else fires when max_approval_iterations is exhausted
             # without a `break`. Defensive: emit a RUN_ERROR so the SPA
@@ -665,12 +703,15 @@ async def _stream_with_reasoning(
         )
 
     if run_error:
+        logger.warning("AG-UI run finished with error: thread=%s message=%s", thread_id, error_message)
         yield encoder.encode(
             RunErrorEvent(
                 type=EventType.RUN_ERROR,
                 message=error_message,
             )
         )
+    else:
+        logger.info("AG-UI run finished normally: thread=%s", thread_id)
     yield encoder.encode(
         RunFinishedEvent(
             type=EventType.RUN_FINISHED,

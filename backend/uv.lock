@@ -77,15 +77,15 @@ wheels = [
 
 [[package]]
 name = "agent-framework-anthropic"
-version = "1.0.0b260304"
+version = "1.0.0b260521"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
     { name = "anthropic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/85/fa/6de2f13341a6d513ea8b5dcffd35a88de887c2c046e83e05b5b7568bb132/agent_framework_anthropic-1.0.0b260304.tar.gz", hash = "sha256:e6504bdfdf612aa9c27c03ed7eeeb4f27a8889d60023089447769ba6430d9176", size = 14148, upload-time = "2026-03-04T22:05:45.689Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/38/44ac3e72a3ad6d89a0dee1e27a6ced4be654ab5669bc1e597fe9fd807d15/agent_framework_anthropic-1.0.0b260521.tar.gz", hash = "sha256:48384a772d26648afa8a75a0f0ad40deb03d3792d870fa992df5cbe34ab0abf4", size = 18657, upload-time = "2026-05-22T02:24:00.327Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/60/0c/4b03b540c3e2fa7c242a1ae69933246c36d8cf48c05282120fcee39e0a7c/agent_framework_anthropic-1.0.0b260304-py3-none-any.whl", hash = "sha256:22d9877e96d57462cd09c003c14f003f07de511e16c76b08c2acbe9bffbbbf8b", size = 14088, upload-time = "2026-03-04T22:05:18.692Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/59/109f210bf09f7eb16c73424da9dcc64823d52a7e022f0c86ad4f594c79b4/agent_framework_anthropic-1.0.0b260521-py3-none-any.whl", hash = "sha256:5fb90d2e11d4aae1a79c53f66aabbda2f83c89fee195da928b5539cf0af32b2f", size = 21353, upload-time = "2026-05-22T02:24:20.131Z" },
 ]
 
 [[package]]
@@ -546,7 +546,7 @@ wheels = [
 
 [[package]]
 name = "anthropic"
-version = "0.84.0"
+version = "0.80.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -558,9 +558,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/04/ea/0869d6df9ef83dcf393aeefc12dd81677d091c6ffc86f783e51cf44062f2/anthropic-0.84.0.tar.gz", hash = "sha256:72f5f90e5aebe62dca316cb013629cfa24996b0f5a4593b8c3d712bc03c43c37", size = 539457, upload-time = "2026-02-25T05:22:38.54Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7f/63/791e14ef5a8ecb485cef5b5d058c7ca3ad6c50a2f94cf4cea5231c6b7c16/anthropic-0.80.0.tar.gz", hash = "sha256:ef042586673fdcab2a6ffd381aa5f9a1bcce38ffe73c07fe70bd56d12b8124ba", size = 533291, upload-time = "2026-02-17T19:26:26.717Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/ca/218fa25002a332c0aa149ba18ffc0543175998b1f65de63f6d106689a345/anthropic-0.84.0-py3-none-any.whl", hash = "sha256:861c4c50f91ca45f942e091d83b60530ad6d4f98733bfe648065364da05d29e7", size = 455156, upload-time = "2026-02-25T05:22:40.468Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/4b/665f29338f51d0c2f9e04b276ea54cc1e957ae5c521a0ad868aa80abc608/anthropic-0.80.0-py3-none-any.whl", hash = "sha256:dad0e40ec371ee686e9ffb2e0cb461a0ed51447fa100927fb5d39b174c286d6f", size = 453667, upload-time = "2026-02-17T19:26:29.96Z" },
 ]
 
 [[package]]
@@ -1002,11 +1002,12 @@ wheels = [
 
 [[package]]
 name = "chatwalaau"
-version = "0.65.0"
+version = "0.66.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework" },
     { name = "agent-framework-ag-ui" },
+    { name = "agent-framework-anthropic" },
     { name = "agent-framework-devui" },
     { name = "av" },
     { name = "azure-identity" },
@@ -1039,6 +1040,7 @@ dev = [
 requires-dist = [
     { name = "agent-framework", specifier = ">=1.6.0,<2" },
     { name = "agent-framework-ag-ui", specifier = ">=1.0.0b260402" },
+    { name = "agent-framework-anthropic", specifier = ">=1.0.0b260521" },
     { name = "agent-framework-devui", specifier = ">=1.0.0b260402" },
     { name = "av", specifier = ">=12.0" },
     { name = "azure-identity", specifier = ">=1.23.0" },

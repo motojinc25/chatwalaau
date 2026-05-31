@@ -122,8 +122,44 @@ class FileHistoryProvider(HistoryProvider):
         _frontend_keys = {"tool_calls", "usage", "activity_log"}
         messages = [Message.from_dict({k: v for k, v in m.items() if k not in _frontend_keys}) for m in raw_messages]
         self._resolve_image_contents(messages, raw_messages)
+        # Anthropic (PRP-0069): a `thinking` block replayed as input requires a
+        # cryptographic signature that we do not persist (reasoning is stored
+        # only for frontend display, UDR-0001). Feeding prior-turn thinking back
+        # to the Anthropic API returns HTTP 400
+        # (messages.*.content.*.thinking.signature: Field required), so strip
+        # reasoning from the model-bound history for Anthropic agents. Reasoning
+        # is a per-turn scratchpad, not conversation history; other providers
+        # (OpenAI / demo) are unchanged and the session JSON is untouched.
+        if self._is_anthropic_agent(agent):
+            messages = self._strip_reasoning_contents(messages)
         context.extend_messages(self, messages)
         logger.info("Loaded %d messages from session %s", len(messages), thread_id)
+
+    @staticmethod
+    def _is_anthropic_agent(agent: SupportsAgentRun) -> bool:
+        """True when the agent's chat client is an Anthropic connector.
+
+        Covers both AnthropicClient (direct) and AnthropicFoundryClient
+        (foundry); OpenAIChatClient and DemoChatClient return False.
+        """
+        client = getattr(agent, "client", None)
+        return client is not None and type(client).__name__.startswith("Anthropic")
+
+    @staticmethod
+    def _strip_reasoning_contents(messages: list[Message]) -> list[Message]:
+        """Drop text_reasoning content from history sent to the model.
+
+        Messages left with no content after stripping are dropped so the
+        request keeps a valid message sequence.
+        """
+        kept_messages: list[Message] = []
+        for msg in messages:
+            kept = [c for c in msg.contents if getattr(c, "type", None) != "text_reasoning"]
+            if not kept:
+                continue
+            msg.contents = kept
+            kept_messages.append(msg)
+        return kept_messages
 
     @staticmethod
     def _resolve_image_contents(messages: list[Message], raw_messages: list[dict[str, Any]]) -> None:

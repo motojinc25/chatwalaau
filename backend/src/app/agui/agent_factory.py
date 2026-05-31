@@ -22,9 +22,10 @@ from typing import Any
 
 from agent_framework import Agent
 
+from app import providers
 from app.agent.approval import resolve_require_set, wrap_with_approval
 from app.agent.compaction import resolve_compaction_strategy
-from app.agui.agent_registry import AgentRegistry, _build_chat_client
+from app.agui.agent_registry import WEB_SEARCH_INSTRUCTION, AgentRegistry, _build_chat_client
 from app.core.config import settings
 from app.demo import is_demo_mode, resolve_demo_models
 from app.mcp.lifecycle import get_mcp_server_names, get_mcp_tools
@@ -97,24 +98,18 @@ def _build_tools_and_instructions(
     (which has no human-in-the-loop UI) keeps the pre-PRP-0067
     behaviour (UDR-0043 D5 DevUI clause).
     """
-    from agent_framework_openai import OpenAIChatClient as _OpenAIChatClient  # local alias for static method
-
-    web_search_tool = _OpenAIChatClient.get_web_search_tool(
-        user_location={"type": "approximate", "country": settings.web_search_country},
-    )
-
     history_provider = FileHistoryProvider(
         sessions_dir=Path(settings.sessions_dir),
     )
 
-    tools: list[Any] = [web_search_tool, get_coords_by_city, get_current_weather_by_coords, get_weather_next_week]
+    # Web search is provider-supplied and added per-model in the AgentRegistry /
+    # build_devui_agent (PRP-0069, UDR-0045 D5), so it is NOT part of this shared
+    # base tool list and the web search guidance lives in WEB_SEARCH_INSTRUCTION
+    # (appended only for models whose provider supplies a web search tool).
+    tools: list[Any] = [get_coords_by_city, get_current_weather_by_coords, get_weather_next_week]
     instructions = (
         "You are a helpful AI assistant. "
-        "You can search the web for up-to-date information. "
-        "When you use web search results, include source links in your response "
-        "as Markdown links: [source title](URL). "
-        "Place citation links inline near the relevant text. "
-        "You can also look up weather information for any city worldwide. "
+        "You can look up weather information for any city worldwide. "
         "For weather queries: first use get_coords_by_city to get coordinates, "
         "then use get_current_weather_by_coords or get_weather_next_week. "
         "After calling weather tools, provide a clear summary of the weather information."
@@ -262,7 +257,7 @@ def build_devui_agent() -> Agent | None:
         models = resolve_demo_models()
         model = models[0]
     else:
-        if not settings.model_list:
+        if not settings.all_model_list:
             return None
         model = settings.default_model
 
@@ -279,20 +274,27 @@ def build_devui_agent() -> Agent | None:
         apply_approval=False,
     )
 
-    # DEMO_MODE: DemoChatClient; LIVE: OpenAIChatClient with credential lane.
+    # DEMO_MODE: DemoChatClient; LIVE: provider dispatch (CTR-0102).
     client = _build_chat_client(model)
 
-    model_options: dict[str, Any] = {}
-    if not is_demo_mode():
-        effort = settings.get_reasoning_effort(model)
-        if effort:
-            model_options["reasoning"] = {"effort": effort, "summary": "detailed"}
+    # Web search + per-model options are provider-supplied (PRP-0069, UDR-0045).
+    # Demo preserves pre-PRP-0069 behavior: OpenAI web search tool + instruction.
+    if is_demo_mode():
+        web_search = providers.openai_web_search_tool()
+        devui_tools = [web_search, *tools]
+        devui_instructions = instructions + WEB_SEARCH_INSTRUCTION
+        model_options: dict[str, Any] = {}
+    else:
+        web_search = providers.web_search_tool(model)
+        devui_tools = [web_search, *tools] if web_search is not None else list(tools)
+        devui_instructions = instructions + (WEB_SEARCH_INSTRUCTION if web_search is not None else "")
+        model_options = providers.build_model_options(model)
 
     agent = Agent(
         name=f"ChatWalaau-DevUI-{model}",
-        instructions=instructions,
+        instructions=devui_instructions,
         client=client,
-        tools=tools,
+        tools=devui_tools,
         context_providers=context_providers,
         default_options=model_options or None,
         compaction_strategy=resolve_compaction_strategy(),

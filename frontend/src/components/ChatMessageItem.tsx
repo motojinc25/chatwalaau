@@ -380,7 +380,7 @@ export function ChatMessageItem({
                           onClick={() => setRegenModelOpen(false)}
                           aria-label="Close model menu"
                         />
-                        <div className="absolute top-full mt-1 left-0 z-50 min-w-[180px] rounded-md border bg-popover p-1 shadow-md">
+                        <div className="absolute top-full mt-1 left-0 z-50 min-w-[240px] rounded-md border bg-popover p-1 shadow-md">
                           {availableModels.map((m) => (
                             <button
                               key={m}

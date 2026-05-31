@@ -134,22 +134,33 @@ export function useChat(options?: UseChatOptions) {
         if (bgEnabledRef.current) aguiState.background = true
         if (options?.resumeToken) aguiState.continuation_token = options.resumeToken
 
+        // PRP-0069 follow-up: for regenerate / resume / similar flows
+        // (skipUserMessage true), the user message we are responding to is
+        // already in the truncated session and will be re-loaded by the
+        // backend FileHistoryProvider.before_run on the next agent.run.
+        // Sending it AGAIN in the request body causes the agent context to
+        // contain the user message twice (history + iteration_messages),
+        // which can stall reasoning models (e.g., gpt-5.5 + web_search) that
+        // try to reconcile the apparent repetition. Send an empty messages
+        // list instead and rely on the session history.
+        const aguiMessages =
+          options?.resumeToken || options?.skipUserMessage
+            ? []
+            : [
+                {
+                  id: userMessage.id,
+                  role: 'user',
+                  content: userContent,
+                  ...(options?.images && options.images.length > 0 ? { images: options.images } : {}),
+                },
+              ]
         const response = await fetch('/ag-ui/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             thread_id: threadIdRef.current,
             run_id: crypto.randomUUID(),
-            messages: options?.resumeToken
-              ? []
-              : [
-                  {
-                    id: userMessage.id,
-                    role: 'user',
-                    content: userContent,
-                    ...(options?.images && options.images.length > 0 ? { images: options.images } : {}),
-                  },
-                ],
+            messages: aguiMessages,
             ...(Object.keys(aguiState).length > 0 ? { state: aguiState } : {}),
           }),
           signal: abortRef.current.signal,

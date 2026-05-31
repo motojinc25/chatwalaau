@@ -49,6 +49,35 @@ class Settings(BaseSettings):
     # If AZURE_OPENAI_MODELS is empty, this value is used as fallback.
     azure_openai_responses_deployment_name: str = ""
 
+    # ---- Anthropic provider (CTR-0069 v2, CTR-0102, PRP-0069, UDR-0045) ----
+    # Comma-separated Claude model ids routed to the "anthropic" provider.
+    # Empty (default) = Anthropic disabled; the runtime behaves exactly as the
+    # pre-PRP-0069 Azure-OpenAI-only build. Model ids must be unique across
+    # AZURE_OPENAI_MODELS and ANTHROPIC_MODELS (validated at startup).
+    anthropic_models: str = ""
+
+    # Anthropic hosting: "direct" (Anthropic public API, default) or "foundry"
+    # (Anthropic on Azure AI Foundry). Single global selector (UDR-0045 D3/G).
+    anthropic_hosting: str = "direct"
+
+    # Direct hosting auth (ANTHROPIC_HOSTING=direct).
+    anthropic_api_key: str = ""
+    anthropic_base_url: str = ""
+
+    # Foundry hosting auth (ANTHROPIC_HOSTING=foundry). Provide RESOURCE
+    # (subdomain before .services.ai.azure.com) or a full BASE_URL.
+    anthropic_foundry_api_key: str = ""
+    anthropic_foundry_resource: str = ""
+    anthropic_foundry_base_url: str = ""
+
+    # Anthropic generation / reasoning. Anthropic requires max_tokens on every
+    # request; when extended thinking is enabled budget_tokens must be strictly
+    # less than max_tokens (validated at startup).
+    anthropic_max_tokens: int = 8192
+    # Per-model "model:budget_tokens" pairs; only listed models enable
+    # extended thinking. Empty = thinking disabled for all Anthropic models.
+    anthropic_thinking_budget: str = ""
+
     # Web Search
     web_search_country: str = "US"
 
@@ -312,9 +341,30 @@ class Settings(BaseSettings):
         return [m.strip() for m in self.azure_openai_models.split(",") if m.strip()]
 
     @property
+    def anthropic_model_list(self) -> list[str]:
+        """Parse ANTHROPIC_MODELS into an ordered list of Claude model ids."""
+        return [m.strip() for m in self.anthropic_models.split(",") if m.strip()]
+
+    @property
+    def all_model_list(self) -> list[str]:
+        """Merged ordered model list across providers (Azure first, then Anthropic).
+
+        UDR-0045 D3: ordering is Azure-first then Anthropic, so the default
+        model is the first Azure model when any is configured (preserving the
+        pre-PRP-0069 default), and falls back to the first Anthropic model for
+        an Anthropic-only deployment. Model ids are unique across providers
+        (enforced by _validate_anthropic), but a defensive de-dup keeps order.
+        """
+        merged = list(self.model_list)
+        for m in self.anthropic_model_list:
+            if m not in merged:
+                merged.append(m)
+        return merged
+
+    @property
     def default_model(self) -> str:
-        """First model in the list is the default."""
-        models = self.model_list
+        """First model in the merged provider-aware list is the default."""
+        models = self.all_model_list
         if not models:
             return ""
         return models[0]
@@ -356,8 +406,37 @@ class Settings(BaseSettings):
 
     @property
     def max_context_tokens_map(self) -> dict[str, int]:
-        """Return a map of model -> max_context_tokens for all configured models."""
-        return {model: self.get_max_context_tokens(model) for model in self.model_list}
+        """Return a map of model -> max_context_tokens for all configured models.
+
+        Spans every provider (Azure + Anthropic) so the frontend context-window
+        indicator resolves a limit for any selectable model. Operators add
+        Claude entries to MODEL_MAX_CONTEXT_TOKENS; unlisted models fall back to
+        the default per get_max_context_tokens. Azure-only behavior is unchanged
+        (all_model_list == model_list when ANTHROPIC_MODELS is empty).
+        """
+        return {model: self.get_max_context_tokens(model) for model in self.all_model_list}
+
+    def get_anthropic_thinking_budget(self, model: str | None = None) -> int | None:
+        """Resolve the Anthropic extended-thinking budget_tokens for a model.
+
+        ANTHROPIC_THINKING_BUDGET is a per-model "model:budget_tokens" list;
+        only listed models enable thinking. Returns None when the model is not
+        listed (thinking disabled) or the list is empty.
+        """
+        raw = self.anthropic_thinking_budget.strip()
+        if not raw:
+            return None
+        pairs: dict[str, int] = {}
+        for entry in raw.split(","):
+            entry = entry.strip()
+            if ":" in entry:
+                name, value = entry.split(":", 1)
+                try:
+                    pairs[name.strip()] = int(value.strip())
+                except ValueError:
+                    continue
+        target = model or self.default_model
+        return pairs.get(target)
 
     def get_reasoning_effort(self, model: str | None = None) -> str | None:
         """Resolve reasoning effort for a specific model.
@@ -423,8 +502,63 @@ class Settings(BaseSettings):
                 "Please migrate to AZURE_OPENAI_MODELS=%s in your .env file.",
                 self.azure_openai_models,
             )
-        if not self.model_list:
-            _logger.warning("AZURE_OPENAI_MODELS is empty; agent creation will be skipped.")
+        if not self.all_model_list:
+            _logger.warning(
+                "No models configured (AZURE_OPENAI_MODELS and ANTHROPIC_MODELS are both empty); "
+                "agent creation will be skipped."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_anthropic(self) -> "Settings":
+        """Validate the Anthropic provider configuration (PRP-0069, UDR-0045).
+
+        - ANTHROPIC_HOSTING must be one of {direct, foundry} (normalised).
+        - Foundry hosting requires a resource or a base_url.
+        - Model ids must be unique across providers (UDR-0045 D3).
+        - Each ANTHROPIC_THINKING_BUDGET entry must be < ANTHROPIC_MAX_TOKENS.
+        Validation only fires for the configured surface, so Azure-only
+        deployments (ANTHROPIC_MODELS empty) are never affected.
+        """
+        hosting = (self.anthropic_hosting or "").strip().lower()
+        allowed = {"direct", "foundry"}
+        if hosting and hosting not in allowed:
+            raise ValueError(f"ANTHROPIC_HOSTING must be one of {sorted(allowed)}, got {hosting!r}")
+        self.anthropic_hosting = hosting or "direct"
+
+        if (
+            self.anthropic_model_list
+            and self.anthropic_hosting == "foundry"
+            and not (self.anthropic_foundry_resource.strip() or self.anthropic_foundry_base_url.strip())
+        ):
+            msg = "ANTHROPIC_HOSTING=foundry requires ANTHROPIC_FOUNDRY_RESOURCE or ANTHROPIC_FOUNDRY_BASE_URL."
+            raise ValueError(msg)
+
+        dupes = sorted(set(self.model_list) & set(self.anthropic_model_list))
+        if dupes:
+            msg = (
+                f"Model id(s) {dupes} appear under multiple providers; ids must be unique "
+                "across AZURE_OPENAI_MODELS and ANTHROPIC_MODELS."
+            )
+            raise ValueError(msg)
+
+        raw = self.anthropic_thinking_budget.strip()
+        if raw:
+            for entry in raw.split(","):
+                entry = entry.strip()
+                if ":" not in entry:
+                    continue
+                name, value = entry.split(":", 1)
+                try:
+                    budget = int(value.strip())
+                except ValueError:
+                    continue
+                if budget >= self.anthropic_max_tokens:
+                    msg = (
+                        f"ANTHROPIC_THINKING_BUDGET for {name.strip()!r} ({budget}) must be "
+                        f"< ANTHROPIC_MAX_TOKENS ({self.anthropic_max_tokens})."
+                    )
+                    raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

@@ -81,7 +81,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Chat with AI agents via AG-UI protocol (SSE streaming)
 - Rich message rendering: Markdown, code blocks, math (KaTeX), Mermaid diagrams
 - LLM reasoning visualization with collapsible thinking blocks
-- Web search with inline citation links
+- Web search with inline citation links (OpenAI hosted web search for OpenAI-family models; Anthropic hosted web search for Claude models)
 - Voice input via microphone with Whisper transcription (supports `whisper`, `gpt-4o-transcribe`, and `gpt-realtime-whisper` via Realtime API)
 - Text-to-Speech playback and download, with a selectable provider: ElevenLabs or Azure OpenAI Realtime voice models (e.g. `gpt-realtime-2`)
 - Multimodal image analysis (file attachment, drag-and-drop, URL)
@@ -90,7 +90,6 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Per-turn token usage display
 - Three layout scenarios: Chat, Popup, Sidebar
 - Multilingual chat with browser auto-translation suppressed
-- Sidebar footer showing the running version, with an **About** dialog (overview, framework, developer, and backer)
 
 ### Agent Tools
 
@@ -107,7 +106,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - MCP Apps: interactive UI rendered in sandboxed iframes for MCP tools with `_meta.ui` resources
 - RAG Pipeline: PDF ingestion with ChromaDB vector search, Azure OpenAI embedding, and source citations
 - Batch Processing: async job queue via Core MCP Server with real-time MCP Apps dashboard
-- Multi-model switching: switch between OpenAI models mid-conversation with per-model reasoning and context window
+- Multi-provider, multi-model switching: switch between **Azure OpenAI** and **Anthropic (Claude)** models mid-conversation with per-model reasoning and context window. Each provider owns its credentials and reasoning shape (OpenAI `reasoning.effort` vs Anthropic `thinking.budget_tokens`); add Claude models with `ANTHROPIC_MODELS` and they appear in the existing model selector. Both Anthropic hostings supported: **Direct** (Anthropic public API) and **Foundry** (Anthropic on Azure AI Foundry)
 - Session management: save, search, organize into folders, pin, archive, fork, rename
 - Background Responses: long-running agent timeout prevention with stream resumption
 - Conversation compaction: long sessions are auto-compacted before each model call (sliding-window by default) so the agent keeps responding instead of failing at the context-window limit; disable with `COMPACTION_STRATEGY=none`
@@ -398,6 +397,48 @@ CHATWALAAU_API_KEY=sk-your-key             # Bearer token (reuses API_KEY if not
 ---
 
 ## Optional Features
+
+### Anthropic Provider (Claude)
+
+Enable Anthropic Claude models alongside Azure OpenAI -- they appear in the same model selector, can be picked per turn, and per-assistant-message regenerate works across providers. Default state is "Anthropic disabled" so upgrading from 0.65.0 with `ANTHROPIC_MODELS` unset is a no-op.
+
+Two hostings, selected by one variable:
+
+```
+# direct (Anthropic public API) | foundry (Anthropic on Azure AI Foundry)
+ANTHROPIC_HOSTING=direct
+ANTHROPIC_MODELS=claude-sonnet-4-5-20250929,claude-haiku-4-5
+```
+
+**Direct hosting** (typical):
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+# Optional override; useful for a corporate gateway or proxy
+# ANTHROPIC_BASE_URL=https://your-gateway.example.com
+```
+
+**Foundry hosting** (Anthropic on Azure AI Foundry); supply either a resource name OR a full base URL:
+
+```
+ANTHROPIC_HOSTING=foundry
+ANTHROPIC_FOUNDRY_API_KEY=<foundry-key>
+ANTHROPIC_FOUNDRY_RESOURCE=<resource-subdomain>   # before .services.ai.azure.com
+# OR
+# ANTHROPIC_FOUNDRY_BASE_URL=https://<resource>.services.ai.azure.com/models/anthropic
+```
+
+**Generation and extended thinking** (Anthropic requires `max_tokens` on every request; budget must be strictly less than `max_tokens`):
+
+```
+ANTHROPIC_MAX_TOKENS=8192
+# Per-model "model:budget_tokens"; only listed models enable extended thinking.
+ANTHROPIC_THINKING_BUDGET=claude-sonnet-4-5-20250929:6000
+```
+
+Hosted web search is included for Anthropic models out of the box (uses Anthropic's `web_search_20250305` tool, no extra config required). Every other agent feature -- Weather, Coding tools + Tool Approval, RAG, Image Generation, Vision input, MCP -- works on either provider as long as the chosen model supports tool calling. Speech-to-text, text-to-speech, image generation, and RAG embedding run on their own dedicated Azure models and are independent of the chat provider choice.
+
+---
 
 ### Prompt Templates
 

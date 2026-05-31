@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.65.0"
+version = "0.66.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -22,6 +22,11 @@ dependencies = [
     "agent-framework>=1.6.0,<2",
     "agent-framework-ag-ui>=1.0.0b260402",
     "agent-framework-devui>=1.0.0b260402",
+    # Anthropic (Claude) base-model provider, Direct + Foundry hostings.
+    # Floor pinned to the build that ships AnthropicFoundryClient + base_url
+    # support (PRP-0069, UDR-0045 D8). Already resolved transitively via
+    # agent-framework-core[all]; declared explicitly to guarantee the capability.
+    "agent-framework-anthropic>=1.0.0b260521",
     "azure-identity>=1.23.0",
     "httpx>=0.28.0",
     "elevenlabs>=2.39.0",
