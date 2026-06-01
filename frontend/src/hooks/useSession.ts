@@ -137,6 +137,11 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
       ...(activityLog ? { activityLog } : {}),
       ...(usage ? { usage } : {}),
+      // Restore per-message model / reasoning from the saved usage object so the
+      // action-bar label survives reload (CTR-0030, PRP-0071). Absent -> omitted
+      // (the label is simply not rendered for legacy messages, UDR-0047 D6).
+      ...(usage?.model ? { model: usage.model } : {}),
+      ...(usage?.reasoning ? { reasoning: usage.reasoning } : {}),
     })
   }
   return result
@@ -299,20 +304,27 @@ export function useSession() {
   )
 
   const forkSession = useCallback(
-    async (sourceThreadId: string, upToIndex: number) => {
+    async (sourceThreadId: string, upToIndex: number): Promise<string | null> => {
       try {
         const res = await fetch(`/api/sessions/${sourceThreadId}/fork`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ up_to_index: upToIndex }),
         })
-        if (!res.ok) return
+        if (!res.ok) {
+          // Surface the failure instead of swallowing it so a branch click
+          // never silently does nothing (CTR-0015 fork; v0.68.2).
+          console.error(`Branch failed: POST /api/sessions/${sourceThreadId}/fork returned ${res.status}`)
+          return null
+        }
         const data = await res.json()
         const newThreadId = data.new_thread_id as string
         await switchSession(newThreadId)
         await refreshSessions()
-      } catch {
-        // ignore
+        return newThreadId
+      } catch (err) {
+        console.error('Branch failed:', err)
+        return null
       }
     },
     [switchSession, refreshSessions],

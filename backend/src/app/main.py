@@ -75,6 +75,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app import providers
 from app.agent.router import router as tool_approval_router
 from app.agui.agent_factory import build_devui_agent, create_agent_registry
 from app.agui.endpoint import register_agui_endpoints
@@ -308,6 +309,9 @@ async def get_model_info():
         "default_model": agent_registry.default_model,
         "max_context_tokens": settings.get_max_context_tokens(),
         "max_context_tokens_map": settings.max_context_tokens_map,
+        # Per-model reasoning effort catalog for the reasoning selector
+        # (CTR-0069 / CTR-0102, PRP-0071): model -> {allowed, default}.
+        "reasoning_options": providers.reasoning_options_map(agent_registry.available_models),
     }
 
 

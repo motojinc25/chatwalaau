@@ -54,6 +54,7 @@ from fastapi.responses import StreamingResponse
 from openai import NotFoundError as OpenAINotFoundError
 from pydantic import AliasChoices, BaseModel, Field
 
+from app import providers
 from app.agent.approval import (
     ApprovalRecord,
     approval_store,
@@ -63,6 +64,7 @@ from app.agent.approval_iteration import IterationContentAccumulator
 from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key
 from app.core.config import settings
+from app.demo import is_demo_mode
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
 
 logger = logging.getLogger(__name__)
@@ -305,17 +307,27 @@ async def _stream_with_reasoning(
             "ag_ui_run_id": run_id,
         }
 
-        # Read model and background options from AG-UI state (CTR-0070, CTR-0045)
+        # Read model, reasoning, and background options from AG-UI state
+        # (CTR-0070, CTR-0045, CTR-0009 reasoning PRP-0071)
         selected_model = None
+        requested_reasoning = None
         background = False
         continuation_token = None
         if request_body.state:
             selected_model = request_body.state.get("model")
+            requested_reasoning = request_body.state.get("reasoning")
             background = request_body.state.get("background", False)
             continuation_token = request_body.state.get("continuation_token")
 
         # Select agent from registry based on model (CTR-0070, PRP-0035)
         agent = agent_registry.get(selected_model)
+
+        # Resolve the per-message reasoning effort against the owning provider's
+        # catalog (PRP-0071, UDR-0047 D4). The resolved value is emitted in the
+        # usage event regardless of provider; the per-request options are merged
+        # only for live (non-demo) agents -- DemoChatClient ignores them.
+        effective_model = selected_model or agent_registry.default_model
+        resolved_reasoning = providers.resolve_effort(effective_model, requested_reasoning)
 
         # Validate continuation_token format: MAF expects dict with "response_id"
         if continuation_token and isinstance(continuation_token, str):
@@ -326,6 +338,11 @@ async def _stream_with_reasoning(
             run_options["background"] = True
         if continuation_token:
             run_options["continuation_token"] = continuation_token
+        # Per-request reasoning options override the Agent's startup default_options
+        # via MAF _merge_options (per key). Only when the client explicitly chose an
+        # effort; otherwise the Agent's catalog-default options already apply.
+        if requested_reasoning and not is_demo_mode():
+            run_options.update(providers.build_model_options(effective_model, resolved_reasoning))
 
         # Set thread_id for image generation tools (CTR-0050, PRP-0027)
         _image_gen_thread_id.set(thread_id)
@@ -602,6 +619,10 @@ async def _stream_with_reasoning(
                         model_name = selected_model or agent_registry.default_model
                         usage_value["max_context_tokens"] = settings.get_max_context_tokens(model_name)
                         usage_value["model"] = model_name
+                        # Per-message reasoning effort (PRP-0071, CTR-0030). Echoed
+                        # for every provider (incl. demo) so the SPA can label and
+                        # persist it next to the model name.
+                        usage_value["reasoning"] = resolved_reasoning
                         yield encoder.encode(
                             CustomEvent(
                                 type=EventType.CUSTOM,
@@ -708,10 +729,10 @@ async def _stream_with_reasoning(
         elif _is_rate_limit_error(exc):
             error_message = (
                 "Rate limited by the model provider (429 Too Many Requests). "
-                "High REASONING_EFFORT generates many tokens quickly and is the "
+                "A high reasoning effort generates many tokens quickly and is the "
                 "most common trigger for the Azure OpenAI per-minute (TPM) limit. "
-                "Please wait a moment and retry, lower REASONING_EFFORT, or raise "
-                "the deployment quota."
+                "Please wait a moment and retry, lower the reasoning effort, or "
+                "raise the deployment quota."
             )
             logger.warning("AG-UI stream rate limited (429) for thread %s: %s", thread_id, exc)
         else:

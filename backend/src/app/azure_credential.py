@@ -134,6 +134,22 @@ def _get_token_provider() -> Callable[[], str]:
     return provider
 
 
+def get_token_provider() -> Callable[[], str]:
+    """Public Entra ID bearer-token provider for the cognitiveservices scope.
+
+    Returns a ``() -> str`` callable that mints a bearer token using the
+    mode-selected Azure credential (cli / managed-identity / default;
+    AZURE_CREDENTIAL_MODE) and AZURE_TENANT_ID. The scope
+    (``https://cognitiveservices.azure.com/.default``) is the Azure AI Services
+    data-plane scope shared by Azure OpenAI and Anthropic-on-Azure-AI-Foundry.
+
+    Used by the Anthropic Foundry Entra ID lane (PRP-0071 follow-up, UDR-0045 D4)
+    when ANTHROPIC_FOUNDRY_API_KEY is unset. NOT gated by AZURE_OPENAI_API_KEY --
+    callers choose the api-key vs token-provider lane themselves.
+    """
+    return _get_token_provider()
+
+
 def get_active_lane() -> str:
     """Return a short name for the active credential lane.
 

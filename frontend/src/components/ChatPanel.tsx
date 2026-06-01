@@ -6,6 +6,7 @@ import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { ModelSelector } from '@/components/ModelSelector'
+import { ReasoningSelector } from '@/components/ReasoningSelector'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
 import { ToolApprovalList } from '@/components/ToolApprovalCard'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
@@ -52,6 +53,7 @@ export function ChatPanel({
   const [bgEnabled, setBgEnabled] = useState(() => localStorage.getItem(BG_STORAGE_KEY) === 'true')
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const [selectedModel, setSelectedModel] = useState('')
+  const [selectedReasoning, setSelectedReasoning] = useState('')
   const [modelMaxTokens, setModelMaxTokens] = useState(128000)
   const [availableModels, setAvailableModels] = useState<string[]>([])
 
@@ -63,6 +65,10 @@ export function ChatPanel({
   const handleModelChange = useCallback((model: string, maxTokens: number) => {
     setSelectedModel(model)
     setModelMaxTokens(maxTokens)
+  }, [])
+
+  const handleReasoningChange = useCallback((effort: string) => {
+    setSelectedReasoning(effort)
   }, [])
 
   // Auto-dismiss notification
@@ -104,6 +110,7 @@ export function ChatPanel({
     onStreamComplete,
     bgEnabled,
     selectedModel,
+    selectedReasoning,
     onCustomEvent: approvalApi.ingestCustomEvent,
   })
 
@@ -331,6 +338,11 @@ export function ChatPanel({
         <div ref={inputRef}>
           <div className="flex items-center justify-end gap-1 px-4">
             <ModelSelector threadId={threadId ?? ''} onModelChange={handleModelChange} />
+            <ReasoningSelector
+              threadId={threadId ?? ''}
+              selectedModel={selectedModel}
+              onReasoningChange={handleReasoningChange}
+            />
             <BackgroundResponsesToggle enabled={bgEnabled} onToggle={handleBgToggle} />
             <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
           </div>
@@ -362,6 +374,11 @@ export function ChatPanel({
           <div className="relative bg-background">
             <div className="mx-auto flex max-w-3xl items-center justify-end gap-1 px-4">
               <ModelSelector threadId={threadId ?? ''} onModelChange={handleModelChange} />
+              <ReasoningSelector
+                threadId={threadId ?? ''}
+                selectedModel={selectedModel}
+                onReasoningChange={handleReasoningChange}
+              />
               <BackgroundResponsesToggle enabled={bgEnabled} onToggle={handleBgToggle} />
               <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
             </div>

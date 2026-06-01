@@ -70,23 +70,18 @@ class Settings(BaseSettings):
     anthropic_foundry_resource: str = ""
     anthropic_foundry_base_url: str = ""
 
-    # Anthropic generation / reasoning. Anthropic requires max_tokens on every
-    # request; when extended thinking is enabled budget_tokens must be strictly
-    # less than max_tokens (validated at startup).
+    # Anthropic generation. Anthropic requires max_tokens on every request as a
+    # hard cap on thinking + text output (CTR-0006, UDR-0047 D5).
     anthropic_max_tokens: int = 8192
-    # Per-model "model:budget_tokens" pairs; only listed models enable
-    # extended thinking. Empty = thinking disabled for all Anthropic models.
-    anthropic_thinking_budget: str = ""
 
     # Web Search
     web_search_country: str = "US"
 
-    # Reasoning Effort (CTR-0069, PRP-0035)
-    # Per-model format: "o3:high,o4-mini:medium" (only listed models get reasoning)
-    # Single value fallback: "high" (applies to ALL models, deprecated)
-    # Empty: reasoning disabled for all models
-    # Valid effort values: low, medium, high, xhigh
-    reasoning_effort: str = ""
+    # Reasoning effort (PRP-0071, UDR-0047): the per-provider allowed list and
+    # DEFAULT are fixed, code-owned constants served by the backend (azure-openai
+    # -> medium, anthropic -> xhigh); see app.providers.{azure_openai,anthropic}.
+    # The effort is selectable per message in the UI -- there is no env var for
+    # it (decision: backend-managed default, not operator-configurable).
 
     # Session
     sessions_dir: str = ".sessions"
@@ -263,7 +258,7 @@ class Settings(BaseSettings):
     # demo_mode is true; populates AgentRegistry so the model selector
     # UI is non-trivially exercised. Comma-separated. Empty falls back
     # to a single "chatwalaau-demo" entry.
-    demo_models: str = "gpt-4o-demo,gpt-4o-mini-demo,o3-demo"
+    demo_models: str = "gpt-5.5,gpt-5.4"
 
     # Demo per-token streaming delay in milliseconds (CTR-0006 v22,
     # PRP-0066). Used by DemoChatClient to pace ChatResponseUpdate
@@ -416,67 +411,6 @@ class Settings(BaseSettings):
         """
         return {model: self.get_max_context_tokens(model) for model in self.all_model_list}
 
-    def get_anthropic_thinking_budget(self, model: str | None = None) -> int | None:
-        """Resolve the Anthropic extended-thinking budget_tokens for a model.
-
-        ANTHROPIC_THINKING_BUDGET is a per-model "model:budget_tokens" list;
-        only listed models enable thinking. Returns None when the model is not
-        listed (thinking disabled) or the list is empty.
-        """
-        raw = self.anthropic_thinking_budget.strip()
-        if not raw:
-            return None
-        pairs: dict[str, int] = {}
-        for entry in raw.split(","):
-            entry = entry.strip()
-            if ":" in entry:
-                name, value = entry.split(":", 1)
-                try:
-                    pairs[name.strip()] = int(value.strip())
-                except ValueError:
-                    continue
-        target = model or self.default_model
-        return pairs.get(target)
-
-    def get_reasoning_effort(self, model: str | None = None) -> str | None:
-        """Resolve reasoning effort for a specific model.
-
-        Returns the effort level string if configured for the model, or None
-        if reasoning should not be applied.
-
-        Supports two formats:
-        - Per-model: "o3:high,o4-mini:medium" -> only listed models get reasoning
-        - Single value (deprecated): "high" -> applies to ALL models
-        - Empty: disabled for all models
-
-        Models NOT listed in per-model format receive None (no reasoning parameter).
-        This is the "not set" semantic: the model does not send reasoning.effort.
-        """
-        raw = self.reasoning_effort.strip()
-        if not raw:
-            return None
-
-        if ":" not in raw:
-            # Single value (deprecated backward compat): applies to all models
-            _logger.warning(
-                "REASONING_EFFORT='%s' (single value) applies to ALL models. "
-                "Migrate to per-model format: REASONING_EFFORT=model:%s",
-                raw,
-                raw,
-            )
-            return raw
-
-        # Per-model format: "o3:high,o4-mini:medium"
-        pairs: dict[str, str] = {}
-        for entry in raw.split(","):
-            entry = entry.strip()
-            if ":" in entry:
-                name, value = entry.split(":", 1)
-                pairs[name.strip()] = value.strip()
-
-        target = model or self.default_model
-        return pairs.get(target)  # None if model not listed -> no reasoning
-
     # ---- Demo Mode helpers (CTR-0006 v22, PRP-0066, UDR-0041) ----
 
     @property
@@ -516,9 +450,12 @@ class Settings(BaseSettings):
         - ANTHROPIC_HOSTING must be one of {direct, foundry} (normalised).
         - Foundry hosting requires a resource or a base_url.
         - Model ids must be unique across providers (UDR-0045 D3).
-        - Each ANTHROPIC_THINKING_BUDGET entry must be < ANTHROPIC_MAX_TOKENS.
         Validation only fires for the configured surface, so Azure-only
         deployments (ANTHROPIC_MODELS empty) are never affected.
+        Reasoning effort (PRP-0071, UDR-0047): Anthropic uses adaptive thinking
+        + output_config.effort; ANTHROPIC_THINKING_BUDGET is removed, so there is
+        no budget-vs-max_tokens check. The effort default is a fixed,
+        backend-owned per-provider constant (no env var).
         """
         hosting = (self.anthropic_hosting or "").strip().lower()
         allowed = {"direct", "foundry"}
@@ -542,23 +479,6 @@ class Settings(BaseSettings):
             )
             raise ValueError(msg)
 
-        raw = self.anthropic_thinking_budget.strip()
-        if raw:
-            for entry in raw.split(","):
-                entry = entry.strip()
-                if ":" not in entry:
-                    continue
-                name, value = entry.split(":", 1)
-                try:
-                    budget = int(value.strip())
-                except ValueError:
-                    continue
-                if budget >= self.anthropic_max_tokens:
-                    msg = (
-                        f"ANTHROPIC_THINKING_BUDGET for {name.strip()!r} ({budget}) must be "
-                        f"< ANTHROPIC_MAX_TOKENS ({self.anthropic_max_tokens})."
-                    )
-                    raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

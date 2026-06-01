@@ -80,6 +80,7 @@ function CopyButton({ text }: { text: string }) {
       size="icon"
       className="h-6 w-6 text-muted-foreground hover:text-foreground"
       onClick={handleCopy}
+      title={copied ? 'Copied' : 'Copy message'}
       aria-label="Copy message">
       {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
     </Button>
@@ -107,6 +108,7 @@ function TTSPlayButton({ message, tts }: { message: ChatMessage; tts: TTSControl
       onClick={handleClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      title={isThisPlaying ? 'Stop playback' : 'Play message'}
       aria-label={isThisPlaying ? 'Stop playback' : 'Play message'}>
       {isThisLoading ? (
         <Loader2 className="h-3 w-3 animate-spin" />
@@ -141,6 +143,7 @@ function TTSDownloadButton({
       className="h-6 w-6 text-muted-foreground hover:text-foreground"
       onClick={handleClick}
       disabled={isThisDownloading}
+      title="Download audio (MP3)"
       aria-label="Download audio">
       {isThisDownloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
     </Button>
@@ -337,6 +340,7 @@ export function ChatMessageItem({
                 size="icon"
                 className="h-6 w-6 text-muted-foreground hover:text-foreground"
                 onClick={handleStartEdit}
+                title="Edit message"
                 aria-label="Edit message">
                 <Pencil className="h-3 w-3" />
               </Button>
@@ -347,6 +351,7 @@ export function ChatMessageItem({
                 size="icon"
                 className="h-6 w-6 text-muted-foreground hover:text-foreground"
                 onClick={() => onSaveAsTemplate(message.content)}
+                title="Save as template"
                 aria-label="Save as template">
                 <FileTextIcon className="h-3 w-3" />
               </Button>
@@ -358,6 +363,7 @@ export function ChatMessageItem({
                   size="icon"
                   className="h-6 w-6 text-muted-foreground hover:text-foreground"
                   onClick={handleRegenerate}
+                  title="Regenerate response"
                   aria-label="Regenerate response">
                   <RefreshCw className="h-3 w-3" />
                 </Button>
@@ -368,6 +374,7 @@ export function ChatMessageItem({
                       size="icon"
                       className="h-6 w-4 -ml-1 text-muted-foreground hover:text-foreground"
                       onClick={() => setRegenModelOpen((prev) => !prev)}
+                      title="Regenerate with a different model"
                       aria-label="Regenerate with model">
                       <ChevronDown className="h-2.5 w-2.5" />
                     </Button>
@@ -407,6 +414,7 @@ export function ChatMessageItem({
                 size="icon"
                 className="h-6 w-6 text-muted-foreground hover:text-foreground"
                 onClick={onBranch}
+                title="Branch into a new chat from here"
                 aria-label="Branch in new chat">
                 <GitBranch className="h-3 w-3" />
               </Button>
@@ -417,12 +425,18 @@ export function ChatMessageItem({
                 size="icon"
                 className="h-6 w-6 text-muted-foreground hover:text-destructive"
                 onClick={() => setDeleteConfirmOpen(true)}
+                title="Delete message"
                 aria-label="Delete message">
                 <Trash2 className="h-3 w-3" />
               </Button>
             )}
             {!isUser && message.model && (
               <span className="ml-1 text-[11px] text-muted-foreground/50">{message.model}</span>
+            )}
+            {!isUser && message.reasoning && (
+              <span className="ml-1 text-[11px] text-muted-foreground/50 capitalize" title="Reasoning effort">
+                {message.reasoning}
+              </span>
             )}
             {!isUser && message.usage && (
               <span className="ml-1 text-[11px] tabular-nums text-muted-foreground/60">

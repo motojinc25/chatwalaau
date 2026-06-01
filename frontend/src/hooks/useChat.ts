@@ -24,6 +24,8 @@ interface UseChatOptions {
   onStreamComplete?: () => void
   bgEnabled?: boolean
   selectedModel?: string
+  /** Selected reasoning effort sent as AG-UI state.reasoning (CTR-0009, PRP-0071). */
+  selectedReasoning?: string
   /**
    * PRP-0067 / CTR-0100. Receives AG-UI CUSTOM events that useChat does
    * not itself act on (e.g., tool_approval_request /
@@ -45,6 +47,7 @@ export function useChat(options?: UseChatOptions) {
   const onStreamCompleteRef = useRef(options?.onStreamComplete)
   const bgEnabledRef = useRef(options?.bgEnabled ?? false)
   const selectedModelRef = useRef(options?.selectedModel ?? '')
+  const selectedReasoningRef = useRef(options?.selectedReasoning ?? '')
   const onCustomEventRef = useRef(options?.onCustomEvent)
 
   useEffect(() => {
@@ -73,6 +76,10 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     selectedModelRef.current = options?.selectedModel ?? ''
   }, [options?.selectedModel])
+
+  useEffect(() => {
+    selectedReasoningRef.current = options?.selectedReasoning ?? ''
+  }, [options?.selectedReasoning])
 
   useEffect(() => {
     onCustomEventRef.current = options?.onCustomEvent
@@ -131,6 +138,7 @@ export function useChat(options?: UseChatOptions) {
         const aguiState: Record<string, unknown> = {}
         const effectiveModel = options?.modelOverride || selectedModelRef.current
         if (effectiveModel) aguiState.model = effectiveModel
+        if (selectedReasoningRef.current) aguiState.reasoning = selectedReasoningRef.current
         if (bgEnabledRef.current) aguiState.background = true
         if (options?.resumeToken) aguiState.continuation_token = options.resumeToken
 
@@ -373,10 +381,16 @@ export function useChat(options?: UseChatOptions) {
                   if (event.name === 'usage' && event.value) {
                     completedUsage = event.value as UsageInfo
                     const usageModel = (event.value as Record<string, unknown>).model as string | undefined
+                    const usageReasoning = (event.value as Record<string, unknown>).reasoning as string | undefined
                     setMessages((prev) =>
                       prev.map((msg) =>
                         msg.id === assistantId
-                          ? { ...msg, usage: event.value as UsageInfo, ...(usageModel ? { model: usageModel } : {}) }
+                          ? {
+                              ...msg,
+                              usage: event.value as UsageInfo,
+                              ...(usageModel ? { model: usageModel } : {}),
+                              ...(usageReasoning ? { reasoning: usageReasoning } : {}),
+                            }
                           : msg,
                       ),
                     )

@@ -57,8 +57,31 @@ def build_chat_client(model: str) -> Any:
     return provider_for(model).build_chat_client(model)
 
 
-def build_model_options(model: str) -> dict[str, Any]:
-    return provider_for(model).build_model_options(model)
+def build_model_options(model: str, effort: str | None = None) -> dict[str, Any]:
+    return provider_for(model).build_model_options(model, effort)
+
+
+def reasoning_catalog(model: str) -> dict[str, Any]:
+    """Return ``{"allowed": [...], "default": ...}`` for ``model`` (CTR-0102 v2)."""
+    return provider_for(model).reasoning_catalog(model)
+
+
+def resolve_effort(model: str, requested: str | None) -> str:
+    """Resolve a requested effort to a valid one for ``model`` (UDR-0047 D4).
+
+    Returns ``requested`` when it is in the model's allowed list; otherwise the
+    model's catalog default (also for ``None`` / unknown). Never raises, so a
+    bad ``state.reasoning`` can never produce a provider validation error.
+    """
+    catalog = provider_for(model).reasoning_catalog(model)
+    if requested in catalog["allowed"]:
+        return requested  # type: ignore[return-value]
+    return catalog["default"]
+
+
+def reasoning_options_map(models: list[str]) -> dict[str, dict[str, Any]]:
+    """model -> reasoning catalog map for the GET /api/model selector (CTR-0069)."""
+    return {model: reasoning_catalog(model) for model in models}
 
 
 def web_search_tool(model: str) -> Any | None:
@@ -73,6 +96,9 @@ __all__ = [
     "build_model_options",
     "openai_web_search_tool",
     "provider_for",
+    "reasoning_catalog",
+    "reasoning_options_map",
+    "resolve_effort",
     "resolve_models",
     "web_search_tool",
 ]

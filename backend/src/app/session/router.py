@@ -414,6 +414,12 @@ class UsageItem(BaseModel):
     input_token_count: int | None = None
     output_token_count: int | None = None
     total_token_count: int | None = None
+    # Persisted so the assistant action bar restores them on reload (PRP-0071,
+    # CTR-0030 / CTR-0014). Without these, model_dump dropped the model and
+    # reasoning effort and past chats showed no model / reasoning label.
+    max_context_tokens: int | None = None
+    model: str | None = None
+    reasoning: str | None = None
 
 
 class SaveMessageItem(BaseModel):

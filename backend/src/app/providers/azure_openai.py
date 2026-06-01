@@ -17,6 +17,12 @@ from app.core.config import settings
 
 NAME = "azure-openai"
 
+# Reasoning effort catalog (PRP-0071, UDR-0047 D2/D3). The OpenAI Responses API
+# accepts none / minimal / low / medium / high / xhigh, but the reasoning-only
+# policy hides none / minimal -- only low and above are offered (UDR-0047 D3).
+OPENAI_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
+OPENAI_EFFORT_DEFAULT = "medium"
+
 
 def openai_web_search_tool() -> Any:
     """Build the OpenAI hosted web search tool (country-scoped).
@@ -46,13 +52,18 @@ class AzureOpenAIProvider:
             **get_chat_client_credential_kwargs(),
         )
 
-    def build_model_options(self, model: str) -> dict[str, Any]:
-        # Per-model reasoning effort (CTR-0069): only models listed in
-        # REASONING_EFFORT send the parameter. Unlisted -> empty options.
-        effort = settings.get_reasoning_effort(model)
-        if effort:
-            return {"reasoning": {"effort": effort, "summary": "detailed"}}
-        return {}
+    def reasoning_catalog(self, model: str) -> dict[str, Any]:
+        # Fixed, backend-owned allowed list + default (PRP-0071, UDR-0047 D2).
+        # Azure OpenAI default reasoning effort is always `medium`; the operator
+        # picks per message in the UI. Not env-configurable.
+        return {"allowed": list(OPENAI_EFFORT_LEVELS), "default": OPENAI_EFFORT_DEFAULT}
+
+    def build_model_options(self, model: str, effort: str | None = None) -> dict[str, Any]:
+        # Reasoning-only policy: always send reasoning.effort (UDR-0047 D3).
+        # Requested effort wins when allowed; otherwise the catalog default.
+        catalog = self.reasoning_catalog(model)
+        chosen = effort if effort in catalog["allowed"] else catalog["default"]
+        return {"reasoning": {"effort": chosen, "summary": "detailed"}}
 
     def web_search_tool(self, model: str) -> Any:
         return openai_web_search_tool()

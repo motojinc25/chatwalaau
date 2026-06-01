@@ -106,7 +106,8 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - MCP Apps: interactive UI rendered in sandboxed iframes for MCP tools with `_meta.ui` resources
 - RAG Pipeline: PDF ingestion with ChromaDB vector search, Azure OpenAI embedding, and source citations
 - Batch Processing: async job queue via Core MCP Server with real-time MCP Apps dashboard
-- Multi-provider, multi-model switching: switch between **Azure OpenAI** and **Anthropic (Claude)** models mid-conversation with per-model reasoning and context window. Each provider owns its credentials and reasoning shape (OpenAI `reasoning.effort` vs Anthropic `thinking.budget_tokens`); add Claude models with `ANTHROPIC_MODELS` and they appear in the existing model selector. Both Anthropic hostings supported: **Direct** (Anthropic public API) and **Foundry** (Anthropic on Azure AI Foundry)
+- Multi-provider, multi-model switching: switch between **Azure OpenAI** and **Anthropic (Claude)** models mid-conversation. Add Claude models with `ANTHROPIC_MODELS` and they appear in the existing model selector. Both Anthropic hostings supported: **Direct** (Anthropic public API) and **Foundry** (Anthropic on Azure AI Foundry)
+- Per-message reasoning effort: a selector next to the model picker sets how hard the model reasons, per message. Allowed levels and the default follow the selected model and are served by the backend -- Azure OpenAI (`low`/`medium`/`high`/`xhigh`, default `medium`); Anthropic (`low`/`medium`/`high`/`xhigh`/`max`, default `xhigh`, via adaptive thinking). The chosen effort is shown next to the model name and per-turn token usage, and persists with the session
 - Session management: save, search, organize into folders, pin, archive, fork, rename
 - Sidebar folders: assign a color from a preset palette (set on create or change later via the folder menu), reorder folders by drag-and-drop, and collapse folders by default (open/closed state remembered per device); the folder list self-heals if its saved color/order values are ever corrupted
 - Background Responses: long-running agent timeout prevention with stream resumption
@@ -419,23 +420,34 @@ ANTHROPIC_API_KEY=sk-ant-...
 # ANTHROPIC_BASE_URL=https://your-gateway.example.com
 ```
 
-**Foundry hosting** (Anthropic on Azure AI Foundry); supply either a resource name OR a full base URL:
+**Foundry hosting** (Anthropic on Azure AI Foundry).
+
+*Endpoint* -- supply exactly ONE (they are mutually exclusive). `ANTHROPIC_FOUNDRY_RESOURCE` is the Azure AI Services **resource name** (the subdomain) -- **not** the Foundry *project* URL or project name -- and expands to `https://<resource>.services.ai.azure.com/anthropic/`. Use `ANTHROPIC_FOUNDRY_BASE_URL` to give that full URL directly instead.
+
+*Auth* -- pick ONE:
 
 ```
 ANTHROPIC_HOSTING=foundry
+ANTHROPIC_FOUNDRY_RESOURCE=my-aifoundry          # resource name only (subdomain)
+# OR: ANTHROPIC_FOUNDRY_BASE_URL=https://my-aifoundry.services.ai.azure.com/anthropic/
+
+# Auth option A -- API key (sent as the api-key header):
 ANTHROPIC_FOUNDRY_API_KEY=<foundry-key>
-ANTHROPIC_FOUNDRY_RESOURCE=<resource-subdomain>   # before .services.ai.azure.com
-# OR
-# ANTHROPIC_FOUNDRY_BASE_URL=https://<resource>.services.ai.azure.com/models/anthropic
+
+# Auth option B -- Entra ID (Azure CLI / Managed Identity): leave the API key
+# EMPTY. The runtime uses the same Azure credential lane as Azure OpenAI
+# (AZURE_CREDENTIAL_MODE: cli | managed-identity | default; AZURE_TENANT_ID),
+# sending an "Authorization: Bearer <token>" header. Do NOT place a token in
+# ANTHROPIC_FOUNDRY_API_KEY -- it is sent verbatim as the api-key header (HTTP 401).
 ```
 
-**Generation and extended thinking** (Anthropic requires `max_tokens` on every request; budget must be strictly less than `max_tokens`):
+**Generation and extended thinking** (Anthropic requires `max_tokens` on every request as a hard output cap):
 
 ```
 ANTHROPIC_MAX_TOKENS=8192
-# Per-model "model:budget_tokens"; only listed models enable extended thinking.
-ANTHROPIC_THINKING_BUDGET=claude-sonnet-4-5-20250929:6000
 ```
+
+Claude Opus 4.7/4.8 use **adaptive thinking** plus an **effort level** (`output_config.effort`); the deprecated `budget_tokens` mechanism is no longer used. The reasoning effort is chosen **per message** in the UI (default `xhigh`) -- there is no environment variable for it. See [Reasoning effort](#multi-model-switching).
 
 Hosted web search is included for Anthropic models out of the box (uses Anthropic's `web_search_20250305` tool, no extra config required). Every other agent feature -- Weather, Coding tools + Tool Approval, RAG, Image Generation, Vision input, MCP -- works on either provider as long as the chosen model supports tool calling. Speech-to-text, text-to-speech, image generation, and RAG embedding run on their own dedicated Azure models and are independent of the chat provider choice.
 
@@ -955,16 +967,15 @@ AZURE_OPENAI_MODELS=gpt-4o,o3,gpt-4.1-mini
 - **Per-message model label**: each assistant message shows which model generated it
 - All models share the same Tools, Skills, and MCP integrations
 
-Per-model reasoning effort (only listed models send the parameter):
+**Reasoning effort** is selectable **per message** from a selector next to the model picker. The allowed levels and the default follow the selected model and are served by the backend (`GET /api/model`); the chosen effort is shown next to the model name + token usage and persists with the session. There is **no environment variable** -- the per-provider default is fixed (Azure OpenAI `medium`; Anthropic `xhigh`):
+
+- Azure OpenAI (gpt-5.5 / gpt-5.4): `low`, `medium`, `high`, `xhigh` -> `reasoning.effort`
+- Anthropic (Opus 4.8 / 4.7): `low`, `medium`, `high`, `xhigh`, `max` -> adaptive thinking + `output_config.effort`
+
+Per-model context window limits (one shared variable across **all** providers):
 
 ```
-REASONING_EFFORT=o3:high,o4-mini:medium
-```
-
-Per-model context window limits:
-
-```
-MODEL_MAX_CONTEXT_TOKENS=gpt-4o:128000,o3:200000,gpt-4.1-mini:1047576
+MODEL_MAX_CONTEXT_TOKENS=gpt-5.5:1050000,gpt-5.4:1050000,claude-opus-4-8:200000,claude-opus-4-7:200000
 ```
 
 ---

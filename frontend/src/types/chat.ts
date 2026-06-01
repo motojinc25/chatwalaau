@@ -22,6 +22,10 @@ export interface UsageInfo {
   output_token_count?: number
   total_token_count?: number
   max_context_tokens?: number
+  /** Model that produced this turn (CTR-0009 usage event). */
+  model?: string
+  /** Reasoning effort used for this turn (CTR-0030, PRP-0071). */
+  reasoning?: string
 }
 
 export type ActivityEntry = { type: 'reasoning'; id: string } | { type: 'toolCall'; id: string }
@@ -49,6 +53,8 @@ export interface ChatMessage {
   mcpApp?: McpAppEvent
   /** Model that generated this assistant message (CTR-0071, PRP-0035) */
   model?: string
+  /** Reasoning effort used for this assistant message (CTR-0030, PRP-0071) */
+  reasoning?: string
 }
 
 export interface PromptTemplate {
