@@ -5,6 +5,7 @@ import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
+import { MessageNavigator } from '@/components/MessageNavigator'
 import { ModelSelector } from '@/components/ModelSelector'
 import { ReasoningSelector } from '@/components/ReasoningSelector'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
@@ -14,6 +15,7 @@ import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialo
 import { useChat } from '@/hooks/useChat'
 import { useChatScroll } from '@/hooks/useChatScroll'
 import { useImageAttachment } from '@/hooks/useImageAttachment'
+import { useMessageNavigator } from '@/hooks/useMessageNavigator'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useToolApproval } from '@/hooks/useToolApproval'
 import { useTTS } from '@/hooks/useTTS'
@@ -218,6 +220,11 @@ export function ChatPanel({
   const { scrollRef, inputRef, showScrollToBottomButton, bottomSpacerHeightPx, scrollToBottom } =
     useChatScroll(streamingKey)
 
+  // CTR-0103 Message Navigator (PRP-0072): user-turn index rail + popover.
+  // Full-page /chat only (non-compact); availability is gated by the measured
+  // right gutter and the user-turn count inside the hook.
+  const messageNav = useMessageNavigator(scrollRef, messages, { enabled: !compact })
+
   const latestUsage = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].usage) return messages[i].usage
@@ -321,6 +328,12 @@ export function ChatPanel({
           {!compact && <div aria-hidden="true" style={{ height: bottomSpacerHeightPx }} />}
         </div>
       </div>
+
+      {/* CTR-0103 Message Navigator: floating right-gutter rail + popover.
+          Overlay only; absent in compact mode and on constrained viewports. */}
+      {messageNav.isAvailable && (
+        <MessageNavigator turns={messageNav.turns} activeId={messageNav.activeId} onJump={messageNav.scrollToTurn} />
+      )}
 
       {notification && (
         <div

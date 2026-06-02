@@ -86,6 +86,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Text-to-Speech playback and download, with a selectable provider: ElevenLabs or Azure OpenAI Realtime voice models (e.g. `gpt-realtime-2`)
 - Multimodal image analysis (file attachment, drag-and-drop, URL)
 - Session management: save, search, pin, archive, fork, rename
+- Conversation navigator: a floating right-edge rail of your questions in long chats; click to open a shortcut list and jump straight to any of your messages (shown on the full-page chat when the window is wide enough)
 - Context window consumption display with warning levels
 - Per-turn token usage display
 - Three layout scenarios: Chat, Popup, Sidebar
