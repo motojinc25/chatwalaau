@@ -41,6 +41,8 @@ class AzureOpenAIProvider:
     """Provider for Azure OpenAI deployments (default provider)."""
 
     name = NAME
+    # Azure OpenAI Responses API supports background runs + resume (CTR-0045).
+    supports_background = True
 
     def models(self) -> list[str]:
         return settings.model_list

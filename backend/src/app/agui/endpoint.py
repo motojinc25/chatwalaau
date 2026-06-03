@@ -334,8 +334,15 @@ async def _stream_with_reasoning(
             continuation_token = {"response_id": continuation_token}
 
         run_options: dict[str, Any] = {}
-        if background:
+        # CTR-0045 / PRP-0073: background runs are an OpenAI Responses API
+        # feature. Drop the flag for providers that do not support it (e.g.
+        # Anthropic Opus 4.7/4.8) so a stale client toggle can never produce a
+        # provider validation error. The UI also disables the toggle for these
+        # models, so this is defense-in-depth.
+        if background and providers.background_supported(effective_model):
             run_options["background"] = True
+        elif background:
+            background = False
         if continuation_token:
             run_options["continuation_token"] = continuation_token
         # Per-request reasoning options override the Agent's startup default_options

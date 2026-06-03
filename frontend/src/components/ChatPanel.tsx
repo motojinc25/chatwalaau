@@ -58,6 +58,17 @@ export function ChatPanel({
   const [selectedReasoning, setSelectedReasoning] = useState('')
   const [modelMaxTokens, setModelMaxTokens] = useState(128000)
   const [availableModels, setAvailableModels] = useState<string[]>([])
+  // CTR-0045 / PRP-0073: per-model background-response capability. The toggle
+  // is disabled for models whose provider does not support background runs
+  // (e.g. Anthropic Opus 4.7/4.8); GPT / Azure OpenAI models support it.
+  const [bgSupportedMap, setBgSupportedMap] = useState<Record<string, boolean>>({})
+
+  // Default to supported when the map has no entry for the model (keeps GPT
+  // working before the map loads and avoids hiding the feature on unknowns).
+  const bgSupported = selectedModel ? (bgSupportedMap[selectedModel] ?? true) : true
+  // Never send background=true for an unsupported model even if localStorage
+  // had it enabled from a previous GPT session.
+  const effectiveBgEnabled = bgEnabled && bgSupported
 
   const handleBgToggle = useCallback((enabled: boolean) => {
     setBgEnabled(enabled)
@@ -110,7 +121,7 @@ export function ChatPanel({
     threadId,
     initialMessages,
     onStreamComplete,
-    bgEnabled,
+    bgEnabled: effectiveBgEnabled,
     selectedModel,
     selectedReasoning,
     onCustomEvent: approvalApi.ingestCustomEvent,
@@ -167,35 +178,53 @@ export function ChatPanel({
     async (compositedBlob: Blob, previewBlob: Blob, prompt: string) => {
       setMaskEditorState(null)
       if (!threadId) return
-      try {
-        // Upload mask preview image (for user message display)
-        const previewForm = new FormData()
-        previewForm.append('file', new File([previewBlob], 'mask_preview.png', { type: 'image/png' }))
-        const previewRes = await fetch(`/api/upload/${threadId}`, { method: 'POST', body: previewForm })
-        const previewData = previewRes.ok ? await previewRes.json() : null
 
-        // Upload composited image (source for edit_image tool -- transparent areas = edit regions)
-        const compositedForm = new FormData()
-        compositedForm.append(
-          'file',
-          new File([compositedBlob], `mask_source_${Date.now()}.png`, { type: 'image/png' }),
-        )
-        const compositedRes = await fetch(`/api/upload/${threadId}`, { method: 'POST', body: compositedForm })
-        const compositedData = compositedRes.ok ? await compositedRes.json() : null
+      // PRP-0073: render the user message immediately, then upload in the
+      // background. The composited filename is already disk/URL-safe, so the
+      // dispatched instruction can be built up-front (the upload stores it
+      // verbatim) -- no need to wait for the upload response before showing
+      // the bubble. The preview shows a local object URL instantly and is
+      // swapped for the durable uploaded URI by the prepare() hook.
+      const compositedFilename = `mask_source_${Date.now()}.png`
+      const instruction = `Edit the masked areas of the image "${compositedFilename}": ${prompt}`
+      const previewObjectUrl = URL.createObjectURL(previewBlob)
 
-        if (!compositedData?.filename) {
-          setNotification({ type: 'error', message: 'Failed to upload source image' })
-          return
-        }
+      await sendMessage(instruction, [{ uri: previewObjectUrl, media_type: 'image/png' }], {
+        prepare: async () => {
+          try {
+            // Upload composited source (edit regions) + display preview in
+            // parallel so the agent can read the source as soon as possible.
+            const compositedForm = new FormData()
+            compositedForm.append('file', new File([compositedBlob], compositedFilename, { type: 'image/png' }))
+            const previewForm = new FormData()
+            previewForm.append('file', new File([previewBlob], 'mask_preview.png', { type: 'image/png' }))
 
-        // Send user message: preview image + instruction for agent to call edit_image
-        const images: ImageRef[] = []
-        if (previewData?.uri) images.push({ uri: previewData.uri, media_type: 'image/png' })
+            const [compositedRes, previewRes] = await Promise.all([
+              fetch(`/api/upload/${threadId}`, { method: 'POST', body: compositedForm }),
+              fetch(`/api/upload/${threadId}`, { method: 'POST', body: previewForm }),
+            ])
 
-        sendMessage(`Edit the masked areas of the image "${compositedData.filename}": ${prompt}`, images)
-      } catch (err) {
-        setNotification({ type: 'error', message: err instanceof Error ? err.message : 'Failed to start mask edit' })
-      }
+            const compositedData = compositedRes.ok ? await compositedRes.json() : null
+            const previewData = previewRes.ok ? await previewRes.json() : null
+
+            if (!compositedData?.filename) {
+              setNotification({ type: 'error', message: 'Failed to upload source image' })
+              return null
+            }
+
+            const images: ImageRef[] = previewData?.uri ? [{ uri: previewData.uri, media_type: 'image/png' }] : []
+            return { images }
+          } catch (err) {
+            setNotification({
+              type: 'error',
+              message: err instanceof Error ? err.message : 'Failed to start mask edit',
+            })
+            return null
+          }
+        },
+      })
+
+      URL.revokeObjectURL(previewObjectUrl)
     },
     [threadId, sendMessage],
   )
@@ -209,6 +238,7 @@ export function ChatPanel({
       .then((data) => {
         if (data?.max_context_tokens) setModelMaxTokens((prev) => (prev === 128000 ? data.max_context_tokens : prev))
         if (data?.models) setAvailableModels(data.models)
+        if (data?.background_supported_map) setBgSupportedMap(data.background_supported_map)
       })
       .catch(() => {})
   }, [])
@@ -356,7 +386,7 @@ export function ChatPanel({
               selectedModel={selectedModel}
               onReasoningChange={handleReasoningChange}
             />
-            <BackgroundResponsesToggle enabled={bgEnabled} onToggle={handleBgToggle} />
+            <BackgroundResponsesToggle enabled={effectiveBgEnabled} onToggle={handleBgToggle} disabled={!bgSupported} />
             <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
           </div>
           <ChatInput
@@ -392,7 +422,11 @@ export function ChatPanel({
                 selectedModel={selectedModel}
                 onReasoningChange={handleReasoningChange}
               />
-              <BackgroundResponsesToggle enabled={bgEnabled} onToggle={handleBgToggle} />
+              <BackgroundResponsesToggle
+                enabled={effectiveBgEnabled}
+                onToggle={handleBgToggle}
+                disabled={!bgSupported}
+              />
               <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
             </div>
             <ChatInput
@@ -405,7 +439,7 @@ export function ChatPanel({
               onRemoveAttachment={removeAttachment}
               getImageRefs={getImageRefs}
               isUploading={isUploading}
-              bgEnabled={bgEnabled}
+              bgEnabled={effectiveBgEnabled}
               onOpenTemplates={handleOpenTemplates}
             />
           </div>

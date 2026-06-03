@@ -23,6 +23,14 @@ class Provider(Protocol):
 
     name: str
 
+    # Whether this provider supports OpenAI-style background responses
+    # (Responses API ``background=true`` + continuation_token resume,
+    # CTR-0045). Azure OpenAI supports it; Anthropic does not. Consumed by
+    # the GET /api/model background_supported_map (CTR-0041) and the AG-UI
+    # run-option guard (CTR-0045), and surfaced in the UI to disable the
+    # Background toggle for non-supporting models (PRP-0073).
+    supports_background: bool
+
     def models(self) -> list[str]:
         """Ordered model ids this provider serves (from its env namespace)."""
         ...

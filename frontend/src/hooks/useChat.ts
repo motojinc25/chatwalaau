@@ -94,6 +94,13 @@ export function useChat(options?: UseChatOptions) {
         images?: ImageRef[]
         resumeToken?: Record<string, unknown>
         modelOverride?: string
+        // PRP-0073: async preparation that runs AFTER the optimistic user
+        // bubble + assistant placeholder render (so the user sees their
+        // message instantly) but BEFORE the agent dispatch. Used by mask-edit
+        // to upload images in the background. Returns the durable image refs
+        // to swap into the optimistic message (replacing local object URLs),
+        // or null to abort the send with an error.
+        prepare?: () => Promise<{ images?: ImageRef[] } | null>
       },
     ): Promise<boolean> => {
       const userMessage: ChatMessage = {
@@ -122,8 +129,28 @@ export function useChat(options?: UseChatOptions) {
       abortRef.current = new AbortController()
       let continuationTokenReceived = false
       let streamSuccess = true
+      // Images dispatched to the agent + persisted. Starts as the optimistic
+      // images and is replaced by prepare()'s durable refs when provided.
+      let dispatchImages = options?.images
 
       try {
+        // PRP-0073: run async preparation (e.g. mask-edit image uploads) now
+        // that the optimistic user bubble is already on screen. On success,
+        // swap the optimistic (local object URL) images for the durable
+        // uploaded refs so dispatch, persistence, and reload all agree.
+        if (options?.prepare) {
+          const prepared = await options.prepare()
+          if (!prepared) throw new Error('Failed to prepare message')
+          dispatchImages = prepared.images
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === userMessage.id
+                ? { ...msg, images: prepared.images && prepared.images.length > 0 ? prepared.images : undefined }
+                : msg,
+            ),
+          )
+        }
+
         // Initialize session file before agent processing (PRP-0025)
         // Creates the JSON file so the session ID is persisted early
         if (!options?.skipUserMessage && !options?.resumeToken) {
@@ -159,7 +186,7 @@ export function useChat(options?: UseChatOptions) {
                   id: userMessage.id,
                   role: 'user',
                   content: userContent,
-                  ...(options?.images && options.images.length > 0 ? { images: options.images } : {}),
+                  ...(dispatchImages && dispatchImages.length > 0 ? { images: dispatchImages } : {}),
                 },
               ]
         const response = await fetch('/ag-ui/', {
@@ -440,8 +467,8 @@ export function useChat(options?: UseChatOptions) {
             assistantMsg.usage = completedUsage
           }
           const userMsg: Record<string, unknown> = { role: 'user', content: userContent }
-          if (options?.images && options.images.length > 0) {
-            userMsg.images = options.images
+          if (dispatchImages && dispatchImages.length > 0) {
+            userMsg.images = dispatchImages
           }
           const saveMessages: Record<string, unknown>[] = options?.skipUserMessage
             ? [assistantMsg]
@@ -503,9 +530,13 @@ export function useChat(options?: UseChatOptions) {
   }, [messages])
 
   const sendMessage = useCallback(
-    async (content: string, images?: ImageRef[]) => {
-      if (!content.trim() && (!images || images.length === 0)) return
-      await streamResponse(content.trim(), messagesRef.current, { images })
+    async (
+      content: string,
+      images?: ImageRef[],
+      opts?: { prepare?: () => Promise<{ images?: ImageRef[] } | null> },
+    ) => {
+      if (!content.trim() && (!images || images.length === 0) && !opts?.prepare) return
+      await streamResponse(content.trim(), messagesRef.current, { images, prepare: opts?.prepare })
     },
     [streamResponse],
   )

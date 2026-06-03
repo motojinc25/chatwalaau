@@ -88,10 +88,27 @@ def web_search_tool(model: str) -> Any | None:
     return provider_for(model).web_search_tool(model)
 
 
+def background_supported(model: str) -> bool:
+    """Whether ``model``'s provider supports background responses (CTR-0045).
+
+    Azure OpenAI -> True, Anthropic -> False. Unknown models resolve via
+    ``provider_for`` (defaults to azure-openai). Used by the AG-UI run-option
+    guard and the GET /api/model capability map (PRP-0073).
+    """
+    return bool(getattr(provider_for(model), "supports_background", False))
+
+
+def background_supported_map(models: list[str]) -> dict[str, bool]:
+    """model -> background support flag for the GET /api/model selector (CTR-0041)."""
+    return {model: background_supported(model) for model in models}
+
+
 __all__ = [
     "PROVIDERS",
     "Provider",
     "anthropic_web_search_tool",
+    "background_supported",
+    "background_supported_map",
     "build_chat_client",
     "build_model_options",
     "openai_web_search_tool",
