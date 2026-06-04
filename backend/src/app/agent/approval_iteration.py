@@ -38,10 +38,22 @@ rate limit (429 Too Many Requests).
 
 The synthetic assistant preserves Anthropic's ``thinking`` block signature
 (stored on ``TextReasoningContent.protected_data``, round-tripped by the MAF
-connector at serialization time). The construction is provider-agnostic:
-OpenAI agents see an explicit (rather than missing) assistant context, which
-is structurally neutral or beneficial; Anthropic agents see the
-``tool_use`` / ``tool_result`` pairing the API requires.
+connector at serialization time).
+
+Reconstruction is provider-aware (``build_iteration_messages`` flags), because
+OpenAI reasoning models impose the OPPOSITE constraint from Anthropic:
+
+- Anthropic needs the signed ``thinking`` block replayed and the original
+  ``tool_use`` Content preserved (``include_reasoning=True``,
+  ``strip_function_call_ids=False``).
+- OpenAI reasoning models (gpt-5.x on the Responses API) link each
+  ``function_call`` server item (``fc_...``) to the ``reasoning`` item
+  (``rs_...``) emitted with it. We cannot replay that exact ``rs_`` item, so
+  replaying the original function_call (with its ``fc_`` id) provokes HTTP 400
+  ("function_call ... provided without its required 'reasoning' item"). OpenAI
+  therefore drops the reasoning and rebuilds function_calls without server item
+  ids (``include_reasoning=False``, ``strip_function_call_ids=True``), matched
+  only by ``call_id`` -- the standard non-reasoning tool-replay shape.
 """
 
 from __future__ import annotations
@@ -171,29 +183,56 @@ class IterationContentAccumulator:
 
     # ---- iteration boundary ----
 
-    def _resolved_function_call(self, call_id: str) -> Content:
+    def _streamed_args(self, call_id: str) -> str | Any | None:
+        """Best-available arguments for ``call_id`` from the streamed observation.
+
+        A structured (parsed) value wins over the joined string chunks.
+        """
+        if call_id in self._function_call_args_structured:
+            return self._function_call_args_structured[call_id]
+        chunks = self._function_call_args_chunks.get(call_id)
+        return "".join(chunks) if chunks else None
+
+    def _resolved_function_call(self, call_id: str, *, strip_server_item_ids: bool = False) -> Content:
         """Build the canonical Content for ``call_id`` for the synthetic assistant.
 
         Priority order:
         1. The Content from a function_approval_request (complete by construction).
         2. A streamed function_call rebuilt from its captured name + args. When
            a structured args value was observed, it wins over the joined chunks.
+
+        ``strip_server_item_ids`` (OpenAI reasoning models): NEVER return the
+        approval's original Content. The original FunctionCallContent carries
+        the provider's server item id (``fc_...``) in its raw_representation,
+        which the OpenAI Responses API links to the reasoning item (``rs_...``)
+        emitted alongside it in the original response. Replaying that
+        function_call without its exact reasoning item triggers HTTP 400
+        ("Item 'fc_...' of type 'function_call' was provided without its
+        required 'reasoning' item: 'rs_...'"). A freshly built function_call
+        (matched only by ``call_id``) carries no such linkage and is accepted.
         """
         from_approval = self._function_call_from_approval.get(call_id)
-        if from_approval is not None:
+        if from_approval is not None and not strip_server_item_ids:
             return from_approval
         name = self._function_call_name.get(call_id, "")
         args: str | Any | None
-        if call_id in self._function_call_args_structured:
-            args = self._function_call_args_structured[call_id]
+        if from_approval is not None:
+            # Rebuild from the approval Content's fields, dropping its
+            # raw_representation / server item id.
+            name = getattr(from_approval, "name", None) or name
+            args = getattr(from_approval, "arguments", None)
+            if args is None:
+                args = self._streamed_args(call_id)
         else:
-            chunks = self._function_call_args_chunks.get(call_id)
-            args = "".join(chunks) if chunks else None
+            args = self._streamed_args(call_id)
         return Content.from_function_call(call_id=call_id, name=name, arguments=args)
 
     def build_iteration_messages(
         self,
         approval_response_contents: list[Content],
+        *,
+        include_reasoning: bool = True,
+        strip_function_call_ids: bool = False,
     ) -> list[Message]:
         """Build ``[synthetic_assistant, synthetic_user]`` for iter N+1's input.
 
@@ -204,23 +243,40 @@ class IterationContentAccumulator:
         order) followed by the operator's function_approval_response contents
         for the gated tools that paused.
 
+        Provider-aware reconstruction (defaults preserve the Anthropic path):
+
+        - ``include_reasoning`` (Anthropic: True): replay the ``thinking`` block
+          with its signature so the connector re-emits a valid signed reasoning
+          block paired with its ``tool_use``. OpenAI passes False -- a replayed
+          reasoning item without its original ``rs_`` id is useless and, paired
+          with a server-id-bearing function_call, provokes the Responses API
+          reasoning/function_call pairing 400.
+        - ``strip_function_call_ids`` (OpenAI: True): rebuild every function_call
+          without the provider server item id so the Responses API does not
+          demand the matching reasoning item (see ``_resolved_function_call``).
+          Anthropic passes False to keep the original ``tool_use`` Content.
+
         Empty assistant or user messages are skipped so a degenerate
         iteration (e.g., no observed content) does not inject a no-op Message
         into the conversation.
         """
         assistant_contents: list[Content] = []
-        reasoning_text = "".join(self._reasoning_text_chunks)
-        if reasoning_text:
-            assistant_contents.append(
-                Content.from_text_reasoning(
-                    text=reasoning_text,
-                    protected_data=self._reasoning_signature,
+        if include_reasoning:
+            reasoning_text = "".join(self._reasoning_text_chunks)
+            if reasoning_text:
+                assistant_contents.append(
+                    Content.from_text_reasoning(
+                        text=reasoning_text,
+                        protected_data=self._reasoning_signature,
+                    )
                 )
-            )
         text = "".join(self._text_chunks)
         if text:
             assistant_contents.append(Content.from_text(text=text))
-        assistant_contents.extend(self._resolved_function_call(cid) for cid in self._function_call_order)
+        assistant_contents.extend(
+            self._resolved_function_call(cid, strip_server_item_ids=strip_function_call_ids)
+            for cid in self._function_call_order
+        )
 
         user_contents: list[Content] = []
         for call_id in self._function_call_order:

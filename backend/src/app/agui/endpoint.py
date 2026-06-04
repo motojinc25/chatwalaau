@@ -691,15 +691,26 @@ async def _stream_with_reasoning(
 
             # PRP-0069 follow-up: append BOTH the iter-N synthetic assistant
             # message (carrying the originating function_call(s) plus the
-            # accumulated reasoning + text, with the Anthropic thinking signature
-            # preserved) AND the user message bundling every approval response.
-            # Without the synthetic assistant, MAF's Anthropic connector emits a
-            # tool_result block with no preceding tool_use (HTTP 400 orphan
-            # tool_result). OpenAI tolerated the missing context; Anthropic
-            # enforces strict tool_use/tool_result pairing. The construction is
-            # provider-agnostic -- OpenAI sees a structurally explicit context,
-            # which is neutral or beneficial (no model behaviour change).
-            iter_synthetic_messages = iter_accumulator.build_iteration_messages(approval_response_contents)
+            # accumulated text -- and, for Anthropic, the signed reasoning) AND
+            # the user message bundling every approval response. Without the
+            # synthetic assistant, MAF's Anthropic connector emits a tool_result
+            # block with no preceding tool_use (HTTP 400 orphan tool_result).
+            #
+            # Reconstruction is provider-aware (defect fix): OpenAI reasoning
+            # models (gpt-5.x Responses API) link each function_call server item
+            # (fc_...) to the reasoning item (rs_...) emitted with it. We cannot
+            # replay that exact rs_ item, so replaying the original function_call
+            # (with its fc_ id) returns HTTP 400 "function_call ... provided
+            # without its required 'reasoning' item". For OpenAI we therefore
+            # drop the reasoning and rebuild function_calls without server item
+            # ids (matched by call_id). Anthropic keeps the signed reasoning +
+            # original tool_use Content the API requires.
+            is_anthropic = providers.provider_for(effective_model).name == "anthropic"
+            iter_synthetic_messages = iter_accumulator.build_iteration_messages(
+                approval_response_contents,
+                include_reasoning=is_anthropic,
+                strip_function_call_ids=not is_anthropic,
+            )
             iteration_messages = [*iteration_messages, *iter_synthetic_messages]
             # Reset server-side response chaining before the post-approval
             # re-run. The approval handshake interrupts the iteration-N
