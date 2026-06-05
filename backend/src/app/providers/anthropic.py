@@ -50,6 +50,22 @@ NAME = "anthropic"
 ANTHROPIC_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 ANTHROPIC_EFFORT_DEFAULT = "xhigh"
 
+# Total output budget (thinking + visible text) per effort level. Anthropic
+# counts BOTH adaptive-thinking tokens AND the answer against max_tokens, so a
+# small cap lets high-effort thinking starve the answer: observed ~70s of xhigh
+# thinking on Opus 4.8, then a single-character reply that stopped at
+# stop_reason=max_tokens. Each effort therefore needs a far larger cap than the
+# 8192 baseline. These tiers are within Claude Opus 4.7/4.8 output limits;
+# ANTHROPIC_MAX_TOKENS acts as a floor an operator can raise further (e.g. for a
+# model with a larger output window), never a value that can lower the tier.
+ANTHROPIC_EFFORT_MAX_TOKENS: dict[str, int] = {
+    "low": 8192,
+    "medium": 16000,
+    "high": 32000,
+    "xhigh": 48000,
+    "max": 64000,
+}
+
 # One INFO log line per active hosting lane per process (mirrors UDR-0034).
 _logged_lanes: set[str] = set()
 
@@ -136,11 +152,19 @@ class AnthropicProvider:
         # thinking.type=enabled + budget_tokens returns HTTP 400). The effort
         # level goes in a separate output_config object; display=summarized keeps
         # the thinking blocks populated for the reasoning UI (CTR-0017, UDR-0047
-        # D5/F3). max_tokens remains required as a hard output cap.
+        # D5/F3).
+        #
+        # max_tokens caps thinking + text TOGETHER, so it must scale with the
+        # effort or high-effort thinking starves the visible answer to ~1 token
+        # (the xhigh "one character then stops" defect). Use the per-effort tier,
+        # floored by the operator's ANTHROPIC_MAX_TOKENS so a larger configured
+        # value still wins.
         catalog = self.reasoning_catalog(model)
         chosen = effort if effort in catalog["allowed"] else catalog["default"]
+        effort_budget = ANTHROPIC_EFFORT_MAX_TOKENS.get(chosen, ANTHROPIC_EFFORT_MAX_TOKENS["high"])
+        max_tokens = max(settings.anthropic_max_tokens, effort_budget)
         return {
-            "max_tokens": settings.anthropic_max_tokens,
+            "max_tokens": max_tokens,
             "thinking": {"type": "adaptive", "display": "summarized"},
             "output_config": {"effort": chosen},
         }

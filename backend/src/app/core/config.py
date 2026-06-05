@@ -71,7 +71,11 @@ class Settings(BaseSettings):
     anthropic_foundry_base_url: str = ""
 
     # Anthropic generation. Anthropic requires max_tokens on every request as a
-    # hard cap on thinking + text output (CTR-0006, UDR-0047 D5).
+    # cap on thinking + text output COMBINED (CTR-0006, UDR-0047 D5). Because
+    # adaptive-thinking effort and the answer share this budget, the per-effort
+    # tier (app.providers.anthropic.ANTHROPIC_EFFORT_MAX_TOKENS) is the effective
+    # value; this setting is a FLOOR an operator can raise (never lowers the
+    # tier). Default 8192 = the low-effort tier.
     anthropic_max_tokens: int = 8192
 
     # Web Search
