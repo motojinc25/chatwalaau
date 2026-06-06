@@ -39,6 +39,9 @@ __pycache__/
 # Prompt Templates
 .templates/
 
+# Agent Identity (PRP-0073: operator-owned; default auto-generated from code)
+.agent/
+
 # TLS Certificates
 .certs/
 

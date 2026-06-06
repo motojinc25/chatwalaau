@@ -25,6 +25,7 @@ from agent_framework import Agent
 from app import providers
 from app.agent.approval import resolve_require_set, wrap_with_approval
 from app.agent.compaction import resolve_compaction_strategy
+from app.agent.identity import build_system_prompt
 from app.agui.agent_registry import WEB_SEARCH_INSTRUCTION, AgentRegistry, _build_chat_client
 from app.core.config import settings
 from app.demo import is_demo_mode, resolve_demo_models
@@ -107,8 +108,11 @@ def _build_tools_and_instructions(
     # base tool list and the web search guidance lives in WEB_SEARCH_INSTRUCTION
     # (appended only for models whose provider supplies a web search tool).
     tools: list[Any] = [get_coords_by_city, get_current_weather_by_coords, get_weather_next_week]
+    # Capability / tool guidance only. The Global Agent Identity (Prompt Assembly
+    # slot #1) is prepended by build_system_prompt() at the end of assembly,
+    # replacing the former anonymous persona sentence (PRP-0073, CTR-0104,
+    # UDR-0049 D4).
     instructions = (
-        "You are a helpful AI assistant. "
         "You can look up weather information for any city worldwide. "
         "For weather queries: first use get_coords_by_city to get coordinates, "
         "then use get_current_weather_by_coords or get_weather_next_week. "
@@ -217,7 +221,8 @@ def _build_tools_and_instructions(
     if skills_provider:
         context_providers.append(skills_provider)
 
-    return tools, context_providers, instructions
+    # Prompt Assembly: prepend the Global Agent Identity as slot #1 (CTR-0104).
+    return tools, context_providers, build_system_prompt(instructions)
 
 
 def create_agent_registry() -> AgentRegistry:

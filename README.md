@@ -103,6 +103,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 
 ### Platform
 
+- Global Agent Identity: a single `.agent/IDENTITY.md` file defines the agent's persona, tone, and base posture for every project and conversation -- it is the first block of the system prompt. Edit it to rebrand the assistant; delete it and the runtime regenerates a sensible default on next start. No env var, fixed path, and read-only hosts (containers) fall back to the built-in default instead of failing to boot
 - MCP Integration: connect external tools via Model Context Protocol (Claude Desktop-compatible config)
 - MCP Apps: interactive UI rendered in sandboxed iframes for MCP tools with `_meta.ui` resources
 - RAG Pipeline: PDF ingestion with ChromaDB vector search, Azure OpenAI embedding, and source citations
