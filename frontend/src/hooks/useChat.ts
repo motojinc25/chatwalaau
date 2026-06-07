@@ -550,7 +550,12 @@ export function useChat(options?: UseChatOptions) {
       const truncated = current.slice(0, idx)
 
       // Truncate backend session
-      fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
+      // Await the truncate so the backend session file is persisted BEFORE
+      // streamResponse triggers POST /ag-ui/ -> before_run reads the file.
+      // Otherwise the two requests race and before_run can load stale,
+      // un-truncated history (duplicate / out-of-order turns), which the
+      // Azure OpenAI Responses API can reject mid-stream.
+      await fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),
@@ -581,7 +586,12 @@ export function useChat(options?: UseChatOptions) {
       const truncated = current.slice(0, idx)
 
       // Truncate backend session (remove only this assistant message)
-      fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
+      // Await the truncate so the backend session file is persisted BEFORE
+      // streamResponse triggers POST /ag-ui/ -> before_run reads the file.
+      // Otherwise the two requests race and before_run can load stale,
+      // un-truncated history (duplicate / out-of-order turns), which the
+      // Azure OpenAI Responses API can reject mid-stream.
+      await fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),
@@ -611,7 +621,12 @@ export function useChat(options?: UseChatOptions) {
 
       const truncated = current.slice(0, idx)
 
-      fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
+      // Await the truncate so the backend session file is persisted BEFORE
+      // streamResponse triggers POST /ag-ui/ -> before_run reads the file.
+      // Otherwise the two requests race and before_run can load stale,
+      // un-truncated history (duplicate / out-of-order turns), which the
+      // Azure OpenAI Responses API can reject mid-stream.
+      await fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),

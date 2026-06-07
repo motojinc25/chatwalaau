@@ -122,28 +122,23 @@ class FileHistoryProvider(HistoryProvider):
         _frontend_keys = {"tool_calls", "usage", "activity_log"}
         messages = [Message.from_dict({k: v for k, v in m.items() if k not in _frontend_keys}) for m in raw_messages]
         self._resolve_image_contents(messages, raw_messages)
-        # Anthropic (PRP-0069): a `thinking` block replayed as input requires a
-        # cryptographic signature that we do not persist (reasoning is stored
-        # only for frontend display, UDR-0001). Feeding prior-turn thinking back
-        # to the Anthropic API returns HTTP 400
-        # (messages.*.content.*.thinking.signature: Field required), so strip
-        # reasoning from the model-bound history for Anthropic agents. Reasoning
-        # is a per-turn scratchpad, not conversation history; other providers
-        # (OpenAI / demo) are unchanged and the session JSON is untouched.
-        if self._is_anthropic_agent(agent):
-            messages = self._strip_reasoning_contents(messages)
+        # Reasoning is a per-turn scratchpad persisted only for frontend display
+        # (UDR-0001); replaying it to the model as input history is never valid,
+        # so strip text_reasoning from the model-bound history for EVERY provider
+        # (the session JSON is untouched -- reasoning still renders in the SPA):
+        #   - Anthropic rejects a `thinking` block replayed without its
+        #     cryptographic signature, which we do not persist (HTTP 400
+        #     messages.*.content.*.thinking.signature: Field required; PRP-0069).
+        #   - OpenAI reasoning models (gpt-5.x Responses API) treat prior-turn
+        #     reasoning summary items re-fed as standalone input as foreign /
+        #     unpaired items. On long sessions and on edit / regenerate (where
+        #     the full history is replayed instead of chaining via
+        #     previous_response_id) this intermittently returns HTTP 5xx
+        #     ("The server had an error processing your request"). v0.70.1
+        #     defect fix -- generalizes the previously Anthropic-only strip.
+        messages = self._strip_reasoning_contents(messages)
         context.extend_messages(self, messages)
         logger.info("Loaded %d messages from session %s", len(messages), thread_id)
-
-    @staticmethod
-    def _is_anthropic_agent(agent: SupportsAgentRun) -> bool:
-        """True when the agent's chat client is an Anthropic connector.
-
-        Covers both AnthropicClient (direct) and AnthropicFoundryClient
-        (foundry); OpenAIChatClient and DemoChatClient return False.
-        """
-        client = getattr(agent, "client", None)
-        return client is not None and type(client).__name__.startswith("Anthropic")
 
     @staticmethod
     def _strip_reasoning_contents(messages: list[Message]) -> list[Message]:

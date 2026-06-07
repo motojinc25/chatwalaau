@@ -137,6 +137,31 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_transient_upstream_error(exc: BaseException) -> bool:
+    """Detect a transient upstream 5xx anywhere in the exception chain.
+
+    Azure/OpenAI may return a generic server error mid-stream ("The server had
+    an error processing your request ... You can retry your request"). The
+    mid-stream variant is raised as a plain ``openai.APIError`` with no
+    ``status_code``, so match by type name and message text as well as by code.
+    agent-framework wraps it in ChatClientException, hence the chain walk.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        status = getattr(cur, "status_code", None)
+        if isinstance(status, int) and 500 <= status < 600:
+            return True
+        if type(cur).__name__ in {"InternalServerError", "APITimeoutError", "APIConnectionError"}:
+            return True
+        text = str(cur).lower()
+        if "the server had an error processing your request" in text or "internal server error" in text:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def _strip_pdf_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Remove PDF image_url entries from message content arrays.
 
@@ -753,6 +778,14 @@ async def _stream_with_reasoning(
                 "raise the deployment quota."
             )
             logger.warning("AG-UI stream rate limited (429) for thread %s: %s", thread_id, exc)
+        elif _is_transient_upstream_error(exc):
+            error_message = (
+                "The model provider returned a temporary server error (HTTP 5xx) "
+                "while generating the response. This is usually transient -- "
+                "please resend your message. On a very long conversation it can "
+                "also help to start a new chat."
+            )
+            logger.warning("AG-UI stream upstream 5xx for thread %s: %s", thread_id, exc)
         else:
             error_message = "An internal error occurred during agent execution."
             logger.exception("AG-UI stream error")
