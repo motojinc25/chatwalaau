@@ -91,6 +91,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Per-turn token usage display
 - Three layout scenarios: Chat, Popup, Sidebar
 - Multilingual chat with browser auto-translation suppressed
+- Smooth large sessions: opening a long conversation and continuing to chat stays responsive -- only the streaming message re-renders, so scrolling and typing no longer slow down as the message count grows
 
 ### Agent Tools
 

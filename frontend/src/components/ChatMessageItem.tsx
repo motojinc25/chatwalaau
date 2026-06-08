@@ -14,7 +14,7 @@ import {
   User,
   Volume2,
 } from 'lucide-react'
-import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { type KeyboardEvent, memo, useCallback, useEffect, useRef, useState } from 'react'
 import { ImageGenerationResults } from '@/components/ImageGenerationResult'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
 import { McpAppView } from '@/components/mcp-apps/McpAppView'
@@ -56,7 +56,9 @@ interface ChatMessageItemProps {
   onEditAssistant?: (messageId: string, newContent: string) => void
   onRegenerateAssistant?: (messageId: string) => void
   onDelete?: (messageId: string) => void
-  onBranch?: () => void
+  // PRP-0074: takes the row index so ChatPanel can pass a referentially
+  // stable callback (no per-row inline closure) and keep React.memo effective.
+  onBranch?: (messageIndex: number) => void
   onSaveAsTemplate?: (content: string) => void
   onMaskEdit?: (imageUrl: string) => void
   /** Available models for regenerate-with-model dropdown (CTR-0071) */
@@ -150,7 +152,7 @@ function TTSDownloadButton({
   )
 }
 
-export function ChatMessageItem({
+function ChatMessageItemImpl({
   message,
   messageIndex = 0,
   compact,
@@ -418,7 +420,7 @@ export function ChatMessageItem({
                 variant="ghost"
                 size="icon"
                 className="h-6 w-6 text-muted-foreground hover:text-foreground"
-                onClick={onBranch}
+                onClick={() => onBranch(messageIndex)}
                 title="Branch into a new chat from here"
                 aria-label="Branch in new chat">
                 <GitBranch className="h-3 w-3" />
@@ -472,3 +474,10 @@ export function ChatMessageItem({
     </div>
   )
 }
+
+// PRP-0074 (UDR-0050, Tier 1): memoize each row so a streaming tail-message
+// delta -- which recreates the messages array on every CTR-0009 token -- only
+// re-renders the changed message instead of all messages. Every prop passed by
+// ChatPanel is referentially stable (useCallback-bound handlers + the stable
+// onBranch reference), so the default shallow comparison is sufficient.
+export const ChatMessageItem = memo(ChatMessageItemImpl)

@@ -1,5 +1,5 @@
 import { Check, Copy, Download } from 'lucide-react'
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Button } from '@/components/ui/button'
@@ -32,7 +32,7 @@ const EXTENSION_MAP: Record<string, string> = {
   toml: 'toml',
 }
 
-export function CodeBlock({ language, value }: CodeBlockProps) {
+function CodeBlockImpl({ language, value }: CodeBlockProps) {
   const [copied, setCopied] = useState(false)
 
   const handleCopy = async () => {
@@ -84,3 +84,8 @@ export function CodeBlock({ language, value }: CodeBlockProps) {
     </div>
   )
 }
+
+// PRP-0074 (UDR-0050, Tier 1): memoize on { language, value } so Prism
+// re-highlights a code block only when its source text changes, not on every
+// parent re-render during streaming.
+export const CodeBlock = memo(CodeBlockImpl)

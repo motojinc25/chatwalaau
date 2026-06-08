@@ -1,7 +1,7 @@
 import 'katex/dist/katex.min.css'
 
 import { Check, Copy } from 'lucide-react'
-import { useCallback, useRef, useState } from 'react'
+import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import type { Components } from 'react-markdown'
 import ReactMarkdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
@@ -248,9 +248,12 @@ function preprocessMath(text: string): string {
   return processed
 }
 
-export function MarkdownRenderer({ content }: MarkdownRendererProps) {
+function MarkdownRendererImpl({ content }: MarkdownRendererProps) {
   // CTR-0012 v1.6 (PRP-0055): compact body text size and leading for
   // higher information density on a single viewport.
+  // PRP-0074 (UDR-0050, Tier 1): memoize the delimiter preprocessing so it is
+  // not recomputed on a re-render that leaves `content` unchanged.
+  const processed = useMemo(() => preprocessMath(content), [content])
   return (
     <div className="text-[15px] leading-[1.55] [&>*:last-child]:mb-0">
       <ReactMarkdown
@@ -258,8 +261,12 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
         rehypePlugins={[[rehypeKatex, { throwOnError: false, trust: true, strict: false }]]}
         remarkRehypeOptions={remarkRehypeOptions}
         components={components}>
-        {preprocessMath(content)}
+        {processed}
       </ReactMarkdown>
     </div>
   )
 }
+
+// PRP-0074 (UDR-0050, Tier 1): memoize on `content` so a static message never
+// re-runs the remark/rehype + KaTeX pipeline when an unrelated message streams.
+export const MarkdownRenderer = memo(MarkdownRendererImpl)

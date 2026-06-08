@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { extractPlainText } from '@/lib/extractPlainText'
 
 export type TTSState = 'idle' | 'loading' | 'playing'
@@ -127,14 +127,21 @@ export function useTTS(): UseTTSReturn {
     }
   }, [])
 
-  return {
-    ttsState,
-    downloadState,
-    playingMessageId,
-    downloadingMessageId,
-    play,
-    stop,
-    download,
-    error,
-  }
+  // PRP-0074 (UDR-0050, Tier 1): return a referentially stable object so the
+  // `tts` prop passed to each memoized ChatMessageItem does not change identity
+  // on every ChatPanel render (e.g. per streaming token). It only changes when
+  // an actual TTS state value or a handler changes.
+  return useMemo(
+    () => ({
+      ttsState,
+      downloadState,
+      playingMessageId,
+      downloadingMessageId,
+      play,
+      stop,
+      download,
+      error,
+    }),
+    [ttsState, downloadState, playingMessageId, downloadingMessageId, play, stop, download, error],
+  )
 }

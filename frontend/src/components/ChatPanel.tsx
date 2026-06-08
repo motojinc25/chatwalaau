@@ -343,7 +343,7 @@ export function ChatPanel({
               onEditAssistant={editAssistantMessage}
               onRegenerateAssistant={regenerateAssistantMessage}
               onDelete={deleteMessage}
-              onBranch={onBranchFromMessage ? () => onBranchFromMessage(i) : undefined}
+              onBranch={onBranchFromMessage}
               onSaveAsTemplate={handleSaveAsTemplate}
               onMaskEdit={handleMaskEdit}
               availableModels={availableModels}
