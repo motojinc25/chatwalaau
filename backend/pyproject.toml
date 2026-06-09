@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.71.0"
+version = "0.73.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"

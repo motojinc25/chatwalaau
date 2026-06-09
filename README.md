@@ -85,6 +85,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - Voice input via microphone with Whisper transcription (supports `whisper`, `gpt-4o-transcribe`, and `gpt-realtime-whisper` via Realtime API)
 - Text-to-Speech playback and download, with a selectable provider: ElevenLabs or Azure OpenAI Realtime voice models (e.g. `gpt-realtime-2`)
 - Multimodal image analysis (file attachment, drag-and-drop, URL)
+- Temporary Chat: an "incognito-style" throwaway conversation started from the top-right of the chat screen. It does not appear in your history or search, cannot be resumed (closing/leaving/reloading discards it), and runs de-personalized -- the agent uses only its base Identity, never reads or writes your saved preferences (the built-in learning loop is untouched), while all other tools stay available. The input turns dark while active. For safety it is briefly retained server-side (`TEMPORARY_CHAT_RETENTION_DAYS`, default 30) then auto-deleted -- "not in your history", not "never stored". Also available on the API via an opt-in `temporary` flag (default off)
 - Session management: save, search, pin, archive, fork, rename
 - Conversation navigator: a floating right-edge rail of your questions in long chats; click to open a shortcut list and jump straight to any of your messages (shown on the full-page chat when the window is wide enough)
 - Context window consumption display with warning levels
@@ -105,6 +106,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 ### Platform
 
 - Global Agent Identity: a single `.agent/IDENTITY.md` file defines the agent's persona, tone, and base posture for every project and conversation -- it is the first block of the system prompt. Edit it to rebrand the assistant; delete it and the runtime regenerates a sensible default on next start. No env var, fixed path, and read-only hosts (containers) fall back to the built-in default instead of failing to boot
+- User Preference Memory: the agent keeps a small, durable profile of how you like to be helped (preferences, communication style, expectations, workflow habits) in a single `.agent/USER.md` file, rendered into the system prompt right after the Identity. It maintains the file itself during chats via an inline memory tool (add / replace / remove / consolidate); a deterministic filter blocks secrets and sensitive personal data from ever being stored, and the file is kept small (`USER_CHAR_LIMIT`, default 1375). Each session reads a frozen snapshot taken at session start -- so prompts stay cache-stable and consistent across reloads, and anything the agent learns mid-session takes effect from your next session. On by default; set `USER_PROFILE_ENABLED=false` to turn it off (fixed path, read-only hosts fall back to a built-in default)
 - MCP Integration: connect external tools via Model Context Protocol (Claude Desktop-compatible config)
 - MCP Apps: interactive UI rendered in sandboxed iframes for MCP tools with `_meta.ui` resources
 - RAG Pipeline: PDF ingestion with ChromaDB vector search, Azure OpenAI embedding, and source citations

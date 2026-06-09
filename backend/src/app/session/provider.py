@@ -41,6 +41,15 @@ class FileHistoryProvider(HistoryProvider):
         return None
 
     def _session_path(self, thread_id: str) -> Path:
+        # Temporary Chat threads (temp_ prefix) read/write the .temporary/
+        # quarantine directory so in-session multi-turn context is restored from
+        # the same place the frontend saved it (CTR-0106 / CTR-0014, UDR-0052).
+        from app.agent.temporary import is_temporary, temporary_path
+
+        if is_temporary(thread_id):
+            path = temporary_path(thread_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
         return self._sessions_dir / f"{thread_id}.json"
 
     def _read_session_data(self, thread_id: str) -> dict[str, Any] | None:

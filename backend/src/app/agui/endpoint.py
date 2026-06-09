@@ -61,6 +61,8 @@ from app.agent.approval import (
     truncate_arguments_preview,
 )
 from app.agent.approval_iteration import IterationContentAccumulator
+from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_path
+from app.agent.user_memory import session_user_profile_snapshot
 from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key
 from app.core.config import settings
@@ -338,11 +340,17 @@ async def _stream_with_reasoning(
         requested_reasoning = None
         background = False
         continuation_token = None
+        temporary = False
         if request_body.state:
             selected_model = request_body.state.get("model")
             requested_reasoning = request_body.state.get("reasoning")
             background = request_body.state.get("background", False)
             continuation_token = request_body.state.get("continuation_token")
+            # Temporary Chat (PRP-0076, CTR-0106, UDR-0052). When the SPA marks
+            # the run temporary the thread_id is temp_-prefixed and routes to the
+            # .temporary/ quarantine (CTR-0014); below we skip the Memory snapshot
+            # and no-op the memory tool for a de-personalized, Identity-only run.
+            temporary = bool(request_body.state.get("temporary", False))
 
         # Select agent from registry based on model (CTR-0070, PRP-0035)
         agent = agent_registry.get(selected_model)
@@ -375,6 +383,33 @@ async def _stream_with_reasoning(
         # effort; otherwise the Agent's catalog-default options already apply.
         if requested_reasoning and not is_demo_mode():
             run_options.update(providers.build_model_options(effective_model, resolved_reasoning))
+
+        # Temporary Chat (PRP-0076, CTR-0106, UDR-0052) vs normal run.
+        # Temporary: de-personalized. No User Profile snapshot is captured or
+        # injected; the memory tool no-ops via the temporary contextvar; the
+        # effective system prompt is the Identity block alone
+        # (run_instructions(temporary=True) -> None, UDR-0052 D6). The temp_
+        # thread id already routes history to the .temporary/ quarantine.
+        # Normal: User Preference Memory (PRP-0075, CTR-0105, UDR-0051 D3/D4) --
+        # capture the per-session FROZEN snapshot (once at session start; reused
+        # on reload) and merge the per-run remainder (Memory Block slot #2 +
+        # capability guidance) so the prompt is Identity -> Memory -> capabilities.
+        set_temporary_run(temporary)
+        profile_snapshot = None
+        if temporary:
+            # Opportunistic retention sweep when this temporary thread is new
+            # (UDR-0052 D4). Fire-and-forget so the stream is never blocked.
+            if not temporary_path(thread_id).exists():
+                schedule_sweep()
+        else:
+            profile_snapshot = session_user_profile_snapshot(thread_id)
+        extra_instructions = agent_registry.run_instructions(
+            effective_model,
+            user_profile_block=profile_snapshot,
+            temporary=temporary,
+        )
+        if extra_instructions:
+            run_options["instructions"] = extra_instructions
 
         # Set thread_id for image generation tools (CTR-0050, PRP-0027)
         _image_gen_thread_id.set(thread_id)

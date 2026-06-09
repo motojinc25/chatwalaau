@@ -17,6 +17,12 @@ class ResponsesRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     max_output_tokens: int | None = None
+    # Temporary Chat (CTR-0057 / CTR-0106, PRP-0076, UDR-0052). Opt-in; default
+    # false (a normal API call is non-temporary). When true the run is
+    # de-personalized (Identity-only system prompt, no User Preference Memory
+    # read/write), the session is quarantine-routed and excluded from listing,
+    # and previous_response_id chaining is rejected (no continuity).
+    temporary: bool = False
 
 
 class ResponseOutput(BaseModel):

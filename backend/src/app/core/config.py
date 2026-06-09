@@ -90,6 +90,25 @@ class Settings(BaseSettings):
     # Session
     sessions_dir: str = ".sessions"
 
+    # Temporary Chat (CTR-0106, CTR-0006, PRP-0076 / UDR-0052 D4/D9).
+    # Quarantine retention for ephemeral "incognito-style" conversations: a
+    # Temporary Chat is stored in a separate .temporary/ directory (a sibling of
+    # SESSIONS_DIR, never user-listed) for safety / abuse monitoring and is
+    # auto-deleted after this many days. The whole feature has NO enable/disable
+    # env var (always available, UDR-0052 D9); this retention period is the only
+    # knob. <= 0 disables the sweep (entries kept indefinitely).
+    temporary_chat_retention_days: int = 30
+
+    # User Preference Memory (CTR-0105, CTR-0006, PRP-0075 / UDR-0051 D12).
+    # Master toggle for the Memory Block (Prompt Assembly slot #2): the rendered
+    # .agent/USER.md snapshot, the inline memory tool, and per-session snapshot
+    # capture. Default true. USER_PROFILE_ENABLED=false restores pre-PRP-0075
+    # behavior byte-for-byte. USER_CHAR_LIMIT bounds the curated entries
+    # (boilerplate excluded); an add/replace that would exceed it is rejected with
+    # guidance to consolidate (UDR-0051 D7).
+    user_profile_enabled: bool = True
+    user_char_limit: int = 1375
+
     # File Upload
     upload_dir: str = ".uploads"
 

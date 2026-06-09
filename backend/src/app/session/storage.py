@@ -42,7 +42,18 @@ def sessions_dir() -> Path:
 
 
 def session_path(thread_id: str) -> Path:
-    """Return the JSON file path for a session."""
+    """Return the JSON file path for a session.
+
+    Temporary Chat threads (``temp_`` prefix) are routed to the ``.temporary/``
+    quarantine directory instead of ``.sessions/`` (CTR-0106, UDR-0052 D2/D3), so
+    they never appear in the sidebar list or full-text search (both scan
+    ``.sessions/`` only) and are swept by the retention policy.
+    """
+    # Lazy import avoids an import cycle (app.agent.temporary imports config only).
+    from app.agent.temporary import is_temporary, temporary_path
+
+    if is_temporary(thread_id):
+        return temporary_path(thread_id)
     return sessions_dir() / f"{thread_id}.json"
 
 

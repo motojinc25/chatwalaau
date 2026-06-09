@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import NotFoundError as OpenAINotFoundError
 
+from app.agent.temporary import new_temporary_thread_id, schedule_sweep, set_temporary_run
 from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key_strict
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
@@ -51,6 +52,11 @@ async def _stream_responses(
     response_id: str,
 ) -> AsyncGenerator[str, None]:
     """Stream OpenAI Responses API SSE events."""
+    # Temporary Chat (CTR-0057 / CTR-0106, UDR-0052): set inside the generator so
+    # the contextvar is active in the same context that runs agent.run (the
+    # memory tool reads it to no-op). request.temporary defaults false.
+    temporary = bool(getattr(request, "temporary", False))
+    set_temporary_run(temporary)
     # Emit response.created
     created_event = {
         "type": "response.created",
@@ -83,6 +89,18 @@ async def _stream_responses(
         run_options["top_p"] = request.top_p
     if request.max_output_tokens is not None:
         run_options["max_output_tokens"] = request.max_output_tokens
+
+    # User Preference Memory (PRP-0075, CTR-0105): the registry agents bake only
+    # the Identity, so supply the capability remainder per run. The frozen User
+    # Profile snapshot is the AG-UI session path and is NOT injected here
+    # (UDR-0051 D10) -> user_profile_block omitted. For a Temporary Chat run the
+    # remainder is empty (Identity-only, UDR-0052 D6).
+    extra_instructions = agent_registry.run_instructions(
+        request.model if request.model != "chatwalaau" else None,
+        temporary=temporary,
+    )
+    if extra_instructions:
+        run_options["instructions"] = extra_instructions
 
     _image_gen_thread_id.set(thread_id)
 
@@ -279,6 +297,15 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
     @app.post("/v1/responses", tags=["OpenAI API"], dependencies=[Depends(verify_api_key_strict)])
     async def create_response(request: ResponsesRequest):
         """OpenAI Responses API-compatible endpoint."""
+        temporary = bool(request.temporary)
+        # Temporary Chat (CTR-0057 / CTR-0106, UDR-0052 D5): no continuity. A
+        # temporary response cannot be chained, so reject previous_response_id.
+        if temporary and request.previous_response_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Temporary responses cannot be chained: do not send previous_response_id with temporary=true.",
+            )
+
         # Resolve session
         response_id = generate_response_id()
 
@@ -289,7 +316,10 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
                     status_code=404, detail=f"Previous response not found: {request.previous_response_id}"
                 )
         else:
-            thread_id = response_id
+            # Temporary: a temp_ thread id routes the session to the .temporary/
+            # quarantine (CTR-0014) so it is excluded from listing/search and
+            # swept by retention; otherwise the response_id is the thread id.
+            thread_id = new_temporary_thread_id() if temporary else response_id
             # Extract title from input
             title = ""
             if isinstance(request.input, str):
@@ -301,6 +331,9 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
                         title = c[:100] if isinstance(c, str) else ""
                         break
             create_api_session(thread_id, response_id, title)
+            if temporary:
+                # Opportunistic retention sweep (UDR-0052 D4); fire-and-forget.
+                schedule_sweep()
 
         if request.stream:
             return StreamingResponse(
@@ -332,6 +365,19 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
             run_options["top_p"] = request.top_p
         if request.max_output_tokens is not None:
             run_options["max_output_tokens"] = request.max_output_tokens
+
+        # User Preference Memory (PRP-0075, CTR-0105): supply the capability
+        # remainder per run under Identity-only baking; no frozen snapshot here
+        # (AG-UI session path only, UDR-0051 D10). For a Temporary Chat run the
+        # remainder is empty (Identity-only, UDR-0052 D6) and the memory tool
+        # no-ops via the contextvar set below.
+        set_temporary_run(temporary)
+        extra_instructions = agent_registry.run_instructions(
+            request.model if request.model != "chatwalaau" else None,
+            temporary=temporary,
+        )
+        if extra_instructions:
+            run_options["instructions"] = extra_instructions
 
         _image_gen_thread_id.set(thread_id)
 

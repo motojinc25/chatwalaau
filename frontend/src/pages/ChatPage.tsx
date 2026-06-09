@@ -3,8 +3,10 @@ import { useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
 import { SessionSidebar } from '@/components/SessionSidebar'
+import { TemporaryChatToggle } from '@/components/TemporaryChatToggle'
 import { Button } from '@/components/ui/button'
 import { useSession } from '@/hooks/useSession'
+import { useTemporaryChat } from '@/hooks/useTemporaryChat'
 
 export function ChatPage() {
   const navigate = useNavigate()
@@ -36,10 +38,20 @@ export function ChatPage() {
     refreshSessions,
   } = useSession()
 
+  // Temporary Chat (CTR-0107, PRP-0076). When active, the panel runs against a
+  // fresh temp_ thread held in React state only; entering never modifies an
+  // existing chat (UDR-0052 D11), and picking a sidebar session / new chat exits
+  // temporary first.
+  const temp = useTemporaryChat()
+  const effectiveThreadId = temp.isTemporary && temp.tempThreadId ? temp.tempThreadId : threadId
+
   const handleStreamComplete = useCallback(() => {
+    // Temporary chats are never listed and never exposed in the URL (UDR-0052
+    // D5): skip the history refresh + ?session= navigation entirely.
+    if (temp.isTemporary) return
     refreshSessions()
     navigate(`/chat?session=${threadId}`, { replace: true })
-  }, [refreshSessions, navigate, threadId])
+  }, [temp.isTemporary, refreshSessions, navigate, threadId])
 
   const handleBranch = useCallback(
     (messageIndex: number) => {
@@ -48,18 +60,31 @@ export function ChatPage() {
     [forkSession, threadId],
   )
 
+  const handleSwitch = useCallback(
+    (id: string) => {
+      temp.exit()
+      switchSession(id)
+    },
+    [temp, switchSession],
+  )
+
+  const handleCreate = useCallback(() => {
+    temp.exit()
+    createSession()
+  }, [temp, createSession])
+
   return (
     <div className="flex h-screen">
       {sidebarOpen && (
         <SessionSidebar
           sessions={sessions}
           folders={folders}
-          currentThreadId={threadId}
+          currentThreadId={temp.isTemporary ? '' : threadId}
           creatingFolder={isCreatingFolder}
           deletingFolderId={deletingFolderId}
           updatingFolderId={updatingFolderId}
           movingSessionId={movingSessionId}
-          onSwitch={switchSession}
+          onSwitch={handleSwitch}
           onDelete={deleteSession}
           onDeleteFolder={deleteFolder}
           onCreateFolder={createFolder}
@@ -69,7 +94,7 @@ export function ChatPage() {
           onRename={renameSession}
           onArchive={archiveSession}
           onPin={pinSession}
-          onCreate={createSession}
+          onCreate={handleCreate}
           onClose={() => setSidebarOpen(false)}
         />
       )}
@@ -86,6 +111,11 @@ export function ChatPage() {
           </Button>
         )}
 
+        {/* Temporary Chat top-right toggle (CTR-0107, PRP-0076). */}
+        <div className="absolute right-3 top-3 z-20">
+          <TemporaryChatToggle isTemporary={temp.isTemporary} onEnter={temp.enter} onExit={temp.exit} />
+        </div>
+
         {isSwitching ? (
           <div className="flex flex-1 items-center justify-center">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
@@ -93,12 +123,13 @@ export function ChatPage() {
           </div>
         ) : (
           <ChatPanel
-            key={threadId}
-            threadId={threadId}
-            initialMessages={initialMessages}
-            continuationToken={continuationToken}
+            key={effectiveThreadId}
+            threadId={effectiveThreadId}
+            initialMessages={temp.isTemporary ? [] : initialMessages}
+            continuationToken={temp.isTemporary ? null : continuationToken}
             onStreamComplete={handleStreamComplete}
-            onBranchFromMessage={handleBranch}
+            onBranchFromMessage={temp.isTemporary ? undefined : handleBranch}
+            temporary={temp.isTemporary}
           />
         )}
       </div>

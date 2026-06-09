@@ -115,6 +115,14 @@ async def lifespan(_app: FastAPI):
     # Startup: activate MCP servers (CTR-0061, PRP-0031)
     # prepare_mcp() was already called at module level before create_agent()
     await activate_mcp()
+    # Temporary Chat retention sweep (PRP-0076, CTR-0106, UDR-0052 D4): delete
+    # expired .temporary/ quarantine entries. Best-effort and non-failing; run
+    # off the event loop so a large quarantine never delays startup.
+    import asyncio as _asyncio
+
+    from app.agent.temporary import sweep_temporary
+
+    await _asyncio.to_thread(sweep_temporary)
     # Demo Mode bootstrap (PRP-0066, UDR-0041 D6): auto-seed the bundled
     # demo RAG corpus into ChromaDB when the collection is empty. The
     # helper is non-failing and idempotent.

@@ -33,6 +33,9 @@ __pycache__/
 # Uploads
 .uploads/
 
+# Temporary Chat quarantine (PRP-0076)
+.temporary/
+
 # Archives
 .archived/
 

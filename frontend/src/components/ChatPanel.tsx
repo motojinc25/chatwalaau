@@ -33,6 +33,8 @@ interface ChatPanelProps {
   continuationToken?: Record<string, unknown> | null
   onStreamComplete?: () => void
   onBranchFromMessage?: (messageIndex: number) => void
+  /** Temporary Chat mode (CTR-0107, PRP-0076): dark input, no BG toggle, no history. */
+  temporary?: boolean
 }
 
 function buildStreamingKey(messages: ChatMessage[], isLoading: boolean): string {
@@ -51,6 +53,7 @@ export function ChatPanel({
   continuationToken,
   onStreamComplete,
   onBranchFromMessage,
+  temporary = false,
 }: ChatPanelProps) {
   const [bgEnabled, setBgEnabled] = useState(() => localStorage.getItem(BG_STORAGE_KEY) === 'true')
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
@@ -124,6 +127,7 @@ export function ChatPanel({
     bgEnabled: effectiveBgEnabled,
     selectedModel,
     selectedReasoning,
+    temporary,
     onCustomEvent: approvalApi.ingestCustomEvent,
   })
 
@@ -386,7 +390,13 @@ export function ChatPanel({
               selectedModel={selectedModel}
               onReasoningChange={handleReasoningChange}
             />
-            <BackgroundResponsesToggle enabled={effectiveBgEnabled} onToggle={handleBgToggle} disabled={!bgSupported} />
+            {!temporary && (
+              <BackgroundResponsesToggle
+                enabled={effectiveBgEnabled}
+                onToggle={handleBgToggle}
+                disabled={!bgSupported}
+              />
+            )}
             <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
           </div>
           <ChatInput
@@ -401,6 +411,7 @@ export function ChatPanel({
             isUploading={isUploading}
             bgEnabled={bgEnabled}
             onOpenTemplates={handleOpenTemplates}
+            temporary={temporary}
           />
         </div>
       ) : (
@@ -422,11 +433,13 @@ export function ChatPanel({
                 selectedModel={selectedModel}
                 onReasoningChange={handleReasoningChange}
               />
-              <BackgroundResponsesToggle
-                enabled={effectiveBgEnabled}
-                onToggle={handleBgToggle}
-                disabled={!bgSupported}
-              />
+              {!temporary && (
+                <BackgroundResponsesToggle
+                  enabled={effectiveBgEnabled}
+                  onToggle={handleBgToggle}
+                  disabled={!bgSupported}
+                />
+              )}
               <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
             </div>
             <ChatInput
@@ -441,6 +454,7 @@ export function ChatPanel({
               isUploading={isUploading}
               bgEnabled={effectiveBgEnabled}
               onOpenTemplates={handleOpenTemplates}
+              temporary={temporary}
             />
           </div>
         </div>

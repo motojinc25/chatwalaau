@@ -27,6 +27,12 @@ interface UseChatOptions {
   /** Selected reasoning effort sent as AG-UI state.reasoning (CTR-0009, PRP-0071). */
   selectedReasoning?: string
   /**
+   * Temporary Chat (CTR-0107 / CTR-0106, PRP-0076). When true the run is sent
+   * with AG-UI state.temporary=true (de-personalized, quarantine-routed) and the
+   * sidebar-creating session init call is skipped so it never appears in history.
+   */
+  temporary?: boolean
+  /**
    * PRP-0067 / CTR-0100. Receives AG-UI CUSTOM events that useChat does
    * not itself act on (e.g., tool_approval_request /
    * tool_approval_response). useToolApproval supplies this callback.
@@ -48,6 +54,7 @@ export function useChat(options?: UseChatOptions) {
   const bgEnabledRef = useRef(options?.bgEnabled ?? false)
   const selectedModelRef = useRef(options?.selectedModel ?? '')
   const selectedReasoningRef = useRef(options?.selectedReasoning ?? '')
+  const temporaryRef = useRef(options?.temporary ?? false)
   const onCustomEventRef = useRef(options?.onCustomEvent)
 
   useEffect(() => {
@@ -80,6 +87,10 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     selectedReasoningRef.current = options?.selectedReasoning ?? ''
   }, [options?.selectedReasoning])
+
+  useEffect(() => {
+    temporaryRef.current = options?.temporary ?? false
+  }, [options?.temporary])
 
   useEffect(() => {
     onCustomEventRef.current = options?.onCustomEvent
@@ -152,8 +163,11 @@ export function useChat(options?: UseChatOptions) {
         }
 
         // Initialize session file before agent processing (PRP-0025)
-        // Creates the JSON file so the session ID is persisted early
-        if (!options?.skipUserMessage && !options?.resumeToken) {
+        // Creates the JSON file so the session ID is persisted early.
+        // Temporary Chat (CTR-0107) skips init: init creates a sidebar-visible
+        // .sessions entry, which a temporary chat must never have. The temp_
+        // session is created lazily in the .temporary/ quarantine by save_messages.
+        if (!options?.skipUserMessage && !options?.resumeToken && !temporaryRef.current) {
           await fetch(`/api/sessions/${threadIdRef.current}/init`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -167,6 +181,7 @@ export function useChat(options?: UseChatOptions) {
         if (effectiveModel) aguiState.model = effectiveModel
         if (selectedReasoningRef.current) aguiState.reasoning = selectedReasoningRef.current
         if (bgEnabledRef.current) aguiState.background = true
+        if (temporaryRef.current) aguiState.temporary = true
         if (options?.resumeToken) aguiState.continuation_token = options.resumeToken
 
         // PRP-0069 follow-up: for regenerate / resume / similar flows

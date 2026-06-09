@@ -25,6 +25,12 @@ interface ChatInputProps {
   isUploading?: boolean
   bgEnabled?: boolean
   onOpenTemplates?: () => void
+  /**
+   * Temporary Chat (CTR-0107, PRP-0076). When true the input is rendered with a
+   * dark/black treatment and an honest "not saved" notice so the ephemeral mode
+   * is unmistakable.
+   */
+  temporary?: boolean
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
@@ -39,6 +45,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     isUploading,
     bgEnabled,
     onOpenTemplates,
+    temporary = false,
   },
   ref,
 ) {
@@ -139,10 +146,15 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         ) : (
           <div
             className={cn(
-              'flex flex-col rounded-lg border bg-background',
-              bgEnabled
-                ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-background'
-                : 'ring-offset-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2',
+              'flex flex-col rounded-lg border',
+              // Temporary Chat (CTR-0107): dark/black treatment regardless of
+              // theme so the ephemeral mode is unmistakable.
+              temporary ? 'border-neutral-700 bg-neutral-900 text-neutral-100' : 'bg-background',
+              temporary
+                ? 'ring-offset-background focus-within:ring-2 focus-within:ring-neutral-500 focus-within:ring-offset-2'
+                : bgEnabled
+                  ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-background'
+                  : 'ring-offset-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2',
             )}>
             {onRemoveAttachment && (
               <>
@@ -230,7 +242,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 rows={1}
                 className={cn(
                   'flex-1 resize-none bg-transparent px-3 py-2 text-sm',
-                  'placeholder:text-muted-foreground',
+                  temporary ? 'text-neutral-100 placeholder:text-neutral-400' : 'placeholder:text-muted-foreground',
                   'focus-visible:outline-hidden',
                   'disabled:cursor-not-allowed disabled:opacity-50',
                   !onAddFiles && 'pl-3',
@@ -277,6 +289,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           </div>
         )}
         {voiceError && <p className="mt-1 text-xs text-destructive">{voiceError}</p>}
+        {temporary && (
+          // UDR-0052: honest wording -- "not in history / not used for
+          // personalization", NOT "never stored anywhere" (the conversation is
+          // briefly quarantine-retained for safety).
+          <p className="mt-1.5 text-center text-xs text-muted-foreground">
+            Temporary chat: not saved to your history and not used to personalize future chats.
+          </p>
+        )}
       </div>
     </div>
   )

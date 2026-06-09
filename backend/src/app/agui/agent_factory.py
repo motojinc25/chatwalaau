@@ -205,6 +205,18 @@ def _build_tools_and_instructions(
             )
             logger.info("MCP tools added to agent: %d tool(s) from servers: %s", len(mcp_tools), servers_list)
 
+    # User Preference Memory tool (PRP-0075, CTR-0105, UDR-0051 D5/D10).
+    # Registered on the shared agent at this single chokepoint when enabled, so
+    # it is available to every consumer. It is NOT in the approval require-set
+    # (UDR-0051 D9), so the wrap below is a no-op for it. The Memory Block itself
+    # (slot #2) is a per-session frozen snapshot injected per run by the AG-UI
+    # endpoint, not baked here.
+    if settings.user_profile_enabled:
+        from app.agent.user_memory import USER_MEMORY_INSTRUCTION, manage_user_memory
+
+        tools.append(manage_user_memory)
+        instructions += USER_MEMORY_INSTRUCTION
+
     # Tool approval gating (PRP-0067, CTR-0099, UDR-0043 D1).
     # The agent factory is the single chokepoint where bare Python
     # callables are turned into MAF tool surfaces; this is the right
@@ -221,8 +233,13 @@ def _build_tools_and_instructions(
     if skills_provider:
         context_providers.append(skills_provider)
 
-    # Prompt Assembly: prepend the Global Agent Identity as slot #1 (CTR-0104).
-    return tools, context_providers, build_system_prompt(instructions)
+    # Return the RAW capability instructions (slot #3..). The Identity (slot #1)
+    # and -- when enabled -- the per-session Memory Block (slot #2) are assembled
+    # by the consumer: AgentRegistry bakes Identity-only and supplies the
+    # capability/memory remainder per run when USER_PROFILE_ENABLED, otherwise it
+    # bakes the full Identity+capability prompt (CTR-0104 v2, CTR-0105, UDR-0051
+    # D4). build_devui_agent assembles the full prompt directly.
+    return tools, context_providers, instructions
 
 
 def create_agent_registry() -> AgentRegistry:
@@ -287,12 +304,16 @@ def build_devui_agent() -> Agent | None:
     if is_demo_mode():
         web_search = providers.openai_web_search_tool()
         devui_tools = [web_search, *tools]
-        devui_instructions = instructions + WEB_SEARCH_INSTRUCTION
+        # DevUI bakes the full Identity + capability prompt (no per-run Memory
+        # Block; the User Profile snapshot is the AG-UI session path, UDR-0051 D10).
+        devui_instructions = build_system_prompt(instructions + WEB_SEARCH_INSTRUCTION)
         model_options: dict[str, Any] = {}
     else:
         web_search = providers.web_search_tool(model)
         devui_tools = [web_search, *tools] if web_search is not None else list(tools)
-        devui_instructions = instructions + (WEB_SEARCH_INSTRUCTION if web_search is not None else "")
+        devui_instructions = build_system_prompt(
+            instructions + (WEB_SEARCH_INSTRUCTION if web_search is not None else "")
+        )
         model_options = providers.build_model_options(model)
 
     agent = Agent(

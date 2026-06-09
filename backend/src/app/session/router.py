@@ -104,9 +104,13 @@ async def init_session(thread_id: str, body: InitSessionRequest) -> dict[str, An
     Creates the session JSON so it appears in the sidebar immediately.
     Idempotent: returns existing session if already present.
     """
-    sessions_path = _sessions_dir()
-    sessions_path.mkdir(parents=True, exist_ok=True)
-    path = sessions_path / f"{thread_id}.json"
+    # Route via session_path so a temp_ thread id (Temporary Chat, CTR-0106) lands
+    # in the .temporary/ quarantine and never the user-listed .sessions/ dir. The
+    # SPA does not call init for temporary chats, but route defensively.
+    from app.agent.temporary import is_temporary
+
+    path = session_path(thread_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     if path.is_file():
         return {"status": "exists", "thread_id": thread_id}
@@ -122,6 +126,15 @@ async def init_session(thread_id: str, body: InitSessionRequest) -> dict[str, An
         "folder_id": None,
         "messages": [],
     }
+    # User Preference Memory (PRP-0075, CTR-0105, UDR-0051 D3): capture the
+    # FROZEN User Profile snapshot at session start. It is reused for every turn
+    # of this session (and on reload); the live .agent/USER.md may change later
+    # but this session's Memory Block does not. Temporary Chat (CTR-0106,
+    # UDR-0052 D7) is de-personalized -- no snapshot is captured.
+    if settings.user_profile_enabled and not is_temporary(thread_id):
+        from app.agent.user_memory import current_user_profile_block
+
+        data["user_profile_snapshot"] = current_user_profile_block()
     write_session_json(thread_id, data)
     logger.info("Initialized session %s", thread_id)
     return {"status": "created", "thread_id": thread_id}

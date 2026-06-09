@@ -21,6 +21,7 @@ from typing import Any
 from agent_framework import Agent
 
 from app import providers
+from app.agent.identity import build_capability_block, load_identity
 from app.demo import is_demo_mode, resolve_demo_models
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,10 @@ class AgentRegistry:
         compaction_strategy: Any | None = None,
     ) -> None:
         self._agents: dict[str, Agent] = {}
+        # Per-model capability instructions (slot #3..). Stored so the per-run
+        # remainder (Memory Block + capabilities) can be assembled when
+        # USER_PROFILE_ENABLED (CTR-0105, UDR-0051 D4).
+        self._capability_instructions: dict[str, str] = {}
         self._compaction_strategy = compaction_strategy
 
         if is_demo_mode():
@@ -106,13 +111,14 @@ class AgentRegistry:
 
         web_search = providers.openai_web_search_tool()
         demo_tools = [web_search, *tools]
-        demo_instructions = instructions + WEB_SEARCH_INSTRUCTION
+        demo_caps = instructions + WEB_SEARCH_INSTRUCTION
 
         for model in models:
+            self._capability_instructions[model] = demo_caps
             client = _build_chat_client(model)
             agent = Agent(
                 name=f"ChatWalaau-Agent-{model}",
-                instructions=demo_instructions,
+                instructions=self._bake_instructions(demo_caps),
                 client=client,
                 tools=demo_tools,
                 context_providers=context_providers,
@@ -144,12 +150,13 @@ class AgentRegistry:
             client = _build_chat_client(model)
             web_search = providers.web_search_tool(model)
             model_tools = [web_search, *tools] if web_search is not None else list(tools)
-            model_instructions = instructions + (WEB_SEARCH_INSTRUCTION if web_search is not None else "")
+            model_caps = instructions + (WEB_SEARCH_INSTRUCTION if web_search is not None else "")
+            self._capability_instructions[model] = model_caps
             model_options = providers.build_model_options(model)
 
             agent = Agent(
                 name=f"ChatWalaau-Agent-{model}",
-                instructions=model_instructions,
+                instructions=self._bake_instructions(model_caps),
                 client=client,
                 tools=model_tools,
                 context_providers=context_providers,
@@ -170,6 +177,51 @@ class AgentRegistry:
             msg = f"No agent available. Configured models: {list(self._agents.keys())}"
             raise ValueError(msg)
         return agent
+
+    def _bake_instructions(self, capability_instructions: str) -> str:
+        """Return the agent-level (baked) instructions for one model (CTR-0105, CTR-0106).
+
+        Always bake ONLY the Identity block (slot #1). The per-run remainder --
+        the Memory Block (slot #2, when USER_PROFILE_ENABLED) plus the capability
+        guidance, OR nothing for a Temporary Chat run -- is supplied via
+        ``run_instructions()`` and concatenated by MAF AFTER the baked Identity,
+        yielding Identity -> Memory -> capabilities (UDR-0051 D4). Both registry
+        consumers (AG-UI endpoint CTR-0009, OpenAI API CTR-0057) always call
+        ``run_instructions()``, so the assembled prompt is byte-for-byte the same
+        as the prior bake-time assembly; a Temporary Chat run can then reduce the
+        effective prompt to the Identity block alone (UDR-0052 D6) by supplying an
+        empty remainder, which the prior conditional full-bake made impossible.
+        """
+        return load_identity()
+
+    def run_instructions(
+        self,
+        model: str | None = None,
+        *,
+        user_profile_block: str | None = None,
+        temporary: bool = False,
+    ) -> str | None:
+        """Return the per-run instruction remainder, or None (CTR-0105/CTR-0106).
+
+        For a Temporary Chat run (``temporary=True``) returns None: the agent is
+        baked Identity-only, so the effective system prompt is the Identity block
+        alone -- no Memory Block and no capability guidance text (UDR-0052 D6).
+        Tools stay registered (the memory tool no-ops via the temporary
+        contextvar).
+
+        Otherwise returns the Memory Block (when ``user_profile_block`` is given)
+        followed by the model's capability guidance; merged into
+        ``agent.run(options=...)`` it is appended by MAF AFTER the baked Identity,
+        yielding Identity -> Memory -> capabilities. Returns None only if there is
+        no remainder text at all.
+        """
+        if temporary:
+            return None
+        name = model or self._default_model
+        caps = self._capability_instructions.get(name)
+        if caps is None:
+            caps = self._capability_instructions.get(self._default_model, "")
+        return build_capability_block(caps, user_profile_block) or None
 
     @property
     def available_models(self) -> list[str]:
