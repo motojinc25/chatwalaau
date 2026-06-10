@@ -95,4 +95,10 @@ export interface SessionSummary {
   pinned_at: string | null
   folder_id: string | null
   source?: 'ag-ui' | 'openai-api'
+  /**
+   * Auto Session Title pending state (PRP-0077, CTR-0109). True while the
+   * background title task is running; drives the sidebar spinner. Cleared by
+   * the CTR-0110 `session_title` WebSocket push or on the next list refresh.
+   */
+  auto_title_pending?: boolean
 }

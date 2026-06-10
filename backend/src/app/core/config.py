@@ -90,6 +90,17 @@ class Settings(BaseSettings):
     # Session
     sessions_dir: str = ".sessions"
 
+    # Auto Session Title (CTR-0109, CTR-0006, PRP-0077 / UDR-0053). SESSION_TITLE_MODE
+    # selects how a chat's sidebar title is set: "truncate" (default) keeps the
+    # leading characters of the first user message (pre-PRP-0077 behavior,
+    # byte-for-byte); "llm" upgrades it via a background task (CTR-0108) that
+    # summarizes the first user message + first assistant reply, post-turn and
+    # non-blocking (on failure the truncation title remains). SESSION_TITLE_MODEL
+    # picks the summarization model; empty (default) uses the session's model.
+    # Unknown SESSION_TITLE_MODE values are treated as "truncate".
+    session_title_mode: str = "truncate"
+    session_title_model: str = ""
+
     # Temporary Chat (CTR-0106, CTR-0006, PRP-0076 / UDR-0052 D4/D9).
     # Quarantine retention for ephemeral "incognito-style" conversations: a
     # Temporary Chat is stored in a separate .temporary/ directory (a sibling of

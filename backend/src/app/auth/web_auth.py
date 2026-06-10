@@ -155,6 +155,10 @@ class StatusResponse(BaseModel):
     # clients that ignore the field see no behaviour change. The SPA
     # sidebar footer renders "v{version}" when non-empty.
     version: str = _APP_VERSION
+    # PRP-0077 / CTR-0094 v6 / UDR-0053: the active Auto Session Title mode
+    # ("truncate" | "llm"). The SPA uses it as a hint; the per-session
+    # auto_title_pending flag (CTR-0014) is the authoritative spinner driver.
+    session_title_mode: str = "truncate"
 
 
 class MeResponse(BaseModel):
@@ -255,6 +259,8 @@ async def status(request: Request) -> StatusResponse:
     # PRP-0067 / CTR-0094 v4: settings.tool_approval_mode is normalized
     # to one of {"skip", "auto", "always"} by the Settings validator.
     approval_mode = settings.tool_approval_mode  # type: ignore[assignment]
+    # PRP-0077 / CTR-0094 v6: normalize the title mode to a known value.
+    title_mode = "llm" if settings.session_title_mode == "llm" else "truncate"
     if settings.web_auth_enabled:
         token_value = request.cookies.get(settings.auth_cookie_name, "")
         if token_value:
@@ -267,6 +273,7 @@ async def status(request: Request) -> StatusResponse:
                     username=record.username,
                     demo_mode=demo,
                     tool_approval_mode=approval_mode,
+                    session_title_mode=title_mode,
                 )
         return StatusResponse(
             mode="login-required",

@@ -37,6 +37,15 @@ export default defineConfig({
 				changeOrigin: true,
 				secure: false,
 			},
+			// Server Notification Channel WebSocket (CTR-0110, PRP-0077). Needs
+			// ws:true so Vite forwards the upgrade handshake to the backend during
+			// `dev:full`; without it the real-time title push never connects.
+			'/ws': {
+				target: backendTarget,
+				changeOrigin: true,
+				secure: false,
+				ws: true,
+			},
 		},
 	},
 	build: {

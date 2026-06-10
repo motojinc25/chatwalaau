@@ -53,6 +53,16 @@ export function ChatPage() {
     navigate(`/chat?session=${threadId}`, { replace: true })
   }, [temp.isTemporary, refreshSessions, navigate, threadId])
 
+  // Immediate sidebar entry (PRP-0077, CTR-0016): show a brand-new chat as soon
+  // as the first message is sent -- the session was just created server-side
+  // (truncate title + pending flag), so a refresh surfaces it instantly without
+  // waiting for the AI answer. The LLM title (when SESSION_TITLE_MODE=llm) then
+  // arrives in real time via the CTR-0110 WebSocket push (handled in useSession).
+  const handleSessionCreated = useCallback(() => {
+    if (temp.isTemporary) return
+    refreshSessions()
+  }, [temp.isTemporary, refreshSessions])
+
   const handleBranch = useCallback(
     (messageIndex: number) => {
       forkSession(threadId, messageIndex)
@@ -128,6 +138,7 @@ export function ChatPage() {
             initialMessages={temp.isTemporary ? [] : initialMessages}
             continuationToken={temp.isTemporary ? null : continuationToken}
             onStreamComplete={handleStreamComplete}
+            onSessionCreated={handleSessionCreated}
             onBranchFromMessage={temp.isTemporary ? undefined : handleBranch}
             temporary={temp.isTemporary}
           />

@@ -87,6 +87,9 @@ def _read_session_metadata(path: Path) -> dict[str, Any] | None:
             "pinned_at": data.get("pinned_at"),
             "folder_id": data.get("folder_id"),
             "source": data.get("source", "ag-ui"),
+            # Auto Session Title pending state (PRP-0077, CTR-0109): drives the
+            # sidebar spinner until the background title task finalizes.
+            "auto_title_pending": bool(data.get("auto_title_pending", False)),
         }
     except (json.JSONDecodeError, OSError):
         logger.warning("Failed to read session file: %s", path)
@@ -135,6 +138,12 @@ async def init_session(thread_id: str, body: InitSessionRequest) -> dict[str, An
         from app.agent.user_memory import current_user_profile_block
 
         data["user_profile_snapshot"] = current_user_profile_block()
+    # Auto Session Title (PRP-0077, CTR-0109, CTR-0110): when LLM titling is on,
+    # mark the session pending so the sidebar shows a spinner until the
+    # background task finalizes the title (cleared via the CTR-0110 push, or on
+    # the next list refresh). Temporary chats are never auto-titled.
+    if settings.session_title_mode == "llm" and not is_temporary(thread_id):
+        data["auto_title_pending"] = True
     write_session_json(thread_id, data)
     logger.info("Initialized session %s", thread_id)
     return {"status": "created", "thread_id": thread_id}
@@ -640,6 +649,11 @@ async def rename_session(thread_id: str, body: RenameRequest) -> dict[str, Any]:
     data = _read_session_or_404(thread_id)
 
     data["title"] = body.title.strip()[:100]
+    # Auto Session Title (PRP-0077, CTR-0109): a manual rename claims the title
+    # slot so a late-completing background title task never overwrites the
+    # user-chosen title (UDR-0053 D9), and clears any pending spinner.
+    data["auto_title_done"] = True
+    data["auto_title_pending"] = False
     data["updated_at"] = datetime.now(UTC).isoformat()
     _write_session_or_500(thread_id, data)
     logger.info("Renamed session %s to '%s'", thread_id, data["title"])

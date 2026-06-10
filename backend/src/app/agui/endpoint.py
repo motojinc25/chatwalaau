@@ -279,6 +279,37 @@ def _arguments_to_dict(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _is_first_assistant_turn(messages: list[dict[str, Any]]) -> bool:
+    """True when the request carries no prior assistant message (CTR-0109).
+
+    The SPA sends the full message history on each turn, so an absent assistant
+    role marks the conversation's first turn -- the only turn that should trigger
+    Auto Session Title. This also makes the trigger fire at most once (later
+    turns carry an assistant message), so a failed first attempt is not retried
+    (UDR-0053 D5/D9).
+    """
+    return not any(m.get("role") == "assistant" for m in messages)
+
+
+def _first_user_text(messages: list[dict[str, Any]]) -> str:
+    """Return the first user message's text (AG-UI content may be str or list)."""
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+                elif isinstance(item, str):
+                    parts.append(item)
+            return " ".join(parts).strip()
+    return ""
+
+
 async def _stream_with_reasoning(
     agent_registry: AgentRegistry,
     request_body: AGUIRequest,
@@ -313,6 +344,13 @@ async def _stream_with_reasoning(
     tc_name_current: str | None = None
     run_error = False
     error_message = ""
+    # Auto Session Title (PRP-0077, CTR-0109): accumulate the visible assistant
+    # text so the post-turn background task can summarize it without re-reading
+    # the (frontend-saved) session file. Pre-initialized here so they are always
+    # bound on the normal-completion path below.
+    assistant_text_parts: list[str] = []
+    temporary = False
+    effective_model = ""
 
     try:
         # Pre-process: strip PDF image_url entries from messages before normalization.
@@ -492,6 +530,9 @@ async def _stream_with_reasoning(
                         text = getattr(content, "text", None)
                         if not text:
                             continue
+                        # Accumulate visible assistant text for Auto Session
+                        # Title (PRP-0077, CTR-0109).
+                        assistant_text_parts.append(text)
                         # Close any open reasoning block before text
                         if reasoning_msg_id is not None:
                             yield encoder.encode(
@@ -861,6 +902,29 @@ async def _stream_with_reasoning(
         )
     else:
         logger.info("AG-UI run finished normally: thread=%s", thread_id)
+        # Auto Session Title (PRP-0077, CTR-0109, UDR-0053). On the FIRST
+        # completed assistant turn of a NON-temporary session, dispatch a
+        # background task (CTR-0108) to summarize the opening exchange into a
+        # concise title. Fire-and-forget and error-isolated: it never blocks or
+        # fails the turn. Gated by SESSION_TITLE_MODE=llm; the default "truncate"
+        # dispatches nothing (byte-for-byte pre-PRP-0077 behavior). The SSE
+        # grammar is unchanged -- no event is emitted for the title.
+        if settings.session_title_mode == "llm" and not temporary and _is_first_assistant_turn(request_body.messages):
+            assistant_text = "".join(assistant_text_parts).strip()
+            user_text = _first_user_text(request_body.messages)
+            if user_text and assistant_text:
+                from app.background import dispatch as _dispatch_background
+
+                _dispatch_background(
+                    "session-title",
+                    dedup_key=thread_id,
+                    ctx={
+                        "thread_id": thread_id,
+                        "user_text": user_text,
+                        "assistant_text": assistant_text,
+                        "model": effective_model,
+                    },
+                )
     yield encoder.encode(
         RunFinishedEvent(
             type=EventType.RUN_FINISHED,

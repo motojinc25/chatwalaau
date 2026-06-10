@@ -22,6 +22,14 @@ interface UseChatOptions {
   threadId?: string
   initialMessages?: ChatMessage[]
   onStreamComplete?: () => void
+  /**
+   * Fired right after a NEW session is created server-side (the init call
+   * returned status "created"), before the agent stream begins, so the SPA can
+   * show the new chat in the sidebar immediately instead of waiting for the AI
+   * answer (PRP-0077, CTR-0016). Not fired for resumed / regenerate sends or
+   * temporary chats.
+   */
+  onSessionCreated?: (info: { threadId: string; title: string }) => void
   bgEnabled?: boolean
   selectedModel?: string
   /** Selected reasoning effort sent as AG-UI state.reasoning (CTR-0009, PRP-0071). */
@@ -51,6 +59,7 @@ export function useChat(options?: UseChatOptions) {
   const abortRef = useRef<AbortController | null>(null)
   const threadIdRef = useRef(options?.threadId ?? crypto.randomUUID())
   const onStreamCompleteRef = useRef(options?.onStreamComplete)
+  const onSessionCreatedRef = useRef(options?.onSessionCreated)
   const bgEnabledRef = useRef(options?.bgEnabled ?? false)
   const selectedModelRef = useRef(options?.selectedModel ?? '')
   const selectedReasoningRef = useRef(options?.selectedReasoning ?? '')
@@ -75,6 +84,10 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     onStreamCompleteRef.current = options?.onStreamComplete
   }, [options?.onStreamComplete])
+
+  useEffect(() => {
+    onSessionCreatedRef.current = options?.onSessionCreated
+  }, [options?.onSessionCreated])
 
   useEffect(() => {
     bgEnabledRef.current = options?.bgEnabled ?? false
@@ -168,11 +181,19 @@ export function useChat(options?: UseChatOptions) {
         // .sessions entry, which a temporary chat must never have. The temp_
         // session is created lazily in the .temporary/ quarantine by save_messages.
         if (!options?.skipUserMessage && !options?.resumeToken && !temporaryRef.current) {
-          await fetch(`/api/sessions/${threadIdRef.current}/init`, {
+          const initTitle = userContent.slice(0, 100)
+          const initStatus = await fetch(`/api/sessions/${threadIdRef.current}/init`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: userContent.slice(0, 100) }),
-          }).catch(() => {})
+            body: JSON.stringify({ title: initTitle }),
+          })
+            .then((r) => (r.ok ? (r.json() as Promise<{ status?: string }>) : null))
+            .catch(() => null)
+          // Show the new chat in the sidebar immediately (PRP-0077, CTR-0016),
+          // without waiting for the AI answer. Only on first creation.
+          if (initStatus?.status === 'created') {
+            onSessionCreatedRef.current?.({ threadId: threadIdRef.current, title: initTitle })
+          }
         }
 
         // Build AG-UI request state (CTR-0045 background, CTR-0070 model)

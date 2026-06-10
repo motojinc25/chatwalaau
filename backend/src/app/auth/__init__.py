@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import ipaddress
-from typing import Literal
+from typing import Any, Literal
 
 # NOTE: ``Request`` is kept as a runtime import (not under TYPE_CHECKING)
 # because FastAPI's dependency-injection machinery resolves the annotation
@@ -204,6 +204,39 @@ async def verify_api_key(request: Request) -> Identity:
     raise HTTPException(status_code=401, detail=_INVALID_KEY_DETAIL)
 
 
+async def authorize_websocket(websocket: Any) -> bool:
+    """Authorize a WebSocket handshake (CTR-0110), mirroring ``verify_api_key``.
+
+    The browser WebSocket API cannot set an Authorization header, so the API_KEY
+    lane is accepted via the ``api_key`` query parameter; the session-cookie lane
+    works automatically for same-origin handshakes; loopback peers bypass; and
+    ``APP_REQUIRE_AUTH_ON_LAN=false`` opens it. The gate is NEVER relaxed beyond
+    what ``verify_api_key`` allows. Returns True to accept, False to reject (the
+    caller closes the socket). Never raises.
+    """
+    # 1. Session cookie lane (same-origin handshakes carry cookies).
+    name = getattr(settings, "auth_cookie_name", "")
+    if getattr(settings, "web_auth_enabled", False) and name:
+        token_value = websocket.cookies.get(name)
+        if token_value:
+            from app.auth.session_store import get_session_store
+
+            record = await get_session_store().lookup(token_value)
+            if record is not None:
+                return True
+    # 2. API key via query parameter (browser WS cannot send a Bearer header).
+    if settings.api_key:
+        qp_key = websocket.query_params.get("api_key")
+        if qp_key is not None and qp_key == settings.api_key:
+            return True
+    # 3. Loopback bypass.
+    client_host = websocket.client.host if websocket.client else None
+    if is_client_loopback(client_host):
+        return True
+    # 4. Operator-acknowledged open mode.
+    return not settings.app_require_auth_on_lan
+
+
 async def verify_api_key_strict(request: Request) -> Identity:
     """FastAPI dependency: Bearer-only variant for external-app paths.
 
@@ -227,6 +260,7 @@ async def verify_api_key_strict(request: Request) -> Identity:
 
 __all__ = [
     "Identity",
+    "authorize_websocket",
     "is_client_loopback",
     "verify_api_key",
     "verify_api_key_strict",

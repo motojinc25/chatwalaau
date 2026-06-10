@@ -133,6 +133,12 @@ async def lifespan(_app: FastAPI):
     yield
     # Shutdown: stop MCP servers
     await shutdown_mcp()
+    # Drain in-flight background tasks (PRP-0077, CTR-0108). Best-effort: gives
+    # running tasks a brief grace period, then cancels stragglers. A cancelled
+    # title task simply leaves the truncation title.
+    from app.background import shutdown as shutdown_background
+
+    await shutdown_background()
 
 
 app = FastAPI(
@@ -291,6 +297,12 @@ agent_registry = create_agent_registry()
 
 # AG-UI endpoint (CTR-0009) -- receives registry for per-request model selection
 register_agui_endpoints(app, agent_registry=agent_registry)
+
+# Server -> client notification WebSocket (CTR-0110, PRP-0077). Real-time push
+# channel; first event type is session_title (CTR-0109).
+from app.notifications import register_notifications_endpoint
+
+register_notifications_endpoint(app)
 
 # OpenAI-compatible Responses API (CTR-0057, PRP-0030)
 register_openai_api(app, agent_registry=agent_registry)

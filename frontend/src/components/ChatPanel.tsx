@@ -32,6 +32,8 @@ interface ChatPanelProps {
   initialMessages?: ChatMessage[]
   continuationToken?: Record<string, unknown> | null
   onStreamComplete?: () => void
+  /** New-session created (PRP-0077, CTR-0016): show it in the sidebar immediately. */
+  onSessionCreated?: (info: { threadId: string; title: string }) => void
   onBranchFromMessage?: (messageIndex: number) => void
   /** Temporary Chat mode (CTR-0107, PRP-0076): dark input, no BG toggle, no history. */
   temporary?: boolean
@@ -52,6 +54,7 @@ export function ChatPanel({
   initialMessages,
   continuationToken,
   onStreamComplete,
+  onSessionCreated,
   onBranchFromMessage,
   temporary = false,
 }: ChatPanelProps) {
@@ -124,6 +127,7 @@ export function ChatPanel({
     threadId,
     initialMessages,
     onStreamComplete,
+    onSessionCreated,
     bgEnabled: effectiveBgEnabled,
     selectedModel,
     selectedReasoning,

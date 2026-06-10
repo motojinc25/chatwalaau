@@ -595,7 +595,13 @@ export function SessionSidebar({
               <>
                 <p className="flex items-center gap-1 truncate text-sm">
                   {session.pinned_at && <Pin className="h-3 w-3 shrink-0 text-muted-foreground" />}
-                  {session.title || 'New session'}
+                  <span className="truncate">{session.title || 'New session'}</span>
+                  {/* Auto Session Title in progress (PRP-0077, CTR-0109): a small
+                      spinner until the background title task finalizes (cleared by
+                      the CTR-0110 push). */}
+                  {session.auto_title_pending && (
+                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
+                  )}
                   {movingSessionId === session.thread_id && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
                 </p>
                 <p className="flex items-center gap-1 text-xs text-muted-foreground">

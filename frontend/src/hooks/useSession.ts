@@ -34,6 +34,7 @@ function normalizeSessionSummaries(data: unknown): SessionSummary[] {
   return data.map((session) => ({
     ...(session as SessionSummary),
     folder_id: (session as SessionSummary).folder_id ?? null,
+    auto_title_pending: (session as SessionSummary).auto_title_pending === true,
   }))
 }
 
@@ -208,6 +209,74 @@ export function useSession() {
   useEffect(() => {
     refreshFolders()
   }, [refreshFolders])
+
+  // Server -> client notifications over WebSocket (CTR-0110, PRP-0077). The
+  // Auto Session Title background task pushes a `session_title` event when it
+  // finalizes a title, so the sidebar updates in real time without a refetch
+  // (UDR-0053 D11, amended). Bounded reconnect: stops after a few failures so a
+  // deployment where the WS cannot authenticate (API_KEY-only LAN) does not
+  // reconnect forever -- titles still appear on the next list refresh / reload.
+  useEffect(() => {
+    let socket: WebSocket | null = null
+    let closed = false
+    let attempts = 0
+    let timer: number | undefined
+
+    const connect = () => {
+      if (closed) return
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      socket = new WebSocket(`${proto}://${window.location.host}/ws/notifications`)
+      socket.onopen = () => {
+        attempts = 0
+      }
+      socket.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data) as { type?: string; thread_id?: string; title?: string }
+          if (msg.type === 'session_title' && typeof msg.thread_id === 'string') {
+            setSessions((prev) =>
+              prev.map((s) =>
+                s.thread_id === msg.thread_id
+                  ? { ...s, title: typeof msg.title === 'string' ? msg.title : s.title, auto_title_pending: false }
+                  : s,
+              ),
+            )
+          }
+        } catch {
+          // ignore malformed frames
+        }
+      }
+      socket.onerror = () => {
+        socket?.close()
+      }
+      socket.onclose = () => {
+        if (closed || attempts >= 5) return
+        attempts += 1
+        timer = window.setTimeout(connect, Math.min(1000 * attempts, 5000))
+      }
+    }
+
+    connect()
+    return () => {
+      closed = true
+      if (timer) window.clearTimeout(timer)
+      socket?.close()
+    }
+  }, [])
+
+  // Self-healing fallback for the Auto Session Title spinner (PRP-0077,
+  // CTR-0109). The CTR-0110 WebSocket push is the primary, real-time path, but
+  // if it cannot connect (e.g. an API_KEY-only LAN deployment, or a dev proxy
+  // gap) a pending row would otherwise spin forever. While any session is
+  // pending, poll the list once every few seconds; the backend clears
+  // `auto_title_pending` on finalize (always, even on failure), so this
+  // terminates as soon as the title resolves and never loops indefinitely.
+  useEffect(() => {
+    if (!sessions.some((s) => s.auto_title_pending)) return
+    const t = window.setTimeout(() => {
+      refreshSessions()
+    }, 4000)
+    return () => window.clearTimeout(t)
+  }, [sessions, refreshSessions])
 
   // Load initial messages when URL has ?session= parameter (page load only).
   // switchSession already loads data before navigating, so skip the re-fetch.
