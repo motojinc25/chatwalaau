@@ -120,6 +120,22 @@ class Settings(BaseSettings):
     user_profile_enabled: bool = True
     user_char_limit: int = 1375
 
+    # User Memory Background Extraction (CTR-0117, CTR-0006, PRP-0079 /
+    # UDR-0051 Phase 2, resolving D5). Opt-in background pass that distills a
+    # conversation into durable user preferences and merges them into
+    # .agent/USER.md through the EXISTING CTR-0105 guarded write (the same
+    # secret/PII filter, USER_CHAR_LIMIT cap, and backup-on-write as the inline
+    # tool). USER_MEMORY_EXTRACTION (default false) gates the feature and ALSO
+    # requires USER_PROFILE_ENABLED=true; false is byte-for-byte pre-PRP-0079
+    # (Phase 1) behavior. USER_MEMORY_EXTRACTION_MODEL picks the extraction
+    # model; empty (default) uses the session's model. The pass runs at most once
+    # every USER_MEMORY_EXTRACTION_EVERY_N_TURNS new user turns (default 4;
+    # clamped to >= 1 at use time) -- below the threshold the task is a cheap
+    # no-op (no LLM call). temp_ chats and DEMO_MODE never extract.
+    user_memory_extraction: bool = False
+    user_memory_extraction_model: str = ""
+    user_memory_extraction_every_n_turns: int = 4
+
     # File Upload
     upload_dir: str = ".uploads"
 

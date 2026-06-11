@@ -113,10 +113,15 @@ async def shutdown(timeout: float = 5.0) -> None:
         await asyncio.gather(*still_running, return_exceptions=True)
 
 
-# Register built-in tasks (CTR-0109). Imported at the BOTTOM so the registry and
+# Register built-in tasks. Imported at the BOTTOM so the registry and
 # register_task() defined above already exist when the consumer module imports
 # them (avoids a circular-import failure).
-from app.background import session_title  # noqa: E402  (import-time task registration side effect)
+#   - session_title          -> CTR-0109 (PRP-0077)
+#   - user_memory_extract     -> CTR-0117 (PRP-0079, UDR-0051 Phase 2 -- resolves D5)
+from app.background import (  # noqa: E402  (import-time task registration side effect)
+    session_title,
+    user_memory_extract,
+)
 
 __all__ = [
     "BACKGROUND_TASK_REGISTRY",

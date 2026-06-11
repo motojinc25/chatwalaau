@@ -311,12 +311,19 @@ def manage_user_memory(
     written first) and takes effect from the user's NEXT session -- the current
     session's frozen profile snapshot is intentionally unchanged.
 
+    Reconcile, do not just append: inspect the existing entries first. If the new
+    preference duplicates or contradicts one already stored, a newer explicit
+    preference SUPERSEDES the older one -- use 'replace'/'remove'/'consolidate' to
+    update or delete the conflicting line(s) rather than 'add'. Keep mutually
+    exclusive preferences (e.g. the default answer language) to a SINGLE line.
+
     Operations:
-    - add: append a new stable preference (in 'content').
-    - replace: replace the existing line 'old' with 'content'.
-    - remove: delete the existing line 'old'.
+    - add: append a new stable preference (in 'content'). Use ONLY when nothing
+      existing duplicates or contradicts it.
+    - replace: replace the existing line 'old' with 'content' (the supersede path).
+    - remove: delete the existing line 'old' (a reversed/outdated preference).
     - consolidate: replace the whole profile with 'content' (one line each),
-      compressing several similar entries into fewer lines.
+      compressing similar entries and dropping contradictions into fewer lines.
 
     Returns a JSON string: {"status": "applied"} or
     {"status": "rejected", "reason": "..."}.
@@ -334,6 +341,23 @@ def manage_user_memory(
     if target != "user":
         return _result("rejected", f"unsupported memory target '{target}' (only 'user')")
 
+    return apply_memory_operation(operation, content, old)
+
+
+def apply_memory_operation(operation: str, content: str = "", old: str = "") -> str:
+    """Apply one memory operation through the guarded write (CTR-0105).
+
+    The authoritative write primitive shared by the inline ``manage_user_memory``
+    tool and the CTR-0117 background extractor (PRP-0079 / UDR-0051 Phase 2 D2):
+    every mutation runs the deterministic secret/PII filter (D6), enforces
+    ``USER_CHAR_LIMIT`` (D7), and backs up the prior file before writing (D8).
+
+    This function does NOT check ``USER_PROFILE_ENABLED``, the temporary
+    contextvar, or the ``target`` -- callers gate those (the inline tool does so
+    above; the extractor gates enable + temporary + DEMO_MODE before calling).
+    Returns a JSON result string: ``{"status": "applied"}`` or
+    ``{"status": "rejected", "reason": "..."}``.
+    """
     op = operation.strip().lower()
     entries = _entry_lines(load_user_profile())
     limit = settings.user_char_limit
@@ -412,7 +436,15 @@ USER_MEMORY_INSTRUCTION = (
     " You maintain a durable User Preference Memory via the manage_user_memory tool. "
     "When you learn something durable, reusable, user-scoped, and non-sensitive about how "
     "the user wants to be helped (stable preferences, communication style, expectations, "
-    "workflow habits), call manage_user_memory to add/replace/remove/consolidate it. "
+    "workflow habits), update it via the tool. "
+    "IMPORTANT -- reconcile, do not just append: first look at the existing entries in the "
+    "<user-profile> block. If a new preference DUPLICATES or CONTRADICTS one already there, do "
+    "NOT call 'add' -- a newer explicit preference SUPERSEDES the older one. Use 'replace' to "
+    "update the conflicting line, 'remove' to delete a preference the user reversed, or "
+    "'consolidate' to rewrite the whole list when several entries overlap or conflict (e.g. a "
+    "user who now wants answers in one language should end up with a SINGLE language line, not "
+    "several contradictory ones). Only use 'add' when the preference is genuinely new and "
+    "conflicts with nothing. "
     "Never store one-off instructions, transient context, project-specific facts, secrets, "
     "credentials, or sensitive personal data. Updates take effect from the user's next session."
 )

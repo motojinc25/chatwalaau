@@ -925,6 +925,26 @@ async def _stream_with_reasoning(
                         "model": effective_model,
                     },
                 )
+        # User Memory Background Extraction (PRP-0079, CTR-0117, UDR-0051 Phase 2,
+        # resolving D5). On EVERY completed turn of a NON-temporary session, when
+        # enabled, dispatch the extraction task (CTR-0108). The cadence cursor
+        # inside the task throttles the actual LLM pass; below the threshold it is
+        # a cheap no-op. Fire-and-forget and error-isolated, like the title task.
+        # Default OFF (USER_MEMORY_EXTRACTION=false) dispatches nothing --
+        # byte-for-byte Phase 1 behavior.
+        if settings.user_profile_enabled and settings.user_memory_extraction and not temporary:
+            from app.background import dispatch as _dispatch_background
+
+            _dispatch_background(
+                "user-memory-extract",
+                dedup_key=thread_id,
+                ctx={
+                    "thread_id": thread_id,
+                    "messages": request_body.messages,
+                    "assistant_text": "".join(assistant_text_parts).strip(),
+                    "model": effective_model,
+                },
+            )
     yield encoder.encode(
         RunFinishedEvent(
             type=EventType.RUN_FINISHED,

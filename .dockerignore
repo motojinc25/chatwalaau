@@ -34,6 +34,20 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 
+# ---- Marketing site build artifacts (assets/docker/Dockerfile.site) ----
+# Stage 1 reinstalls deps and rebuilds the static site inside the image, so the
+# local copies must stay out of the build context (and not clobber the COPY).
+site/frontend/node_modules/
+site/frontend/build/
+site/frontend/.docusaurus/
+site/backend/.venv/
+site/backend/.ruff_cache/
+site/backend/.pytest_cache/
+site/backend/dist/
+site/backend/**/__pycache__/
+site/backend/**/*.pyc
+site/backend/.leads/
+
 # ---- Environment / secrets ----
 **/.env
 **/.env.local
