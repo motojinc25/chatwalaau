@@ -77,6 +77,142 @@ def _log_lane(lane: str) -> None:
     logger.info("Anthropic provider hosting lane: %s", lane)
 
 
+# ---- Prompt caching (PRP-0080, FEAT-0038 / UDR-0056 D3) -------------------
+# The MAF Anthropic connector assembles the Messages API request in
+# RawAnthropicClient._prepare_options (it sets ``system`` as a plain string and
+# ``tools`` as a list). We subclass the connector and override that single
+# chokepoint to mark the STABLE prefix (the final system block + the final tool
+# definition) with ``cache_control``, which caches the whole system + tools
+# prefix. The per-message tail after the breakpoint stays uncached, so a cache
+# hit is always prefix-exact; model outputs are unchanged (only billing /
+# latency change). Up to 4 breakpoints are allowed; we use two.
+
+_EXTENDED_CACHE_BETA = "extended-cache-ttl-2025-04-11"
+
+
+def _cache_control_marker(ttl: str) -> dict[str, Any]:
+    """Return the ``cache_control`` object for the configured TTL.
+
+    ``5m`` (GA) uses the bare ephemeral marker; ``1h`` uses the extended cache
+    (also requires the ``extended-cache-ttl-2025-04-11`` beta, added below).
+    """
+    if ttl == "1h":
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
+
+
+# Thinking blocks cannot carry cache_control (Anthropic rejects it / the MAF
+# connector strips it). Never place a breakpoint on these block types.
+_NON_CACHEABLE_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+
+
+def _mark_message_breakpoint(msg: dict[str, Any], marker: dict[str, Any]) -> bool:
+    """Place ``cache_control`` on the last cacheable block of a message.
+
+    Returns True if a breakpoint was placed. A bare string content is promoted to
+    a text block; a block list is marked on its last non-thinking block.
+    """
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        msg["content"] = [{"type": "text", "text": content, "cache_control": marker}]
+        return True
+    if isinstance(content, list) and content:
+        for block in reversed(content):
+            if isinstance(block, dict) and block.get("type") not in _NON_CACHEABLE_BLOCK_TYPES:
+                block["cache_control"] = marker
+                return True
+    return False
+
+
+def _inject_prompt_cache(run_options: dict[str, Any], ttl: str) -> dict[str, Any]:
+    """Annotate the stable prefix of an Anthropic request for caching (`system_and_3`).
+
+    Uses the proven layout from the Hermes reference agent and the Anthropic
+    prompt-caching guidance: all 4 allowed `cache_control` breakpoints go on the
+    system block + the last 3 (non-system) messages.
+
+      1. The final system block. Anthropic renders ``tools -> system -> messages``,
+         so a breakpoint on the last system block caches the WHOLE tools + system
+         prefix -- a separate tools breakpoint would only cache a redundant subset,
+         so we spend the remaining budget on the conversation instead.
+      2. The last up-to-3 message content blocks -- a ROLLING conversation cache.
+         An agentic tool loop re-sends the conversation tail (tool results, file
+         contents) on every model call; marking the recent messages makes that tail
+         read back at ~0.1x instead of full price. Multiple overlapping read points
+         (a) let hits accrue incrementally as the conversation grows and (b) stay
+         within Anthropic's 20-content-block cache lookback window in long tool
+         loops, where a single trailing breakpoint can silently miss.
+
+    Net-positive whenever consecutive requests share a message prefix (short tool
+    loops + cross-turn -- the observed common case). Within a LONG tool loop the
+    sliding-window compaction (CTR-0098) shifts the prefix; raise
+    COMPACTION_KEEP_LAST_GROUPS to widen the stable window when caching is the
+    priority (UDR-0056 D9). NOTE: Opus 4.x only caches a prefix of >= 4096 tokens;
+    below that the markers are silently inert (no error, no write).
+
+    Mutates and returns ``run_options`` (the kwargs for
+    ``anthropic_client.beta.messages.create``). Defensive: only acts on the
+    expected shapes; an unexpected shape is left untouched so caching simply does
+    not engage rather than breaking the call.
+    """
+    marker = _cache_control_marker(ttl)
+    remaining = 4
+
+    system = run_options.get("system")
+    if isinstance(system, str) and system:
+        run_options["system"] = [{"type": "text", "text": system, "cache_control": marker}]
+        remaining -= 1
+    elif isinstance(system, list) and system and isinstance(system[-1], dict):
+        system[-1]["cache_control"] = marker
+        remaining -= 1
+
+    # Roll the remaining breakpoints across the most recent messages (last 3 when a
+    # system breakpoint was placed, else last 4).
+    messages = run_options.get("messages")
+    if isinstance(messages, list) and messages and remaining > 0:
+        for msg in messages[-remaining:]:
+            if isinstance(msg, dict):
+                _mark_message_breakpoint(msg, marker)
+
+    if ttl == "1h":
+        betas = run_options.get("betas")
+        if isinstance(betas, set):
+            betas.add(_EXTENDED_CACHE_BETA)
+        elif isinstance(betas, (list, tuple)):
+            run_options["betas"] = set(betas) | {_EXTENDED_CACHE_BETA}
+        else:
+            run_options["betas"] = {_EXTENDED_CACHE_BETA}
+
+    return run_options
+
+
+class _PromptCacheMixin:
+    """Mixin overriding ``_prepare_options`` to inject prompt-cache markers.
+
+    Layered BEFORE the concrete MAF client in the MRO so ``super()`` builds the
+    normal request and we annotate its stable prefix afterwards. The TTL is read
+    per call from settings so a test toggling it sees the effect.
+    """
+
+    def _prepare_options(self, messages: Any, options: Any, **kwargs: Any) -> dict[str, Any]:
+        run_options = super()._prepare_options(messages, options, **kwargs)  # type: ignore[misc]
+        return _inject_prompt_cache(run_options, settings.anthropic_prompt_cache_ttl)
+
+
+# Caching subclasses are built lazily and memoized per base class, so the
+# agent_framework.anthropic connector import stays confined to build_chat_client
+# (an Azure-only deployment never pays it).
+_caching_subclasses: dict[type, type] = {}
+
+
+def _caching_client_class(base_cls: type) -> type:
+    cls = _caching_subclasses.get(base_cls)
+    if cls is None:
+        cls = type(f"PromptCaching{base_cls.__name__}", (_PromptCacheMixin, base_cls), {})
+        _caching_subclasses[base_cls] = cls
+    return cls
+
+
 def anthropic_web_search_tool() -> Any:
     """Return the Anthropic hosted web search tool dict.
 
@@ -129,7 +265,11 @@ class AnthropicProvider:
 
                 kwargs["azure_ad_token_provider"] = get_token_provider()
                 _log_lane(f"foundry/entra:{get_active_lane()}")
-            return AnthropicFoundryClient(**kwargs)
+            # Prompt caching (PRP-0080, UDR-0056 D3): use the cache-injecting
+            # subclass when enabled; otherwise the plain connector (no
+            # cache_control -> pre-PRP-0080 request shape).
+            cls = _caching_client_class(AnthropicFoundryClient) if settings.prompt_cache_enabled else AnthropicFoundryClient
+            return cls(**kwargs)
 
         from agent_framework.anthropic import AnthropicClient
 
@@ -139,7 +279,8 @@ class AnthropicProvider:
         if settings.anthropic_base_url:
             kwargs["base_url"] = settings.anthropic_base_url
         _log_lane("direct")
-        return AnthropicClient(**kwargs)
+        cls = _caching_client_class(AnthropicClient) if settings.prompt_cache_enabled else AnthropicClient
+        return cls(**kwargs)
 
     def reasoning_catalog(self, model: str) -> dict[str, Any]:
         # Fixed, backend-owned allowed list + default (PRP-0071, UDR-0047 D2).

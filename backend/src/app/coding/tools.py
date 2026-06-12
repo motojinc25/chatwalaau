@@ -153,11 +153,20 @@ def _bash_execute_sync(command: str, cwd: str) -> str:
             command,
             shell=True,
             capture_output=True,
-            text=True,
+            # Decode child output as UTF-8 with replacement instead of the process
+            # locale default. On Windows that default is cp1252, which raises a
+            # UnicodeDecodeError on the subprocess reader thread for any byte it
+            # cannot map (e.g. 0x81 in non-ASCII tool output). That crash left the
+            # captured streams as None, so the concatenation below then failed with
+            # a NoneType-plus-str TypeError, surfacing the tool as a hard failure
+            # and spinning the Tool Approval loop until it aborted at 16 rounds.
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             cwd=work_dir,
         )
-        output = result.stdout + result.stderr
+        # Defensive: never concatenate None even if a stream came back empty/None.
+        output = (result.stdout or "") + (result.stderr or "")
         if len(output) > max_output:
             output = output[:max_output] + f"\n... (output truncated at {max_output} characters)"
         return f"Exit code: {result.returncode}\n{output}"
@@ -165,6 +174,11 @@ def _bash_execute_sync(command: str, cwd: str) -> str:
         return f"Error: Command timed out after {timeout} seconds: {command}"
     except OSError as e:
         return f"Error executing command: {e}"
+    except Exception as e:
+        # A coding tool that RAISES makes MAF mark the function failed and can spin
+        # the Tool Approval loop (FEAT-0028) until it aborts at 16 rounds. Always
+        # return the error as the tool result so the agent can recover instead.
+        return f"Error executing command: {type(e).__name__}: {e}"
 
 
 def _file_glob_sync(pattern: str, path: str) -> str:

@@ -48,6 +48,14 @@ class AzureOpenAIProvider:
         return settings.model_list
 
     def build_chat_client(self, model: str) -> Any:
+        # Prompt caching (PRP-0080, FEAT-0038 / UDR-0056 D4): Azure/OpenAI prompt
+        # caching is AUTOMATIC for prefixes >= 1024 tokens, so this provider needs
+        # no request rewrite and returns the plain client (pass-through). The seam
+        # responsibility still lives here -- a future provider with EXPLICIT caching
+        # injects it in its own build_chat_client (as app.providers.anthropic does);
+        # an optional stable prompt_cache_key hint is intentionally deferred (the
+        # automatic discount already applies). PROMPT_CACHE_ENABLED gates only the
+        # explicit (anthropic) lane.
         return OpenAIChatClient(
             model=model,
             azure_endpoint=settings.azure_openai_endpoint or None,

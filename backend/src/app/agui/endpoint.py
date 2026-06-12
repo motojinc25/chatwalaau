@@ -164,6 +164,99 @@ def _is_transient_upstream_error(exc: BaseException) -> bool:
     return False
 
 
+# --- Run-error classification (CTR-0009) -------------------------------------
+# Map an exception raised mid-stream to a clear, actionable RUN_ERROR message.
+# Applied to BOTH the typed and the generic except blocks so a RAW provider error
+# (e.g. anthropic.BadRequestError, which is NOT wrapped in ChatClientException)
+# gets the same actionable treatment as an OpenAI-wrapped one.
+
+_MSG_CONTINUATION = "Background response token not found or expired. Please resend your message."
+_MSG_PREV_RESPONSE = (
+    "The conversation's server-side response reference expired or "
+    "was not found. Please resend your message to continue."
+)
+_MSG_BILLING = (
+    "The model provider rejected the request because the account is out of "
+    "credits or quota (a billing issue, not a transient error -- retrying will "
+    "not help). Add credits or upgrade the plan for the active provider "
+    "(e.g. Anthropic Plans & Billing, or raise the Azure OpenAI quota), or "
+    "switch to another configured model, then resend."
+)
+_MSG_RATE_LIMIT = (
+    "Rate limited by the model provider (429 Too Many Requests). "
+    "A high reasoning effort generates many tokens quickly and is the "
+    "most common trigger for the Azure OpenAI per-minute (TPM) limit. "
+    "Please wait a moment and retry, lower the reasoning effort, or "
+    "raise the deployment quota."
+)
+_MSG_TRANSIENT = (
+    "The model provider returned a temporary server error (HTTP 5xx) "
+    "while generating the response. This is usually transient -- "
+    "please resend your message. On a very long conversation it can "
+    "also help to start a new chat."
+)
+_MSG_GENERIC = "An internal error occurred during agent execution."
+
+# Markers that identify an out-of-credits / quota-exhausted condition (as
+# opposed to a transient 429). Anthropic: "Your credit balance is too low ...
+# Plans & Billing ... purchase credits". OpenAI: code "insufficient_quota" /
+# "exceeded your current quota".
+_BILLING_MARKERS = (
+    "credit balance is too low",
+    "purchase credits",
+    "plans & billing",
+    "insufficient_quota",
+    "exceeded your current quota",
+    "billing",
+    "payment required",
+)
+
+
+def _is_billing_or_quota_error(exc: BaseException) -> bool:
+    """Detect a provider billing / credit / quota-exhausted error in the chain.
+
+    Anthropic raises a 400 invalid_request_error ("Your credit balance is too
+    low ...") and OpenAI a 429 with code "insufficient_quota"; both mean the
+    account is out of funds/quota and a retry will NOT help -- distinct from a
+    transient 429 rate limit. agent-framework may wrap them, so walk the chain.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if getattr(cur, "status_code", None) == 402:
+            return True
+        if getattr(cur, "code", None) == "insufficient_quota":
+            return True
+        text = str(cur).lower()
+        if any(marker in text for marker in _BILLING_MARKERS):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _classify_run_error(exc: BaseException, *, continuation_token: bool) -> tuple[str, bool]:
+    """Return (user-facing RUN_ERROR message, is_known) for a mid-stream error.
+
+    ``is_known`` False means the cause is unexpected and the caller should log a
+    full traceback (logger.exception); True means it is a recognized, actionable
+    condition worth only a WARNING. Billing is checked BEFORE rate-limit so an
+    OpenAI ``insufficient_quota`` 429 is reported as a billing issue, not as a
+    transient rate limit.
+    """
+    if continuation_token:
+        return _MSG_CONTINUATION, True
+    if _is_previous_response_not_found(exc):
+        return _MSG_PREV_RESPONSE, True
+    if _is_billing_or_quota_error(exc):
+        return _MSG_BILLING, True
+    if _is_rate_limit_error(exc):
+        return _MSG_RATE_LIMIT, True
+    if _is_transient_upstream_error(exc):
+        return _MSG_TRANSIENT, True
+    return _MSG_GENERIC, False
+
+
 def _strip_pdf_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Remove PDF image_url entries from message content arrays.
 
@@ -731,6 +824,25 @@ async def _stream_with_reasoning(
                         # for every provider (incl. demo) so the SPA can label and
                         # persist it next to the model name.
                         usage_value["reasoning"] = resolved_reasoning
+                        # Provider-agnostic prompt-cache metrics (PRP-0080,
+                        # CTR-0009 / FEAT-0038 / UDR-0056 D6). Normalize the
+                        # provider-specific cache token keys to a stable
+                        # cache_read_input_tokens / cache_write_input_tokens pair
+                        # so the SPA / operator can see the savings regardless of
+                        # provider. Anthropic reports anthropic.cache_read /
+                        # cache_creation; OpenAI reports a *cached_tokens detail.
+                        # Additive: absent when the provider reports no cache use.
+                        cache_read = usage_value.get("anthropic.cache_read_input_tokens")
+                        cache_write = usage_value.get("anthropic.cache_creation_input_tokens")
+                        if cache_read is None:
+                            cache_read = next(
+                                (v for k, v in usage_value.items() if isinstance(k, str) and k.endswith("cached_tokens")),
+                                None,
+                            )
+                        if cache_read is not None:
+                            usage_value["cache_read_input_tokens"] = cache_read
+                        if cache_write is not None:
+                            usage_value["cache_write_input_tokens"] = cache_write
                         yield encoder.encode(
                             CustomEvent(
                                 type=EventType.CUSTOM,
@@ -836,43 +948,22 @@ async def _stream_with_reasoning(
 
     except (OpenAINotFoundError, ChatClientException, TypeError) as exc:
         run_error = True
-        if continuation_token:
-            error_message = "Background response token not found or expired. Please resend your message."
-            logger.warning("Continuation token error for thread %s: %s", thread_id, exc)
-        elif _is_previous_response_not_found(exc):
-            error_message = (
-                "The conversation's server-side response reference expired or "
-                "was not found. Please resend your message to continue."
-            )
-            logger.warning("AG-UI previous_response_not_found for thread %s: %s", thread_id, exc)
-        elif _is_rate_limit_error(exc):
-            error_message = (
-                "Rate limited by the model provider (429 Too Many Requests). "
-                "A high reasoning effort generates many tokens quickly and is the "
-                "most common trigger for the Azure OpenAI per-minute (TPM) limit. "
-                "Please wait a moment and retry, lower the reasoning effort, or "
-                "raise the deployment quota."
-            )
-            logger.warning("AG-UI stream rate limited (429) for thread %s: %s", thread_id, exc)
-        elif _is_transient_upstream_error(exc):
-            error_message = (
-                "The model provider returned a temporary server error (HTTP 5xx) "
-                "while generating the response. This is usually transient -- "
-                "please resend your message. On a very long conversation it can "
-                "also help to start a new chat."
-            )
-            logger.warning("AG-UI stream upstream 5xx for thread %s: %s", thread_id, exc)
+        error_message, known = _classify_run_error(exc, continuation_token=bool(continuation_token))
+        if known:
+            logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:
-            error_message = "An internal error occurred during agent execution."
             logger.exception("AG-UI stream error")
 
-    except Exception:
+    except Exception as exc:
+        # A RAW provider error not wrapped in the typed exceptions above (e.g.
+        # anthropic.BadRequestError for an out-of-credits 400) reaches here; run
+        # it through the same classifier so billing / rate-limit / transient
+        # causes still surface an actionable message instead of the generic one.
         run_error = True
-        if continuation_token:
-            error_message = "Background response token not found or expired. Please resend your message."
-            logger.warning("Continuation token error for thread %s", thread_id, exc_info=True)
+        error_message, known = _classify_run_error(exc, continuation_token=bool(continuation_token))
+        if known:
+            logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:
-            error_message = "An internal error occurred during agent execution."
             logger.exception("AG-UI stream error")
 
     # Always finalize open blocks -- even after exceptions, so the frontend

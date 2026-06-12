@@ -81,6 +81,26 @@ class Settings(BaseSettings):
     # Web Search
     web_search_country: str = "US"
 
+    # ---- Prompt Caching (CTR-0006 v24, PRP-0080, FEAT-0038 / UDR-0056) ----
+    # Provider-agnostic input-token cost reduction. When enabled (default) each
+    # provider marks its large, stable per-call prefix (system prompt + tool
+    # schemas) as cacheable, so that prefix is billed once and re-read cheaply on
+    # the many model calls of a single turn (e.g. a coding tool loop). Caching is
+    # OUTPUT-TRANSPARENT: model outputs are identical with it on or off; only
+    # billing / latency / the additive usage cache fields change. Set false to
+    # restore the pre-PRP-0080 request shape (no cache_control, no cache key, no
+    # usage cache fields).
+    #   - azure-openai: caching is AUTOMATIC for prefixes >= 1024 tokens (no
+    #     request rewrite either way); this provider is effectively pass-through.
+    #   - anthropic: injects cache_control breakpoints on the system block + the
+    #     tools array at request-assembly time (app.providers.anthropic).
+    prompt_cache_enabled: bool = True
+
+    # Anthropic prompt-cache TTL: "5m" (default, GA) or "1h" (extended cache,
+    # adds the extended-cache-ttl-2025-04-11 beta). Unknown -> "5m" (validator
+    # below). Only the anthropic provider consumes this; azure-openai ignores it.
+    anthropic_prompt_cache_ttl: str = "5m"
+
     # Reasoning effort (PRP-0071, UDR-0047): the per-provider allowed list and
     # DEFAULT are fixed, code-owned constants served by the backend (azure-openai
     # -> medium, anthropic -> xhigh); see app.providers.{azure_openai,anthropic}.
@@ -686,6 +706,20 @@ class Settings(BaseSettings):
         if not (1 <= self.compaction_keep_last_groups <= 32):
             msg = f"COMPACTION_KEEP_LAST_GROUPS must be in 1..32; got {self.compaction_keep_last_groups}"
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_prompt_cache(self) -> "Settings":
+        """Normalize the Anthropic prompt-cache TTL (PRP-0080, UDR-0056 D3)."""
+        ttl = (self.anthropic_prompt_cache_ttl or "").strip().lower()
+        if ttl not in {"5m", "1h"}:
+            if ttl:
+                _logger.warning(
+                    "ANTHROPIC_PROMPT_CACHE_TTL=%r is not recognised; using 5m. Allowed: 5m, 1h",
+                    self.anthropic_prompt_cache_ttl,
+                )
+            ttl = "5m"
+        self.anthropic_prompt_cache_ttl = ttl
         return self
 
     @model_validator(mode="after")

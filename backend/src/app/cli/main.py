@@ -37,11 +37,13 @@ def _check_azure_login() -> bool:
             "az account show",
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             shell=True,
         )
         if result.returncode != 0:
-            print(f"  az account show failed: {result.stderr.strip()}")
+            print(f"  az account show failed: {(result.stderr or '').strip()}")
         return result.returncode == 0
     except FileNotFoundError:
         print("  Azure CLI (az) not found in PATH.")
