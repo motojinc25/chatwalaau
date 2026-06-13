@@ -57,8 +57,13 @@ def build_chat_client(model: str) -> Any:
     return provider_for(model).build_chat_client(model)
 
 
-def build_model_options(model: str, effort: str | None = None) -> dict[str, Any]:
-    return provider_for(model).build_model_options(model, effort)
+def build_model_options(model: str, selected: dict[str, Any] | None = None) -> dict[str, Any]:
+    return provider_for(model).build_model_options(model, selected)
+
+
+def model_options_catalog(model: str) -> dict[str, Any]:
+    """Return ``{"options": [descriptor, ...]}`` for ``model`` (CTR-0102 v4)."""
+    return provider_for(model).model_options_catalog(model)
 
 
 def reasoning_catalog(model: str) -> dict[str, Any]:
@@ -79,9 +84,39 @@ def resolve_effort(model: str, requested: str | None) -> str:
     return catalog["default"]
 
 
+def resolve_options(model: str, requested: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve a requested option selection against ``model``'s catalog (UDR-0057 D7).
+
+    Returns ``{key: value}`` for EVERY option the model advertises: a valid /
+    in-range requested value wins, otherwise the descriptor default. Never raises,
+    so a bad ``state.model_options`` can never produce a provider validation
+    error. Used by the AG-UI endpoint both to build the per-request options and to
+    echo the resolved selections on the usage event (CTR-0009).
+    """
+    requested = requested or {}
+    resolved: dict[str, Any] = {}
+    for desc in model_options_catalog(model)["options"]:
+        key = desc["key"]
+        val = requested.get(key)
+        if desc.get("kind") == "number":
+            lo, hi = desc.get("min"), desc.get("max")
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and lo <= val <= hi:
+                resolved[key] = val
+            else:
+                resolved[key] = desc.get("default")
+        else:  # enum (default)
+            resolved[key] = val if val in desc.get("allowed", []) else desc.get("default")
+    return resolved
+
+
 def reasoning_options_map(models: list[str]) -> dict[str, dict[str, Any]]:
     """model -> reasoning catalog map for the GET /api/model selector (CTR-0069)."""
     return {model: reasoning_catalog(model) for model in models}
+
+
+def model_options_map(models: list[str]) -> dict[str, dict[str, Any]]:
+    """model -> generalized option catalog for the GET /api/model selector (CTR-0069 v4)."""
+    return {model: model_options_catalog(model) for model in models}
 
 
 def web_search_tool(model: str) -> Any | None:
@@ -111,11 +146,14 @@ __all__ = [
     "background_supported_map",
     "build_chat_client",
     "build_model_options",
+    "model_options_catalog",
+    "model_options_map",
     "openai_web_search_tool",
     "provider_for",
     "reasoning_catalog",
     "reasoning_options_map",
     "resolve_effort",
     "resolve_models",
+    "resolve_options",
     "web_search_tool",
 ]

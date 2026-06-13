@@ -36,7 +36,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 
 - **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, and Temporary Chat
 - **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow, prompt templates, and Agent Skills
-- **Models** -- switch between **Azure OpenAI** and **Anthropic (Claude)** mid-conversation, with per-message reasoning effort and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
+- **Models** -- switch between **Azure OpenAI** and **Anthropic (Claude)** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity) and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
 - **Knowledge** -- RAG over your PDFs (ChromaDB) and background batch jobs with a live dashboard
 - **MCP native** -- connect any MCP server (Claude Desktop-compatible config); MCP Apps render interactive UI in chat
 - **Memory** -- a configurable Agent Identity and a self-maintaining User Preference Memory that the agent curates inline and (opt-in) reconciles in the background, superseding stale or conflicting preferences instead of just piling them up

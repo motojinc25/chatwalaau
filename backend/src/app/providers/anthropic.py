@@ -268,7 +268,11 @@ class AnthropicProvider:
             # Prompt caching (PRP-0080, UDR-0056 D3): use the cache-injecting
             # subclass when enabled; otherwise the plain connector (no
             # cache_control -> pre-PRP-0080 request shape).
-            cls = _caching_client_class(AnthropicFoundryClient) if settings.prompt_cache_enabled else AnthropicFoundryClient
+            cls = (
+                _caching_client_class(AnthropicFoundryClient)
+                if settings.prompt_cache_enabled
+                else AnthropicFoundryClient
+            )
             return cls(**kwargs)
 
         from agent_framework.anthropic import AnthropicClient
@@ -282,13 +286,29 @@ class AnthropicProvider:
         cls = _caching_client_class(AnthropicClient) if settings.prompt_cache_enabled else AnthropicClient
         return cls(**kwargs)
 
+    def model_options_catalog(self, model: str) -> dict[str, Any]:
+        # Generalized per-model option catalog (PRP-0081, UDR-0057 D2/D3). Opus
+        # 4.7/4.8 advertise reasoning effort ONLY. temperature / top_p / top_k are
+        # removed on adaptive-thinking models and the Messages API returns HTTP 400
+        # if sent, so they are NEVER advertised (UDR-0057 D3); verbosity is an
+        # OpenAI-only control. Fixed, backend-owned; the operator picks per message.
+        return {
+            "options": [
+                {
+                    "key": "effort",
+                    "kind": "enum",
+                    "allowed": list(ANTHROPIC_EFFORT_LEVELS),
+                    "default": ANTHROPIC_EFFORT_DEFAULT,
+                },
+            ]
+        }
+
     def reasoning_catalog(self, model: str) -> dict[str, Any]:
-        # Fixed, backend-owned allowed list + default (PRP-0071, UDR-0047 D2).
-        # Anthropic default reasoning effort is always `xhigh`; the operator
-        # picks per message in the UI. Not env-configurable.
+        # Derived effort-axis view of model_options_catalog (back-compat for the
+        # GET /api/model reasoning_options map, CTR-0069 v4).
         return {"allowed": list(ANTHROPIC_EFFORT_LEVELS), "default": ANTHROPIC_EFFORT_DEFAULT}
 
-    def build_model_options(self, model: str, effort: str | None = None) -> dict[str, Any]:
+    def build_model_options(self, model: str, selected: dict[str, Any] | None = None) -> dict[str, Any]:
         # Adaptive thinking is the only supported mode on Opus 4.7 / 4.8 (manual
         # thinking.type=enabled + budget_tokens returns HTTP 400). The effort
         # level goes in a separate output_config object; display=summarized keeps
@@ -300,8 +320,9 @@ class AnthropicProvider:
         # (the xhigh "one character then stops" defect). Use the per-effort tier,
         # floored by the operator's ANTHROPIC_MAX_TOKENS so a larger configured
         # value still wins.
-        catalog = self.reasoning_catalog(model)
-        chosen = effort if effort in catalog["allowed"] else catalog["default"]
+        selected = selected or {}
+        effort = selected.get("effort")
+        chosen = effort if effort in ANTHROPIC_EFFORT_LEVELS else ANTHROPIC_EFFORT_DEFAULT
         effort_budget = ANTHROPIC_EFFORT_MAX_TOKENS.get(chosen, ANTHROPIC_EFFORT_MAX_TOKENS["high"])
         max_tokens = max(settings.anthropic_max_tokens, effort_budget)
         return {

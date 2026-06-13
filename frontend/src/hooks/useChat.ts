@@ -32,8 +32,12 @@ interface UseChatOptions {
   onSessionCreated?: (info: { threadId: string; title: string }) => void
   bgEnabled?: boolean
   selectedModel?: string
-  /** Selected reasoning effort sent as AG-UI state.reasoning (CTR-0009, PRP-0071). */
-  selectedReasoning?: string
+  /**
+   * Selected per-message generation options (effort + verbosity) sent as AG-UI
+   * state.model_options (CTR-0009 v13, PRP-0081). Supersedes the single
+   * selectedReasoning string; the backend still accepts the legacy field.
+   */
+  selectedModelOptions?: Record<string, string>
   /**
    * Temporary Chat (CTR-0107 / CTR-0106, PRP-0076). When true the run is sent
    * with AG-UI state.temporary=true (de-personalized, quarantine-routed) and the
@@ -62,7 +66,7 @@ export function useChat(options?: UseChatOptions) {
   const onSessionCreatedRef = useRef(options?.onSessionCreated)
   const bgEnabledRef = useRef(options?.bgEnabled ?? false)
   const selectedModelRef = useRef(options?.selectedModel ?? '')
-  const selectedReasoningRef = useRef(options?.selectedReasoning ?? '')
+  const selectedModelOptionsRef = useRef<Record<string, string>>(options?.selectedModelOptions ?? {})
   const temporaryRef = useRef(options?.temporary ?? false)
   const onCustomEventRef = useRef(options?.onCustomEvent)
 
@@ -98,8 +102,8 @@ export function useChat(options?: UseChatOptions) {
   }, [options?.selectedModel])
 
   useEffect(() => {
-    selectedReasoningRef.current = options?.selectedReasoning ?? ''
-  }, [options?.selectedReasoning])
+    selectedModelOptionsRef.current = options?.selectedModelOptions ?? {}
+  }, [options?.selectedModelOptions])
 
   useEffect(() => {
     temporaryRef.current = options?.temporary ?? false
@@ -200,7 +204,8 @@ export function useChat(options?: UseChatOptions) {
         const aguiState: Record<string, unknown> = {}
         const effectiveModel = options?.modelOverride || selectedModelRef.current
         if (effectiveModel) aguiState.model = effectiveModel
-        if (selectedReasoningRef.current) aguiState.reasoning = selectedReasoningRef.current
+        if (Object.keys(selectedModelOptionsRef.current).length > 0)
+          aguiState.model_options = selectedModelOptionsRef.current
         if (bgEnabledRef.current) aguiState.background = true
         if (temporaryRef.current) aguiState.temporary = true
         if (options?.resumeToken) aguiState.continuation_token = options.resumeToken
@@ -445,6 +450,7 @@ export function useChat(options?: UseChatOptions) {
                     completedUsage = event.value as UsageInfo
                     const usageModel = (event.value as Record<string, unknown>).model as string | undefined
                     const usageReasoning = (event.value as Record<string, unknown>).reasoning as string | undefined
+                    const usageVerbosity = (event.value as Record<string, unknown>).verbosity as string | undefined
                     setMessages((prev) =>
                       prev.map((msg) =>
                         msg.id === assistantId
@@ -453,6 +459,7 @@ export function useChat(options?: UseChatOptions) {
                               usage: event.value as UsageInfo,
                               ...(usageModel ? { model: usageModel } : {}),
                               ...(usageReasoning ? { reasoning: usageReasoning } : {}),
+                              ...(usageVerbosity ? { verbosity: usageVerbosity } : {}),
                             }
                           : msg,
                       ),

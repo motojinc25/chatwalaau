@@ -26,6 +26,8 @@ export interface UsageInfo {
   model?: string
   /** Reasoning effort used for this turn (CTR-0030, PRP-0071). */
   reasoning?: string
+  /** Text verbosity used for this turn (gpt-5.x only; CTR-0030, PRP-0081). */
+  verbosity?: string
 }
 
 export type ActivityEntry = { type: 'reasoning'; id: string } | { type: 'toolCall'; id: string }
@@ -55,6 +57,8 @@ export interface ChatMessage {
   model?: string
   /** Reasoning effort used for this assistant message (CTR-0030, PRP-0071) */
   reasoning?: string
+  /** Text verbosity used for this assistant message (gpt-5.x only; CTR-0030, PRP-0081) */
+  verbosity?: string
 }
 
 export interface PromptTemplate {

@@ -6,8 +6,8 @@ import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { MessageNavigator } from '@/components/MessageNavigator'
+import { ModelOptionsSelector } from '@/components/ModelOptionsSelector'
 import { ModelSelector } from '@/components/ModelSelector'
-import { ReasoningSelector } from '@/components/ReasoningSelector'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
 import { ToolApprovalList } from '@/components/ToolApprovalCard'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
@@ -61,7 +61,9 @@ export function ChatPanel({
   const [bgEnabled, setBgEnabled] = useState(() => localStorage.getItem(BG_STORAGE_KEY) === 'true')
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const [selectedModel, setSelectedModel] = useState('')
-  const [selectedReasoning, setSelectedReasoning] = useState('')
+  // Per-message generation options (effort + verbosity), catalog-driven
+  // (CTR-0071, PRP-0081). Sent as AG-UI state.model_options.
+  const [selectedModelOptions, setSelectedModelOptions] = useState<Record<string, string>>({})
   const [modelMaxTokens, setModelMaxTokens] = useState(128000)
   const [availableModels, setAvailableModels] = useState<string[]>([])
   // CTR-0045 / PRP-0073: per-model background-response capability. The toggle
@@ -86,8 +88,8 @@ export function ChatPanel({
     setModelMaxTokens(maxTokens)
   }, [])
 
-  const handleReasoningChange = useCallback((effort: string) => {
-    setSelectedReasoning(effort)
+  const handleModelOptionsChange = useCallback((opts: Record<string, string>) => {
+    setSelectedModelOptions(opts)
   }, [])
 
   // Auto-dismiss notification
@@ -130,7 +132,7 @@ export function ChatPanel({
     onSessionCreated,
     bgEnabled: effectiveBgEnabled,
     selectedModel,
-    selectedReasoning,
+    selectedModelOptions,
     temporary,
     onCustomEvent: approvalApi.ingestCustomEvent,
   })
@@ -389,10 +391,10 @@ export function ChatPanel({
         <div ref={inputRef}>
           <div className="flex items-center justify-end gap-1 px-4">
             <ModelSelector threadId={threadId ?? ''} onModelChange={handleModelChange} />
-            <ReasoningSelector
+            <ModelOptionsSelector
               threadId={threadId ?? ''}
               selectedModel={selectedModel}
-              onReasoningChange={handleReasoningChange}
+              onOptionsChange={handleModelOptionsChange}
             />
             {!temporary && (
               <BackgroundResponsesToggle
@@ -432,10 +434,10 @@ export function ChatPanel({
           <div className="relative bg-background">
             <div className="mx-auto flex max-w-3xl items-center justify-end gap-1 px-4">
               <ModelSelector threadId={threadId ?? ''} onModelChange={handleModelChange} />
-              <ReasoningSelector
+              <ModelOptionsSelector
                 threadId={threadId ?? ''}
                 selectedModel={selectedModel}
-                onReasoningChange={handleReasoningChange}
+                onOptionsChange={handleModelOptionsChange}
               />
               {!temporary && (
                 <BackgroundResponsesToggle

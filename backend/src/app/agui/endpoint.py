@@ -468,13 +468,22 @@ async def _stream_with_reasoning(
         # Read model, reasoning, and background options from AG-UI state
         # (CTR-0070, CTR-0045, CTR-0009 reasoning PRP-0071)
         selected_model = None
-        requested_reasoning = None
+        requested_options: dict[str, Any] = {}
         background = False
         continuation_token = None
         temporary = False
         if request_body.state:
             selected_model = request_body.state.get("model")
-            requested_reasoning = request_body.state.get("reasoning")
+            # Per-message generation options (PRP-0081, CTR-0009 v13). The SPA
+            # sends a `state.model_options` object (e.g. {effort, verbosity}).
+            # Back-compat (UDR-0057): a legacy `state.reasoning` string is folded
+            # in as {effort: <value>} when model_options omits effort.
+            raw_options = request_body.state.get("model_options")
+            if isinstance(raw_options, dict):
+                requested_options = dict(raw_options)
+            legacy_reasoning = request_body.state.get("reasoning")
+            if legacy_reasoning and "effort" not in requested_options:
+                requested_options["effort"] = legacy_reasoning
             background = request_body.state.get("background", False)
             continuation_token = request_body.state.get("continuation_token")
             # Temporary Chat (PRP-0076, CTR-0106, UDR-0052). When the SPA marks
@@ -486,12 +495,17 @@ async def _stream_with_reasoning(
         # Select agent from registry based on model (CTR-0070, PRP-0035)
         agent = agent_registry.get(selected_model)
 
-        # Resolve the per-message reasoning effort against the owning provider's
-        # catalog (PRP-0071, UDR-0047 D4). The resolved value is emitted in the
-        # usage event regardless of provider; the per-request options are merged
-        # only for live (non-demo) agents -- DemoChatClient ignores them.
+        # Resolve the per-message generation options against the owning provider's
+        # catalog (PRP-0081, UDR-0057 D7). Every advertised option is resolved
+        # (effort plus, for gpt-5.x, verbosity); a missing / invalid value falls
+        # back to the model default and never errors. The resolved values are
+        # emitted in the usage event regardless of provider; the per-request
+        # options are merged only for live (non-demo) agents -- DemoChatClient
+        # ignores them. `resolved_reasoning` is kept as the effort alias used by
+        # the usage event's back-compat `reasoning` field.
         effective_model = selected_model or agent_registry.default_model
-        resolved_reasoning = providers.resolve_effort(effective_model, requested_reasoning)
+        resolved_options = providers.resolve_options(effective_model, requested_options)
+        resolved_reasoning = resolved_options.get("effort", providers.resolve_effort(effective_model, None))
 
         # Validate continuation_token format: MAF expects dict with "response_id"
         if continuation_token and isinstance(continuation_token, str):
@@ -509,11 +523,14 @@ async def _stream_with_reasoning(
             background = False
         if continuation_token:
             run_options["continuation_token"] = continuation_token
-        # Per-request reasoning options override the Agent's startup default_options
-        # via MAF _merge_options (per key). Only when the client explicitly chose an
-        # effort; otherwise the Agent's catalog-default options already apply.
-        if requested_reasoning and not is_demo_mode():
-            run_options.update(providers.build_model_options(effective_model, resolved_reasoning))
+        # Per-request generation options override the Agent's startup
+        # default_options via MAF _merge_options (per key). Only when the client
+        # explicitly chose at least one option; otherwise the Agent's
+        # catalog-default options already apply. build_model_options keeps the
+        # output-neutral default rule (a default value is omitted), so a default
+        # selection is byte-for-byte with the construction-time options.
+        if requested_options and not is_demo_mode():
+            run_options.update(providers.build_model_options(effective_model, resolved_options))
 
         # Temporary Chat (PRP-0076, CTR-0106, UDR-0052) vs normal run.
         # Temporary: de-personalized. No User Profile snapshot is captured or
@@ -820,10 +837,15 @@ async def _stream_with_reasoning(
                         model_name = selected_model or agent_registry.default_model
                         usage_value["max_context_tokens"] = settings.get_max_context_tokens(model_name)
                         usage_value["model"] = model_name
-                        # Per-message reasoning effort (PRP-0071, CTR-0030). Echoed
-                        # for every provider (incl. demo) so the SPA can label and
-                        # persist it next to the model name.
+                        # Per-message generation options (PRP-0071 / PRP-0081,
+                        # CTR-0030). The effort keeps its back-compat field name
+                        # `reasoning`; every other advertised option (e.g.
+                        # `verbosity`) is echoed under its own key. Emitted for
+                        # every provider (incl. demo) so the SPA can label and
+                        # persist the selections next to the model name. Anthropic
+                        # advertises effort only, so no extra key appears there.
                         usage_value["reasoning"] = resolved_reasoning
+                        usage_value.update({k: v for k, v in resolved_options.items() if k != "effort"})
                         # Provider-agnostic prompt-cache metrics (PRP-0080,
                         # CTR-0009 / FEAT-0038 / UDR-0056 D6). Normalize the
                         # provider-specific cache token keys to a stable
@@ -836,7 +858,11 @@ async def _stream_with_reasoning(
                         cache_write = usage_value.get("anthropic.cache_creation_input_tokens")
                         if cache_read is None:
                             cache_read = next(
-                                (v for k, v in usage_value.items() if isinstance(k, str) and k.endswith("cached_tokens")),
+                                (
+                                    v
+                                    for k, v in usage_value.items()
+                                    if isinstance(k, str) and k.endswith("cached_tokens")
+                                ),
                                 None,
                             )
                         if cache_read is not None:

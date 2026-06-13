@@ -143,6 +143,7 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
       // (the label is simply not rendered for legacy messages, UDR-0047 D6).
       ...(usage?.model ? { model: usage.model } : {}),
       ...(usage?.reasoning ? { reasoning: usage.reasoning } : {}),
+      ...(usage?.verbosity ? { verbosity: usage.verbosity } : {}),
     })
   }
   return result

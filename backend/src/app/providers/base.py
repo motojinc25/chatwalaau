@@ -3,9 +3,10 @@
 A Provider owns everything that differs between base-model providers:
 the model list it serves, how to construct the MAF ``ChatClient`` for a
 model (including ``(provider x hosting)`` credential / endpoint
-resolution), the model-aware reasoning effort catalog, the per-model
-generation / reasoning ``default_options`` (effort-aware), and the
-provider-supplied hosted web search tool (when any).
+resolution), the per-model GENERATION OPTION CATALOG (the set of knobs the
+model accepts: reasoning effort plus, where supported, verbosity; PRP-0081 /
+UDR-0057), the per-model generation ``default_options`` resolved from a
+selection, and the provider-supplied hosted web search tool (when any).
 
 No new in-house seam is introduced: the returned chat client is a MAF
 ``ChatClient`` (BaseChatClient), reused exactly as ``OpenAIChatClient`` and
@@ -39,20 +40,42 @@ class Provider(Protocol):
         """Construct the MAF ChatClient for ``model`` (credential owned here)."""
         ...
 
-    def reasoning_catalog(self, model: str) -> dict[str, Any]:
-        """Reasoning effort catalog for ``model`` (PRP-0071, UDR-0047 D2).
+    def model_options_catalog(self, model: str) -> dict[str, Any]:
+        """Generation option catalog for ``model`` (PRP-0081, UDR-0057 D2).
 
-        Returns ``{"allowed": [<effort>, ...], "default": <effort>}``. The
-        allowed list and built-in default are provider-owned; the default may
-        be overridden per model via the provider's env override key.
+        Returns ``{"options": [descriptor, ...]}`` where each descriptor is one
+        of:
+
+          - ``{"key", "kind": "enum",   "allowed": [...], "default": ...}``
+          - ``{"key", "kind": "number", "min", "max", "step", "default"}``
+
+        Each provider advertises ONLY the knobs the model actually accepts, so
+        the UI renders nothing unsupported (UDR-0057 D2). Classic sampling params
+        (temperature / top_p / top_k) MUST NOT be advertised for adaptive-thinking
+        / reasoning-only models; the ``number`` kind is reserved for a future
+        non-reasoning model (UDR-0057 D3).
         """
         ...
 
-    def build_model_options(self, model: str, effort: str | None = None) -> dict[str, Any]:
+    def reasoning_catalog(self, model: str) -> dict[str, Any]:
+        """Reasoning effort catalog for ``model`` (PRP-0071, UDR-0047 D2).
+
+        Returns ``{"allowed": [<effort>, ...], "default": <effort>}``, the
+        ``effort`` axis of :meth:`model_options_catalog`. Retained as a derived
+        back-compat view for the GET /api/model ``reasoning_options`` map
+        (CTR-0069); the generalized catalog is the source of truth.
+        """
+        ...
+
+    def build_model_options(self, model: str, selected: dict[str, Any] | None = None) -> dict[str, Any]:
         """Per-model Agent ``default_options`` (provider-specific shape).
 
-        ``effort`` selects the reasoning strength; ``None`` or a value not in the
-        model's allowed list resolves to the catalog default (UDR-0047 D7).
+        ``selected`` maps advertised option keys to chosen values
+        (e.g. ``{"effort": "high", "verbosity": "low"}``). ``None``, missing, or
+        invalid / out-of-range values resolve to the catalog default (UDR-0057
+        D7). A resolved value equal to its default is OMITTED from the request so
+        the un-changed path stays byte-for-byte (output-neutral default, UDR-0057
+        D6).
         """
         ...
 

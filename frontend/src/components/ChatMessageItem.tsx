@@ -445,6 +445,11 @@ function ChatMessageItemImpl({
                 {message.reasoning}
               </span>
             )}
+            {!isUser && message.verbosity && (
+              <span className="ml-1 text-[11px] text-muted-foreground/50 capitalize" title="Verbosity">
+                {message.verbosity}
+              </span>
+            )}
             {!isUser && message.usage && (
               <span className="ml-1 text-[11px] tabular-nums text-muted-foreground/60">
                 {message.usage.input_token_count?.toLocaleString() ?? '?'}in /{' '}

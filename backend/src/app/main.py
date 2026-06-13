@@ -329,8 +329,13 @@ async def get_model_info():
         "default_model": agent_registry.default_model,
         "max_context_tokens": settings.get_max_context_tokens(),
         "max_context_tokens_map": settings.max_context_tokens_map,
-        # Per-model reasoning effort catalog for the reasoning selector
-        # (CTR-0069 / CTR-0102, PRP-0071): model -> {allowed, default}.
+        # Per-model generation option catalog for the model-options panel
+        # (CTR-0069 v4 / CTR-0102 v4, PRP-0081): model -> {options: [descriptor]}.
+        # Covers reasoning effort plus, for gpt-5.x, text verbosity.
+        "model_options": providers.model_options_map(agent_registry.available_models),
+        # Per-model reasoning effort catalog (CTR-0069 / CTR-0102, PRP-0071):
+        # model -> {allowed, default}. Retained as a derived back-compat subset of
+        # `model_options` (the effort axis) for clients that still read it.
         "reasoning_options": providers.reasoning_options_map(agent_registry.available_models),
         # Per-model background-response capability (CTR-0045, PRP-0073):
         # model -> bool. The UI disables the Background toggle for models
