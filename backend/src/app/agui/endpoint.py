@@ -257,6 +257,86 @@ def _classify_run_error(exc: BaseException, *, continuation_token: bool) -> tupl
     return _MSG_GENERIC, False
 
 
+# --- Transient upstream auto-retry (CTR-0009, v0.77.1) ------------------------
+# A coding turn fans out into many sequential model calls; any one can hit a
+# transient Azure/OpenAI 5xx ("The server had an error processing your request").
+# When that happens BEFORE any output has been streamed for the attempt, retrying
+# is safe -- nothing was sent to the client or committed server-side -- so the
+# model simply restarts the turn. A failure AFTER the first update is NOT retried
+# (it would duplicate streamed output); billing / rate-limit / not-found causes
+# are never retried (a retry will not help). Fixed small bound, no env var.
+_MAX_TRANSIENT_RETRIES = 2
+_RETRY_BACKOFF_BASE_SEC = 0.8
+
+
+class _RetryNotice:
+    """Sentinel yielded by ``_resilient_run`` to signal a pending auto-retry.
+
+    The endpoint translates it into a CUSTOM ``run_retry`` event so the SPA can
+    show that a transient error is being retried (the run continues; no
+    RUN_ERROR is emitted).
+    """
+
+    __slots__ = ("attempt", "delay_ms", "max_attempts")
+
+    def __init__(self, attempt: int, max_attempts: int, delay_ms: int) -> None:
+        self.attempt = attempt
+        self.max_attempts = max_attempts
+        self.delay_ms = delay_ms
+
+
+async def _resilient_run(
+    agent: Any, messages: Any, session: Any, run_options: dict[str, Any]
+) -> AsyncGenerator[Any, None]:
+    """Yield MAF updates, auto-retrying a TRANSIENT upstream 5xx that fails before
+    any update is produced (v0.77.1).
+
+    ``produced`` flips True on the first update; once output exists the attempt is
+    never retried (mid-stream failures fall through to the caller's classifier and
+    surface the normal transient RUN_ERROR). Non-transient, billing, rate-limit,
+    and previous-response-not-found errors propagate immediately. Before each
+    retry the (uncommitted) server-side response id is cleared so the retry relies
+    on explicit context, and a ``_RetryNotice`` is yielded so the caller can inform
+    the SPA. ``asyncio.CancelledError`` is not an ``Exception`` subclass, so a
+    client disconnect propagates untouched.
+    """
+    attempt = 0
+    while True:
+        produced = False
+        try:
+            response_stream = agent.run(messages, stream=True, session=session, options=run_options or None)
+            stream = await _normalize_response_stream(response_stream)
+            async for update in stream:
+                produced = True
+                yield update
+            return
+        except Exception as exc:
+            retryable = (
+                not produced
+                and attempt < _MAX_TRANSIENT_RETRIES
+                and _is_transient_upstream_error(exc)
+                and not _is_billing_or_quota_error(exc)
+                and not _is_rate_limit_error(exc)
+                and not _is_previous_response_not_found(exc)
+            )
+            if not retryable:
+                raise
+            attempt += 1
+            delay = _RETRY_BACKOFF_BASE_SEC * (2 ** (attempt - 1))
+            logger.warning(
+                "AG-UI transient upstream error before output; auto-retry %d/%d after %.1fs: %s",
+                attempt,
+                _MAX_TRANSIENT_RETRIES,
+                delay,
+                exc,
+            )
+            # Clear any uncommitted server-side response id so the retry relies on
+            # the explicit context (mirrors the post-approval reset).
+            session.service_session_id = None
+            yield _RetryNotice(attempt, _MAX_TRANSIENT_RETRIES, int(delay * 1000))
+            await asyncio.sleep(delay)
+
+
 def _strip_pdf_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Remove PDF image_url entries from message content arrays.
 
@@ -585,15 +665,25 @@ async def _stream_with_reasoning(
             # tool_result -> HTTP 400. See app.agent.approval_iteration.
             iter_accumulator = IterationContentAccumulator()
 
-            response_stream = agent.run(
-                iteration_messages,
-                stream=True,
-                session=session,
-                options=run_options or None,
-            )
-            stream = await _normalize_response_stream(response_stream)
+            async for update in _resilient_run(agent, iteration_messages, session, run_options):
+                # v0.77.1: a transient upstream 5xx before any output triggers an
+                # automatic retry. The helper yields a _RetryNotice so we can tell
+                # the SPA a retry is happening (the run continues; no RUN_ERROR).
+                if isinstance(update, _RetryNotice):
+                    yield encoder.encode(
+                        CustomEvent(
+                            type=EventType.CUSTOM,
+                            name="run_retry",
+                            value={
+                                "attempt": update.attempt,
+                                "max_attempts": update.max_attempts,
+                                "delay_ms": update.delay_ms,
+                                "reason": "transient_upstream_error",
+                            },
+                        )
+                    )
+                    continue
 
-            async for update in stream:
                 # Emit continuation_token if present (CTR-0045, PRP-0025)
                 if background:
                     update_ct = getattr(update, "continuation_token", None)

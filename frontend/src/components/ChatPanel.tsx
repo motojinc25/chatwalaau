@@ -59,7 +59,7 @@ export function ChatPanel({
   temporary = false,
 }: ChatPanelProps) {
   const [bgEnabled, setBgEnabled] = useState(() => localStorage.getItem(BG_STORAGE_KEY) === 'true')
-  const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+  const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null)
   const [selectedModel, setSelectedModel] = useState('')
   // Per-message generation options (effort + verbosity), catalog-driven
   // (CTR-0071, PRP-0081). Sent as AG-UI state.model_options.
@@ -135,6 +135,9 @@ export function ChatPanel({
     selectedModelOptions,
     temporary,
     onCustomEvent: approvalApi.ingestCustomEvent,
+    // v0.77.1: transient upstream 5xx auto-retry status (CTR-0009). Shown as a
+    // brief amber banner so the user knows the run is being resent, not stalled.
+    onNotice: useCallback((message: string) => setNotification({ type: 'info', message }), []),
   })
 
   // Auto-resume from continuation_token (page reload or sidebar switch).
@@ -379,9 +382,9 @@ export function ChatPanel({
         <div
           className={cn(
             'absolute right-3 top-3 z-30 rounded-md px-4 py-2 text-sm shadow-md',
-            notification.type === 'success'
-              ? 'bg-green-500/10 text-green-600 border border-green-500/20'
-              : 'bg-red-500/10 text-red-600 border border-red-500/20',
+            notification.type === 'success' && 'bg-green-500/10 text-green-600 border border-green-500/20',
+            notification.type === 'error' && 'bg-red-500/10 text-red-600 border border-red-500/20',
+            notification.type === 'info' && 'bg-amber-500/10 text-amber-600 border border-amber-500/20',
           )}>
           {notification.message}
         </div>

@@ -50,6 +50,12 @@ interface UseChatOptions {
    * tool_approval_response). useToolApproval supplies this callback.
    */
   onCustomEvent?: (name: string | undefined, value: Record<string, unknown> | undefined) => void
+  /**
+   * v0.77.1 (CTR-0009): transient/informational status during a run, e.g. a
+   * `run_retry` event when the backend auto-resends after a temporary upstream
+   * 5xx. Shown to the user as a brief notice; not persisted.
+   */
+  onNotice?: (message: string) => void
 }
 
 /**
@@ -69,6 +75,7 @@ export function useChat(options?: UseChatOptions) {
   const selectedModelOptionsRef = useRef<Record<string, string>>(options?.selectedModelOptions ?? {})
   const temporaryRef = useRef(options?.temporary ?? false)
   const onCustomEventRef = useRef(options?.onCustomEvent)
+  const onNoticeRef = useRef(options?.onNotice)
 
   useEffect(() => {
     if (options?.threadId) {
@@ -112,6 +119,10 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     onCustomEventRef.current = options?.onCustomEvent
   }, [options?.onCustomEvent])
+
+  useEffect(() => {
+    onNoticeRef.current = options?.onNotice
+  }, [options?.onNotice])
 
   const streamResponse = useCallback(
     async (
@@ -446,6 +457,17 @@ export function useChat(options?: UseChatOptions) {
                   // tool_approval_request / tool_approval_response pair
                   // without duplicating SSE parsing.
                   onCustomEventRef.current?.(event.name, event.value)
+                  if (event.name === 'run_retry' && event.value) {
+                    // v0.77.1 (CTR-0009): the backend hit a transient upstream
+                    // 5xx before any output and is auto-resending. Surface a
+                    // brief status so the user knows the run is retrying, not
+                    // stuck. The stream continues on the same assistant message.
+                    const v = event.value as Record<string, unknown>
+                    const attempt = typeof v.attempt === 'number' ? v.attempt : undefined
+                    const max = typeof v.max_attempts === 'number' ? v.max_attempts : undefined
+                    const counter = attempt && max ? ` (${attempt}/${max})` : ''
+                    onNoticeRef.current?.(`Temporary server error -- retrying${counter}...`)
+                  }
                   if (event.name === 'usage' && event.value) {
                     completedUsage = event.value as UsageInfo
                     const usageModel = (event.value as Record<string, unknown>).model as string | undefined
