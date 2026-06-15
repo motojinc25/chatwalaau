@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from openai import NotFoundError as OpenAINotFoundError
 
+from app import providers
 from app.agent.temporary import new_temporary_thread_id, schedule_sweep, set_temporary_run
 from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key_strict
@@ -43,6 +44,34 @@ def _build_session_message(role: str, text: str) -> dict[str, Any]:
         "role": role,
         "contents": [{"type": "text", "text": text}],
     }
+
+
+def _structured_run_options(request: ResponsesRequest, agent_registry: AgentRegistry) -> dict[str, Any]:
+    """Resolve the standard OpenAI `text.format` field into a provider-native
+    structured-output run-options fragment (CTR-0057 v3, PRP-0082, UDR-0058 D8).
+
+    Honors the standard field shape (`text.format.{type,schema,...}`) and routes it
+    through the same CTR-0102 seam as the SPA path. Returns {} when absent / off.
+    Never raises.
+    """
+    text = getattr(request, "text", None)
+    fmt = text.get("format") if isinstance(text, dict) else None
+    if not isinstance(fmt, dict):
+        return {}
+    model = request.model if request.model != "chatwalaau" else agent_registry.default_model
+    ftype = fmt.get("type")
+    if ftype == "json_schema":
+        schema = fmt.get("schema")
+        if not isinstance(schema, dict):
+            # tolerate the nested {json_schema: {schema: ...}} variant
+            nested = fmt.get("json_schema")
+            schema = nested.get("schema") if isinstance(nested, dict) else None
+        return providers.build_structured_output(
+            model, schema if isinstance(schema, dict) else None, "json_schema"
+        )
+    if ftype == "json_object":
+        return providers.build_structured_output(model, None, "json_object")
+    return {}
 
 
 async def _stream_responses(
@@ -89,6 +118,8 @@ async def _stream_responses(
         run_options["top_p"] = request.top_p
     if request.max_output_tokens is not None:
         run_options["max_output_tokens"] = request.max_output_tokens
+    # Structured output passthrough (CTR-0057 v3, PRP-0082, UDR-0058 D8).
+    providers.merge_generation_options(run_options, _structured_run_options(request, agent_registry))
 
     # User Preference Memory (PRP-0075, CTR-0105): the registry agents bake only
     # the Identity, so supply the capability remainder per run. The frozen User
@@ -365,6 +396,8 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
             run_options["top_p"] = request.top_p
         if request.max_output_tokens is not None:
             run_options["max_output_tokens"] = request.max_output_tokens
+        # Structured output passthrough (CTR-0057 v3, PRP-0082, UDR-0058 D8).
+        providers.merge_generation_options(run_options, _structured_run_options(request, agent_registry))
 
         # User Preference Memory (PRP-0075, CTR-0105): supply the capability
         # remainder per run under Identity-only baking; no frozen snapshot here

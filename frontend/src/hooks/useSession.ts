@@ -144,6 +144,9 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
       ...(usage?.model ? { model: usage.model } : {}),
       ...(usage?.reasoning ? { reasoning: usage.reasoning } : {}),
       ...(usage?.verbosity ? { verbosity: usage.verbosity } : {}),
+      // Restore the structured-output flag so a reloaded JSON answer still renders
+      // as a code block (CTR-0118 / CTR-0012 v11, PRP-0082, UDR-0058 D9).
+      ...(usage?.structured ? { structured: true } : {}),
     })
   }
   return result

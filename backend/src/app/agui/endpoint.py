@@ -68,6 +68,8 @@ from app.auth import verify_api_key
 from app.core.config import settings
 from app.demo import is_demo_mode
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
+from app.providers.structured import resolve_request as resolve_structured_request
+from app.providers.structured import soft_validate
 
 logger = logging.getLogger(__name__)
 
@@ -572,6 +574,13 @@ async def _stream_with_reasoning(
             # and no-op the memory tool for a de-personalized, Identity-only run.
             temporary = bool(request_body.state.get("temporary", False))
 
+        # Structured output (PRP-0082, CTR-0009 v14, UDR-0058). Resolve the additive
+        # `state.output_schema` (object) / `state.output_format` (mode) into an
+        # (explicit schema, mode) pair. mode == "none" means structured output is off
+        # (default) and the request stays byte-for-byte (UDR-0058 D7).
+        output_schema, output_format = resolve_structured_request(request_body.state)
+        structured_active = output_format != "none"
+
         # Select agent from registry based on model (CTR-0070, PRP-0035)
         agent = agent_registry.get(selected_model)
 
@@ -609,8 +618,21 @@ async def _stream_with_reasoning(
         # catalog-default options already apply. build_model_options keeps the
         # output-neutral default rule (a default value is omitted), so a default
         # selection is byte-for-byte with the construction-time options.
-        if requested_options and not is_demo_mode():
-            run_options.update(providers.build_model_options(effective_model, resolved_options))
+        #
+        # Structured output (PRP-0082, UDR-0058 D2) folds into the same merge: when a
+        # schema is requested we ALWAYS build the model options (so the provider's
+        # native option container -- OpenAI `text`, Anthropic `output_config` -- is
+        # present with its effort/verbosity defaults) and then deep-merge the
+        # structured fragment into it via merge_generation_options, so the format and
+        # the effort/verbosity coexist instead of clobbering each other.
+        if (requested_options or structured_active) and not is_demo_mode():
+            gen_options = providers.build_model_options(effective_model, resolved_options)
+            if structured_active:
+                providers.merge_generation_options(
+                    gen_options,
+                    providers.build_structured_output(effective_model, output_schema, output_format),
+                )
+            providers.merge_generation_options(run_options, gen_options)
 
         # Temporary Chat (PRP-0076, CTR-0106, UDR-0052) vs normal run.
         # Temporary: de-personalized. No User Profile snapshot is captured or
@@ -656,6 +678,25 @@ async def _stream_with_reasoning(
             selected_model or "<default>",
             len(iteration_messages),
         )
+        # Structured output marker (PRP-0082, CTR-0009 v14, UDR-0058 D5). Tell the
+        # SPA early that this turn is structured so it renders the answer as a JSON
+        # code block. DEMO_MODE resolves no structured shape (DemoChatClient is
+        # selected before provider dispatch, UDR-0045 D7 / D10), so the marker is not
+        # emitted there. Additive CUSTOM event; no new SSE event TYPE.
+        if structured_active and not is_demo_mode():
+            so_support = providers.structured_output_support(effective_model)
+            yield encoder.encode(
+                CustomEvent(
+                    type=EventType.CUSTOM,
+                    name="structured_output",
+                    value={
+                        "enabled": True,
+                        "mode": output_format,
+                        "strategy": "native" if so_support.get("native") else so_support.get("fallback", "none"),
+                        "schema_present": output_schema is not None,
+                    },
+                )
+            )
         for _iteration in range(max_approval_iterations):
             pending_approvals: list[tuple[ApprovalRecord, Content]] = []
             # PRP-0069 follow-up: capture this iteration's stream content so
@@ -936,6 +977,14 @@ async def _stream_with_reasoning(
                         # advertises effort only, so no extra key appears there.
                         usage_value["reasoning"] = resolved_reasoning
                         usage_value.update({k: v for k, v in resolved_options.items() if k != "effort"})
+                        # Structured output status (PRP-0082, CTR-0009 v14, UDR-0058
+                        # D4/D9). Soft, non-blocking: parse the accumulated answer and
+                        # surface a status; never reject / regenerate. Persisted by the
+                        # SPA inside the usage object so the structured flag survives
+                        # reload. Skipped in DEMO_MODE (no structured resolution).
+                        if structured_active and not is_demo_mode():
+                            usage_value["structured"] = True
+                            usage_value["output_status"] = soft_validate("".join(assistant_text_parts))
                         # Provider-agnostic prompt-cache metrics (PRP-0080,
                         # CTR-0009 / FEAT-0038 / UDR-0056 D6). Normalize the
                         # provider-specific cache token keys to a stable

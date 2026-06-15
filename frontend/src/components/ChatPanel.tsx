@@ -9,6 +9,7 @@ import { MessageNavigator } from '@/components/MessageNavigator'
 import { ModelOptionsSelector } from '@/components/ModelOptionsSelector'
 import { ModelSelector } from '@/components/ModelSelector'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
+import { StructuredOutputControl, type StructuredSelection } from '@/components/StructuredOutputControl'
 import { ToolApprovalList } from '@/components/ToolApprovalCard'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
@@ -64,6 +65,9 @@ export function ChatPanel({
   // Per-message generation options (effort + verbosity), catalog-driven
   // (CTR-0071, PRP-0081). Sent as AG-UI state.model_options.
   const [selectedModelOptions, setSelectedModelOptions] = useState<Record<string, string>>({})
+  // Structured output selection (CTR-0118, PRP-0082). Sent as AG-UI
+  // state.output_schema / state.output_format.
+  const [structured, setStructured] = useState<StructuredSelection>({ format: 'none', schema: null })
   const [modelMaxTokens, setModelMaxTokens] = useState(128000)
   const [availableModels, setAvailableModels] = useState<string[]>([])
   // CTR-0045 / PRP-0073: per-model background-response capability. The toggle
@@ -90,6 +94,10 @@ export function ChatPanel({
 
   const handleModelOptionsChange = useCallback((opts: Record<string, string>) => {
     setSelectedModelOptions(opts)
+  }, [])
+
+  const handleStructuredChange = useCallback((selection: StructuredSelection) => {
+    setStructured(selection)
   }, [])
 
   // Auto-dismiss notification
@@ -133,6 +141,8 @@ export function ChatPanel({
     bgEnabled: effectiveBgEnabled,
     selectedModel,
     selectedModelOptions,
+    selectedOutputFormat: structured.format,
+    selectedOutputSchema: structured.schema,
     temporary,
     onCustomEvent: approvalApi.ingestCustomEvent,
     // v0.77.1: transient upstream 5xx auto-retry status (CTR-0009). Shown as a
@@ -399,6 +409,11 @@ export function ChatPanel({
               selectedModel={selectedModel}
               onOptionsChange={handleModelOptionsChange}
             />
+            <StructuredOutputControl
+              threadId={threadId ?? ''}
+              selectedModel={selectedModel}
+              onChange={handleStructuredChange}
+            />
             {!temporary && (
               <BackgroundResponsesToggle
                 enabled={effectiveBgEnabled}
@@ -441,6 +456,11 @@ export function ChatPanel({
                 threadId={threadId ?? ''}
                 selectedModel={selectedModel}
                 onOptionsChange={handleModelOptionsChange}
+              />
+              <StructuredOutputControl
+                threadId={threadId ?? ''}
+                selectedModel={selectedModel}
+                onChange={handleStructuredChange}
               />
               {!temporary && (
                 <BackgroundResponsesToggle

@@ -123,6 +123,40 @@ def web_search_tool(model: str) -> Any | None:
     return provider_for(model).web_search_tool(model)
 
 
+def structured_output_support(model: str) -> dict[str, Any]:
+    """Per-model structured-output capability descriptor (CTR-0102 v5, UDR-0058)."""
+    return provider_for(model).structured_output_support(model)
+
+
+def build_structured_output(model: str, schema: dict[str, Any] | None, mode: str) -> dict[str, Any]:
+    """Provider-native structured-output run-options fragment (CTR-0102 v5, UDR-0058 D2)."""
+    return provider_for(model).build_structured_output(model, schema, mode)
+
+
+def structured_output_map(models: list[str]) -> dict[str, dict[str, Any]]:
+    """model -> structured-output capability for the GET /api/model selector (CTR-0069 v5)."""
+    return {model: structured_output_support(model) for model in models}
+
+
+def merge_generation_options(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``extra`` run-options into ``base``, deep-merging known nested option
+    objects so sibling keys coexist (PRP-0082).
+
+    Both ``build_model_options`` and ``build_structured_output`` can set the same
+    top-level container: OpenAI ``text`` (``text.verbosity`` + ``text.format``) and
+    Anthropic ``output_config`` (``output_config.effort`` + ``output_config.format``).
+    A plain ``dict.update`` would clobber one with the other; this deep-merges those
+    two keys one level down and shallow-merges everything else. Mutates and returns
+    ``base``.
+    """
+    for key, val in extra.items():
+        if key in ("text", "output_config") and isinstance(base.get(key), dict) and isinstance(val, dict):
+            base[key] = {**base[key], **val}
+        else:
+            base[key] = val
+    return base
+
+
 def background_supported(model: str) -> bool:
     """Whether ``model``'s provider supports background responses (CTR-0045).
 
@@ -146,6 +180,8 @@ __all__ = [
     "background_supported_map",
     "build_chat_client",
     "build_model_options",
+    "build_structured_output",
+    "merge_generation_options",
     "model_options_catalog",
     "model_options_map",
     "openai_web_search_tool",
@@ -155,5 +191,7 @@ __all__ = [
     "resolve_effort",
     "resolve_models",
     "resolve_options",
+    "structured_output_map",
+    "structured_output_support",
     "web_search_tool",
 ]

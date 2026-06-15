@@ -17,6 +17,12 @@ class ResponsesRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     max_output_tokens: int | None = None
+    # Structured output (CTR-0057 v3, PRP-0082, UDR-0058 D8). The STANDARD OpenAI
+    # Responses API `text.format` object (e.g. {"format": {"type": "json_schema",
+    # "schema": {...}, "strict": true}} or {"format": {"type": "json_object"}}). No
+    # bespoke ChatWalaʻau parameter is introduced; it is resolved through the same
+    # Provider seam (CTR-0102) as the SPA path. Absent -> structured output off.
+    text: dict[str, Any] | None = None
     # Temporary Chat (CTR-0057 / CTR-0106, PRP-0076, UDR-0052). Opt-in; default
     # false (a normal API call is non-temporary). When true the run is
     # de-personalized (Identity-only system prompt, no User Preference Memory

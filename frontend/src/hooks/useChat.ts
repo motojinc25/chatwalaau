@@ -39,6 +39,14 @@ interface UseChatOptions {
    */
   selectedModelOptions?: Record<string, string>
   /**
+   * Structured output (CTR-0118 / CTR-0009 v14, PRP-0082). `selectedOutputFormat`
+   * is 'none' (off, default), 'json_object' (generic), or 'json_schema' (explicit
+   * schema). For 'json_schema' the schema is sent as AG-UI state.output_schema; a
+   * null/empty schema degrades to state.output_format='json_object'.
+   */
+  selectedOutputFormat?: string
+  selectedOutputSchema?: Record<string, unknown> | null
+  /**
    * Temporary Chat (CTR-0107 / CTR-0106, PRP-0076). When true the run is sent
    * with AG-UI state.temporary=true (de-personalized, quarantine-routed) and the
    * sidebar-creating session init call is skipped so it never appears in history.
@@ -73,6 +81,8 @@ export function useChat(options?: UseChatOptions) {
   const bgEnabledRef = useRef(options?.bgEnabled ?? false)
   const selectedModelRef = useRef(options?.selectedModel ?? '')
   const selectedModelOptionsRef = useRef<Record<string, string>>(options?.selectedModelOptions ?? {})
+  const selectedOutputFormatRef = useRef(options?.selectedOutputFormat ?? 'none')
+  const selectedOutputSchemaRef = useRef<Record<string, unknown> | null>(options?.selectedOutputSchema ?? null)
   const temporaryRef = useRef(options?.temporary ?? false)
   const onCustomEventRef = useRef(options?.onCustomEvent)
   const onNoticeRef = useRef(options?.onNotice)
@@ -111,6 +121,14 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     selectedModelOptionsRef.current = options?.selectedModelOptions ?? {}
   }, [options?.selectedModelOptions])
+
+  useEffect(() => {
+    selectedOutputFormatRef.current = options?.selectedOutputFormat ?? 'none'
+  }, [options?.selectedOutputFormat])
+
+  useEffect(() => {
+    selectedOutputSchemaRef.current = options?.selectedOutputSchema ?? null
+  }, [options?.selectedOutputSchema])
 
   useEffect(() => {
     temporaryRef.current = options?.temporary ?? false
@@ -217,6 +235,18 @@ export function useChat(options?: UseChatOptions) {
         if (effectiveModel) aguiState.model = effectiveModel
         if (Object.keys(selectedModelOptionsRef.current).length > 0)
           aguiState.model_options = selectedModelOptionsRef.current
+        // Structured output (PRP-0082, UDR-0058 D3). An explicit schema rides in
+        // state.output_schema; the generic mode (or a json_schema selection whose
+        // schema is empty/invalid) rides in state.output_format. 'none' sends
+        // nothing so the default path is byte-for-byte (UDR-0058 D7).
+        {
+          const of = selectedOutputFormatRef.current
+          if (of === 'json_schema' && selectedOutputSchemaRef.current) {
+            aguiState.output_schema = selectedOutputSchemaRef.current
+          } else if (of === 'json_schema' || of === 'json_object') {
+            aguiState.output_format = 'json_object'
+          }
+        }
         if (bgEnabledRef.current) aguiState.background = true
         if (temporaryRef.current) aguiState.temporary = true
         if (options?.resumeToken) aguiState.continuation_token = options.resumeToken
@@ -468,11 +498,19 @@ export function useChat(options?: UseChatOptions) {
                     const counter = attempt && max ? ` (${attempt}/${max})` : ''
                     onNoticeRef.current?.(`Temporary server error -- retrying${counter}...`)
                   }
+                  if (event.name === 'structured_output' && event.value) {
+                    // PRP-0082 (CTR-0009 v14): this turn is structured -> render the
+                    // answer as a JSON code block as it streams (UDR-0058 D5).
+                    setMessages((prev) =>
+                      prev.map((msg) => (msg.id === assistantId ? { ...msg, structured: true } : msg)),
+                    )
+                  }
                   if (event.name === 'usage' && event.value) {
                     completedUsage = event.value as UsageInfo
                     const usageModel = (event.value as Record<string, unknown>).model as string | undefined
                     const usageReasoning = (event.value as Record<string, unknown>).reasoning as string | undefined
                     const usageVerbosity = (event.value as Record<string, unknown>).verbosity as string | undefined
+                    const usageStructured = (event.value as Record<string, unknown>).structured === true
                     setMessages((prev) =>
                       prev.map((msg) =>
                         msg.id === assistantId
@@ -482,6 +520,7 @@ export function useChat(options?: UseChatOptions) {
                               ...(usageModel ? { model: usageModel } : {}),
                               ...(usageReasoning ? { reasoning: usageReasoning } : {}),
                               ...(usageVerbosity ? { verbosity: usageVerbosity } : {}),
+                              ...(usageStructured ? { structured: true } : {}),
                             }
                           : msg,
                       ),

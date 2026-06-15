@@ -38,6 +38,7 @@ import logging
 from typing import Any
 
 from app.core.config import settings
+from app.providers.structured import effective_schema, forced_tool_use_fragment, strip_web_search
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +197,18 @@ class _PromptCacheMixin:
 
     def _prepare_options(self, messages: Any, options: Any, **kwargs: Any) -> dict[str, Any]:
         run_options = super()._prepare_options(messages, options, **kwargs)  # type: ignore[misc]
-        return _inject_prompt_cache(run_options, settings.anthropic_prompt_cache_ttl)
+        # Structured output vs hosted web search (PRP-0082, UDR-0058 D2): web search
+        # is incompatible with a JSON output_config.format; drop it for that turn so
+        # the request never fails. Inert when no structured format is set.
+        oc = run_options.get("output_config")
+        if isinstance(oc, dict) and oc.get("format") is not None:
+            strip_web_search(run_options)
+        # Prompt caching (PRP-0080, UDR-0056). Gated here so the wrapper is applied
+        # unconditionally (for the structured strip above) while caching stays an
+        # output-transparent opt-out -- byte-for-byte when both are off.
+        if settings.prompt_cache_enabled:
+            run_options = _inject_prompt_cache(run_options, settings.anthropic_prompt_cache_ttl)
+        return run_options
 
 
 # Caching subclasses are built lazily and memoized per base class, so the
@@ -268,12 +280,10 @@ class AnthropicProvider:
             # Prompt caching (PRP-0080, UDR-0056 D3): use the cache-injecting
             # subclass when enabled; otherwise the plain connector (no
             # cache_control -> pre-PRP-0080 request shape).
-            cls = (
-                _caching_client_class(AnthropicFoundryClient)
-                if settings.prompt_cache_enabled
-                else AnthropicFoundryClient
-            )
-            return cls(**kwargs)
+            # Always wrap: the mixin gates prompt caching on PROMPT_CACHE_ENABLED
+            # internally and additionally strips web search under structured output
+            # (PRP-0082). Byte-for-byte when neither fires.
+            return _caching_client_class(AnthropicFoundryClient)(**kwargs)
 
         from agent_framework.anthropic import AnthropicClient
 
@@ -283,8 +293,7 @@ class AnthropicProvider:
         if settings.anthropic_base_url:
             kwargs["base_url"] = settings.anthropic_base_url
         _log_lane("direct")
-        cls = _caching_client_class(AnthropicClient) if settings.prompt_cache_enabled else AnthropicClient
-        return cls(**kwargs)
+        return _caching_client_class(AnthropicClient)(**kwargs)
 
     def model_options_catalog(self, model: str) -> dict[str, Any]:
         # Generalized per-model option catalog (PRP-0081, UDR-0057 D2/D3). Opus
@@ -348,3 +357,26 @@ class AnthropicProvider:
         This supersedes the original UDR-0045 D5 deferral for Anthropic.
         """
         return anthropic_web_search_tool()
+
+    def structured_output_support(self, model: str) -> dict[str, Any]:
+        # Structured output (PRP-0082, UDR-0058 D1/D6). Anthropic Opus 4.x supports
+        # native structured output via `output_config.format` (the modern path that
+        # supersedes the deprecated `output_format` parameter). forced_tool_use is
+        # the declared universal fallback for a hypothetical non-native model
+        # (UDR-0058 D2). The exact connector passthrough is verified at integration
+        # (see PRP-0082 Risk); if unavailable on the pinned connector, set
+        # native=False here and the forced-tool-use branch engages with no other
+        # change.
+        return {"supported": True, "native": True, "fallback": "forced_tool_use"}
+
+    def build_structured_output(self, model: str, schema: dict[str, Any] | None, mode: str) -> dict[str, Any]:
+        # Native: Anthropic Messages API `output_config.format` (PRP-0082, UDR-0058
+        # D2). Returned as a separate `output_config` fragment; the AG-UI endpoint
+        # deep-merges it with the `output_config{effort}` from build_model_options so
+        # adaptive-thinking effort and the output format coexist.
+        eff = effective_schema(schema, mode)
+        if eff is None:
+            return {}
+        if not self.structured_output_support(model)["native"]:
+            return forced_tool_use_fragment(eff)
+        return {"output_config": {"format": {"type": "json_schema", "schema": eff}}}

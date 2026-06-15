@@ -442,6 +442,13 @@ class UsageItem(BaseModel):
     max_context_tokens: int | None = None
     model: str | None = None
     reasoning: str | None = None
+    # Text verbosity (PRP-0081) and structured-output state (PRP-0082, CTR-0014
+    # v1.12, UDR-0058 D9). Persisted so a reloaded chat restores the verbosity
+    # label and re-renders a structured (JSON) answer as a code block instead of
+    # plain Markdown. Absent on legacy messages.
+    verbosity: str | None = None
+    structured: bool | None = None
+    output_status: dict[str, Any] | None = None
 
 
 class SaveMessageItem(BaseModel):

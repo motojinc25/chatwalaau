@@ -14,6 +14,12 @@ from agent_framework_openai import OpenAIChatClient
 
 from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
+from app.providers.structured import (
+    STRUCTURED_OUTPUT_NAME,
+    effective_schema,
+    forced_tool_use_fragment,
+    strip_web_search,
+)
 
 NAME = "azure-openai"
 
@@ -32,6 +38,33 @@ OPENAI_EFFORT_DEFAULT = "medium"
 # knob the v1 catalog advertises beyond effort.
 OPENAI_VERBOSITY_LEVELS: tuple[str, ...] = ("low", "medium", "high")
 OPENAI_VERBOSITY_DEFAULT = "medium"
+
+
+# Structured output vs. hosted web search (PRP-0082, UDR-0058 D2). The OpenAI
+# Responses API rejects the hosted web_search tool together with a JSON response
+# format ("Web Search cannot be used with JSON mode."). We subclass the connector
+# and, at the single request-assembly chokepoint, drop web_search whenever a JSON
+# `text.format` is set. Always applied; inert (byte-for-byte) when no structured
+# format is present, so non-structured turns are unchanged.
+
+
+class _StructuredOutputMixin:
+    async def _prepare_options(self, messages: Any, options: Any, **kwargs: Any) -> dict[str, Any]:
+        run_options = await super()._prepare_options(messages, options, **kwargs)  # type: ignore[misc]
+        text_cfg = run_options.get("text")
+        if isinstance(text_cfg, dict) and text_cfg.get("format") is not None:
+            strip_web_search(run_options)
+        return run_options
+
+
+_structured_client_cls: type | None = None
+
+
+def _structured_openai_client_class() -> type:
+    global _structured_client_cls
+    if _structured_client_cls is None:
+        _structured_client_cls = type("StructuredOpenAIChatClient", (_StructuredOutputMixin, OpenAIChatClient), {})
+    return _structured_client_cls
 
 
 def openai_web_search_tool() -> Any:
@@ -66,7 +99,9 @@ class AzureOpenAIProvider:
         # an optional stable prompt_cache_key hint is intentionally deferred (the
         # automatic discount already applies). PROMPT_CACHE_ENABLED gates only the
         # explicit (anthropic) lane.
-        return OpenAIChatClient(
+        # Wrapped in the structured-output subclass so the hosted web_search tool is
+        # dropped when a JSON `text.format` is set (PRP-0082); inert otherwise.
+        return _structured_openai_client_class()(
             model=model,
             azure_endpoint=settings.azure_openai_endpoint or None,
             **get_chat_client_credential_kwargs(),
@@ -122,3 +157,34 @@ class AzureOpenAIProvider:
 
     def web_search_tool(self, model: str) -> Any:
         return openai_web_search_tool()
+
+    def structured_output_support(self, model: str) -> dict[str, Any]:
+        # Structured output (PRP-0082, UDR-0058 D1/D6). gpt-5.x supports the OpenAI
+        # Responses API `text.format` json_schema control with `strict: true`, which
+        # the API GUARANTEES conforms to the schema (modulo truncation / refusal).
+        # forced_tool_use is the declared universal fallback for a hypothetical
+        # non-native model (UDR-0058 D2).
+        return {"supported": True, "native": True, "fallback": "forced_tool_use"}
+
+    def build_structured_output(self, model: str, schema: dict[str, Any] | None, mode: str) -> dict[str, Any]:
+        # Native: OpenAI Responses API `text.format` (PRP-0082, UDR-0058 D2). For an
+        # explicit schema use json_schema strict (the conformance guarantee); for the
+        # generic / no-schema mode use the json_object format. Merged into the run
+        # options next to `text.verbosity` (the AG-UI endpoint deep-merges `text`).
+        eff = effective_schema(schema, mode)
+        if eff is None:
+            return {}
+        if not self.structured_output_support(model)["native"]:
+            return forced_tool_use_fragment(eff)
+        if mode == "json_schema" and isinstance(schema, dict) and schema:
+            return {
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": STRUCTURED_OUTPUT_NAME,
+                        "schema": schema,
+                        "strict": True,
+                    }
+                }
+            }
+        return {"text": {"format": {"type": "json_object"}}}

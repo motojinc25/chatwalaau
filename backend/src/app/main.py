@@ -341,6 +341,10 @@ async def get_model_info():
         # model -> bool. The UI disables the Background toggle for models
         # whose provider does not support background runs (e.g. Anthropic).
         "background_supported_map": providers.background_supported_map(agent_registry.available_models),
+        # Per-model structured-output capability (CTR-0069 v5 / CTR-0102 v5,
+        # PRP-0082): model -> {supported, native, fallback}. The UI enables /
+        # annotates the structured-output control per model (UDR-0058 D6).
+        "structured_output": providers.structured_output_map(agent_registry.available_models),
     }
 
 

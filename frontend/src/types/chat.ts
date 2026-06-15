@@ -28,6 +28,14 @@ export interface UsageInfo {
   reasoning?: string
   /** Text verbosity used for this turn (gpt-5.x only; CTR-0030, PRP-0081). */
   verbosity?: string
+  /** Structured output active for this turn (CTR-0009 v14, PRP-0082). */
+  structured?: boolean
+  /**
+   * Soft, non-blocking validation status of the structured answer (UDR-0058 D4).
+   * `parsed` false means the JSON was empty (refusal) or unparseable (truncation /
+   * a non-native fallback that did not conform); it never blocks the turn.
+   */
+  output_status?: { parsed: boolean; reason?: string }
 }
 
 export type ActivityEntry = { type: 'reasoning'; id: string } | { type: 'toolCall'; id: string }
@@ -59,6 +67,11 @@ export interface ChatMessage {
   reasoning?: string
   /** Text verbosity used for this assistant message (gpt-5.x only; CTR-0030, PRP-0081) */
   verbosity?: string
+  /**
+   * Structured output (CTR-0118 / CTR-0012 v11, PRP-0082). When true the content is
+   * JSON Schema-constrained and is rendered as a JSON code block instead of Markdown.
+   */
+  structured?: boolean
 }
 
 export interface PromptTemplate {

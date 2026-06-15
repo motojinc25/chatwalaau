@@ -36,6 +36,28 @@ import { WeatherToolResults } from '@/components/WeatherCard'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from '@/types/chat'
 
+/**
+ * Wrap a structured (JSON) answer in a ```json code fence so MarkdownRenderer
+ * renders it through CodeBlock (CTR-0012 v11, PRP-0082). Strips a fence the model
+ * may already have emitted to avoid double-fencing. Pretty-prints when the content
+ * is complete, valid JSON; otherwise (streaming / truncated) shows it verbatim.
+ */
+function toJsonCodeFence(content: string): string {
+  let body = content.trim()
+  if (body.startsWith('```')) {
+    body = body
+      .replace(/^```[a-zA-Z]*\n?/, '')
+      .replace(/```$/, '')
+      .trim()
+  }
+  try {
+    body = JSON.stringify(JSON.parse(body), null, 2)
+  } catch {
+    // streaming / truncated / non-conforming: render the raw text as-is
+  }
+  return `\`\`\`json\n${body}\n\`\`\``
+}
+
 interface TTSControls {
   play: (text: string, messageId: string) => Promise<void>
   stop: () => void
@@ -329,7 +351,10 @@ function ChatMessageItemImpl({
               <ImageGenerationResults toolCalls={message.toolCalls} onMaskEdit={onMaskEdit} />
             )}
             {message.content ? (
-              <MarkdownRenderer content={message.content} />
+              // Structured output (CTR-0012 v11, PRP-0082, UDR-0058 D5): render the
+              // JSON answer as a `json` code block (reuses CodeBlock copy/download)
+              // instead of Markdown. Streaming partial JSON shows as it arrives.
+              <MarkdownRenderer content={message.structured ? toJsonCodeFence(message.content) : message.content} />
             ) : (
               !isWaiting && <span className="inline-block h-4 w-1 animate-pulse bg-current" />
             )}
@@ -448,6 +473,22 @@ function ChatMessageItemImpl({
             {!isUser && message.verbosity && (
               <span className="ml-1 text-[11px] text-muted-foreground/50 capitalize" title="Verbosity">
                 {message.verbosity}
+              </span>
+            )}
+            {!isUser && message.structured && (
+              <span
+                className={cn(
+                  'ml-1 text-[11px]',
+                  message.usage?.output_status && !message.usage.output_status.parsed
+                    ? 'text-amber-600/70 dark:text-amber-500/70'
+                    : 'text-muted-foreground/50',
+                )}
+                title={
+                  message.usage?.output_status && !message.usage.output_status.parsed
+                    ? `Structured output (${message.usage.output_status.reason ?? 'not valid JSON'})`
+                    : 'Structured output (JSON)'
+                }>
+                JSON
               </span>
             )}
             {!isUser && message.usage && (

@@ -82,3 +82,37 @@ class Provider(Protocol):
     def web_search_tool(self, model: str) -> Any | None:
         """Provider-supplied hosted web search tool, or None when unsupplied."""
         ...
+
+    def structured_output_support(self, model: str) -> dict[str, Any]:
+        """Per-model structured-output capability (CTR-0102 v5, UDR-0058 D1/D6).
+
+        Returns ``{"supported": bool, "native": bool, "fallback": str}`` where
+        ``fallback`` is ``"forced_tool_use"`` or ``"none"``. ``native`` is True when
+        the model accepts the provider's first-class structured-output request
+        (OpenAI ``text.format`` json_schema / Anthropic ``output_config.format``);
+        when False the model still produces JSON via the forced-tool-use fallback
+        (UDR-0058 D2). Published per model by GET /api/model (CTR-0069 v5) so the UI
+        renders strictly what is advertised.
+        """
+        ...
+
+    def build_structured_output(
+        self, model: str, schema: dict[str, Any] | None, mode: str
+    ) -> dict[str, Any]:
+        """Per-request structured-output run-options fragment (CTR-0102 v5, UDR-0058 D2/D3).
+
+        ``mode`` is ``"json_schema"`` (use the explicit ``schema`` verbatim) or
+        ``"json_object"`` (generic permissive / free-JSON when no schema is supplied,
+        UDR-0058 D3). The returned dict is merged into the ``agent.run`` options:
+
+          - native models -> the provider's first-class shape (OpenAI
+            ``{"text": {"format": {...}}}`` / Anthropic
+            ``{"output_config": {"format": {...}}}``).
+          - non-native models -> a forced-tool-use fragment
+            (``{"tools": [...], "tool_choice": {...}}``) constraining the answer to
+            the schema (UDR-0058 D2).
+
+        Returns ``{}`` when structured output is not requested. MUST NOT raise: a bad
+        or oversized schema resolves to the generic object mode (UDR-0058 D2/D4).
+        """
+        ...
