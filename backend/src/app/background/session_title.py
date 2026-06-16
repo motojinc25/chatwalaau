@@ -165,4 +165,36 @@ async def run_session_title_task(ctx: dict[str, Any]) -> None:
         await hub.broadcast({"type": "session_title", "thread_id": thread_id, "title": effective})
 
 
+async def run_session_title_clear_task(ctx: dict[str, Any]) -> None:
+    """Clear a stuck ``auto_title_pending`` spinner WITHOUT generating a title
+    (CTR-0109, UDR-0053 D17).
+
+    Dispatched by the AG-UI endpoint when the Auto Session Title generation task
+    will NOT run for the first turn -- a run error, a user abort / client
+    disconnect, or a first turn that produced no assistant text. Without this the
+    sidebar spinner (driven by ``auto_title_pending``, set at session init) would
+    animate forever. Acts only when the flag is actually set; reconciles the
+    persisted metadata (so a reload shows no spinner) and pushes the current
+    (truncation) title over the CTR-0110 hub so the live spinner clears too.
+    """
+    thread_id = ctx.get("thread_id")
+    if not thread_id:
+        return
+    from app.agent.temporary import is_temporary
+
+    if is_temporary(thread_id):
+        return
+    from app.session.storage import read_session_json
+
+    data = read_session_json(thread_id)
+    if data is None or not data.get("auto_title_pending"):
+        return  # nothing pending to reconcile (no-op on later turns)
+    effective = _finalize(thread_id, None)  # clears pending, writes no title
+    if effective is not None:
+        from app.notifications import hub
+
+        await hub.broadcast({"type": "session_title", "thread_id": thread_id, "title": effective})
+
+
 register_task("session-title", run_session_title_task)
+register_task("session-title-clear", run_session_title_clear_task)

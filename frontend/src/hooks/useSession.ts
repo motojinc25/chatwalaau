@@ -174,6 +174,10 @@ export function useSession() {
   const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null)
   const [updatingFolderId, setUpdatingFolderId] = useState<string | null>(null)
   const [movingSessionId, setMovingSessionId] = useState<string | null>(null)
+  // CTR-0110 WebSocket connection health (UDR-0053 D16). True only while the
+  // /ws/notifications socket is open and authenticated; gates the Auto Session
+  // Title list-refresh fallback so a healthy push channel performs no polling.
+  const [wsConnected, setWsConnected] = useState(false)
   const abortRef = useRef<(() => void) | null>(null)
   const switchedRef = useRef(false)
 
@@ -232,6 +236,8 @@ export function useSession() {
       socket = new WebSocket(`${proto}://${window.location.host}/ws/notifications`)
       socket.onopen = () => {
         attempts = 0
+        // Primary path is live (UDR-0053 D16): the fallback poll stays off.
+        setWsConnected(true)
       }
       socket.onmessage = (event) => {
         try {
@@ -253,6 +259,8 @@ export function useSession() {
         socket?.close()
       }
       socket.onclose = () => {
+        // The push channel is down (UDR-0053 D16): re-enable the fallback poll.
+        setWsConnected(false)
         if (closed || attempts >= 5) return
         attempts += 1
         timer = window.setTimeout(connect, Math.min(1000 * attempts, 5000))
@@ -262,25 +270,31 @@ export function useSession() {
     connect()
     return () => {
       closed = true
+      setWsConnected(false)
       if (timer) window.clearTimeout(timer)
       socket?.close()
     }
   }, [])
 
   // Self-healing fallback for the Auto Session Title spinner (PRP-0077,
-  // CTR-0109). The CTR-0110 WebSocket push is the primary, real-time path, but
-  // if it cannot connect (e.g. an API_KEY-only LAN deployment, or a dev proxy
-  // gap) a pending row would otherwise spin forever. While any session is
-  // pending, poll the list once every few seconds; the backend clears
+  // CTR-0109, UDR-0053 D16). The CTR-0110 WebSocket push is the SOLE primary,
+  // real-time path; when it is connected the `session_title` event clears the
+  // pending row directly, so we do NOT poll. Only when the socket is NOT
+  // connected (e.g. an API_KEY-only LAN deployment where the WS cannot
+  // authenticate, or a dev proxy gap) would a pending row otherwise spin
+  // forever -- so poll the list once every few seconds. The backend clears
   // `auto_title_pending` on finalize (always, even on failure), so this
-  // terminates as soon as the title resolves and never loops indefinitely.
+  // terminates as soon as the title resolves and never loops indefinitely. When
+  // the socket reconnects, `wsConnected` flips and this effect tears down the
+  // timer, returning steady-state polling to zero.
   useEffect(() => {
+    if (wsConnected) return
     if (!sessions.some((s) => s.auto_title_pending)) return
     const t = window.setTimeout(() => {
       refreshSessions()
     }, 4000)
     return () => window.clearTimeout(t)
-  }, [sessions, refreshSessions])
+  }, [wsConnected, sessions, refreshSessions])
 
   // Load initial messages when URL has ?session= parameter (page load only).
   // switchSession already loads data before navigating, so skip the re-fetch.

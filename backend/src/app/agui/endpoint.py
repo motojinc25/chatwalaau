@@ -24,6 +24,7 @@ from collections.abc import AsyncGenerator
 import json
 import logging
 from pathlib import Path
+import sys
 from typing import Any, get_args
 import uuid
 
@@ -526,6 +527,28 @@ async def _stream_with_reasoning(
     assistant_text_parts: list[str] = []
     temporary = False
     effective_model = ""
+    # Auto Session Title spinner reconciliation (UDR-0053 D17). `auto_title_pending`
+    # is set at session init (CTR-0014) and is normally cleared by the generation
+    # task. If that task never runs for the FIRST turn -- a run error, a user abort /
+    # client disconnect, or a first turn with no assistant text -- the spinner would
+    # animate forever, so we dispatch a lightweight clear task in those cases.
+    is_first_turn = _is_first_assistant_turn(request_body.messages)
+    title_dispatched = False
+
+    def _dispatch_title_clear() -> None:
+        # No-op unless llm titling could have left this non-temporary session's first
+        # turn pending and the generation task was not dispatched. Sync (fire-and-
+        # forget) so it is safe to call during GeneratorExit / cancellation.
+        if title_dispatched or temporary or not is_first_turn:
+            return
+        if settings.session_title_mode != "llm":
+            return
+        try:
+            from app.background import dispatch as _dispatch_background
+
+            _dispatch_background("session-title-clear", dedup_key=thread_id, ctx={"thread_id": thread_id})
+        except Exception:
+            logger.warning("failed to dispatch session-title-clear for %s", thread_id, exc_info=True)
 
     try:
         # Pre-process: strip PDF image_url entries from messages before normalization.
@@ -1130,6 +1153,17 @@ async def _stream_with_reasoning(
             logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:
             logger.exception("AG-UI stream error")
+    finally:
+        # Abort / client disconnect (UDR-0053 D17). On a user stop or a dropped
+        # connection the stream is cancelled (CancelledError / GeneratorExit, a
+        # BaseException not caught above), so the post-try finalization below --
+        # including the title dispatch -- is skipped. Detect a propagating exception
+        # here and reconcile the Auto Session Title spinner so it never animates
+        # forever. Normal and caught-error completions leave no propagating
+        # exception (the except consumed it) and are handled below, so this does not
+        # double-dispatch. Sync dispatch only; never yields.
+        if sys.exc_info()[0] is not None:
+            _dispatch_title_clear()
 
     # Always finalize open blocks -- even after exceptions, so the frontend
     # can stop thinking indicators and display any error.
@@ -1156,6 +1190,9 @@ async def _stream_with_reasoning(
                 message=error_message,
             )
         )
+        # The generation task will not run on an errored turn, so clear the
+        # auto_title_pending spinner instead (UDR-0053 D17).
+        _dispatch_title_clear()
     else:
         logger.info("AG-UI run finished normally: thread=%s", thread_id)
         # Auto Session Title (PRP-0077, CTR-0109, UDR-0053). On the FIRST
@@ -1165,7 +1202,7 @@ async def _stream_with_reasoning(
         # fails the turn. Gated by SESSION_TITLE_MODE=llm; the default "truncate"
         # dispatches nothing (byte-for-byte pre-PRP-0077 behavior). The SSE
         # grammar is unchanged -- no event is emitted for the title.
-        if settings.session_title_mode == "llm" and not temporary and _is_first_assistant_turn(request_body.messages):
+        if settings.session_title_mode == "llm" and not temporary and is_first_turn:
             assistant_text = "".join(assistant_text_parts).strip()
             user_text = _first_user_text(request_body.messages)
             if user_text and assistant_text:
@@ -1181,6 +1218,12 @@ async def _stream_with_reasoning(
                         "model": effective_model,
                     },
                 )
+                title_dispatched = True
+        # First turn completed but produced no text to summarize (e.g. a tool-only
+        # turn): the generation task was not dispatched, so clear the pending
+        # spinner instead (UDR-0053 D17). No-op on later turns / non-llm mode.
+        if not title_dispatched:
+            _dispatch_title_clear()
         # User Memory Background Extraction (PRP-0079, CTR-0117, UDR-0051 Phase 2,
         # resolving D5). On EVERY completed turn of a NON-temporary session, when
         # enabled, dispatch the extraction task (CTR-0108). The cadence cursor
