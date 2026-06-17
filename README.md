@@ -83,7 +83,8 @@ Everything -- installation, configuration, every feature, the API, the CLI, and 
 - **API & CLI:** [OpenAI-compatible API](https://www.chatwalaau.com/docs/api-and-cli/openai-compatible-api) · [Authentication](https://www.chatwalaau.com/docs/api-and-cli/authentication) · [CLI](https://www.chatwalaau.com/docs/api-and-cli/cli)
 - **Deployment & Ops:** [Development setup](https://www.chatwalaau.com/docs/deployment/development) · [Networking & Ops](https://www.chatwalaau.com/docs/deployment/operations)
 
-Documentation is available in English and 日本語.
+Documentation is available in English and 日本語, with **full-text search** (including
+Japanese) built into the site.
 
 ---
 

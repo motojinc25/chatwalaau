@@ -167,24 +167,35 @@ class AzureOpenAIProvider:
         return {"supported": True, "native": True, "fallback": "forced_tool_use"}
 
     def build_structured_output(self, model: str, schema: dict[str, Any] | None, mode: str) -> dict[str, Any]:
-        # Native: OpenAI Responses API `text.format` (PRP-0082, UDR-0058 D2). For an
-        # explicit schema use json_schema strict (the conformance guarantee); for the
-        # generic / no-schema mode use the json_object format. Merged into the run
-        # options next to `text.verbosity` (the AG-UI endpoint deep-merges `text`).
+        # Native: OpenAI Responses API `text.format` (PRP-0082, UDR-0058 D2). Both
+        # the explicit-schema and the generic modes use the `json_schema` format
+        # type. Merged into the run options next to `text.verbosity` (the AG-UI
+        # endpoint deep-merges `text`).
+        #
+        # The legacy `json_object` format type is intentionally NOT used: the
+        # Responses API rejects it (HTTP 400 "Response input messages must contain
+        # the word 'json' ...") unless an input message literally contains the word
+        # "json", which our assembled system prompt (Identity -> Memory ->
+        # capabilities) does not guarantee. `json_schema` carries no such
+        # requirement, so the generic mode is expressed as a wide-open object schema
+        # with strict=false -- functionally equivalent to json_object (any JSON
+        # object) but without the prompt-content constraint.
         eff = effective_schema(schema, mode)
         if eff is None:
             return {}
         if not self.structured_output_support(model)["native"]:
             return forced_tool_use_fragment(eff)
-        if mode == "json_schema" and isinstance(schema, dict) and schema:
-            return {
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": STRUCTURED_OUTPUT_NAME,
-                        "schema": schema,
-                        "strict": True,
-                    }
+        explicit = mode == "json_schema" and isinstance(schema, dict) and bool(schema)
+        return {
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": STRUCTURED_OUTPUT_NAME,
+                    "schema": eff,
+                    # strict=true gives the conformance guarantee for an explicit
+                    # schema; the generic open schema uses strict=false (an open
+                    # object cannot satisfy strict's closed-schema requirements).
+                    "strict": explicit,
                 }
             }
-        return {"text": {"format": {"type": "json_object"}}}
+        }
