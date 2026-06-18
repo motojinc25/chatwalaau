@@ -652,6 +652,9 @@ export function useChat(options?: UseChatOptions) {
       if (idx === -1) return
 
       const truncated = current.slice(0, idx)
+      // Preserve any images attached to the original user message so editing the
+      // text does not drop the attachments from the re-sent turn.
+      const originalImages = current[idx].images
 
       // Truncate backend session
       // Await the truncate so the backend session file is persisted BEFORE
@@ -665,7 +668,11 @@ export function useChat(options?: UseChatOptions) {
         body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),
       }).catch(() => {})
 
-      await streamResponse(newContent, truncated)
+      await streamResponse(
+        newContent,
+        truncated,
+        originalImages && originalImages.length > 0 ? { images: originalImages } : undefined,
+      )
     },
     [streamResponse],
   )
@@ -764,6 +771,34 @@ export function useChat(options?: UseChatOptions) {
     const idx = current.findIndex((m) => m.id === messageId)
     if (idx === -1) return
 
+    // Preserve everything except the text (in-place edit): generated images and
+    // tool results (toolCalls), attached images, reasoning, the activity log
+    // ordering, and usage. Re-saving content alone previously dropped tool_calls
+    // (generated images) and attachments, so they vanished on reload.
+    const original = current[idx]
+    const assistantMsg: Record<string, unknown> = { role: 'assistant', content: newContent }
+    if (original.reasoningBlocks && original.reasoningBlocks.length > 0) {
+      assistantMsg.reasoning = original.reasoningBlocks.map((r) => ({ id: r.id, content: r.content }))
+    }
+    if (original.toolCalls && original.toolCalls.length > 0) {
+      assistantMsg.tool_calls = original.toolCalls.map((t) => ({
+        id: t.id,
+        name: t.name,
+        status: t.status,
+        ...(t.args != null ? { args: t.args } : {}),
+        ...(t.result != null ? { result: t.result } : {}),
+      }))
+    }
+    if (original.activityLog && original.activityLog.length > 0) {
+      assistantMsg.activity_log = original.activityLog.map((a) => ({ type: a.type, id: a.id }))
+    }
+    if (original.images && original.images.length > 0) {
+      assistantMsg.images = original.images.map((im) => ({ uri: im.uri, media_type: im.media_type }))
+    }
+    if (original.usage) {
+      assistantMsg.usage = original.usage
+    }
+
     fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -773,9 +808,7 @@ export function useChat(options?: UseChatOptions) {
         fetch(`/api/sessions/${threadIdRef.current}/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages: [{ role: 'assistant', content: newContent }],
-          }),
+          body: JSON.stringify({ messages: [assistantMsg] }),
         }),
       )
       .catch(() => {})

@@ -174,6 +174,9 @@ export function useSession() {
   const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null)
   const [updatingFolderId, setUpdatingFolderId] = useState<string | null>(null)
   const [movingSessionId, setMovingSessionId] = useState<string | null>(null)
+  // Session Import in progress (PRP-0084, CTR-0016 v4). Drives the sidebar
+  // animated indicator while a bundle uploads and the server validates it.
+  const [isImporting, setIsImporting] = useState(false)
   // CTR-0110 WebSocket connection health (UDR-0053 D16). True only while the
   // /ws/notifications socket is open and authenticated; gates the Auto Session
   // Title list-refresh fallback so a healthy push channel performs no polling.
@@ -634,6 +637,55 @@ export function useSession() {
     [refreshFolders, refreshSessions, sessions],
   )
 
+  // Session Export (PRP-0084, CTR-0015 v1.15 / CTR-0016 v4). Downloads the chat
+  // as a self-contained ZIP bundle (session JSON + its uploads). Read-only GET.
+  const exportSession = useCallback(async (targetThreadId: string) => {
+    try {
+      const res = await fetch(`/api/sessions/${targetThreadId}/export`)
+      if (!res.ok) return
+      const blob = await res.blob()
+      const disposition = res.headers.get('Content-Disposition') ?? ''
+      const match = disposition.match(/filename="?([^"]+)"?/)
+      const filename = match ? match[1] : `chatwalaau-chat-${targetThreadId}.zip`
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+    } catch {
+      // ignore download errors
+    }
+  }, [])
+
+  // Session Import (PRP-0084, CTR-0015 v1.15 / CTR-0016 v4). Uploads a ZIP
+  // bundle; the server validates it and creates a NEW session. On success the
+  // list refreshes and we switch to the imported chat.
+  const importSession = useCallback(
+    async (file: File): Promise<boolean> => {
+      setIsImporting(true)
+      try {
+        const form = new FormData()
+        form.append('file', file)
+        const res = await fetch('/api/sessions/import', { method: 'POST', body: form })
+        if (!res.ok) return false
+        const summary = (await res.json()) as SessionSummary
+        await refreshSessions()
+        if (summary && typeof summary.thread_id === 'string') {
+          await switchSession(summary.thread_id)
+        }
+        return true
+      } catch {
+        return false
+      } finally {
+        setIsImporting(false)
+      }
+    },
+    [refreshSessions, switchSession],
+  )
+
   return {
     threadId,
     sessions,
@@ -647,7 +699,10 @@ export function useSession() {
     deletingFolderId,
     updatingFolderId,
     movingSessionId,
+    isImporting,
     createSession,
+    exportSession,
+    importSession,
     createFolder,
     switchSession,
     deleteSession,

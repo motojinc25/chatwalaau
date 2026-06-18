@@ -20,6 +20,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Download,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -35,9 +36,19 @@ import {
   Plus,
   Search,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react'
-import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type ChangeEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { AboutDialog } from '@/components/AboutDialog'
 import { PermissionsDisabledBanner } from '@/components/PermissionsDisabledBanner'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
@@ -88,8 +99,11 @@ interface SessionSidebarProps {
   deletingFolderId: string | null
   updatingFolderId: string | null
   movingSessionId: string | null
+  importing: boolean
   onSwitch: (threadId: string) => void
   onDelete: (threadId: string) => void
+  onExport: (threadId: string) => void
+  onImport: (file: File) => Promise<boolean>
   onDeleteFolder: (folderId: string) => Promise<boolean>
   onCreateFolder: (name: string, color: FolderColor) => Promise<boolean>
   onUpdateFolderColor: (folderId: string, color: FolderColor) => Promise<boolean>
@@ -331,8 +345,11 @@ export function SessionSidebar({
   deletingFolderId,
   updatingFolderId,
   movingSessionId,
+  importing,
   onSwitch,
   onDelete,
+  onExport,
+  onImport,
   onDeleteFolder,
   onCreateFolder,
   onUpdateFolderColor,
@@ -362,6 +379,18 @@ export function SessionSidebar({
   const [dropFolderId, setDropFolderId] = useState<string | null>(null)
   const renameRef = useRef<HTMLInputElement>(null)
   const folderNameRef = useRef<HTMLInputElement>(null)
+  // Session Import file picker (PRP-0084, CTR-0016 v4).
+  const importInputRef = useRef<HTMLInputElement>(null)
+
+  const handleImportChange = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      // Reset the input so re-selecting the same file fires onChange again.
+      event.target.value = ''
+      if (file) await onImport(file)
+    },
+    [onImport],
+  )
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -690,6 +719,12 @@ export function SessionSidebar({
                   <Archive className="mr-2 h-3.5 w-3.5" />
                   Archive
                 </DropdownMenuItem>
+                {/* Session Export (PRP-0084, CTR-0016 v4): download this chat as
+                    a self-contained ZIP bundle (session JSON + its uploads). */}
+                <DropdownMenuItem onClick={() => onExport(session.thread_id)}>
+                  <Download className="mr-2 h-3.5 w-3.5" />
+                  Export
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   className="text-destructive focus:text-destructive"
                   onClick={() => setDeleteTarget(session)}>
@@ -711,6 +746,7 @@ export function SessionSidebar({
       handleSessionDragStart,
       movingSessionId,
       onArchive,
+      onExport,
       onMoveToFolder,
       onPin,
       onSwitch,
@@ -815,9 +851,31 @@ export function SessionSidebar({
         </section>
 
         <section className="py-2">
-          <div className="flex items-center gap-2 px-3 pb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-            <Plus className="h-3.5 w-3.5" />
-            Chats
+          <div className="flex items-center justify-between px-3 pb-1">
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+              <Plus className="h-3.5 w-3.5" />
+              Chats
+            </div>
+            {/* Session Import (PRP-0084, CTR-0016 v4): upload a ZIP bundle as a
+                new chat. The animated indicator shows until import completes,
+                after which useSession refreshes the list and selects it. */}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => importInputRef.current?.click()}
+              aria-label="Import chat"
+              title="Import chat from a .zip bundle"
+              disabled={importing}>
+              {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+            </Button>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept=".zip,application/zip"
+              className="hidden"
+              onChange={handleImportChange}
+            />
           </div>
           {rootSessions.length === 0 ? (
             <div className="px-3 py-2 text-xs text-muted-foreground">

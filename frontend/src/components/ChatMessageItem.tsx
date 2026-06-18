@@ -32,6 +32,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { WeatherToolResults } from '@/components/WeatherCard'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from '@/types/chat'
@@ -224,8 +225,10 @@ function ChatMessageItemImpl({
 
   const handleEditKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      // Skip while an IME composition is in progress (CJK conversion).
-      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+      // Full-screen modal editor (PRP-0084, CTR-0018 v1.3): Enter inserts a
+      // newline; Cmd/Ctrl+Enter submits. Skip while an IME composition is in
+      // progress (CJK conversion).
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
         e.preventDefault()
         handleSubmitEdit()
       }
@@ -240,25 +243,34 @@ function ChatMessageItemImpl({
     onRegenerateAssistant?.(message.id)
   }, [onRegenerateAssistant, message.id])
 
+  // Message edit modal (PRP-0084, CTR-0018 v1.3, UDR-0062 D6). The editor is
+  // relocated from a cramped inline textarea into an ~80% modal so long messages
+  // are comfortable to edit. The edit DATA FLOW is unchanged: a user-message
+  // edit truncates + re-requests; an assistant edit updates in place.
   const renderEditForm = () => (
-    <div className="flex flex-col gap-2">
-      <textarea
-        ref={editRef}
-        value={editValue}
-        onChange={(e) => setEditValue(e.target.value)}
-        onKeyDown={handleEditKeyDown}
-        className="w-full resize-none rounded-lg border bg-background px-3 py-2 text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-        rows={3}
-      />
-      <div className="flex gap-2">
-        <Button size="sm" onClick={handleSubmitEdit}>
-          Submit
-        </Button>
-        <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
-          Cancel
-        </Button>
-      </div>
-    </div>
+    <Dialog open={editing} onOpenChange={(open) => !open && setEditing(false)}>
+      <DialogContent className="flex h-[80vh] w-[80vw] max-w-[80vw] flex-col gap-3 sm:max-w-[80vw]">
+        <DialogHeader>
+          <DialogTitle>{isUser ? 'Edit message' : 'Edit response'}</DialogTitle>
+        </DialogHeader>
+        <textarea
+          ref={editRef}
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onKeyDown={handleEditKeyDown}
+          className="min-h-0 flex-1 resize-none rounded-lg border bg-background px-3 py-2 text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+        />
+        <DialogFooter>
+          <span className="mr-auto self-center text-xs text-muted-foreground">
+            Cmd/Ctrl+Enter to save, Esc to cancel
+          </span>
+          <Button variant="ghost" onClick={() => setEditing(false)}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmitEdit}>Save</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 
   return (
@@ -278,9 +290,7 @@ function ChatMessageItemImpl({
         </AvatarFallback>
       </Avatar>
       <div className={cn('min-w-0 flex-1 text-sm leading-relaxed')}>
-        {editing ? (
-          renderEditForm()
-        ) : isUser ? (
+        {isUser ? (
           <div>
             {message.images && message.images.length > 0 && (
               <div className="mb-2 flex flex-wrap gap-2">
@@ -516,6 +526,10 @@ function ChatMessageItemImpl({
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+
+        {/* Full-screen message edit modal (PRP-0084, CTR-0018 v1.3). Portaled,
+            so its placement here is cosmetic; open is driven by `editing`. */}
+        {renderEditForm()}
       </div>
     </div>
   )

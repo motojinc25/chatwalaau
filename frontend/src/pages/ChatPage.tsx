@@ -23,7 +23,10 @@ export function ChatPage() {
     deletingFolderId,
     updatingFolderId,
     movingSessionId,
+    isImporting,
     createSession,
+    exportSession,
+    importSession,
     createFolder,
     switchSession,
     deleteSession,
@@ -94,8 +97,11 @@ export function ChatPage() {
           deletingFolderId={deletingFolderId}
           updatingFolderId={updatingFolderId}
           movingSessionId={movingSessionId}
+          importing={isImporting}
           onSwitch={handleSwitch}
           onDelete={deleteSession}
+          onExport={exportSession}
+          onImport={importSession}
           onDeleteFolder={deleteFolder}
           onCreateFolder={createFolder}
           onUpdateFolderColor={updateFolderColor}

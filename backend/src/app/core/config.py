@@ -159,6 +159,12 @@ class Settings(BaseSettings):
     # File Upload
     upload_dir: str = ".uploads"
 
+    # Session Export/Import (CTR-0015, CTR-0006, PRP-0084 / UDR-0062 D5).
+    # Maximum accepted size (bytes) of an uploaded chat import bundle (.zip).
+    # Bounds the compressed upload; the import path additionally enforces an
+    # internal uncompressed-total and entry-count cap (zip-bomb defense).
+    session_import_max_bytes: int = 26_214_400  # 25 MiB
+
     # Speech-to-Text (CTR-0021, PRP-0012)
     whisper_deployment_name: str = ""
 

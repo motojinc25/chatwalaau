@@ -11,13 +11,16 @@ import logging
 from pathlib import Path
 import shutil
 from typing import Any
+from urllib.parse import quote
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.auth import verify_api_key
 from app.core.config import settings
+from app.session.bundle import BundleValidationError, build_export_bundle, import_bundle
 from app.session.storage import (
     DEFAULT_FOLDER_COLOR,
     FOLDER_COLORS,
@@ -381,10 +384,50 @@ async def search_sessions(q: str = "") -> list[dict[str, Any]]:
     return results
 
 
+@router.post("/import", dependencies=[Depends(verify_api_key)])
+async def import_session(file: UploadFile) -> dict[str, Any]:
+    """Import a chat from a ZIP bundle as a brand-new session (CTR-0015 v1.15).
+
+    The bundle is untrusted input (UDR-0062 D5): size / entry caps, zip-slip
+    rejection, an entry allowlist, manifest + session schema validation, and
+    per-upload media-type checks all run before anything is written. A NEW
+    thread id is always allocated (non-destructive, UDR-0062 D3) and the chat
+    is de-personalized (UDR-0062 D4). Must be registered before /{thread_id}
+    so "import" is never captured as a path parameter.
+    """
+    zip_bytes = await file.read()
+    try:
+        return import_bundle(zip_bytes)
+    except BundleValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/{thread_id}")
 async def get_session(thread_id: str) -> dict[str, Any]:
     """Get a session with its messages."""
     return _read_session_or_404(thread_id)
+
+
+@router.get("/{thread_id}/export")
+async def export_session(thread_id: str) -> Response:
+    """Export a chat as a self-contained ZIP bundle (CTR-0015 v1.15).
+
+    Read-only GET following the existing GET-session convention (loopback
+    friendly, not behind the write gate). The bundle carries the session JSON
+    plus its whole upload directory so images round-trip across instances.
+    """
+    try:
+        zip_bytes, filename, filename_utf8 = build_export_bundle(thread_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    # `filename` is latin-1-safe (header-encodable); `filename*` carries the full
+    # possibly-non-ASCII name per RFC 5987 so browsers show the real title.
+    disposition = f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename_utf8)}"
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": disposition},
+    )
 
 
 @router.patch("/{thread_id}/folder", dependencies=[Depends(verify_api_key)])
