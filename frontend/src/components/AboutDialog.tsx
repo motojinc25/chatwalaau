@@ -9,6 +9,10 @@
 
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
+// Public marketing/documentation site (PRP-0085, UDR-0063 D1). Static frontend
+// constant -- About copy is not backend-served and not env-configurable (UDR-0044 D3).
+const WEBSITE_URL = 'https://chatwalaau.com'
+
 interface AboutDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -47,6 +51,18 @@ export function AboutDialog({ open, onOpenChange, version }: AboutDialogProps) {
           <div>
             <dt className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Backed by</dt>
             <dd className="mt-0.5">WeDX Digital Twins Solutions, a DBA of Motojin Investment, Inc. (USA)</dd>
+          </div>
+          <div>
+            <dt className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Website</dt>
+            <dd className="mt-0.5">
+              <a
+                href={WEBSITE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary underline-offset-2 hover:underline">
+                chatwalaau.com
+              </a>
+            </dd>
           </div>
         </dl>
       </DialogContent>

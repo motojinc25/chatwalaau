@@ -47,6 +47,13 @@ interface UseChatOptions {
   selectedOutputFormat?: string
   selectedOutputSchema?: Record<string, unknown> | null
   /**
+   * Per-session image output options (CTR-0120 / CTR-0049, PRP-0085). Sent as AG-UI
+   * state.image_options {size, quality, format, compression, background}; only
+   * non-default fields are present. Becomes the generate_image / edit_image default
+   * (an explicit LLM tool argument still wins).
+   */
+  selectedImageOptions?: Record<string, string>
+  /**
    * Temporary Chat (CTR-0107 / CTR-0106, PRP-0076). When true the run is sent
    * with AG-UI state.temporary=true (de-personalized, quarantine-routed) and the
    * sidebar-creating session init call is skipped so it never appears in history.
@@ -83,6 +90,7 @@ export function useChat(options?: UseChatOptions) {
   const selectedModelOptionsRef = useRef<Record<string, string>>(options?.selectedModelOptions ?? {})
   const selectedOutputFormatRef = useRef(options?.selectedOutputFormat ?? 'none')
   const selectedOutputSchemaRef = useRef<Record<string, unknown> | null>(options?.selectedOutputSchema ?? null)
+  const selectedImageOptionsRef = useRef<Record<string, string>>(options?.selectedImageOptions ?? {})
   const temporaryRef = useRef(options?.temporary ?? false)
   const onCustomEventRef = useRef(options?.onCustomEvent)
   const onNoticeRef = useRef(options?.onNotice)
@@ -129,6 +137,10 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     selectedOutputSchemaRef.current = options?.selectedOutputSchema ?? null
   }, [options?.selectedOutputSchema])
+
+  useEffect(() => {
+    selectedImageOptionsRef.current = options?.selectedImageOptions ?? {}
+  }, [options?.selectedImageOptions])
 
   useEffect(() => {
     temporaryRef.current = options?.temporary ?? false
@@ -247,6 +259,10 @@ export function useChat(options?: UseChatOptions) {
             aguiState.output_format = 'json_object'
           }
         }
+        // Per-session image output options (PRP-0085, CTR-0120/CTR-0049). Only
+        // non-default fields are present; absent = backend settings/API default.
+        if (Object.keys(selectedImageOptionsRef.current).length > 0)
+          aguiState.image_options = selectedImageOptionsRef.current
         if (bgEnabledRef.current) aguiState.background = true
         if (temporaryRef.current) aguiState.temporary = true
         if (options?.resumeToken) aguiState.continuation_token = options.resumeToken

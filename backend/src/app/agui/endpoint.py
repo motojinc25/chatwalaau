@@ -68,6 +68,7 @@ from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key
 from app.core.config import settings
 from app.demo import is_demo_mode
+from app.image_gen.tools import current_image_options as _image_gen_options
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
 from app.providers.structured import resolve_request as resolve_structured_request
 from app.providers.structured import soft_validate
@@ -577,8 +578,16 @@ async def _stream_with_reasoning(
         background = False
         continuation_token = None
         temporary = False
+        image_options: dict[str, Any] = {}
         if request_body.state:
             selected_model = request_body.state.get("model")
+            # Per-session image output options (PRP-0085, CTR-0120/CTR-0049,
+            # UDR-0063 D6). The SPA sends state.image_options
+            # {size, quality, format, compression, background}; it becomes the tool
+            # DEFAULT via the image-gen contextvar (an explicit LLM argument wins).
+            raw_image_options = request_body.state.get("image_options")
+            if isinstance(raw_image_options, dict):
+                image_options = {k: v for k, v in raw_image_options.items() if v not in (None, "")}
             # Per-message generation options (PRP-0081, CTR-0009 v13). The SPA
             # sends a `state.model_options` object (e.g. {effort, verbosity}).
             # Back-compat (UDR-0057): a legacy `state.reasoning` string is folded
@@ -686,6 +695,9 @@ async def _stream_with_reasoning(
 
         # Set thread_id for image generation tools (CTR-0050, PRP-0027)
         _image_gen_thread_id.set(thread_id)
+        # Per-session image output options (CTR-0120/CTR-0049, PRP-0085). The tools
+        # read this as their default when the LLM omits a value.
+        _image_gen_options.set(image_options)
 
         # PRP-0067 approval loop. The first iteration runs the original
         # messages. If MAF emits function_approval_request contents, the

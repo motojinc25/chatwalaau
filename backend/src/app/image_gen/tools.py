@@ -1,9 +1,18 @@
 """Image generation tools for the main agent (CTR-0049, PRP-0027).
 
 Provides generate_image and edit_image as MAF function tools.
-Uses Azure OpenAI Images API with gpt-image-1.5 (configurable via
-IMAGE_DEPLOYMENT_NAME). Generated images are saved to the session
-upload directory (.uploads/{thread_id}/generated_{uuid}.{ext}).
+Uses Azure OpenAI Images API with a configurable deployment via
+IMAGE_DEPLOYMENT_NAME (gpt-image-2 suggested; gpt-image-1.5 still supported).
+Generated images are saved to the session upload directory
+(.uploads/{thread_id}/generated_{uuid}.{ext}).
+
+Image output options (size / quality / format / compression / background) follow a
+precedence (PRP-0085, FEAT-0044, UDR-0063 D5/D6):
+  explicit LLM argument > state.image_options (per-session UI) > CTR-0006 settings
+  > API default.
+The per-session selection is delivered by the AG-UI endpoint (CTR-0009) into the
+current_image_options contextvar before agent.run(); the LLM tool arguments default
+to None so an omitted argument falls through to the session / settings default.
 
 Tools execute in a thread pool via asyncio.to_thread() to prevent blocking
 the FastAPI async event loop during API calls.
@@ -11,6 +20,7 @@ the FastAPI async event loop during API calls.
 
 import asyncio
 import base64
+import contextlib
 import contextvars
 import json
 import logging
@@ -29,8 +39,30 @@ logger = logging.getLogger(__name__)
 # Context variable for thread_id -- set by endpoint.py before agent.run()
 current_thread_id: contextvars.ContextVar[str] = contextvars.ContextVar("current_thread_id")
 
+# Per-session image output options (PRP-0085, CTR-0120/CTR-0009). Set by the AG-UI
+# endpoint before agent.run() from state.image_options; unset / empty means the
+# user made no selection (fall through to settings / API defaults).
+current_image_options: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "current_image_options", default=None
+)
+
 # Lazy-initialized Azure OpenAI client for image generation
 _client: AzureOpenAI | None = None
+
+
+def _resolve_option(arg: str | None, key: str, setting_value: str) -> str:
+    """Resolve one image output option by precedence.
+
+    explicit LLM argument > state.image_options[key] > CTR-0006 setting > "" (API default).
+    A blank string at any tier is treated as "unspecified" and falls through.
+    """
+    if arg:
+        return arg
+    session = current_image_options.get() or {}
+    session_value = session.get(key)
+    if session_value:
+        return str(session_value)
+    return setting_value or ""
 
 
 def _get_client() -> AzureOpenAI:
@@ -44,10 +76,37 @@ def _get_client() -> AzureOpenAI:
     if _client is None:
         _client = AzureOpenAI(
             azure_endpoint=settings.azure_openai_endpoint,
-            api_version="2025-04-01-preview",
+            api_version=settings.image_api_version,
             **get_azure_openai_kwargs(),
         )
     return _client
+
+
+def _resolve_image_params(
+    size: str | None,
+    quality: str | None,
+    output_format: str | None,
+    background: str | None,
+    compression: str | None,
+) -> dict:
+    """Resolve the effective image output parameters by precedence (UDR-0063 D5).
+
+    Returns a kwargs dict for the Azure Images API. output_compression is included
+    only when the resolved format is jpeg or webp and a compression value exists.
+    """
+    fmt = _resolve_option(output_format, "format", settings.image_format) or "png"
+    params: dict = {
+        "size": _resolve_option(size, "size", settings.image_size) or "auto",
+        "quality": _resolve_option(quality, "quality", settings.image_quality) or "auto",
+        "output_format": fmt,
+        "background": _resolve_option(background, "background", settings.image_background) or "auto",
+    }
+    if fmt in ("jpeg", "webp"):
+        comp = _resolve_option(compression, "compression", settings.image_compression)
+        if comp:
+            with contextlib.suppress(TypeError, ValueError):
+                params["output_compression"] = max(0, min(100, int(comp)))
+    return params
 
 
 def _save_image(thread_id: str, image_b64: str, output_format: str) -> tuple[str, str]:
@@ -68,10 +127,11 @@ def _save_image(thread_id: str, image_b64: str, output_format: str) -> tuple[str
 
 def _generate_image_sync(
     prompt: str,
-    size: str,
-    quality: str,
-    output_format: str,
-    background: str,
+    size: str | None,
+    quality: str | None,
+    output_format: str | None,
+    background: str | None,
+    compression: str | None,
     n: int,
 ) -> str:
     """Synchronous image generation implementation."""
@@ -81,16 +141,14 @@ def _generate_image_sync(
 
     client = _get_client()
     n = max(1, min(n, 4))
+    params = _resolve_image_params(size, quality, output_format, background, compression)
 
     try:
         result = client.images.generate(
             model=settings.image_deployment_name,
             prompt=prompt,
-            size=size,
-            quality=quality,
             n=n,
-            background=background,
-            output_format=output_format,
+            **params,
         )
     except Exception as exc:
         logger.exception("Image generation API error")
@@ -101,13 +159,13 @@ def _generate_image_sync(
         b64 = item.b64_json
         if not b64:
             continue
-        filename, uri = _save_image(thread_id, b64, output_format)
+        filename, uri = _save_image(thread_id, b64, params["output_format"])
         images.append(
             {
                 "url": uri,
                 "filename": filename,
                 "revised_prompt": getattr(item, "revised_prompt", None) or prompt,
-                "size": size,
+                "size": params["size"],
             }
         )
 
@@ -123,10 +181,11 @@ def _generate_image_sync(
 def _edit_image_sync(
     prompt: str,
     image_filename: str,
-    size: str,
-    quality: str,
-    output_format: str,
-    background: str,
+    size: str | None,
+    quality: str | None,
+    output_format: str | None,
+    background: str | None,
+    compression: str | None,
     n: int,
 ) -> str:
     """Synchronous image editing implementation."""
@@ -151,6 +210,7 @@ def _edit_image_sync(
 
     client = _get_client()
     n = max(1, min(n, 4))
+    params = _resolve_image_params(size, quality, output_format, background, compression)
 
     try:
         with image_path.open("rb") as f:
@@ -158,10 +218,8 @@ def _edit_image_sync(
                 model=settings.image_deployment_name,
                 image=f,
                 prompt=prompt,
-                size=size,
-                quality=quality,
                 n=n,
-                background=background,
+                **params,
             )
     except Exception as exc:
         logger.exception("Image edit API error")
@@ -172,13 +230,13 @@ def _edit_image_sync(
         b64 = getattr(item, "b64_json", None)
         if not b64:
             continue
-        filename, uri = _save_image(thread_id, b64, output_format)
+        filename, uri = _save_image(thread_id, b64, params["output_format"])
         images.append(
             {
                 "url": uri,
                 "filename": filename,
                 "revised_prompt": getattr(item, "revised_prompt", None) or prompt,
-                "size": size,
+                "size": params["size"],
             }
         )
 
@@ -197,13 +255,29 @@ def _edit_image_sync(
 
 async def generate_image(
     prompt: Annotated[str, Field(description="Detailed description of the image to generate")],
-    size: Annotated[str, Field(description="Image size: auto, 1024x1024, 1024x1536, or 1536x1024")] = "auto",
-    quality: Annotated[str, Field(description="Image quality: auto, low, medium, or high")] = "auto",
-    output_format: Annotated[str, Field(description="Output format: png, jpeg, or webp")] = "png",
-    background: Annotated[str, Field(description="Background: auto, transparent, or opaque")] = "auto",
+    size: Annotated[
+        str | None, Field(description="Image size: auto, 1024x1024, 1024x1536, or 1536x1024 (omit to use the user's default)")
+    ] = None,
+    quality: Annotated[
+        str | None, Field(description="Image quality: auto, low, medium, or high (omit to use the user's default)")
+    ] = None,
+    output_format: Annotated[
+        str | None, Field(description="Output format: png, jpeg, or webp (omit to use the user's default)")
+    ] = None,
+    background: Annotated[
+        str | None, Field(description="Background: auto, transparent, or opaque (omit to use the user's default)")
+    ] = None,
+    compression: Annotated[
+        str | None, Field(description="Output compression 0-100 (jpeg/webp only; omit to use the user's default)")
+    ] = None,
     n: Annotated[int, Field(description="Number of images to generate (1-4)")] = 1,
 ) -> str:
-    """Generate an image from a text description using AI."""
+    """Generate an image from a text description using AI.
+
+    Omit size/quality/output_format/background/compression to honor the user's
+    per-session Image Output Options; pass an explicit value only when the request
+    requires a specific one (it overrides the user's default).
+    """
     # PRP-0066 / UDR-0041 D3: demo lane returns bundled placeholder PNGs.
     from app.demo import is_demo_mode
 
@@ -222,6 +296,7 @@ async def generate_image(
         quality,
         output_format,
         background,
+        compression,
         n,
     )
 
@@ -231,13 +306,28 @@ async def edit_image(
     image_filename: Annotated[
         str, Field(description="Filename of the source image in the session (e.g., photo.jpg, generated_abc123.png)")
     ],
-    size: Annotated[str, Field(description="Output image size: auto, 1024x1024, 1024x1536, or 1536x1024")] = "auto",
-    quality: Annotated[str, Field(description="Image quality: auto, low, medium, or high")] = "auto",
-    output_format: Annotated[str, Field(description="Output format: png, jpeg, or webp")] = "png",
-    background: Annotated[str, Field(description="Background: auto, transparent, or opaque")] = "auto",
+    size: Annotated[
+        str | None, Field(description="Output image size: auto, 1024x1024, 1024x1536, or 1536x1024 (omit to use the user's default)")
+    ] = None,
+    quality: Annotated[
+        str | None, Field(description="Image quality: auto, low, medium, or high (omit to use the user's default)")
+    ] = None,
+    output_format: Annotated[
+        str | None, Field(description="Output format: png, jpeg, or webp (omit to use the user's default)")
+    ] = None,
+    background: Annotated[
+        str | None, Field(description="Background: auto, transparent, or opaque (omit to use the user's default)")
+    ] = None,
+    compression: Annotated[
+        str | None, Field(description="Output compression 0-100 (jpeg/webp only; omit to use the user's default)")
+    ] = None,
     n: Annotated[int, Field(description="Number of edited images to generate (1-4)")] = 1,
 ) -> str:
-    """Edit an existing image based on a text description (full image edit, no mask)."""
+    """Edit an existing image based on a text description (full image edit, no mask).
+
+    Omit size/quality/output_format/background/compression to honor the user's
+    per-session Image Output Options; pass an explicit value only when needed.
+    """
     # PRP-0066 / UDR-0041 D3: demo lane returns bundled placeholder PNG.
     from app.demo import is_demo_mode
 
@@ -262,5 +352,6 @@ async def edit_image(
         quality,
         output_format,
         background,
+        compression,
         n,
     )

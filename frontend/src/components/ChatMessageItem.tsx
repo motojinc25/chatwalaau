@@ -175,6 +175,59 @@ function TTSDownloadButton({
   )
 }
 
+// Long user-message collapse (PRP-0085, FEAT-0001 / UDR-0063 D2). A user message
+// whose RENDERED height exceeds ~5 lines is clamped with a soft fade and a
+// Show more / Show less toggle. The threshold is judged by rendered height (so a
+// single wrapped long line collapses too), not by counting newlines. Collapse
+// applies to user messages only; the expanded/collapsed state is ephemeral
+// (not persisted). A ResizeObserver re-measures when the column width changes.
+const USER_MSG_COLLAPSED_MAX_PX = 120 // ~5 lines at text-sm leading-relaxed
+
+function CollapsibleUserText({ content }: { content: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [overflowing, setOverflowing] = useState(false)
+
+  // content is intentionally a dependency so the effect re-measures after the message
+  // re-renders with new content (content drives the rendered height we measure).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const measure = () => setOverflowing(el.scrollHeight > USER_MSG_COLLAPSED_MAX_PX + 4)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [content])
+
+  const collapsed = overflowing && !expanded
+
+  return (
+    <div>
+      <div className="relative">
+        <div
+          ref={ref}
+          className="overflow-hidden whitespace-pre-wrap"
+          style={collapsed ? { maxHeight: USER_MSG_COLLAPSED_MAX_PX } : undefined}>
+          {content}
+        </div>
+        {collapsed && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background to-transparent" />
+        )}
+      </div>
+      {overflowing && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 text-xs font-medium text-muted-foreground hover:text-foreground">
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </div>
+  )
+}
+
 function ChatMessageItemImpl({
   message,
   messageIndex = 0,
@@ -322,7 +375,7 @@ function ChatMessageItemImpl({
                 })}
               </div>
             )}
-            <div className="whitespace-pre-wrap">{message.content}</div>
+            <CollapsibleUserText content={message.content} />
           </div>
         ) : (
           <>

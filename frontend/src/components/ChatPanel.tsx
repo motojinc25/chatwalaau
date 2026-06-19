@@ -4,6 +4,7 @@ import { BackgroundResponsesToggle } from '@/components/BackgroundResponsesToggl
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
+import { ImageOutputOptions } from '@/components/ImageOutputOptions'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { MessageNavigator } from '@/components/MessageNavigator'
 import { ModelOptionsSelector } from '@/components/ModelOptionsSelector'
@@ -68,6 +69,8 @@ export function ChatPanel({
   // Structured output selection (CTR-0118, PRP-0082). Sent as AG-UI
   // state.output_schema / state.output_format.
   const [structured, setStructured] = useState<StructuredSelection>({ format: 'none', schema: null })
+  // Image output options (CTR-0120, PRP-0085). Sent as AG-UI state.image_options.
+  const [selectedImageOptions, setSelectedImageOptions] = useState<Record<string, string>>({})
   const [modelMaxTokens, setModelMaxTokens] = useState(128000)
   const [availableModels, setAvailableModels] = useState<string[]>([])
   // CTR-0045 / PRP-0073: per-model background-response capability. The toggle
@@ -98,6 +101,10 @@ export function ChatPanel({
 
   const handleStructuredChange = useCallback((selection: StructuredSelection) => {
     setStructured(selection)
+  }, [])
+
+  const handleImageOptionsChange = useCallback((opts: Record<string, string>) => {
+    setSelectedImageOptions(opts)
   }, [])
 
   // Auto-dismiss notification
@@ -143,6 +150,7 @@ export function ChatPanel({
     selectedModelOptions,
     selectedOutputFormat: structured.format,
     selectedOutputSchema: structured.schema,
+    selectedImageOptions,
     temporary,
     onCustomEvent: approvalApi.ingestCustomEvent,
     // v0.77.1: transient upstream 5xx auto-retry status (CTR-0009). Shown as a
@@ -414,6 +422,7 @@ export function ChatPanel({
               selectedModel={selectedModel}
               onChange={handleStructuredChange}
             />
+            <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
             {!temporary && (
               <BackgroundResponsesToggle
                 enabled={effectiveBgEnabled}
@@ -462,6 +471,7 @@ export function ChatPanel({
                 selectedModel={selectedModel}
                 onChange={handleStructuredChange}
               />
+              <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
               {!temporary && (
                 <BackgroundResponsesToggle
                   enabled={effectiveBgEnabled}
