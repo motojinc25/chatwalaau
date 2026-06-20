@@ -63,3 +63,6 @@ batch-server.log
 
 # Archived uploads
 .archived_uploads
+
+# Releases
+.releases

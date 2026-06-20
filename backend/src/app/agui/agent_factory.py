@@ -29,7 +29,8 @@ from app.agent.identity import build_system_prompt
 from app.agui.agent_registry import WEB_SEARCH_INSTRUCTION, AgentRegistry, _build_chat_client
 from app.core.config import settings
 from app.demo import is_demo_mode, resolve_demo_models
-from app.mcp.lifecycle import get_mcp_server_names, get_mcp_tools
+from app.mcp.lifecycle import get_mcp_tools, get_server_tool_names
+from app.mcp.overrides import get_override_store
 from app.session.provider import FileHistoryProvider
 from app.skills.provider import create_skills_provider
 from app.weather.tools import get_coords_by_city, get_current_weather_by_coords, get_weather_next_week
@@ -187,23 +188,57 @@ def _build_tools_and_instructions(
             is_demo_mode(),
         )
 
-    # MCP tools (CTR-0060, PRP-0031) -- excluded when include_mcp=False
+    # MCP tools (CTR-0060, PRP-0031) -- excluded when include_mcp=False.
+    # PRP-0086 / UDR-0064: the active MCP tool set is gated at runtime by the
+    # in-memory override store. A fully-disabled server is OMITTED from this
+    # agent's tool list; a partially-disabled server has ``allowed_tools`` set to
+    # its enabled subset (the only MAF primitive that subsets one server's
+    # functions). MCP connections are left untouched -- gating is at tool exposure,
+    # not process lifecycle. With an empty override store this is byte-for-byte the
+    # pre-PRP-0086 behaviour (every tool exposed).
     if include_mcp:
         mcp_tools = get_mcp_tools()
         if mcp_tools:
-            tools.extend(mcp_tools)
-            mcp_server_names = get_mcp_server_names()
-            servers_list = ", ".join(mcp_server_names)
-            instructions += (
-                f" You have MCP (Model Context Protocol) tools available from the following "
-                f"connected servers: {servers_list}. "
-                "When the user's request can be fulfilled by an MCP tool, ALWAYS prefer "
-                "using the MCP tool over web search or other built-in tools. "
-                "MCP tools provide direct, structured access to external services and "
-                "are more reliable than general web search for their specific domains. "
-                "After using an MCP tool, summarize the result clearly for the user."
-            )
-            logger.info("MCP tools added to agent: %d tool(s) from servers: %s", len(mcp_tools), servers_list)
+            store = get_override_store()
+            enabled_mcp_tools: list[Any] = []
+            enabled_servers: list[str] = []
+            for tool in mcp_tools:
+                server = getattr(tool, "name", "") or ""
+                if store.server_disabled(server):
+                    tool.allowed_tools = None  # reset so a later re-enable is clean
+                    continue
+                full_names = get_server_tool_names(server)
+                disabled = store.disabled_tools_for(server)
+                if full_names and disabled:
+                    allowed = [n for n in full_names if n not in disabled]
+                    if not allowed:
+                        # Every tool of this server is disabled -> drop the server.
+                        tool.allowed_tools = None
+                        continue
+                    # None when nothing is filtered, so the unmodified case stays
+                    # byte-for-byte identical to pre-PRP-0086.
+                    tool.allowed_tools = allowed if len(allowed) != len(full_names) else None
+                else:
+                    tool.allowed_tools = None
+                enabled_mcp_tools.append(tool)
+                enabled_servers.append(server)
+            if enabled_mcp_tools:
+                tools.extend(enabled_mcp_tools)
+                servers_list = ", ".join(enabled_servers)
+                instructions += (
+                    f" You have MCP (Model Context Protocol) tools available from the following "
+                    f"connected servers: {servers_list}. "
+                    "When the user's request can be fulfilled by an MCP tool, ALWAYS prefer "
+                    "using the MCP tool over web search or other built-in tools. "
+                    "MCP tools provide direct, structured access to external services and "
+                    "are more reliable than general web search for their specific domains. "
+                    "After using an MCP tool, summarize the result clearly for the user."
+                )
+                logger.info(
+                    "MCP tools added to agent: %d active server(s): %s",
+                    len(enabled_mcp_tools),
+                    servers_list,
+                )
 
     # User Preference Memory tool (PRP-0075, CTR-0105, UDR-0051 D5/D10).
     # Registered on the shared agent at this single chokepoint when enabled, so
@@ -255,6 +290,28 @@ def create_agent_registry() -> AgentRegistry:
         context_providers=context_providers,
         instructions=instructions,
         compaction_strategy=compaction_strategy,
+    )
+
+
+async def rebuild_agent_registry(registry: AgentRegistry) -> None:
+    """Re-assemble the shared tool set (override-aware) and rebuild all agents.
+
+    PRP-0086 / UDR-0064: called by the MCP management API (CTR-0121) after the
+    in-memory MCP override store changes. Reuses the SAME assembly as
+    ``create_agent_registry()`` so the rebuilt agents differ only by the gated MCP
+    tool set; ``AgentRegistry.rebuild()`` swaps the per-model map atomically. Safe
+    to call repeatedly -- ``_build_tools_and_instructions`` re-initialises only
+    cheap, idempotent pieces (RAG init is guarded, CTR-0077).
+    """
+    tools, context_providers, instructions = _build_tools_and_instructions(
+        include_mcp=True,
+        include_rag=True,
+        apply_approval=True,
+    )
+    await registry.rebuild(
+        tools=tools,
+        context_providers=context_providers,
+        instructions=instructions,
     )
 
 

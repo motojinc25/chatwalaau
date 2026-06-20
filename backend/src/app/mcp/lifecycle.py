@@ -54,6 +54,73 @@ def get_mcp_server_names() -> list[str]:
     return [s["name"] for s in _mcp_server_status]
 
 
+def _function_entries(tool: object) -> list[tuple[str, str]]:
+    """Return (name, description) for every function a connected MCP tool exposes.
+
+    Reads the MCP tool's loaded function list. Before ``activate_mcp()`` (or for a
+    server that failed to connect) the list is empty, so the inventory simply shows
+    a server with no tools. The names returned here are the tool's EXPOSED names,
+    which is exactly what ``MCPTool.allowed_tools`` matches against (CTR-0060,
+    UDR-0064 D3).
+    """
+    funcs = getattr(tool, "_functions", None) or []
+    out: list[tuple[str, str]] = []
+    for f in funcs:
+        name = getattr(f, "name", None)
+        if not name:
+            continue
+        out.append((name, getattr(f, "description", "") or ""))
+    return out
+
+
+def get_server_tool_names(server_name: str) -> list[str]:
+    """Return the exposed tool names for one prepared server (CTR-0061).
+
+    Used by the agent factory to compute the enabled SUBSET for
+    ``MCPTool.allowed_tools`` (a whitelist) from the disabled set held in the
+    override store (UDR-0064 D3).
+    """
+    for tool in _mcp_tools:
+        if getattr(tool, "name", None) == server_name:
+            return [name for name, _ in _function_entries(tool)]
+    return []
+
+
+def get_mcp_tool_inventory() -> list[dict]:
+    """Return the MCP tool inventory with current enabled/disabled state (CTR-0121).
+
+    For each prepared server: name, transport, connection status, the server-level
+    enabled flag, and its tools (each with name, description when available, and the
+    per-tool enabled flag). State is read from the in-memory override store
+    (CTR-0061, UDR-0064 D4).
+    """
+    from app.mcp.overrides import get_override_store
+
+    store = get_override_store()
+    inventory: list[dict] = []
+    for i, tool in enumerate(_mcp_tools):
+        status = _mcp_server_status[i] if i < len(_mcp_server_status) else {}
+        server_name = status.get("name") or getattr(tool, "name", f"server-{i}")
+        tools = [
+            {
+                "name": tname,
+                "description": tdesc,
+                "enabled": store.is_tool_enabled(server_name, tname),
+            }
+            for tname, tdesc in _function_entries(tool)
+        ]
+        inventory.append(
+            {
+                "name": server_name,
+                "transport": status.get("transport", ""),
+                "status": status.get("status", ""),
+                "enabled": not store.server_disabled(server_name),
+                "tools": tools,
+            }
+        )
+    return inventory
+
+
 def _resolve_mcp_config_path() -> Path | None:
     """Resolve the MCP config file path with two-tier fallback (PRP-0060).
 

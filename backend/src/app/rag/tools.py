@@ -36,13 +36,22 @@ _default_top_k: int = 5
 
 
 def init_rag_search(chroma_dir: str, collection_name: str, top_k: int) -> None:
-    """Initialize RAG search module state. Called once at startup."""
+    """Initialize RAG search module state.
+
+    Idempotent (PRP-0086): the agent factory's tool assembly is now re-run on every
+    runtime agent rebuild (MCP tool gating, CTR-0121), so a second call with the
+    ChromaDB PersistentClient already constructed re-uses it instead of opening a
+    new SQLite-backed client to the same directory. The cheap config values
+    (collection / top_k) are still refreshed.
+    """
     from app.demo import is_demo_mode
 
     global _chroma_client, _openai_client, _embedding_model, _default_collection, _default_top_k
-    _chroma_client = chromadb.PersistentClient(path=chroma_dir)
     _default_collection = collection_name
     _default_top_k = top_k
+    if _chroma_client is not None:
+        return
+    _chroma_client = chromadb.PersistentClient(path=chroma_dir)
     _embedding_model = os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-small")
 
     # PRP-0066: skip Azure client construction in demo mode -- DemoEmbedder

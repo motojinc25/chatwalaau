@@ -18,13 +18,42 @@ ChatWalaʻau is a **full-stack AI agent runtime** that runs entirely on localhos
 
 ```bash
 pip install chatwalaau
-chatwalaau init
-# Edit .env and set AZURE_OPENAI_ENDPOINT
-az login
+chatwalaau init        # writes a .env for you to edit
+```
+
+Configure **at least one model provider** in `.env`:
+
+**Azure OpenAI**
+
+```ini
+AZURE_OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com/
+AZURE_OPENAI_MODELS=gpt-4o            # comma-separated; the first entry is the default
+AZURE_OPENAI_API_KEY=<your-key>      # or authenticate with Entra ID instead (see below)
+```
+
+**Anthropic (Claude)** -- standalone or alongside Azure OpenAI
+
+```ini
+ANTHROPIC_MODELS=claude-sonnet-4-5-20250929
+ANTHROPIC_API_KEY=sk-ant-...         # "direct" hosting; Azure AI Foundry hosting is also supported
+```
+
+Then start the server:
+
+```bash
 chatwalaau
 ```
 
 Open: [http://localhost:8000/chat](http://localhost:8000/chat)
+
+> **Azure authentication options.** An API key (`AZURE_OPENAI_API_KEY`) is the
+> quickest and always takes precedence -- set it and you do **not** need `az login`.
+> To use Microsoft Entra ID instead, leave the key unset and pick a credential lane
+> with `AZURE_CREDENTIAL_MODE`: `cli` (default -- `az login` for local dev),
+> `managed-identity` (Azure App Service / Container Apps / AKS / Functions / VM), or
+> `default` (auto-discovery). Anthropic uses `ANTHROPIC_API_KEY` for `direct`
+> hosting, or Entra ID for `foundry` hosting. See the
+> [Authentication guide](https://www.chatwalaau.com/docs/api-and-cli/authentication).
 
 > Behind a corporate TLS-intercepting proxy? Install with `pip install "chatwalaau[corp]"`
 > so Python trusts your OS certificate store. See the
@@ -38,7 +67,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow, prompt templates, and Agent Skills
 - **Models** -- switch between **Azure OpenAI** and **Anthropic (Claude)** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
 - **Knowledge** -- RAG over your PDFs (ChromaDB) and background batch jobs with a live dashboard
-- **MCP native** -- connect any MCP server (Claude Desktop-compatible config); MCP Apps render interactive UI in chat
+- **MCP native** -- connect any MCP server (Claude Desktop-compatible config); enable/disable servers and individual tools at runtime to control token usage; MCP Apps render interactive UI in chat
 - **Memory** -- a configurable Agent Identity and a self-maintaining User Preference Memory that the agent curates inline and (opt-in) reconciles in the background, superseding stale or conflicting preferences instead of just piling them up
 - **OpenAI-compatible API** -- expose the agent as `/v1/responses` for any OpenAI-SDK app
 - **Yours, local-first** -- file-based sessions, vectors, and uploads stay on your machine; unified API-key auth and an optional web sign-in for LAN/cloud

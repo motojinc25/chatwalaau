@@ -6,6 +6,7 @@ import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
 import { ImageOutputOptions } from '@/components/ImageOutputOptions'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
+import { McpToolManager } from '@/components/McpToolManager'
 import { MessageNavigator } from '@/components/MessageNavigator'
 import { ModelOptionsSelector } from '@/components/ModelOptionsSelector'
 import { ModelSelector } from '@/components/ModelSelector'
@@ -423,6 +424,7 @@ export function ChatPanel({
               onChange={handleStructuredChange}
             />
             <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
+            <McpToolManager />
             {!temporary && (
               <BackgroundResponsesToggle
                 enabled={effectiveBgEnabled}
@@ -472,6 +474,7 @@ export function ChatPanel({
                 onChange={handleStructuredChange}
               />
               <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
+              <McpToolManager />
               {!temporary && (
                 <BackgroundResponsesToggle
                   enabled={effectiveBgEnabled}

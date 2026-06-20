@@ -76,6 +76,7 @@ Thumbs.db
 # ---- Docs that are not needed in the runtime image ----
 assets/
 tests/
+.releases/
 RELEASE_NOTES*.md
 CHANGELOG.md
 CLAUDE.md

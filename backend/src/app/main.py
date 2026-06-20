@@ -298,6 +298,12 @@ agent_registry = create_agent_registry()
 # AG-UI endpoint (CTR-0009) -- receives registry for per-request model selection
 register_agui_endpoints(app, agent_registry=agent_registry)
 
+# MCP Tool Management API (CTR-0121, PRP-0086) -- runtime gating of the active MCP
+# tool set. Receives the same registry so PUT can rebuild it atomically (CTR-0070).
+from app.mcp.router import register_mcp_management
+
+register_mcp_management(app, agent_registry=agent_registry)
+
 # Server -> client notification WebSocket (CTR-0110, PRP-0077). Real-time push
 # channel; first event type is session_title (CTR-0109).
 from app.notifications import register_notifications_endpoint

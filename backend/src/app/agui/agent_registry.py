@@ -15,6 +15,7 @@ agents keep the OpenAI hosted web search tool + instruction.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -74,17 +75,12 @@ class AgentRegistry:
         instructions: str,
         compaction_strategy: Any | None = None,
     ) -> None:
-        self._agents: dict[str, Agent] = {}
-        # Per-model capability instructions (slot #3..). Stored so the per-run
-        # remainder (Memory Block + capabilities) can be assembled when
-        # USER_PROFILE_ENABLED (CTR-0105, UDR-0051 D4).
-        self._capability_instructions: dict[str, str] = {}
         self._compaction_strategy = compaction_strategy
-
-        if is_demo_mode():
-            self._build_demo_agents(tools, context_providers, instructions)
-        else:
-            self._build_live_agents(tools, context_providers, instructions)
+        # Serialises runtime rebuilds (PRP-0086, UDR-0064 D5). asyncio.Lock can be
+        # constructed without a running event loop on Python 3.12 (it binds lazily),
+        # which matters because the registry is created at import time.
+        self._rebuild_lock = asyncio.Lock()
+        self._install(self._build(tools, context_providers, instructions))
 
         logger.info(
             "AgentRegistry initialized: %d model(s), default=%s, demo=%s",
@@ -93,12 +89,72 @@ class AgentRegistry:
             is_demo_mode(),
         )
 
+    # ---- build / install (PRP-0086, UDR-0064 D2/D5) ----
+
+    def _build(
+        self,
+        tools: list[Any],
+        context_providers: list[Any],
+        instructions: str,
+    ) -> tuple[dict[str, Agent], dict[str, str], list[str], str]:
+        """Build a FRESH per-model agent map + capability map (pure; no self mutation).
+
+        Returns ``(agents, capability_instructions, configured_models,
+        default_model)`` so ``__init__`` and ``rebuild()`` can adopt the result
+        with a single atomic swap (UDR-0064 D5).
+        """
+        if is_demo_mode():
+            return self._build_demo_agents(tools, context_providers, instructions)
+        return self._build_live_agents(tools, context_providers, instructions)
+
+    def _install(
+        self,
+        built: tuple[dict[str, Agent], dict[str, str], list[str], str],
+    ) -> None:
+        """Adopt a freshly-built result atomically (UDR-0064 D5).
+
+        Each assignment merely rebinds a reference, so a concurrent ``get()``
+        observes either the complete old map or the complete new map -- never a
+        partially-populated one.
+        """
+        agents, caps, models, default = built
+        # Per-model capability instructions (slot #3..) feed the per-run remainder
+        # (Memory Block + capabilities) when USER_PROFILE_ENABLED (CTR-0105).
+        self._agents = agents
+        self._capability_instructions = caps
+        self._configured_models = models
+        self._default_model = default
+
+    async def rebuild(
+        self,
+        *,
+        tools: list[Any],
+        context_providers: list[Any],
+        instructions: str,
+    ) -> None:
+        """Rebuild all per-model agents with a new tool set and swap atomically.
+
+        PRP-0086 / UDR-0064 D2/D5: builds a brand-new per-model map off to the
+        side, then installs it under a single lock. ``get()`` always returns a
+        fully-built agent; if the build raises, the prior agents stay installed (no
+        partial swap). The compaction strategy is reused from construction.
+        """
+        async with self._rebuild_lock:
+            built = self._build(tools, context_providers, instructions)
+            self._install(built)
+            logger.info(
+                "AgentRegistry rebuilt: %d model(s), default=%s, demo=%s",
+                len(built[0]),
+                built[3],
+                is_demo_mode(),
+            )
+
     def _build_demo_agents(
         self,
         tools: list[Any],
         context_providers: list[Any],
         instructions: str,
-    ) -> None:
+    ) -> tuple[dict[str, Agent], dict[str, str], list[str], str]:
         """Build demo agents (DemoChatClient), preserving pre-PRP-0069 behavior.
 
         UDR-0045 D7: demo agents keep the OpenAI hosted web search tool + the
@@ -106,15 +162,17 @@ class AgentRegistry:
         reasoning options.
         """
         models = resolve_demo_models()
-        self._configured_models = list(models)
-        self._default_model = models[0]
+        configured = list(models)
+        default = models[0]
+        agents: dict[str, Agent] = {}
+        caps: dict[str, str] = {}
 
         web_search = providers.openai_web_search_tool()
         demo_tools = [web_search, *tools]
         demo_caps = instructions + WEB_SEARCH_INSTRUCTION
 
         for model in models:
-            self._capability_instructions[model] = demo_caps
+            caps[model] = demo_caps
             client = _build_chat_client(model)
             agent = Agent(
                 name=f"ChatWalaau-Agent-{model}",
@@ -125,15 +183,16 @@ class AgentRegistry:
                 default_options=None,
                 compaction_strategy=self._compaction_strategy,
             )
-            self._agents[model] = agent
+            agents[model] = agent
             logger.info("Agent created for model: %s (demo=True)", model)
+        return agents, caps, configured, default
 
     def _build_live_agents(
         self,
         tools: list[Any],
         context_providers: list[Any],
         instructions: str,
-    ) -> None:
+    ) -> tuple[dict[str, Agent], dict[str, str], list[str], str]:
         """Build live agents via provider dispatch (PRP-0069, UDR-0045).
 
         Per model: the owning provider builds the ChatClient, the per-model
@@ -143,15 +202,17 @@ class AgentRegistry:
         appended only when a web search tool is supplied.
         """
         resolved = providers.resolve_models()
-        self._configured_models = [model for model, _ in resolved]
-        self._default_model = self._configured_models[0] if self._configured_models else ""
+        configured = [model for model, _ in resolved]
+        default = configured[0] if configured else ""
+        agents: dict[str, Agent] = {}
+        caps: dict[str, str] = {}
 
         for model, provider_name in resolved:
             client = _build_chat_client(model)
             web_search = providers.web_search_tool(model)
             model_tools = [web_search, *tools] if web_search is not None else list(tools)
             model_caps = instructions + (WEB_SEARCH_INSTRUCTION if web_search is not None else "")
-            self._capability_instructions[model] = model_caps
+            caps[model] = model_caps
             model_options = providers.build_model_options(model)
 
             agent = Agent(
@@ -163,8 +224,9 @@ class AgentRegistry:
                 default_options=model_options or None,
                 compaction_strategy=self._compaction_strategy,
             )
-            self._agents[model] = agent
+            agents[model] = agent
             logger.info("Agent created for model: %s (provider=%s)", model, provider_name)
+        return agents, caps, configured, default
 
     def get(self, model: str | None = None) -> Agent:
         """Get Agent for specified model. Falls back to default if None or unknown."""
