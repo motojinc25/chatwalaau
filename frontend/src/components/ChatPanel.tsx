@@ -11,6 +11,7 @@ import { MessageNavigator } from '@/components/MessageNavigator'
 import { ModelOptionsSelector } from '@/components/ModelOptionsSelector'
 import { ModelSelector } from '@/components/ModelSelector'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
+import { SkillsManager } from '@/components/SkillsManager'
 import { StructuredOutputControl, type StructuredSelection } from '@/components/StructuredOutputControl'
 import { ToolApprovalList } from '@/components/ToolApprovalCard'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
@@ -425,6 +426,7 @@ export function ChatPanel({
             />
             <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
             <McpToolManager />
+            <SkillsManager />
             {!temporary && (
               <BackgroundResponsesToggle
                 enabled={effectiveBgEnabled}
@@ -475,6 +477,7 @@ export function ChatPanel({
               />
               <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
               <McpToolManager />
+              <SkillsManager />
               {!temporary && (
                 <BackgroundResponsesToggle
                   enabled={effectiveBgEnabled}

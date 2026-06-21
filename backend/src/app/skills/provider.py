@@ -37,9 +37,15 @@ import subprocess
 import sys
 from typing import Any
 
-from agent_framework import SkillsProvider
+from agent_framework import (
+    DeduplicatingSkillsSource,
+    FileSkillsSource,
+    FilteringSkillsSource,
+    SkillsProvider,
+)
 
 from app.core.config import settings
+from app.skills.overrides import get_skills_override_store
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +126,37 @@ async def _skill_script_runner(skill: Any, script: Any, args: dict[str, Any] | l
     return await asyncio.to_thread(_run_skill_script_sync, skill, script, args)
 
 
+def build_skill_source() -> DeduplicatingSkillsSource:
+    """Build the UNFILTERED, deduplicated file-based skill source.
+
+    Mirrors what ``SkillsProvider.from_paths()`` constructs internally
+    (``DeduplicatingSkillsSource(FileSkillsSource(...))``) so that, with an empty
+    override store, ``create_skills_provider()`` produces a byte-for-byte
+    equivalent provider. Reused by ``app.skills.inventory`` so the inventory's
+    skill NAMES match exactly what the runtime FilteringSkillsSource predicate
+    gates against (PRP-0087, UDR-0065 D2/D3).
+    """
+    skills_path = Path(settings.skills_dir)
+    return DeduplicatingSkillsSource(
+        FileSkillsSource(skills_path, script_runner=_skill_script_runner)
+    )
+
+
 def create_skills_provider() -> SkillsProvider | None:
     """Create SkillsProvider if SKILLS_DIR exists and is a directory.
+
+    PRP-0087 / UDR-0065: the active Skills set is gated at runtime by the in-memory
+    override store. The file source is wrapped in MAF ``FilteringSkillsSource`` with
+    the predicate "skill name not in the disabled set", so a disabled skill is
+    dropped from ``get_skills()`` and therefore leaves BOTH the advertise block AND
+    the load_skill / read_skill_resource / run_skill_script closures. The disabled
+    set is SNAPSHOTTED here, so a rebuild is the deterministic apply boundary
+    (UDR-0065 D2); the agent rebuild (CTR-0070) re-runs this factory. With an empty
+    override store this is byte-for-byte the pre-PRP-0087 behaviour.
+
+    When every discovered skill is disabled the filtered source yields no skills,
+    so MAF injects no advertise text and no skill tools at all -- observationally
+    identical to omitting the provider (UDR-0065 D3).
 
     Returns:
         SkillsProvider instance if skills directory exists, None otherwise.
@@ -132,20 +167,24 @@ def create_skills_provider() -> SkillsProvider | None:
         logger.info("Skills directory not found: %s (skipping SkillsProvider)", skills_path)
         return None
 
-    # MAF moved file-based skill discovery to the SkillsProvider.from_paths()
-    # factory; the constructor now takes Skill instances / sources, so the old
-    # SkillsProvider(skill_paths=...) call raises TypeError on current
-    # agent-framework builds. We also supply a script runner so skills that ship
-    # scripts (e.g. pptx) actually run instead of raising "requires a runner"
-    # (which previously made the agent flail until the approval loop aborted).
-    provider = SkillsProvider.from_paths(
-        skills_path,
-        script_runner=_skill_script_runner,
+    # We construct the provider manually (rather than SkillsProvider.from_paths)
+    # so the override filter can be injected over the same deduplicated file
+    # source. A script runner is supplied so skills that ship scripts (e.g. pptx)
+    # actually run instead of raising "requires a runner".
+    disabled = frozenset(get_skills_override_store().disabled_names())
+    source = build_skill_source()
+    if disabled:
+        source = FilteringSkillsSource(source, predicate=lambda s: s.frontmatter.name not in disabled)
+
+    provider = SkillsProvider(
+        source,
         require_script_approval=settings.tool_approval_mode != "skip",
     )
     logger.info(
-        "SkillsProvider created (skills_dir=%s, script_execution=%s, script_approval=%s)",
+        "SkillsProvider created (skills_dir=%s, disabled_skills=%d [%s], script_execution=%s, script_approval=%s)",
         skills_path,
+        len(disabled),
+        ", ".join(sorted(disabled)) if disabled else "none",
         "on" if settings.coding_enabled else "off (CODING_ENABLED=false)",
         settings.tool_approval_mode != "skip",
     )
