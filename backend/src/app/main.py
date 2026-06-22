@@ -310,6 +310,19 @@ from app.skills.router import register_skills_management
 
 register_skills_management(app, agent_registry=agent_registry)
 
+# Slash Commands API (CTR-0126, PRP-0088) -- read-only merged command inventory
+# of built-ins plus prompt-template-derived and skill-derived commands. Dispatch
+# is client-side per UDR-0066 D1, so no agent_registry is needed.
+from app.commands.router import router as commands_router
+
+app.include_router(commands_router)
+
+# Workspace File Completion API (CTR-0127, PRP-0088) -- workspace-jailed file
+# listing for @file completion; gated by CODING_ENABLED (UDR-0066 D6).
+from app.workspace.router import router as workspace_router
+
+app.include_router(workspace_router)
+
 # Server -> client notification WebSocket (CTR-0110, PRP-0077). Real-time push
 # channel; first event type is session_title (CTR-0109).
 from app.notifications import register_notifications_endpoint

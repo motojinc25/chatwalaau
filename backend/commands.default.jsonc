@@ -1,0 +1,17 @@
+{
+  // Slash Command registry. JSONC -- `//` and `/* */`
+  // comments are stripped before parse. This bundled default mirrors the
+  // code-backed built-in commands; the runtime always provides these four even
+  // if this file is absent. Copy to `commands.jsonc` (gitignored) to override a
+  // built-in's metadata or to add operator-defined data commands.
+  //
+  // Each entry: { name, description, category?, aliases?, args_hint? }.
+  // `name` and each alias must match ^[A-Za-z][A-Za-z0-9_-]*$ (no leading slash).
+  // Behavior is code-backed for the built-ins; this file is METADATA only.
+  "commands": [
+    { "name": "help",   "category": "Core",   "description": "Show all available slash commands", "args_hint": "" },
+    { "name": "prompt", "category": "Prompt", "aliases": ["p"], "description": "Run a prompt template", "args_hint": "<template> [args...]" },
+    { "name": "skill",  "category": "Skill",  "description": "Invoke an Agent Skill", "args_hint": "<skill> [args...]" },
+    { "name": "model",  "category": "Model",  "aliases": ["m"], "description": "Switch the active model", "args_hint": "<model>" }
+  ]
+}

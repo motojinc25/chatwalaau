@@ -63,6 +63,42 @@ def _discover_skill_dirs(root: Path) -> list[Path]:
     return out
 
 
+def _read_command_meta(skill_dir: Path) -> dict[str, str]:
+    """Best-effort read of optional slash-command metadata from SKILL.md frontmatter.
+
+    Scans the leading ``---`` ... ``---`` YAML frontmatter for optional ``command``
+    and ``args_hint`` keys (CTR-0043 v-note, PRP-0088). Additive and tolerant: any
+    read/parse problem yields an empty dict, so a skill with no such keys (the common
+    case) contributes nothing. No yaml dependency -- a minimal ``key: value`` scan.
+    """
+    out: dict[str, str] = {}
+    path = skill_dir / _SKILL_FILE_NAME
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    if not text.lstrip().startswith("---"):
+        return out
+    lines = text.splitlines()
+    started = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "---":
+            if started:
+                break
+            started = True
+            continue
+        if not started:
+            continue
+        for key in ("command", "args_hint"):
+            prefix = f"{key}:"
+            if stripped.startswith(prefix):
+                value = stripped[len(prefix) :].strip().strip("'\"")
+                if value:
+                    out[key] = value
+    return out
+
+
 def _group_for(skill_dir: Path, root: Path) -> str:
     """Derive the group name from the skill directory's path relative to SKILLS_DIR.
 
@@ -105,10 +141,12 @@ async def get_skills_inventory() -> dict[str, Any]:
     for skill in skills:
         name = skill.frontmatter.name
         description = (skill.frontmatter.description or "").strip()
-        group = _group_for(Path(getattr(skill, "path", "") or ""), skills_path)
-        grouped.setdefault(group, []).append(
-            {"name": name, "description": description, "enabled": store.is_enabled(name)}
-        )
+        skill_dir = Path(getattr(skill, "path", "") or "")
+        group = _group_for(skill_dir, skills_path)
+        entry: dict[str, Any] = {"name": name, "description": description, "enabled": store.is_enabled(name)}
+        # Optional slash-command metadata (CTR-0043 v-note, PRP-0088); additive.
+        entry.update(_read_command_meta(skill_dir))
+        grouped.setdefault(group, []).append(entry)
 
     # Collision scan: duplicate basenames among all discovered SKILL.md dirs.
     seen: set[str] = set()

@@ -44,6 +44,7 @@ class TemplateStorage:
             "description": data.get("description", ""),
             "category": data.get("category", ""),
             "body": data["body"],
+            "slash_command": data.get("slash_command", ""),
             "created_at": now,
             "updated_at": now,
         }
@@ -65,6 +66,7 @@ class TemplateStorage:
         existing["body"] = data["body"]
         existing["description"] = data.get("description", "")
         existing["category"] = data.get("category", "")
+        existing["slash_command"] = data.get("slash_command", "")
         existing["updated_at"] = datetime.now(UTC).isoformat()
 
         path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")

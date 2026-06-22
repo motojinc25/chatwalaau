@@ -63,7 +63,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 
 ## Highlights
 
-- **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, and Temporary Chat
+- **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, Temporary Chat, and **slash commands** (`/help`, `/prompt`, `/skill`, `/model`) with completion and dynamic arguments
 - **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow, prompt templates, and Agent Skills
 - **Models** -- switch between **Azure OpenAI** and **Anthropic (Claude)** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
 - **Knowledge** -- RAG over your PDFs (ChromaDB) and background batch jobs with a live dashboard
@@ -108,7 +108,7 @@ See the [Features documentation](https://www.chatwalaau.com/docs/features/chat-a
 Everything -- installation, configuration, every feature, the API, the CLI, and deployment -- lives on the documentation site:
 
 - **Getting started:** [Installation](https://www.chatwalaau.com/docs/getting-started/installation) · [Configuration](https://www.chatwalaau.com/docs/getting-started/configuration)
-- **Features:** [Chat & UI](https://www.chatwalaau.com/docs/features/chat-and-ui) · [Agent Tools](https://www.chatwalaau.com/docs/features/agents-and-tools) · [Models & Reasoning](https://www.chatwalaau.com/docs/features/models-and-reasoning) · [Voice](https://www.chatwalaau.com/docs/features/voice-and-speech) · [Knowledge & MCP](https://www.chatwalaau.com/docs/features/knowledge-and-mcp) · [Memory & Sessions](https://www.chatwalaau.com/docs/features/memory-and-sessions)
+- **Features:** [Chat & UI](https://www.chatwalaau.com/docs/features/chat-and-ui) · [Slash Commands](https://www.chatwalaau.com/docs/features/slash-commands) · [Agent Tools](https://www.chatwalaau.com/docs/features/agents-and-tools) · [Models & Reasoning](https://www.chatwalaau.com/docs/features/models-and-reasoning) · [Voice](https://www.chatwalaau.com/docs/features/voice-and-speech) · [Knowledge & MCP](https://www.chatwalaau.com/docs/features/knowledge-and-mcp) · [Memory & Sessions](https://www.chatwalaau.com/docs/features/memory-and-sessions)
 - **API & CLI:** [OpenAI-compatible API](https://www.chatwalaau.com/docs/api-and-cli/openai-compatible-api) · [Authentication](https://www.chatwalaau.com/docs/api-and-cli/authentication) · [CLI](https://www.chatwalaau.com/docs/api-and-cli/cli)
 - **Deployment & Ops:** [Development setup](https://www.chatwalaau.com/docs/deployment/development) · [Networking & Ops](https://www.chatwalaau.com/docs/deployment/operations)
 

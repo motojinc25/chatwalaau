@@ -17,7 +17,13 @@ import type { PromptTemplate } from '@/types/chat'
 interface TemplateFormProps {
   template: PromptTemplate | null
   isNew: boolean
-  onSave: (data: { name: string; body: string; description?: string; category?: string }) => Promise<void>
+  onSave: (data: {
+    name: string
+    body: string
+    description?: string
+    category?: string
+    slash_command?: string
+  }) => Promise<void>
   onDelete: () => Promise<void>
   onInsert: (template: PromptTemplate) => void
 }
@@ -27,6 +33,7 @@ export function TemplateForm({ template, isNew, onSave, onDelete, onInsert }: Te
   const [description, setDescription] = useState('')
   const [category, setCategory] = useState('')
   const [body, setBody] = useState('')
+  const [slashCommand, setSlashCommand] = useState('')
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [errors, setErrors] = useState<{ name?: string; body?: string }>({})
 
@@ -36,12 +43,14 @@ export function TemplateForm({ template, isNew, onSave, onDelete, onInsert }: Te
       setDescription('')
       setCategory('')
       setBody('')
+      setSlashCommand('')
       setErrors({})
     } else if (template) {
       setName(template.name)
       setDescription(template.description)
       setCategory(template.category)
       setBody(template.body)
+      setSlashCommand(template.slash_command ?? '')
       setErrors({})
     }
   }, [template, isNew])
@@ -53,9 +62,10 @@ export function TemplateForm({ template, isNew, onSave, onDelete, onInsert }: Te
       name !== template.name ||
       description !== template.description ||
       category !== template.category ||
-      body !== template.body
+      body !== template.body ||
+      slashCommand !== (template.slash_command ?? '')
     )
-  }, [isNew, template, name, description, category, body])
+  }, [isNew, template, name, description, category, body, slashCommand])
 
   const validate = useCallback(() => {
     const e: { name?: string; body?: string } = {}
@@ -67,8 +77,14 @@ export function TemplateForm({ template, isNew, onSave, onDelete, onInsert }: Te
 
   const handleSave = useCallback(async () => {
     if (!validate()) return
-    await onSave({ name: name.trim(), body: body.trim(), description: description.trim(), category: category.trim() })
-  }, [validate, onSave, name, body, description, category])
+    await onSave({
+      name: name.trim(),
+      body: body.trim(),
+      description: description.trim(),
+      category: category.trim(),
+      slash_command: slashCommand.trim().replace(/^\/+/, ''),
+    })
+  }, [validate, onSave, name, body, description, category, slashCommand])
 
   if (!isNew && !template) {
     return (
@@ -101,6 +117,23 @@ export function TemplateForm({ template, isNew, onSave, onDelete, onInsert }: Te
             Description
           </label>
           <Input id="tpl-desc" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={500} />
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="tpl-slash" className="text-sm font-medium">
+            Slash command
+          </label>
+          <Input
+            id="tpl-slash"
+            value={slashCommand}
+            onChange={(e) => setSlashCommand(e.target.value)}
+            maxLength={50}
+            placeholder="(optional; defaults to the template name)"
+          />
+          <p className="text-xs text-muted-foreground">
+            Run this template from the chat input as <code>/{slashCommand.trim().replace(/^\/+/, '') || '<name>'}</code>
+            . Use placeholders like <code>$1</code>, <code>$2</code>, or <code>$ARGUMENTS</code> in the body.
+          </p>
         </div>
 
         <div className="flex flex-col gap-1.5">

@@ -80,6 +80,8 @@ export interface PromptTemplate {
   description: string
   category: string
   body: string
+  /** Optional slash command token for /prompt (CTR-0047 v2, PRP-0088). */
+  slash_command?: string
   created_at: string
   updated_at: string
 }

@@ -43,7 +43,7 @@ export function PromptTemplatesModal({ open, onOpenChange, onInsert, onNotify }:
   }, [])
 
   const handleSave = useCallback(
-    async (data: { name: string; body: string; description?: string; category?: string }) => {
+    async (data: { name: string; body: string; description?: string; category?: string; slash_command?: string }) => {
       let success: boolean
       if (isNew) {
         success = await createTemplate(data)

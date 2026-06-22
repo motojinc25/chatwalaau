@@ -4,12 +4,13 @@ import { BackgroundResponsesToggle } from '@/components/BackgroundResponsesToggl
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
+import { HelpPortal } from '@/components/HelpPortal'
 import { ImageOutputOptions } from '@/components/ImageOutputOptions'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { McpToolManager } from '@/components/McpToolManager'
 import { MessageNavigator } from '@/components/MessageNavigator'
 import { ModelOptionsSelector } from '@/components/ModelOptionsSelector'
-import { ModelSelector } from '@/components/ModelSelector'
+import { ModelSelector, type ModelSelectorHandle } from '@/components/ModelSelector'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
 import { SkillsManager } from '@/components/SkillsManager'
 import { StructuredOutputControl, type StructuredSelection } from '@/components/StructuredOutputControl'
@@ -181,6 +182,13 @@ export function ChatPanel({
   const { attachments, addFiles, removeAttachment, clearAttachments, getImageRefs, isUploading } = useImageAttachment()
 
   const tts = useTTS()
+
+  // Slash commands (CTR-0128, PRP-0088): /model drives the selector via an
+  // imperative handle; /help opens the Help Portal.
+  const modelSelectorRef = useRef<ModelSelectorHandle>(null)
+  const [helpOpen, setHelpOpen] = useState(false)
+  const handleSlashModel = useCallback((model: string) => modelSelectorRef.current?.selectModel(model) ?? false, [])
+  const handleSlashHelp = useCallback(() => setHelpOpen(true), [])
 
   // Prompt Templates state (CTR-0048, PRP-0026)
   const chatInputRef = useRef<ChatInputHandle>(null)
@@ -413,7 +421,7 @@ export function ChatPanel({
       {compact ? (
         <div ref={inputRef}>
           <div className="flex items-center justify-end gap-1 px-4">
-            <ModelSelector threadId={threadId ?? ''} onModelChange={handleModelChange} />
+            <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
             <ModelOptionsSelector
               threadId={threadId ?? ''}
               selectedModel={selectedModel}
@@ -448,6 +456,9 @@ export function ChatPanel({
             isUploading={isUploading}
             bgEnabled={bgEnabled}
             onOpenTemplates={handleOpenTemplates}
+            onSlashModel={handleSlashModel}
+            onSlashHelp={handleSlashHelp}
+            availableModels={availableModels}
             temporary={temporary}
           />
         </div>
@@ -464,7 +475,7 @@ export function ChatPanel({
           <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
           <div className="relative bg-background">
             <div className="mx-auto flex max-w-3xl items-center justify-end gap-1 px-4">
-              <ModelSelector threadId={threadId ?? ''} onModelChange={handleModelChange} />
+              <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
               <ModelOptionsSelector
                 threadId={threadId ?? ''}
                 selectedModel={selectedModel}
@@ -499,6 +510,9 @@ export function ChatPanel({
               isUploading={isUploading}
               bgEnabled={effectiveBgEnabled}
               onOpenTemplates={handleOpenTemplates}
+              onSlashModel={handleSlashModel}
+              onSlashHelp={handleSlashHelp}
+              availableModels={availableModels}
               temporary={temporary}
             />
           </div>
@@ -514,6 +528,7 @@ export function ChatPanel({
         </div>
       )}
 
+      <HelpPortal open={helpOpen} onOpenChange={setHelpOpen} />
       <PromptTemplatesModal
         open={templatesModalOpen}
         onOpenChange={setTemplatesModalOpen}

@@ -6,10 +6,16 @@ interface UseTemplatesReturn {
   isLoading: boolean
   error: string | null
   fetchTemplates: () => Promise<void>
-  createTemplate: (data: { name: string; body: string; description?: string; category?: string }) => Promise<boolean>
+  createTemplate: (data: {
+    name: string
+    body: string
+    description?: string
+    category?: string
+    slash_command?: string
+  }) => Promise<boolean>
   updateTemplate: (
     id: string,
-    data: { name: string; body: string; description?: string; category?: string },
+    data: { name: string; body: string; description?: string; category?: string; slash_command?: string },
   ) => Promise<boolean>
   deleteTemplate: (id: string) => Promise<boolean>
 }
@@ -35,7 +41,7 @@ export function useTemplates(): UseTemplatesReturn {
   }, [])
 
   const createTemplate = useCallback(
-    async (data: { name: string; body: string; description?: string; category?: string }) => {
+    async (data: { name: string; body: string; description?: string; category?: string; slash_command?: string }) => {
       setError(null)
       try {
         const res = await fetch('/api/templates', {
@@ -55,7 +61,10 @@ export function useTemplates(): UseTemplatesReturn {
   )
 
   const updateTemplate = useCallback(
-    async (id: string, data: { name: string; body: string; description?: string; category?: string }) => {
+    async (
+      id: string,
+      data: { name: string; body: string; description?: string; category?: string; slash_command?: string },
+    ) => {
       setError(null)
       try {
         const res = await fetch(`/api/templates/${id}`, {

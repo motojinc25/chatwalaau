@@ -1,5 +1,5 @@
 import { Check, ChevronDown } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 interface ModelInfo {
@@ -14,13 +14,24 @@ interface ModelSelectorProps {
   onModelChange: (model: string, maxTokens: number) => void
 }
 
+/** Imperative handle so the `/model` slash command can drive the selector (PRP-0088). */
+export interface ModelSelectorHandle {
+  /** Switch the active model by name (case-insensitive); returns false if unknown. */
+  selectModel: (model: string) => boolean
+  /** Currently available model names. */
+  getModels: () => string[]
+}
+
 const MODEL_STORAGE_PREFIX = 'chatwalaau-model-'
 
 /**
  * Compact model selector dropdown (CTR-0071, PRP-0035).
  * Hidden when only one model is configured.
  */
-export function ModelSelector({ threadId, onModelChange }: ModelSelectorProps) {
+export const ModelSelector = forwardRef<ModelSelectorHandle, ModelSelectorProps>(function ModelSelector(
+  { threadId, onModelChange },
+  ref,
+) {
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
   const [selectedModel, setSelectedModel] = useState<string>('')
   const [isOpen, setIsOpen] = useState(false)
@@ -50,6 +61,20 @@ export function ModelSelector({ threadId, onModelChange }: ModelSelectorProps) {
       }
     },
     [threadId, modelInfo, onModelChange],
+  )
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      selectModel: (model: string) => {
+        const match = modelInfo?.models.find((m) => m.toLowerCase() === model.toLowerCase())
+        if (!match) return false
+        handleSelect(match)
+        return true
+      },
+      getModels: () => modelInfo?.models ?? [],
+    }),
+    [modelInfo, handleSelect],
   )
 
   // Hide when single model or no data
@@ -93,4 +118,4 @@ export function ModelSelector({ threadId, onModelChange }: ModelSelectorProps) {
       )}
     </div>
   )
-}
+})

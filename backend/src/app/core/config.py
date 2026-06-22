@@ -289,6 +289,14 @@ class Settings(BaseSettings):
     # Prompt Templates (CTR-0046, PRP-0026)
     templates_dir: str = ".templates"
 
+    # Slash Commands (CTR-0125, PRP-0088)
+    # The four built-in commands (help / prompt / skill / model) are code-backed
+    # and always available, so the feature works with zero configuration. This
+    # optional JSONC file lets an operator add or override command METADATA;
+    # two-tier resolution falls back to a bundled commands.default.jsonc sibling.
+    # An explicit empty value disables loading the operator file (built-ins stay).
+    commands_config_file: str = "commands.jsonc"
+
     # RAG Pipeline (CTR-0075, PRP-0037)
     chroma_dir: str = ".chroma"
     rag_collection_name: str = "default"
