@@ -40,6 +40,8 @@ interface ChatPanelProps {
   /** New-session created (PRP-0077, CTR-0016): show it in the sidebar immediately. */
   onSessionCreated?: (info: { threadId: string; title: string }) => void
   onBranchFromMessage?: (messageIndex: number) => void
+  /** Slash command /cron (CTR-0135, PRP-0089): open the Cron scheduler portal. */
+  onSlashCron?: () => void
   /** Temporary Chat mode (CTR-0107, PRP-0076): dark input, no BG toggle, no history. */
   temporary?: boolean
 }
@@ -61,6 +63,7 @@ export function ChatPanel({
   onStreamComplete,
   onSessionCreated,
   onBranchFromMessage,
+  onSlashCron,
   temporary = false,
 }: ChatPanelProps) {
   const [bgEnabled, setBgEnabled] = useState(() => localStorage.getItem(BG_STORAGE_KEY) === 'true')
@@ -458,6 +461,7 @@ export function ChatPanel({
             onOpenTemplates={handleOpenTemplates}
             onSlashModel={handleSlashModel}
             onSlashHelp={handleSlashHelp}
+            onSlashCron={onSlashCron}
             availableModels={availableModels}
             temporary={temporary}
           />
@@ -512,6 +516,7 @@ export function ChatPanel({
               onOpenTemplates={handleOpenTemplates}
               onSlashModel={handleSlashModel}
               onSlashHelp={handleSlashHelp}
+              onSlashCron={onSlashCron}
               availableModels={availableModels}
               temporary={temporary}
             />

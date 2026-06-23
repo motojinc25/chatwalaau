@@ -1,10 +1,12 @@
 import { Loader2, Menu } from 'lucide-react'
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
+import { CronManager } from '@/components/CronManager'
 import { SessionSidebar } from '@/components/SessionSidebar'
 import { TemporaryChatToggle } from '@/components/TemporaryChatToggle'
 import { Button } from '@/components/ui/button'
+import { useCronAvailable } from '@/hooks/useCronAvailable'
 import { useSession } from '@/hooks/useSession'
 import { useTemporaryChat } from '@/hooks/useTemporaryChat'
 
@@ -47,6 +49,11 @@ export function ChatPage() {
   // temporary first.
   const temp = useTemporaryChat()
   const effectiveThreadId = temp.isTemporary && temp.tempThreadId ? temp.tempThreadId : threadId
+
+  // Cron Scheduler portal (CTR-0135, PRP-0089). State is lifted here so both the
+  // sidebar-footer launcher icon and the /cron slash command open the same modal.
+  const cronAvailable = useCronAvailable()
+  const [cronOpen, setCronOpen] = useState(false)
 
   const handleStreamComplete = useCallback(() => {
     // Temporary chats are never listed and never exposed in the URL (UDR-0052
@@ -112,8 +119,12 @@ export function ChatPage() {
           onPin={pinSession}
           onCreate={handleCreate}
           onClose={() => setSidebarOpen(false)}
+          cronAvailable={cronAvailable}
+          onOpenCron={() => setCronOpen(true)}
         />
       )}
+
+      {cronAvailable && <CronManager open={cronOpen} onOpenChange={setCronOpen} />}
 
       <div className="relative flex flex-1 flex-col">
         {!sidebarOpen && (
@@ -146,6 +157,7 @@ export function ChatPage() {
             onStreamComplete={handleStreamComplete}
             onSessionCreated={handleSessionCreated}
             onBranchFromMessage={temp.isTemporary ? undefined : handleBranch}
+            onSlashCron={() => setCronOpen(true)}
             temporary={temp.isTemporary}
           />
         )}

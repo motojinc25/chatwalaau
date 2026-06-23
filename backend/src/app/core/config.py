@@ -297,6 +297,21 @@ class Settings(BaseSettings):
     # An explicit empty value disables loading the operator file (built-ins stay).
     commands_config_file: str = "commands.jsonc"
 
+    # Cron Scheduler (CTR-0006, CTR-0130..0135, PRP-0089, UDR-0067)
+    # Self-contained, file-backed scheduler. The whole feature is OFF unless
+    # CRON_ENABLED is true (UDR-0067 D10). Cron runs are script-only inside the
+    # coding workspace and ADDITIONALLY require CODING_ENABLED (UDR-0067 D7/D8).
+    cron_enabled: bool = False
+    cron_tick_seconds: int = 60  # tick interval; clamped to [5, 3600] at use time
+    cron_jobs_dir: str = ".cron"  # per-job JSON files; run logs under <dir>/output/
+    # Missed-run catch-up tolerance: lateness beyond this fast-forwards without
+    # running (UDR-0067 D4). Clamped to [120, 7200] at use time.
+    cron_grace_window_seconds: int = 120
+    # IANA timezone cron expressions evaluate in; empty = system local (UDR-0067 D6).
+    cron_timezone: str = ""
+    cron_run_timeout_seconds: int = 900  # per-run subprocess wall-clock timeout
+    cron_output_max_bytes: int = 1_048_576  # cap per captured stdout/stderr log
+
     # RAG Pipeline (CTR-0075, PRP-0037)
     chroma_dir: str = ".chroma"
     rag_collection_name: str = "default"

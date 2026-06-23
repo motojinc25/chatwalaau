@@ -57,6 +57,13 @@ DEFAULT_COMMANDS: list[dict[str, Any]] = [
         "aliases": ["m"],
         "args_hint": "<model>",
     },
+    {
+        "name": "cron",
+        "category": "Core",
+        "description": "Open the Cron scheduler portal",
+        "aliases": [],
+        "args_hint": "",
+    },
 ]
 
 
@@ -133,12 +140,15 @@ def load_builtin_commands() -> list[dict[str, Any]]:
     metadata; new names are appended. First declaration of a token wins for
     collision purposes downstream (CTR-0126).
     """
-    by_name: dict[str, dict[str, Any]] = {c["name"]: dict(c) for c in DEFAULT_COMMANDS}
+    # The /cron built-in is only meaningful when the Cron Scheduler is enabled
+    # (PRP-0089, UDR-0067 D10); drop it from the advertised set otherwise.
+    defaults = [c for c in DEFAULT_COMMANDS if c["name"] != "cron" or settings.cron_enabled]
+    by_name: dict[str, dict[str, Any]] = {c["name"]: dict(c) for c in defaults}
     for entry in _load_operator_commands():
         by_name[entry["name"]] = entry
     # Preserve built-in order first, then any appended operator commands.
-    ordered = [by_name[c["name"]] for c in DEFAULT_COMMANDS]
-    extras = [v for k, v in by_name.items() if k not in {c["name"] for c in DEFAULT_COMMANDS}]
+    ordered = [by_name[c["name"]] for c in defaults]
+    extras = [v for k, v in by_name.items() if k not in {c["name"] for c in defaults}]
     return ordered + extras
 
 

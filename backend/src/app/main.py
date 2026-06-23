@@ -130,7 +130,18 @@ async def lifespan(_app: FastAPI):
         from app.demo.bootstrap import seed_rag_corpus_if_needed
 
         await seed_rag_corpus_if_needed()
+    # Cron Scheduler tick loop (PRP-0089, CTR-0130, UDR-0067). Started only when
+    # CRON_ENABLED; the loop is otherwise never created (byte-for-byte unchanged).
+    if settings.cron_enabled:
+        from app.cron.engine import start_scheduler
+
+        start_scheduler()
     yield
+    # Shutdown: stop the cron scheduler (cancel loop + drain in-flight runs).
+    if settings.cron_enabled:
+        from app.cron.engine import stop_scheduler
+
+        await stop_scheduler()
     # Shutdown: stop MCP servers
     await shutdown_mcp()
     # Drain in-flight background tasks (PRP-0077, CTR-0108). Best-effort: gives
@@ -322,6 +333,13 @@ app.include_router(commands_router)
 from app.workspace.router import router as workspace_router
 
 app.include_router(workspace_router)
+
+# Cron Management API (CTR-0133, PRP-0089) -- job CRUD + run history/detail. The
+# surface returns 404 when CRON_ENABLED is false so the SPA can gate its launcher
+# icon by probing it (UDR-0067 D10). Mutating endpoints consume CTR-0083.
+from app.cron.router import router as cron_router
+
+app.include_router(cron_router)
 
 # Server -> client notification WebSocket (CTR-0110, PRP-0077). Real-time push
 # channel; first event type is session_title (CTR-0109).

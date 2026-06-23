@@ -39,6 +39,9 @@ __pycache__/
 # Archives
 .archived/
 
+# Cron Scheduler job store + run logs (PRP-0089)
+.cron/
+
 # Prompt Templates
 .templates/
 

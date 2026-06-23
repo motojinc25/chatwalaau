@@ -20,6 +20,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Clock,
   Download,
   Folder,
   FolderOpen,
@@ -114,6 +115,9 @@ interface SessionSidebarProps {
   onPin: (threadId: string, pinned: boolean) => void
   onCreate: () => void
   onClose: () => void
+  /** Cron scheduler launcher (CTR-0135, PRP-0089): footer icon next to App Info. */
+  cronAvailable?: boolean
+  onOpenCron?: () => void
 }
 
 // Per-device open/closed state (UDR-0046 D4): the set of explicitly-expanded
@@ -360,6 +364,8 @@ export function SessionSidebar({
   onPin,
   onCreate,
   onClose,
+  cronAvailable,
+  onOpenCron,
 }: SessionSidebarProps) {
   const sortedSessions = useMemo(() => sortSessions(sessions), [sessions])
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
@@ -887,17 +893,31 @@ export function SessionSidebar({
         </section>
       </div>
 
-      {/* App info footer (CTR-0101, FEAT-0029): version label + About button */}
+      {/* App info footer (CTR-0101, FEAT-0029): version label + Cron launcher + About */}
       <div className="flex h-9 shrink-0 items-center justify-between border-t px-3">
         <span className="text-[11px] text-muted-foreground">{auth.version ? `v${auth.version}` : ''}</span>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6 text-muted-foreground"
-          onClick={() => setAboutOpen(true)}
-          aria-label="About ChatWalaʻau">
-          <Info className="h-4 w-4" />
-        </Button>
+        <div className="flex items-center gap-1">
+          {/* Cron scheduler launcher (CTR-0135, PRP-0089): shown only when CRON_ENABLED. */}
+          {cronAvailable && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-muted-foreground"
+              onClick={() => onOpenCron?.()}
+              aria-label="Cron scheduler"
+              title="Cron scheduler">
+              <Clock className="h-4 w-4" />
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 text-muted-foreground"
+            onClick={() => setAboutOpen(true)}
+            aria-label="About ChatWalaʻau">
+            <Info className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
       <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>

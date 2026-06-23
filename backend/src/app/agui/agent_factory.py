@@ -252,6 +252,16 @@ def _build_tools_and_instructions(
         tools.append(manage_user_memory)
         instructions += USER_MEMORY_INSTRUCTION
 
+    # Cron management tool (PRP-0089, CTR-0134, UDR-0067 D7). Registered on the
+    # shared agent only when CRON_ENABLED so the LLM can schedule script jobs. It
+    # is NOT in the approval require-set; the workspace jail + CODING_ENABLED gate
+    # are enforced at run time by the executor (CTR-0132).
+    if settings.cron_enabled:
+        from app.cron.tool import CRON_TOOL_INSTRUCTION, manage_cron
+
+        tools.append(manage_cron)
+        instructions += CRON_TOOL_INSTRUCTION
+
     # Tool approval gating (PRP-0067, CTR-0099, UDR-0043 D1).
     # The agent factory is the single chokepoint where bare Python
     # callables are turned into MAF tool surfaces; this is the right

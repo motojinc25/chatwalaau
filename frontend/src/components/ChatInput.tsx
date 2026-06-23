@@ -45,6 +45,7 @@ interface ChatInputProps {
   /** Slash commands (CTR-0128, PRP-0088). */
   onSlashModel?: (model: string) => boolean
   onSlashHelp?: () => void
+  onSlashCron?: () => void
   availableModels?: string[]
   /**
    * Temporary Chat (CTR-0107, PRP-0076). When true the input is rendered with a
@@ -68,6 +69,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     onOpenTemplates,
     onSlashModel,
     onSlashHelp,
+    onSlashCron,
     availableModels = [],
     temporary = false,
   },
@@ -292,6 +294,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           setValue('')
           requestAnimationFrame(resize)
           return true
+        case 'cron':
+          // Open the Cron scheduler portal (CTR-0135). Consume the input even when
+          // no handler is wired (compact scenarios) so "/cron" is never sent as text.
+          onSlashCron?.()
+          setValue('')
+          requestAnimationFrame(resize)
+          return true
         case 'model': {
           const target = argStr.trim().split(/\s+/)[0] ?? ''
           if (target && onSlashModel?.(target)) {
@@ -321,7 +330,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           return false
       }
     },
-    [onSlashHelp, onSlashModel, resize, setValueAndResize],
+    [onSlashHelp, onSlashModel, onSlashCron, resize, setValueAndResize],
   )
 
   const handleSend = async () => {
