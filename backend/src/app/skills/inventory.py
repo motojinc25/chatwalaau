@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.skills.loaded import get_loaded_skills
 from app.skills.overrides import get_skills_override_store
 
 logger = logging.getLogger(__name__)
@@ -118,14 +119,17 @@ def _group_for(skill_dir: Path, root: Path) -> str:
 async def get_skills_inventory() -> dict[str, Any]:
     """Return the grouped Skills inventory with current enabled/disabled state.
 
-    Shape: ``{"groups": [{"name", "skills": [{"name", "description", "enabled"}]}],
-    "collisions": [name, ...]}``. The ungrouped bucket carries group name ``""``.
-    Returns an empty inventory when SKILLS_DIR is absent (FEAT-0009 graceful
-    degradation), so the UI hides the management icon.
+    Shape: ``{"groups": [{"name", "skills": [{"name", "description", "enabled",
+    "loaded"}]}], "collisions": [name, ...], "skills_dir": str}``. The ungrouped
+    bucket carries group name ``""``. ``loaded`` (UDR-0068 D4) is true iff the skill
+    is in the current live agent build; a skill discovered on disk but not yet loaded
+    (added since the last build/Reload) is ``loaded=false`` so the UI disables its
+    toggle. ``skills_dir`` is always returned so the UI can render an empty state and
+    a Reload action even when SKILLS_DIR is absent (UDR-0068 D5).
     """
     skills_path = Path(settings.skills_dir)
     if not skills_path.is_dir():
-        return {"groups": [], "collisions": []}
+        return {"groups": [], "collisions": [], "skills_dir": str(skills_path)}
 
     # Local import avoids a module import cycle (provider -> overrides; inventory
     # -> provider). ``build_skill_source`` returns the UNFILTERED, deduplicated
@@ -136,6 +140,7 @@ async def get_skills_inventory() -> dict[str, Any]:
     source = build_skill_source()
     skills = await source.get_skills()
     store = get_skills_override_store()
+    loaded = get_loaded_skills()
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     for skill in skills:
@@ -143,7 +148,12 @@ async def get_skills_inventory() -> dict[str, Any]:
         description = (skill.frontmatter.description or "").strip()
         skill_dir = Path(getattr(skill, "path", "") or "")
         group = _group_for(skill_dir, skills_path)
-        entry: dict[str, Any] = {"name": name, "description": description, "enabled": store.is_enabled(name)}
+        entry: dict[str, Any] = {
+            "name": name,
+            "description": description,
+            "enabled": store.is_enabled(name),
+            "loaded": name in loaded,
+        }
         # Optional slash-command metadata (CTR-0043 v-note, PRP-0088); additive.
         entry.update(_read_command_meta(skill_dir))
         grouped.setdefault(group, []).append(entry)
@@ -163,7 +173,7 @@ async def get_skills_inventory() -> dict[str, Any]:
         {"name": group, "skills": sorted(grouped[group], key=lambda s: s["name"].lower())}
         for group in sorted(grouped, key=lambda g: (g == "", g.lower()))
     ]
-    return {"groups": groups_out, "collisions": sorted(collisions)}
+    return {"groups": groups_out, "collisions": sorted(collisions), "skills_dir": str(skills_path)}
 
 
 __all__ = ["get_skills_inventory"]

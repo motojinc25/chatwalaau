@@ -65,6 +65,7 @@ backend/.jobs/
 backend/.chroma/
 backend/.skills/
 backend/.templates/
+backend/.cron/
 backend/batch-server.log
 
 # ---- IDE / OS ----

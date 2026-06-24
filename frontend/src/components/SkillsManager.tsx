@@ -1,11 +1,11 @@
-import { BookOpen, Loader2, TriangleAlert } from 'lucide-react'
+import { BookOpen, Loader2, RefreshCw, TriangleAlert } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 
 /**
- * Skills Management modal (CTR-0124, FEAT-0046, PRP-0087, UDR-0065).
+ * Skills Management modal (CTR-0124, FEAT-0046, PRP-0087/PRP-0090, UDR-0065/UDR-0068).
  *
  * An icon in the chat input controls row opens a ~90% modal that lets the
  * operator enable/disable Agent Skills (organized by folder group) at runtime to
@@ -13,21 +13,20 @@ import { cn } from '@/lib/utils'
  * in-memory override store (CTR-0123) and rebuilds the per-model agents
  * (CTR-0070); a blocking "rebuilding" indicator shows until the rebuild completes.
  *
- * Layout: left = Skills group list (with a group-level bulk toggle), right = the
- * selected group's skills with per-skill toggles and each skill's description as
- * the overview. A group toggle is a bulk convenience expanded to per-skill states
- * before submission (UDR-0065 D2).
- *
- * Closing: the top-right X / Esc / overlay and a formal Close button. If there
- * are unsaved changes either path prompts to Save or Discard. The selection is
- * NOT persisted client-side (the backend store is the source of truth, reloaded
- * on open). The icon is hidden when no Skills are configured (UDR-0065 D7).
+ * PRP-0090 (UDR-0068): a Reload action re-reads SKILL.md from disk and rebuilds the
+ * agents so out-of-band edits (a newly added skill folder) are picked up without a
+ * restart; it is guarded by a confirmation + the same blocking indicator. A skill
+ * discovered on disk but not yet in the live build (`loaded === false`) shows a
+ * disabled toggle with a "Reload to apply" hint. The icon is ALWAYS shown when the
+ * endpoint is reachable, and an empty state (the configured SKILLS_DIR + Reload) is
+ * rendered when no skills exist yet (UDR-0068 D5).
  */
 
 interface Skill {
   name: string
   description?: string
   enabled: boolean
+  loaded?: boolean
 }
 
 interface SkillGroup {
@@ -35,7 +34,7 @@ interface SkillGroup {
   skills: Skill[]
 }
 
-type ConfirmMode = 'save' | 'close' | null
+type ConfirmMode = 'save' | 'close' | 'reload' | null
 
 const UNGROUPED_LABEL = 'Ungrouped'
 
@@ -53,6 +52,12 @@ function selectionKey(groups: SkillGroup[]): string {
   )
 }
 
+// A skill is toggleable only when it is actually loaded into the current build
+// (UDR-0068 D4). `loaded` is optional for back-compat; treat absent as loaded.
+function isToggleable(s: Skill): boolean {
+  return s.loaded !== false
+}
+
 export function SkillsManager() {
   const [available, setAvailable] = useState(false)
   const [open, setOpen] = useState(false)
@@ -61,31 +66,31 @@ export function SkillsManager() {
   const [error, setError] = useState<string | null>(null)
   const [groups, setGroups] = useState<SkillGroup[]>([])
   const [collisions, setCollisions] = useState<string[]>([])
+  const [skillsDir, setSkillsDir] = useState('')
   const [baseline, setBaseline] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
   const [confirmMode, setConfirmMode] = useState<ConfirmMode>(null)
 
   const dirty = groups.length > 0 && selectionKey(groups) !== baseline
 
-  const adopt = useCallback((next: SkillGroup[], nextCollisions: string[]) => {
+  const adopt = useCallback((data: { groups?: SkillGroup[]; collisions?: string[]; skills_dir?: string }) => {
+    const next = (data.groups ?? []) as SkillGroup[]
     setGroups(next)
-    setCollisions(nextCollisions)
+    setCollisions((data.collisions ?? []) as string[])
+    setSkillsDir(data.skills_dir ?? '')
     setBaseline(selectionKey(next))
     setSelected((prev) => prev ?? next[0]?.name ?? null)
   }, [])
 
-  // Probe availability once on mount: hide the icon when there are no Skills (or
-  // the inventory is not reachable, e.g. unauthenticated on LAN).
+  // Probe availability once on mount: show the icon whenever the endpoint is
+  // reachable (UDR-0068 D5), even with zero skills, so Reload is reachable in the
+  // bootstrap case. Hidden only when unreachable (e.g. unauthenticated on LAN).
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       try {
         const res = await fetch('/api/skills')
-        if (!res.ok) return
-        const data = await res.json()
-        if (!cancelled && Array.isArray(data.groups) && data.groups.length > 0) {
-          setAvailable(true)
-        }
+        if (!cancelled && res.ok) setAvailable(true)
       } catch {
         // Silent: Skills management is simply unavailable.
       }
@@ -101,8 +106,7 @@ export function SkillsManager() {
     try {
       const res = await fetch('/api/skills')
       if (!res.ok) throw new Error('Failed to load skills')
-      const data = await res.json()
-      adopt((data.groups ?? []) as SkillGroup[], (data.collisions ?? []) as string[])
+      adopt(await res.json())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load skills')
     } finally {
@@ -139,14 +143,20 @@ export function SkillsManager() {
     [saving, dirty, resetAndClose],
   )
 
-  // Bulk-toggle every skill in a group (UDR-0065 D2): if all are currently
-  // enabled, disable all; otherwise enable all.
+  // Bulk-toggle every TOGGLEABLE skill in a group (UDR-0065 D2): not-loaded skills
+  // are left untouched (they are uncheckable until Reload). If all toggleable skills
+  // are enabled, disable them; otherwise enable them.
   const toggleGroup = useCallback((name: string) => {
     setGroups((prev) =>
       prev.map((g) => {
         if (g.name !== name) return g
-        const allEnabled = g.skills.every((s) => s.enabled)
-        return { ...g, skills: g.skills.map((s) => ({ ...s, enabled: !allEnabled })) }
+        const toggleable = g.skills.filter(isToggleable)
+        if (toggleable.length === 0) return g
+        const allEnabled = toggleable.every((s) => s.enabled)
+        return {
+          ...g,
+          skills: g.skills.map((s) => (isToggleable(s) ? { ...s, enabled: !allEnabled } : s)),
+        }
       }),
     )
   }, [])
@@ -177,8 +187,7 @@ export function SkillsManager() {
         }),
       })
       if (!res.ok) throw new Error('Failed to apply skill changes')
-      const data = await res.json()
-      adopt((data.groups ?? []) as SkillGroup[], (data.collisions ?? []) as string[])
+      adopt(await res.json())
       resetAndClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to apply skill changes')
@@ -186,6 +195,23 @@ export function SkillsManager() {
       setSaving(false)
     }
   }, [groups, adopt, resetAndClose])
+
+  // Reload: re-read SKILL.md from disk and rebuild the agents (UDR-0068 D1/D2). Keeps
+  // the modal open and refreshes the inventory so a just-added skill becomes loaded.
+  const doReload = useCallback(async () => {
+    setConfirmMode(null)
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/skills/reload', { method: 'POST' })
+      if (!res.ok) throw new Error('Failed to reload skills')
+      adopt(await res.json())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to reload skills')
+    } finally {
+      setSaving(false)
+    }
+  }, [adopt])
 
   if (!available) return null
 
@@ -211,7 +237,7 @@ export function SkillsManager() {
             <DialogTitle>Skills</DialogTitle>
             <DialogDescription>
               Enable or disable Agent Skills by group. Saving rebuilds the agents so the next message advertises only
-              the selected skills.
+              the selected skills. Use Reload to pick up skills you added or removed on disk.
             </DialogDescription>
             {collisions.length > 0 && (
               <p className="mt-1 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-500">
@@ -227,12 +253,28 @@ export function SkillsManager() {
               <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
               </div>
+            ) : groups.length === 0 ? (
+              /* Empty state (UDR-0068 D5): no skills discovered yet. */
+              <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+                <BookOpen className="h-8 w-8 text-muted-foreground" />
+                <div className="text-sm font-medium">No skills found</div>
+                <p className="max-w-md text-xs text-muted-foreground">
+                  Add skill folders (each with a <code className="font-mono">SKILL.md</code>) under
+                  {skillsDir ? <code className="mx-1 font-mono">{skillsDir}</code> : ' the skills directory '}
+                  then click Reload to pick them up without restarting.
+                </p>
+                <Button variant="outline" size="sm" onClick={() => setConfirmMode('reload')}>
+                  <RefreshCw className="mr-1 h-3.5 w-3.5" /> Reload
+                </Button>
+              </div>
             ) : (
               <>
                 {/* Left: group list */}
                 <div className="w-64 shrink-0 overflow-y-auto border-r">
                   {groups.map((g) => {
                     const enabledCount = g.skills.filter((s) => s.enabled).length
+                    const toggleable = g.skills.filter(isToggleable)
+                    const toggleableEnabled = toggleable.filter((s) => s.enabled).length
                     return (
                       <div
                         key={g.name}
@@ -252,9 +294,10 @@ export function SkillsManager() {
                         <label className="flex shrink-0 cursor-pointer items-center" title="Enable all skills in group">
                           <input
                             type="checkbox"
-                            checked={enabledCount === g.skills.length}
+                            checked={toggleable.length > 0 && toggleableEnabled === toggleable.length}
+                            disabled={toggleable.length === 0}
                             ref={(el) => {
-                              if (el) el.indeterminate = enabledCount > 0 && enabledCount < g.skills.length
+                              if (el) el.indeterminate = toggleableEnabled > 0 && toggleableEnabled < toggleable.length
                             }}
                             onChange={() => toggleGroup(g.name)}
                             className="h-4 w-4"
@@ -279,11 +322,16 @@ export function SkillsManager() {
                         <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
                           <input
                             type="checkbox"
-                            checked={current.skills.every((s) => s.enabled)}
+                            checked={
+                              current.skills.filter(isToggleable).length > 0 &&
+                              current.skills.filter(isToggleable).every((s) => s.enabled)
+                            }
+                            disabled={current.skills.filter(isToggleable).length === 0}
                             ref={(el) => {
                               if (el) {
-                                const c = current.skills.filter((s) => s.enabled).length
-                                el.indeterminate = c > 0 && c < current.skills.length
+                                const t = current.skills.filter(isToggleable)
+                                const c = t.filter((s) => s.enabled).length
+                                el.indeterminate = c > 0 && c < t.length
                               }
                             }}
                             onChange={() => toggleGroup(current.name)}
@@ -296,22 +344,36 @@ export function SkillsManager() {
                         <p className="text-sm text-muted-foreground">No skills in this group.</p>
                       ) : (
                         <ul className="space-y-1">
-                          {current.skills.map((s) => (
-                            <li key={s.name} className="flex items-start gap-2 rounded-md border p-2">
-                              <input
-                                type="checkbox"
-                                checked={s.enabled}
-                                onChange={() => toggleSkill(current.name, s.name)}
-                                className="mt-0.5 h-4 w-4 shrink-0"
-                              />
-                              <div className="min-w-0">
-                                <div className="font-mono text-sm">{s.name}</div>
-                                {s.description && (
-                                  <div className="text-[11px] text-muted-foreground">{s.description}</div>
-                                )}
-                              </div>
-                            </li>
-                          ))}
+                          {current.skills.map((s) => {
+                            const toggleable = isToggleable(s)
+                            return (
+                              <li
+                                key={s.name}
+                                className={cn(
+                                  'flex items-start gap-2 rounded-md border p-2',
+                                  !toggleable && 'opacity-60',
+                                )}>
+                                <input
+                                  type="checkbox"
+                                  checked={s.enabled}
+                                  disabled={!toggleable}
+                                  onChange={() => toggleSkill(current.name, s.name)}
+                                  className="mt-0.5 h-4 w-4 shrink-0"
+                                />
+                                <div className="min-w-0">
+                                  <div className="font-mono text-sm">{s.name}</div>
+                                  {!toggleable && (
+                                    <div className="text-[11px] text-amber-600 dark:text-amber-500">
+                                      Not loaded yet -- Reload to apply.
+                                    </div>
+                                  )}
+                                  {s.description && (
+                                    <div className="text-[11px] text-muted-foreground">{s.description}</div>
+                                  )}
+                                </div>
+                              </li>
+                            )
+                          })}
                         </ul>
                       )}
                     </>
@@ -322,7 +384,7 @@ export function SkillsManager() {
               </>
             )}
 
-            {/* Save / rebuild overlay + confirmation */}
+            {/* Save / reload / rebuild overlay + confirmation */}
             {(saving || confirmMode) && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/80">
                 {saving ? (
@@ -331,14 +393,20 @@ export function SkillsManager() {
                     Rebuilding agents...
                   </div>
                 ) : (
-                  <div className="w-[320px] rounded-lg border bg-background p-4 shadow-lg">
+                  <div className="w-[340px] rounded-lg border bg-background p-4 shadow-lg">
                     <p className="text-sm font-medium">
-                      {confirmMode === 'save' ? 'Apply skill changes?' : 'Discard unsaved changes?'}
+                      {confirmMode === 'save'
+                        ? 'Apply skill changes?'
+                        : confirmMode === 'reload'
+                          ? 'Reload skills from disk?'
+                          : 'Discard unsaved changes?'}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {confirmMode === 'save'
                         ? 'This rebuilds the agents; the next message advertises the selected skills.'
-                        : 'Your changes have not been saved.'}
+                        : confirmMode === 'reload'
+                          ? 'Re-reads SKILL.md from disk and rebuilds the agents. Unsaved changes are discarded.'
+                          : 'Your changes have not been saved.'}
                     </p>
                     <div className="mt-3 flex justify-end gap-2">
                       <Button variant="outline" size="sm" onClick={() => setConfirmMode(null)}>
@@ -347,6 +415,10 @@ export function SkillsManager() {
                       {confirmMode === 'save' ? (
                         <Button size="sm" onClick={doSave}>
                           Apply
+                        </Button>
+                      ) : confirmMode === 'reload' ? (
+                        <Button size="sm" onClick={doReload}>
+                          Reload
                         </Button>
                       ) : (
                         <Button variant="destructive" size="sm" onClick={resetAndClose}>
@@ -363,6 +435,9 @@ export function SkillsManager() {
           <div className="flex items-center justify-between gap-2 border-t px-6 py-3">
             <span className="text-xs text-destructive">{error}</span>
             <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setConfirmMode('reload')} disabled={saving || loading}>
+                <RefreshCw className="mr-1 h-3.5 w-3.5" /> Reload
+              </Button>
               <Button variant="outline" size="sm" onClick={() => handleOpenChange(false)} disabled={saving}>
                 Close
               </Button>

@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import verify_api_key
-from app.mcp.lifecycle import get_mcp_tool_inventory
+from app.mcp.lifecycle import get_mcp_config_path, get_mcp_tool_inventory
 from app.mcp.overrides import get_override_store
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ def register_mcp_management(app: FastAPI, *, agent_registry) -> None:
     @router.get("/tools", dependencies=[Depends(verify_api_key)])
     async def list_mcp_tools() -> dict:
         """Return the MCP tool inventory with current enabled/disabled state."""
-        return {"servers": get_mcp_tool_inventory()}
+        return {"servers": get_mcp_tool_inventory(), "config_path": get_mcp_config_path()}
 
     @router.put("/tools", dependencies=[Depends(verify_api_key)])
     async def apply_mcp_tools(body: McpSelection) -> dict:
@@ -104,7 +104,43 @@ def register_mcp_management(app: FastAPI, *, agent_registry) -> None:
             len(disabled_servers),
             sum(1 for t in disabled_tools.values() if t),
         )
-        return {"servers": get_mcp_tool_inventory()}
+        return {"servers": get_mcp_tool_inventory(), "config_path": get_mcp_config_path()}
+
+    @router.post("/reload", dependencies=[Depends(verify_api_key)])
+    async def reload_mcp_tools() -> dict:
+        """Re-parse mcp_servers.jsonc, reconnect servers, rebuild agents, prune overrides.
+
+        A FULL reload (PRP-0090, UDR-0068 D3): ``reload_mcp()`` reconnects on a fresh
+        AsyncExitStack (new-before-teardown), then the agents are rebuilt so they bind
+        to the new tools. On any failure the prior live tools + agents remain installed
+        (``reload_mcp`` swaps only on success of its own sequence; a rebuild failure
+        leaves the prior agents). Overrides naming servers/tools that no longer exist
+        after the reload are pruned (UDR-0068 D2).
+        """
+        from app.mcp.lifecycle import reload_mcp
+
+        try:
+            await reload_mcp()
+            from app.agui.agent_factory import rebuild_agent_registry
+
+            await rebuild_agent_registry(agent_registry)
+        except Exception:
+            logger.exception("MCP reload failed")
+            raise HTTPException(status_code=500, detail={"error": "mcp_reload_failed"}) from None
+
+        _prune_mcp_overrides()
+        logger.info("MCP reloaded from config: %d server(s) in inventory", len(get_mcp_tool_inventory()))
+        return {"servers": get_mcp_tool_inventory(), "config_path": get_mcp_config_path()}
+
+    def _prune_mcp_overrides() -> None:
+        """Drop disabled servers/tools that no longer appear after a reload (UDR-0068 D2)."""
+        store = get_override_store()
+        snap = store.snapshot()
+        live = {s["name"] for s in get_mcp_tool_inventory()}
+        disabled_servers = {s for s in snap["disabled_servers"] if s in live}  # type: ignore[union-attr]
+        disabled_tools = {s: t for s, t in snap["disabled_tools"].items() if s in live and t}  # type: ignore[union-attr]
+        if disabled_servers != snap["disabled_servers"] or disabled_tools != snap["disabled_tools"]:
+            store.set_selection(disabled_servers=disabled_servers, disabled_tools=disabled_tools)
 
     app.include_router(router)
 

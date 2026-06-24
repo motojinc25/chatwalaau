@@ -1,11 +1,11 @@
-import { Loader2, Plug } from 'lucide-react'
+import { Loader2, Plug, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 
 /**
- * MCP Tool Management modal (CTR-0122, FEAT-0045, PRP-0086, UDR-0064).
+ * MCP Tool Management modal (CTR-0122, FEAT-0045, PRP-0086/PRP-0090, UDR-0064/UDR-0068).
  *
  * An icon in the chat input controls row opens a ~90% modal that lets the
  * operator enable/disable MCP servers and individual MCP tools at runtime to
@@ -13,16 +13,20 @@ import { cn } from '@/lib/utils'
  * override store (CTR-0121) and rebuilds the per-model agents (CTR-0070); a
  * blocking "rebuilding" indicator shows until the rebuild completes.
  *
- * Closing: the top-right X / Esc / overlay and a formal Close button. If there
- * are unsaved changes either path prompts to Save or Discard. The selection is
- * NOT persisted client-side (the backend store is the source of truth, reloaded
- * on open). The icon is hidden when no MCP servers are configured (UDR-0064 D4).
+ * PRP-0090 (UDR-0068): a Reload action re-parses mcp_servers.jsonc, reconnects the
+ * servers (new-before-teardown), and rebuilds the agents so out-of-band config edits
+ * are picked up without a restart; it is guarded by a confirmation + the same
+ * blocking indicator. A server/tool that is configured but not currently connected
+ * (`loaded === false`) shows a disabled toggle with a "Reload to apply" hint. The
+ * icon is ALWAYS shown when the endpoint is reachable, and an empty state (the MCP
+ * config path + Reload) is rendered when no servers are configured (UDR-0068 D5).
  */
 
 interface McpTool {
   name: string
   description?: string
   enabled: boolean
+  loaded?: boolean
 }
 
 interface McpServer {
@@ -30,10 +34,17 @@ interface McpServer {
   transport: string
   status: string
   enabled: boolean
+  loaded?: boolean
   tools: McpTool[]
 }
 
-type ConfirmMode = 'save' | 'close' | null
+type ConfirmMode = 'save' | 'close' | 'reload' | null
+
+// A server is toggleable only when it is actually connected (UDR-0068 D4). `loaded`
+// is optional for back-compat; treat absent as loaded.
+function isLoaded(s: { loaded?: boolean }): boolean {
+  return s.loaded !== false
+}
 
 function selectionKey(servers: McpServer[]): string {
   // Stable signature of the enabled state for dirty detection.
@@ -53,30 +64,30 @@ export function McpToolManager() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [servers, setServers] = useState<McpServer[]>([])
+  const [configPath, setConfigPath] = useState('')
   const [baseline, setBaseline] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
   const [confirmMode, setConfirmMode] = useState<ConfirmMode>(null)
 
   const dirty = servers.length > 0 && selectionKey(servers) !== baseline
 
-  const adopt = useCallback((next: McpServer[]) => {
+  const adopt = useCallback((data: { servers?: McpServer[]; config_path?: string }) => {
+    const next = (data.servers ?? []) as McpServer[]
     setServers(next)
+    setConfigPath(data.config_path ?? '')
     setBaseline(selectionKey(next))
     setSelected((prev) => prev ?? next[0]?.name ?? null)
   }, [])
 
-  // Probe availability once on mount: hide the icon when there are no MCP
-  // servers (or the inventory is not reachable, e.g. unauthenticated on LAN).
+  // Probe availability once on mount: show the icon whenever the endpoint is
+  // reachable (UDR-0068 D5), even with zero servers, so Reload is reachable in the
+  // bootstrap case. Hidden only when unreachable (e.g. unauthenticated on LAN).
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       try {
         const res = await fetch('/api/mcp/tools')
-        if (!res.ok) return
-        const data = await res.json()
-        if (!cancelled && Array.isArray(data.servers) && data.servers.length > 0) {
-          setAvailable(true)
-        }
+        if (!cancelled && res.ok) setAvailable(true)
       } catch {
         // Silent: MCP management is simply unavailable.
       }
@@ -92,8 +103,7 @@ export function McpToolManager() {
     try {
       const res = await fetch('/api/mcp/tools')
       if (!res.ok) throw new Error('Failed to load MCP tools')
-      const data = await res.json()
-      adopt((data.servers ?? []) as McpServer[])
+      adopt(await res.json())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load MCP tools')
     } finally {
@@ -161,8 +171,7 @@ export function McpToolManager() {
         }),
       })
       if (!res.ok) throw new Error('Failed to apply MCP tool changes')
-      const data = await res.json()
-      adopt((data.servers ?? []) as McpServer[])
+      adopt(await res.json())
       resetAndClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to apply MCP tool changes')
@@ -171,9 +180,27 @@ export function McpToolManager() {
     }
   }, [servers, adopt, resetAndClose])
 
+  // Reload: re-parse the config, reconnect servers, and rebuild the agents
+  // (UDR-0068 D1/D3). Keeps the modal open and refreshes the inventory.
+  const doReload = useCallback(async () => {
+    setConfirmMode(null)
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/mcp/reload', { method: 'POST' })
+      if (!res.ok) throw new Error('Failed to reload MCP tools')
+      adopt(await res.json())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to reload MCP tools')
+    } finally {
+      setSaving(false)
+    }
+  }, [adopt])
+
   if (!available) return null
 
   const current = servers.find((s) => s.name === selected) ?? null
+  const currentLoaded = current ? isLoaded(current) : false
 
   return (
     <>
@@ -195,7 +222,7 @@ export function McpToolManager() {
             <DialogTitle>MCP Tools</DialogTitle>
             <DialogDescription>
               Enable or disable MCP servers and individual tools. Saving rebuilds the agents so the next message uses
-              only the selected tools.
+              only the selected tools. Use Reload to reconnect servers after editing the config.
             </DialogDescription>
           </DialogHeader>
 
@@ -203,6 +230,20 @@ export function McpToolManager() {
             {loading ? (
               <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+              </div>
+            ) : servers.length === 0 ? (
+              /* Empty state (UDR-0068 D5): no MCP servers configured/connected yet. */
+              <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+                <Plug className="h-8 w-8 text-muted-foreground" />
+                <div className="text-sm font-medium">No MCP servers</div>
+                <p className="max-w-md text-xs text-muted-foreground">
+                  Add servers to
+                  {configPath ? <code className="mx-1 font-mono">{configPath}</code> : ' the MCP config '}
+                  then click Reload to connect them without restarting.
+                </p>
+                <Button variant="outline" size="sm" onClick={() => setConfirmMode('reload')}>
+                  <RefreshCw className="mr-1 h-3.5 w-3.5" /> Reload
+                </Button>
               </div>
             ) : (
               <>
@@ -226,10 +267,13 @@ export function McpToolManager() {
                             {s.status} - {enabledCount}/{s.tools.length} tools
                           </span>
                         </button>
-                        <label className="flex shrink-0 cursor-pointer items-center" title="Enable server">
+                        <label
+                          className="flex shrink-0 cursor-pointer items-center"
+                          title={isLoaded(s) ? 'Enable server' : 'Not connected -- Reload to apply'}>
                           <input
                             type="checkbox"
-                            checked={s.enabled}
+                            checked={s.enabled && isLoaded(s)}
+                            disabled={!isLoaded(s)}
                             onChange={() => toggleServer(s.name)}
                             className="h-4 w-4"
                           />
@@ -253,14 +297,19 @@ export function McpToolManager() {
                         <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
                           <input
                             type="checkbox"
-                            checked={current.enabled}
+                            checked={current.enabled && currentLoaded}
+                            disabled={!currentLoaded}
                             onChange={() => toggleServer(current.name)}
                             className="h-4 w-4"
                           />
                           Server enabled
                         </label>
                       </div>
-                      {current.tools.length === 0 ? (
+                      {!currentLoaded ? (
+                        <p className="text-sm text-amber-600 dark:text-amber-500">
+                          This server is configured but not connected. Click Reload to connect it.
+                        </p>
+                      ) : current.tools.length === 0 ? (
                         <p className="text-sm text-muted-foreground">
                           No tools reported (the server may not be connected).
                         </p>
@@ -275,8 +324,8 @@ export function McpToolManager() {
                               )}>
                               <input
                                 type="checkbox"
-                                checked={t.enabled && current.enabled}
-                                disabled={!current.enabled}
+                                checked={t.enabled && current.enabled && isLoaded(t)}
+                                disabled={!current.enabled || !isLoaded(t)}
                                 onChange={() => toggleTool(current.name, t.name)}
                                 className="mt-0.5 h-4 w-4 shrink-0"
                               />
@@ -298,7 +347,7 @@ export function McpToolManager() {
               </>
             )}
 
-            {/* Save / rebuild overlay + confirmation */}
+            {/* Save / reload / rebuild overlay + confirmation */}
             {(saving || confirmMode) && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/80">
                 {saving ? (
@@ -307,14 +356,20 @@ export function McpToolManager() {
                     Rebuilding agents...
                   </div>
                 ) : (
-                  <div className="w-[320px] rounded-lg border bg-background p-4 shadow-lg">
+                  <div className="w-[340px] rounded-lg border bg-background p-4 shadow-lg">
                     <p className="text-sm font-medium">
-                      {confirmMode === 'save' ? 'Apply MCP tool changes?' : 'Discard unsaved changes?'}
+                      {confirmMode === 'save'
+                        ? 'Apply MCP tool changes?'
+                        : confirmMode === 'reload'
+                          ? 'Reload MCP servers?'
+                          : 'Discard unsaved changes?'}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {confirmMode === 'save'
                         ? 'This rebuilds the agents; the next message uses the selected tools.'
-                        : 'Your changes have not been saved.'}
+                        : confirmMode === 'reload'
+                          ? 'Re-parses the config, reconnects servers, and rebuilds the agents. Unsaved changes are discarded.'
+                          : 'Your changes have not been saved.'}
                     </p>
                     <div className="mt-3 flex justify-end gap-2">
                       <Button variant="outline" size="sm" onClick={() => setConfirmMode(null)}>
@@ -323,6 +378,10 @@ export function McpToolManager() {
                       {confirmMode === 'save' ? (
                         <Button size="sm" onClick={doSave}>
                           Apply
+                        </Button>
+                      ) : confirmMode === 'reload' ? (
+                        <Button size="sm" onClick={doReload}>
+                          Reload
                         </Button>
                       ) : (
                         <Button variant="destructive" size="sm" onClick={resetAndClose}>
@@ -339,6 +398,9 @@ export function McpToolManager() {
           <div className="flex items-center justify-between gap-2 border-t px-6 py-3">
             <span className="text-xs text-destructive">{error}</span>
             <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setConfirmMode('reload')} disabled={saving || loading}>
+                <RefreshCw className="mr-1 h-3.5 w-3.5" /> Reload
+              </Button>
               <Button variant="outline" size="sm" onClick={() => handleOpenChange(false)} disabled={saving}>
                 Close
               </Button>

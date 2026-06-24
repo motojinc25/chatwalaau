@@ -6,6 +6,7 @@ each MCP tool's async context manager. Registers atexit and SIGTERM
 handlers for zombie process prevention.
 """
 
+import asyncio
 import atexit
 from contextlib import AsyncExitStack
 import logging
@@ -24,6 +25,10 @@ _mcp_exit_stack: AsyncExitStack | None = None
 _mcp_tools: list = []
 _mcp_raw_tools: list = []  # unstarted tool instances for emergency cleanup
 _mcp_server_status: list[dict] = []  # status info for API endpoint
+# Serialises a full reload (re-parse + reconnect + swap) so two concurrent Reloads
+# never interleave their module-state swaps (PRP-0090, UDR-0068 D3/D7). Constructed
+# without a running loop (binds lazily on Python 3.12) since this is import-time.
+_reload_lock = asyncio.Lock()
 
 
 def get_mcp_tools() -> list:
@@ -86,36 +91,88 @@ def get_server_tool_names(server_name: str) -> list[str]:
     return []
 
 
-def get_mcp_tool_inventory() -> list[dict]:
-    """Return the MCP tool inventory with current enabled/disabled state (CTR-0121).
+def _configured_server_entries() -> list[dict]:
+    """Best-effort re-parse of the MCP config for the inventory (PRP-0090, UDR-0068 D4).
 
-    For each prepared server: name, transport, connection status, the server-level
-    enabled flag, and its tools (each with name, description when available, and the
-    per-tool enabled flag). State is read from the in-memory override store
-    (CTR-0061, UDR-0064 D4).
+    Returns ``[{name, transport}]`` for every server currently declared in the config
+    file. Used to surface servers that were ADDED to the config after startup (not yet
+    connected, so absent from ``_mcp_tools``) as ``loaded=false`` rows -- the operator
+    sees them and can Reload to connect. Any parse problem yields an empty list so the
+    inventory degrades to the connected-only view.
+    """
+    try:
+        config_path = _resolve_mcp_config_path()
+        if config_path is None:
+            return []
+        server_configs = parse_mcp_config(config_path)
+        return [{"name": sc.name, "transport": sc.transport} for sc in server_configs]
+    except Exception:
+        logger.debug("MCP config re-parse for inventory failed", exc_info=True)
+        return []
+
+
+def get_mcp_config_path() -> str:
+    """Return the resolved MCP config path as a string (or "") for the UI empty state."""
+    path = _resolve_mcp_config_path()
+    return str(path) if path is not None else ""
+
+
+def get_mcp_tool_inventory() -> list[dict]:
+    """Return the MCP tool inventory with current enabled/disabled + loaded state (CTR-0121).
+
+    For each CONNECTED/prepared server: name, transport, connection status, the
+    server-level enabled flag, a ``loaded`` flag (UDR-0068 D4: true iff the server is
+    currently connected), and its tools (name, description when available, per-tool
+    enabled flag, and the same ``loaded`` flag). State is read from the in-memory
+    override store (CTR-0061, UDR-0064 D4).
+
+    The inventory is then UNIONED with servers declared in the config but NOT currently
+    connected (added since startup): they appear as ``loaded=false`` rows with status
+    ``not_loaded`` and no tools, so the UI can disable their toggle and prompt a Reload
+    (PRP-0090, UDR-0068 D4).
     """
     from app.mcp.overrides import get_override_store
 
     store = get_override_store()
     inventory: list[dict] = []
+    seen: set[str] = set()
     for i, tool in enumerate(_mcp_tools):
-        status = _mcp_server_status[i] if i < len(_mcp_server_status) else {}
-        server_name = status.get("name") or getattr(tool, "name", f"server-{i}")
+        status_info = _mcp_server_status[i] if i < len(_mcp_server_status) else {}
+        server_name = status_info.get("name") or getattr(tool, "name", f"server-{i}")
+        seen.add(server_name)
+        status = status_info.get("status", "")
+        loaded = status == "connected"
         tools = [
             {
                 "name": tname,
                 "description": tdesc,
                 "enabled": store.is_tool_enabled(server_name, tname),
+                "loaded": loaded,
             }
             for tname, tdesc in _function_entries(tool)
         ]
         inventory.append(
             {
                 "name": server_name,
-                "transport": status.get("transport", ""),
-                "status": status.get("status", ""),
+                "transport": status_info.get("transport", ""),
+                "status": status,
                 "enabled": not store.server_disabled(server_name),
+                "loaded": loaded,
                 "tools": tools,
+            }
+        )
+
+    for entry in _configured_server_entries():
+        if entry["name"] in seen:
+            continue
+        inventory.append(
+            {
+                "name": entry["name"],
+                "transport": entry.get("transport", ""),
+                "status": "not_loaded",
+                "enabled": not store.server_disabled(entry["name"]),
+                "loaded": False,
+                "tools": [],
             }
         )
     return inventory
@@ -245,6 +302,84 @@ async def activate_mcp() -> None:
     from app.mcp_apps.manager import discover_ui_tools
 
     await discover_ui_tools(_mcp_tools, _mcp_server_status)
+
+
+async def reload_mcp() -> None:
+    """Re-parse the config and reconnect all MCP servers (PRP-0090, UDR-0068 D3).
+
+    A FULL reload that picks up out-of-band edits to ``mcp_servers.jsonc`` (added,
+    removed, or changed servers) without a restart. Uses new-before-teardown so a
+    concurrent request is never left without MCP tools mid-swap:
+
+      1. Re-parse the config and create fresh tool instances.
+      2. CONNECT them on a NEW AsyncExitStack (per-server failures isolated).
+      3. Atomically swap the module-level tool list / status (each ``get_mcp_tools()``
+         caller copies the list, so subsequent agent builds see the new tools).
+      4. Re-discover MCP Apps UI tools against the new connections.
+      5. Close the OLD AsyncExitStack LAST -- an in-flight request still holding an old
+         agent finishes against the old connection on a best-effort basis.
+
+    The caller (CTR-0121 reload endpoint) rebuilds the AgentRegistry AFTER this so the
+    per-model agents bind to the new tools. Serialised by ``_reload_lock`` so two
+    Reloads never interleave their swaps.
+    """
+    global _mcp_exit_stack
+
+    async with _reload_lock:
+        config_path = _resolve_mcp_config_path()
+        new_tools: list = []
+        new_raw: list = []
+        new_status: list[dict] = []
+        if config_path is not None:
+            server_configs = parse_mcp_config(config_path)
+            for server_config in server_configs:
+                tool = create_mcp_tool(server_config)
+                new_tools.append(tool)
+                new_raw.append(tool)
+                new_status.append(
+                    {
+                        "name": server_config.name,
+                        "transport": server_config.transport,
+                        "status": "prepared",
+                    }
+                )
+
+        new_stack = AsyncExitStack()
+        started = 0
+        for i, tool in enumerate(new_tools):
+            try:
+                await new_stack.enter_async_context(tool)
+                new_status[i]["status"] = "connected"
+                started += 1
+                logger.info("MCP server reconnected: %s", new_status[i]["name"])
+            except Exception:
+                new_status[i]["status"] = "error"
+                logger.exception("Failed to reconnect MCP server: %s", new_status[i]["name"])
+
+        # Atomic swap: rebind module state before tearing the old stack down.
+        old_stack = _mcp_exit_stack
+        _mcp_exit_stack = new_stack
+        _mcp_tools[:] = new_tools
+        _mcp_raw_tools[:] = new_raw
+        _mcp_server_status[:] = new_status
+
+        # Re-discover MCP Apps UI tools against the new connections (clears its own
+        # caches first, so this is safe to re-run).
+        try:
+            from app.mcp_apps.manager import discover_ui_tools
+
+            await discover_ui_tools(_mcp_tools, _mcp_server_status)
+        except Exception:
+            logger.exception("MCP Apps UI re-discovery failed during reload")
+
+        # Close the OLD stack last (new-before-teardown).
+        if old_stack is not None:
+            try:
+                await old_stack.aclose()
+            except Exception:
+                logger.exception("Error closing previous MCP exit stack during reload")
+
+        logger.info("MCP reload complete: %d/%d server(s) connected", started, len(new_tools))
 
 
 async def shutdown_mcp() -> None:

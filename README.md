@@ -64,10 +64,10 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 ## Highlights
 
 - **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, Temporary Chat, and **slash commands** (`/help`, `/prompt`, `/skill`, `/model`) with completion and dynamic arguments
-- **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow, prompt templates, and Agent Skills
+- **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow, prompt templates, and Agent Skills (enable/disable or hot-reload from disk at runtime)
 - **Models** -- switch between **Azure OpenAI** and **Anthropic (Claude)** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
 - **Knowledge** -- RAG over your PDFs (ChromaDB) and background batch jobs with a live dashboard
-- **MCP native** -- connect any MCP server (Claude Desktop-compatible config); enable/disable servers and individual tools at runtime to control token usage; MCP Apps render interactive UI in chat
+- **MCP native** -- connect any MCP server (Claude Desktop-compatible config); enable/disable servers and individual tools at runtime to control token usage, or hot-reload the config (reconnect) without a restart; MCP Apps render interactive UI in chat
 - **Memory** -- a configurable Agent Identity and a self-maintaining User Preference Memory that the agent curates inline and (opt-in) reconciles in the background, superseding stale or conflicting preferences instead of just piling them up
 - **Scheduled execution** -- a built-in **Cron Scheduler** runs workspace scripts on a cron expression, an interval, or once after a delay; manage jobs from a portal, the API, or the agent (opt-in via `CRON_ENABLED`)
 - **OpenAI-compatible API** -- expose the agent as `/v1/responses` for any OpenAI-SDK app

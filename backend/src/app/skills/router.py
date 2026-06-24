@@ -116,6 +116,42 @@ def register_skills_management(app: FastAPI, *, agent_registry) -> None:
         )
         return inventory
 
+    @router.post("/reload", dependencies=[Depends(verify_api_key)])
+    async def reload_skills() -> dict:
+        """Re-discover SKILL.md from disk, rebuild the agents, and prune stale overrides.
+
+        Unlike PUT (which applies a new selection), Reload keeps the current selection
+        and forces a rebuild so on-disk edits -- a newly added skill folder, a removed
+        one -- are picked up without a restart (PRP-0090, UDR-0068 D1/D2). The rebuild
+        re-runs ``create_skills_provider()`` which re-reads disk and refreshes the
+        ``loaded`` snapshot. Override entries naming a skill that no longer exists on
+        disk are pruned so the store does not accumulate stale names.
+        """
+        store = get_skills_override_store()
+        prior = store.snapshot()
+        try:
+            from app.agui.agent_factory import rebuild_agent_registry
+
+            await rebuild_agent_registry(agent_registry)
+        except Exception:
+            logger.exception("Skills reload failed during agent rebuild")
+            raise HTTPException(status_code=500, detail={"error": "agent_rebuild_failed"}) from None
+
+        # Prune disabled names that no longer exist on disk (UDR-0068 D2). The rebuild
+        # above refreshed the live-build snapshot, so it is the authoritative
+        # discovered set.
+        from app.skills.loaded import get_loaded_skills
+
+        discovered = get_loaded_skills()
+        pruned = prior & discovered
+        if pruned != prior:
+            store.set_disabled(pruned)
+            logger.info("Skills reload pruned %d stale override(s)", len(prior - pruned))
+
+        inventory = await get_skills_inventory()
+        logger.info("Skills reloaded from disk: %d skill(s) discovered", len(discovered))
+        return inventory
+
     app.include_router(router)
 
 

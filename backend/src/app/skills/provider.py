@@ -45,9 +45,14 @@ from agent_framework import (
 )
 
 from app.core.config import settings
+from app.skills.loaded import set_loaded_skills
 from app.skills.overrides import get_skills_override_store
 
 logger = logging.getLogger(__name__)
+
+_SKILL_FILE_NAME = "SKILL.md"
+# Mirror MAF's FileSkillsSource discovery depth (agent_framework MAX_SEARCH_DEPTH).
+_MAX_SEARCH_DEPTH = 2
 
 _DISABLED_MESSAGE = (
     "Skill script execution is disabled in this deployment (CODING_ENABLED is off). "
@@ -126,6 +131,36 @@ async def _skill_script_runner(skill: Any, script: Any, args: dict[str, Any] | l
     return await asyncio.to_thread(_run_skill_script_sync, skill, script, args)
 
 
+def discover_skill_names(root: Path | None = None) -> set[str]:
+    """Return the discovered skill names (SKILL.md dir basenames), depth <= 2.
+
+    Mirrors MAF ``FileSkillsSource`` discovery (basename == frontmatter name) so the
+    set matches what ``get_skills()`` would load. Used to (a) snapshot the live build
+    set for the ``loaded`` flag (CTR-0123, UDR-0068 D4) and (b) prune stale override
+    entries on Reload. A synchronous disk walk so it can run inside the sync agent
+    build chokepoint.
+    """
+    base = Path(settings.skills_dir) if root is None else root
+    names: set[str] = set()
+
+    def _search(directory: Path, depth: int) -> None:
+        if (directory / _SKILL_FILE_NAME).is_file():
+            names.add(directory.name)
+        if depth >= _MAX_SEARCH_DEPTH:
+            return
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if entry.is_dir():
+                _search(entry, depth + 1)
+
+    if base.is_dir():
+        _search(base, 0)
+    return names
+
+
 def build_skill_source() -> DeduplicatingSkillsSource:
     """Build the UNFILTERED, deduplicated file-based skill source.
 
@@ -162,6 +197,11 @@ def create_skills_provider() -> SkillsProvider | None:
         SkillsProvider instance if skills directory exists, None otherwise.
     """
     skills_path = Path(settings.skills_dir)
+
+    # Refresh the live-build snapshot every build so the inventory's ``loaded`` flag
+    # (CTR-0123, UDR-0068 D4) reflects exactly what this build discovered on disk.
+    # A skill added after this point is shown but disabled until the next Reload.
+    set_loaded_skills(discover_skill_names(skills_path))
 
     if not skills_path.is_dir():
         logger.info("Skills directory not found: %s (skipping SkillsProvider)", skills_path)

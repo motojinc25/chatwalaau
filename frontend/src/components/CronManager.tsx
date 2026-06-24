@@ -160,6 +160,7 @@ export function CronManager({ open, onOpenChange }: CronManagerProps) {
   const [draft, setDraft] = useState<DraftState>(EMPTY_DRAFT)
   const [runs, setRuns] = useState<CronRun[]>([])
   const [runDetail, setRunDetail] = useState<CronRun | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const fetchJobs = useCallback(async () => {
     setLoading(true)
@@ -204,6 +205,7 @@ export function CronManager({ open, onOpenChange }: CronManagerProps) {
       setDraft(EMPTY_DRAFT)
       setRuns([])
       setRunDetail(null)
+      setConfirmDelete(false)
     }
   }, [open, fetchJobs])
 
@@ -251,6 +253,7 @@ export function CronManager({ open, onOpenChange }: CronManagerProps) {
 
   const remove = useCallback(async () => {
     if (!draft.id) return
+    setConfirmDelete(false)
     setSaving(true)
     setError(null)
     try {
@@ -443,7 +446,7 @@ export function CronManager({ open, onOpenChange }: CronManagerProps) {
                   {draft.id ? 'Save changes' : 'Create job'}
                 </Button>
                 {draft.id && (
-                  <Button variant="destructive" size="sm" onClick={() => void remove()} disabled={saving}>
+                  <Button variant="destructive" size="sm" onClick={() => setConfirmDelete(true)} disabled={saving}>
                     <Trash2 className="mr-1 h-3.5 w-3.5" /> Delete
                   </Button>
                 )}
@@ -510,12 +513,30 @@ export function CronManager({ open, onOpenChange }: CronManagerProps) {
             )}
           </div>
 
-          {saving && (
+          {(saving || confirmDelete) && (
             <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/80">
-              <div className="flex items-center gap-2 text-sm">
-                <Loader2 className="h-5 w-5 animate-spin" />
-                Applying...
-              </div>
+              {saving ? (
+                <div className="flex items-center gap-2 text-sm">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  Applying...
+                </div>
+              ) : (
+                /* Final confirmation before delete (UDR-0068 D6). */
+                <div className="w-[340px] rounded-lg border bg-background p-4 shadow-lg">
+                  <p className="text-sm font-medium">Delete this job?</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    "{draft.description || draft.id}" and its run history will be removed. This cannot be undone.
+                  </p>
+                  <div className="mt-3 flex justify-end gap-2">
+                    <Button variant="outline" size="sm" onClick={() => setConfirmDelete(false)}>
+                      Cancel
+                    </Button>
+                    <Button variant="destructive" size="sm" onClick={() => void remove()}>
+                      <Trash2 className="mr-1 h-3.5 w-3.5" /> Delete
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
