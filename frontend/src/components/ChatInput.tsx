@@ -46,6 +46,7 @@ interface ChatInputProps {
   onSlashModel?: (model: string) => boolean
   onSlashHelp?: () => void
   onSlashCron?: () => void
+  onSlashFiles?: () => void
   availableModels?: string[]
   /**
    * Temporary Chat (CTR-0107, PRP-0076). When true the input is rendered with a
@@ -70,6 +71,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     onSlashModel,
     onSlashHelp,
     onSlashCron,
+    onSlashFiles,
     availableModels = [],
     temporary = false,
   },
@@ -301,6 +303,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           setValue('')
           requestAnimationFrame(resize)
           return true
+        case 'files':
+          // Open the File Explorer overlay (CTR-0137). Consume the input even when no
+          // handler is wired (compact scenarios) so "/files" is never sent as text.
+          onSlashFiles?.()
+          setValue('')
+          requestAnimationFrame(resize)
+          return true
         case 'model': {
           const target = argStr.trim().split(/\s+/)[0] ?? ''
           if (target && onSlashModel?.(target)) {
@@ -330,7 +339,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           return false
       }
     },
-    [onSlashHelp, onSlashModel, onSlashCron, resize, setValueAndResize],
+    [onSlashHelp, onSlashModel, onSlashCron, onSlashFiles, resize, setValueAndResize],
   )
 
   const handleSend = async () => {

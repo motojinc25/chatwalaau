@@ -25,6 +25,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  FolderTree,
   GripVertical,
   Info,
   Loader2,
@@ -118,6 +119,9 @@ interface SessionSidebarProps {
   /** Cron scheduler launcher (CTR-0135, PRP-0089): footer icon next to App Info. */
   cronAvailable?: boolean
   onOpenCron?: () => void
+  /** File Explorer launcher (CTR-0137, PRP-0091): footer icon next to Cron. */
+  fileExplorerAvailable?: boolean
+  onOpenFiles?: () => void
 }
 
 // Per-device open/closed state (UDR-0046 D4): the set of explicitly-expanded
@@ -366,6 +370,8 @@ export function SessionSidebar({
   onClose,
   cronAvailable,
   onOpenCron,
+  fileExplorerAvailable,
+  onOpenFiles,
 }: SessionSidebarProps) {
   const sortedSessions = useMemo(() => sortSessions(sessions), [sessions])
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
@@ -897,6 +903,18 @@ export function SessionSidebar({
       <div className="flex h-9 shrink-0 items-center justify-between border-t px-3">
         <span className="text-[11px] text-muted-foreground">{auth.version ? `v${auth.version}` : ''}</span>
         <div className="flex items-center gap-1">
+          {/* File Explorer launcher (CTR-0137, PRP-0091): shown only when FILE_EXPLORER_ENABLED. */}
+          {fileExplorerAvailable && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-muted-foreground"
+              onClick={() => onOpenFiles?.()}
+              aria-label="File Explorer"
+              title="File Explorer">
+              <FolderTree className="h-4 w-4" />
+            </Button>
+          )}
           {/* Cron scheduler launcher (CTR-0135, PRP-0089): shown only when CRON_ENABLED. */}
           {cronAvailable && (
             <Button

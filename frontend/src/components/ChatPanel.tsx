@@ -42,6 +42,8 @@ interface ChatPanelProps {
   onBranchFromMessage?: (messageIndex: number) => void
   /** Slash command /cron (CTR-0135, PRP-0089): open the Cron scheduler portal. */
   onSlashCron?: () => void
+  /** Slash command /files (CTR-0137, PRP-0091): open the File Explorer overlay. */
+  onSlashFiles?: () => void
   /** Temporary Chat mode (CTR-0107, PRP-0076): dark input, no BG toggle, no history. */
   temporary?: boolean
 }
@@ -64,6 +66,7 @@ export function ChatPanel({
   onSessionCreated,
   onBranchFromMessage,
   onSlashCron,
+  onSlashFiles,
   temporary = false,
 }: ChatPanelProps) {
   const [bgEnabled, setBgEnabled] = useState(() => localStorage.getItem(BG_STORAGE_KEY) === 'true')
@@ -462,6 +465,7 @@ export function ChatPanel({
             onSlashModel={handleSlashModel}
             onSlashHelp={handleSlashHelp}
             onSlashCron={onSlashCron}
+            onSlashFiles={onSlashFiles}
             availableModels={availableModels}
             temporary={temporary}
           />
@@ -517,6 +521,7 @@ export function ChatPanel({
               onSlashModel={handleSlashModel}
               onSlashHelp={handleSlashHelp}
               onSlashCron={onSlashCron}
+              onSlashFiles={onSlashFiles}
               availableModels={availableModels}
               temporary={temporary}
             />

@@ -1,5 +1,5 @@
 import { Loader2, Menu } from 'lucide-react'
-import { useCallback, useState } from 'react'
+import { lazy, Suspense, useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
 import { CronManager } from '@/components/CronManager'
@@ -7,8 +7,13 @@ import { SessionSidebar } from '@/components/SessionSidebar'
 import { TemporaryChatToggle } from '@/components/TemporaryChatToggle'
 import { Button } from '@/components/ui/button'
 import { useCronAvailable } from '@/hooks/useCronAvailable'
+import { useFileExplorerAvailable } from '@/hooks/useFileExplorerAvailable'
 import { useSession } from '@/hooks/useSession'
 import { useTemporaryChat } from '@/hooks/useTemporaryChat'
+
+// Lazy-loaded so the heavy monaco-editor bundle is fetched only when the File
+// Explorer is enabled and first opened (CTR-0137, UDR-0069 D5).
+const FileExplorer = lazy(() => import('@/components/FileExplorer').then((m) => ({ default: m.FileExplorer })))
 
 export function ChatPage() {
   const navigate = useNavigate()
@@ -54,6 +59,11 @@ export function ChatPage() {
   // sidebar-footer launcher icon and the /cron slash command open the same modal.
   const cronAvailable = useCronAvailable()
   const [cronOpen, setCronOpen] = useState(false)
+
+  // File Explorer overlay (CTR-0137, PRP-0091). Lifted here so both the sidebar-footer
+  // launcher icon and the /files slash command open the same overlay instance.
+  const fileExplorerAvailable = useFileExplorerAvailable()
+  const [filesOpen, setFilesOpen] = useState(false)
 
   const handleStreamComplete = useCallback(() => {
     // Temporary chats are never listed and never exposed in the URL (UDR-0052
@@ -121,10 +131,18 @@ export function ChatPage() {
           onClose={() => setSidebarOpen(false)}
           cronAvailable={cronAvailable}
           onOpenCron={() => setCronOpen(true)}
+          fileExplorerAvailable={fileExplorerAvailable}
+          onOpenFiles={() => setFilesOpen(true)}
         />
       )}
 
       {cronAvailable && <CronManager open={cronOpen} onOpenChange={setCronOpen} />}
+
+      {fileExplorerAvailable && (
+        <Suspense fallback={null}>
+          <FileExplorer open={filesOpen} onOpenChange={setFilesOpen} />
+        </Suspense>
+      )}
 
       <div className="relative flex flex-1 flex-col">
         {!sidebarOpen && (
@@ -158,6 +176,7 @@ export function ChatPage() {
             onSessionCreated={handleSessionCreated}
             onBranchFromMessage={temp.isTemporary ? undefined : handleBranch}
             onSlashCron={() => setCronOpen(true)}
+            onSlashFiles={() => setFilesOpen(true)}
             temporary={temp.isTemporary}
           />
         )}

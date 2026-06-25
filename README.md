@@ -70,6 +70,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - **MCP native** -- connect any MCP server (Claude Desktop-compatible config); enable/disable servers and individual tools at runtime to control token usage, or hot-reload the config (reconnect) without a restart; MCP Apps render interactive UI in chat
 - **Memory** -- a configurable Agent Identity and a self-maintaining User Preference Memory that the agent curates inline and (opt-in) reconciles in the background, superseding stale or conflicting preferences instead of just piling them up
 - **Scheduled execution** -- a built-in **Cron Scheduler** runs workspace scripts on a cron expression, an interval, or once after a delay; manage jobs from a portal, the API, or the agent (opt-in via `CRON_ENABLED`)
+- **File Explorer** -- a built-in VSCode-style **file tree + monaco editor** to browse and hand-edit files in your coding workspace, with tabs, create/rename/delete, and drag-to-move (opt-in via `FILE_EXPLORER_ENABLED`)
 - **OpenAI-compatible API** -- expose the agent as `/v1/responses` for any OpenAI-SDK app
 - **Yours, local-first** -- file-based sessions, vectors, and uploads stay on your machine; unified API-key auth and an optional web sign-in for LAN/cloud
 

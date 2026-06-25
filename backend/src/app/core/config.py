@@ -283,6 +283,18 @@ class Settings(BaseSettings):
     # Prevents memory/context blow-up on very large files.
     coding_file_read_max_bytes: int = 1_048_576
 
+    # File Explorer (CTR-0006, CTR-0136/0137, PRP-0091, UDR-0069)
+    # Human-facing file browse/edit over the coding workspace. OFF unless
+    # FILE_EXPLORER_ENABLED; every file operation ADDITIONALLY requires
+    # CODING_ENABLED and reuses the CTR-0031 realpath jail (UDR-0069 D2/D3).
+    file_explorer_enabled: bool = False
+    # Max size a file may be opened/saved at in the editor (memory + transport
+    # guard); an oversize file is listed but refused for open/save (UDR-0069 D6).
+    file_explorer_max_file_bytes: int = 5_242_880  # 5 MiB
+    # Cap on entries returned per directory level; a larger dir is truncated
+    # with a flag, and the tree loads one level at a time (UDR-0069 D6).
+    file_explorer_max_tree_entries: int = 1000
+
     # Agent Skills (CTR-0042, PRP-0024)
     skills_dir: str = ".skills"
 

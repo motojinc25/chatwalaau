@@ -64,6 +64,13 @@ DEFAULT_COMMANDS: list[dict[str, Any]] = [
         "aliases": [],
         "args_hint": "",
     },
+    {
+        "name": "files",
+        "category": "Core",
+        "description": "Open the File Explorer",
+        "aliases": [],
+        "args_hint": "",
+    },
 ]
 
 
@@ -140,9 +147,17 @@ def load_builtin_commands() -> list[dict[str, Any]]:
     metadata; new names are appended. First declaration of a token wins for
     collision purposes downstream (CTR-0126).
     """
-    # The /cron built-in is only meaningful when the Cron Scheduler is enabled
-    # (PRP-0089, UDR-0067 D10); drop it from the advertised set otherwise.
-    defaults = [c for c in DEFAULT_COMMANDS if c["name"] != "cron" or settings.cron_enabled]
+
+    # The /cron and /files built-ins are only meaningful when their feature is
+    # enabled (UDR-0067 D10 / UDR-0069 D3); drop each from the advertised set otherwise.
+    def _advertise(name: str) -> bool:
+        if name == "cron":
+            return settings.cron_enabled
+        if name == "files":
+            return settings.file_explorer_enabled
+        return True
+
+    defaults = [c for c in DEFAULT_COMMANDS if _advertise(c["name"])]
     by_name: dict[str, dict[str, Any]] = {c["name"]: dict(c) for c in defaults}
     for entry in _load_operator_commands():
         by_name[entry["name"]] = entry

@@ -334,6 +334,14 @@ from app.workspace.router import router as workspace_router
 
 app.include_router(workspace_router)
 
+# File Explorer API (CTR-0136, PRP-0091) -- human-facing browse/edit over the coding
+# workspace, sibling of CTR-0127. The surface returns 404 unless FILE_EXPLORER_ENABLED
+# and CODING_ENABLED so the SPA can gate its launcher icon by probing it (UDR-0069 D3).
+# Every path resolves through the CTR-0031 jail; mutating endpoints consume CTR-0083.
+from app.workspace.explorer import router as file_explorer_router
+
+app.include_router(file_explorer_router)
+
 # Cron Management API (CTR-0133, PRP-0089) -- job CRUD + run history/detail. The
 # surface returns 404 when CRON_ENABLED is false so the SPA can gate its launcher
 # icon by probing it (UDR-0067 D10). Mutating endpoints consume CTR-0083.
