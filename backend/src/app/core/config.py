@@ -294,6 +294,13 @@ class Settings(BaseSettings):
     # Cap on entries returned per directory level; a larger dir is truncated
     # with a flag, and the tree loads one level at a time (UDR-0069 D6).
     file_explorer_max_tree_entries: int = 1000
+    # Download path (CTR-0136 v2, PRP-0093, UDR-0071 D2). Separate from the
+    # editor open/save cap above: a download MAY exceed FILE_EXPLORER_MAX_FILE_BYTES.
+    # Upper bound on a single-file download and on a folder ZIP (total uncompressed);
+    # an over-cap target is refused with a clear 400.
+    file_explorer_max_download_bytes: int = 104_857_600  # 100 MiB
+    # Max number of files included in a folder ZIP; a larger folder is refused (400).
+    file_explorer_max_download_entries: int = 5000
 
     # Agent Skills (CTR-0042, PRP-0024)
     skills_dir: str = ".skills"

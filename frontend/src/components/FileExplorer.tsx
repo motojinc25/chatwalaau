@@ -1,6 +1,19 @@
+import {
+  closestCenter,
+  DndContext,
+  type DragEndEvent,
+  DragOverlay,
+  type DragStartEvent,
+  PointerSensor,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core'
 import Editor, { type OnMount } from '@monaco-editor/react'
 import {
   ChevronRight,
+  Download,
   File as FileIcon,
   FilePlus,
   Folder as FolderIcon,
@@ -9,11 +22,14 @@ import {
   Loader2,
   RefreshCw,
   Save,
+  SplitSquareHorizontal,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { type NodeRendererProps, Tree } from 'react-arborist'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
+import { ImageViewer } from '@/components/file-explorer/ImageViewer'
+import { PdfViewer } from '@/components/file-explorer/PdfViewer'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -38,18 +54,21 @@ import { cn } from '@/lib/utils'
 import '@/lib/monaco-setup'
 
 /**
- * File Explorer overlay (CTR-0137, FEAT-0049, PRP-0091, UDR-0069).
+ * File Explorer overlay (CTR-0137, FEAT-0049, PRP-0091/PRP-0093, UDR-0069/UDR-0071).
  *
  * A full-screen, VSCode-style overlay rooted at the coding workspace: a left
- * react-arborist file tree, a react-resizable-panels splitter, and a right tabbed
- * monaco editor (light "vs" theme). All file IO goes through the jailed CTR-0136 API;
- * the editor never resolves paths itself (UDR-0069 D2). In the tree, a single click
- * selects (a folder also toggles) and a double click opens a file. Open/save/delete show
- * blocking indicators; delete requires a final confirmation (UDR-0069 D8). Any close that
- * would drop unsaved work -- a single dirty tab, a bulk Close All / Close Others including
- * unsaved tabs, or closing the whole overlay -- prompts a discard confirmation first; for
- * the overlay, confirming restores each tab to its opened content (so re-opening shows the
- * clean state) and closes.
+ * react-arborist file tree, a react-resizable-panels splitter, and a right editor area.
+ * All file IO goes through the jailed CTR-0136 API; the editor never resolves paths itself.
+ *
+ * PRP-0093 (UDR-0071) enhancements:
+ * - Download a file (tree / tab menu) or a folder as a ZIP (tree menu) via CTR-0136 v2.
+ * - Preview a PDF (pdf.js, custom zoom) or an image (zoom + pan) instead of monaco; the
+ *   bytes come from CTR-0136 /raw as an authenticated blob URL (revoked on tab close).
+ * - Editor GROUPS: the single editor pane generalizes to N groups in a nested
+ *   react-resizable-panels layout; tabs move between groups by @dnd-kit drag-and-drop, and
+ *   dropping a tab on a group edge splits it. A path is open in at most one group (move
+ *   relocates; re-opening focuses). The dirty / close confirmations are generalized across
+ *   groups; the layout is ephemeral (flattened to one group when the overlay re-opens).
  *
  * Controlled component: the parent (ChatPage) owns open state so both the sidebar
  * footer icon and the /files slash command drive one instance.
@@ -75,9 +94,12 @@ interface TreeEntry {
   mtime?: number
 }
 
+type TabKind = 'text' | 'image' | 'pdf'
+
 interface Tab {
   path: string
   name: string
+  kind: TabKind
   loading: boolean
   saving: boolean
   error: string | null
@@ -85,9 +107,38 @@ interface Tab {
   original: string
   mtime: number
   isBinary: boolean
+  blobUrl?: string // image/pdf preview object URL (revoked on close)
 }
 
-const isDirty = (t: Tab): boolean => !t.isBinary && !t.loading && t.content !== t.original
+interface EditorGroup {
+  id: string
+  tabs: Tab[]
+  activePath: string | null
+}
+
+// Binary layout tree over editor groups (UDR-0071 D6): a leaf is one group; a split is a
+// horizontal/vertical pair. Splitting replaces a leaf with a split; emptying a group
+// collapses its leaf (the sibling is promoted).
+type LayoutNode =
+  | { id: string; kind: 'leaf'; groupId: string }
+  | { id: string; kind: 'split'; dir: 'horizontal' | 'vertical'; a: LayoutNode; b: LayoutNode }
+
+type EdgeSide = 'left' | 'right' | 'top' | 'bottom'
+
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif'])
+
+const isDirty = (t: Tab): boolean => t.kind === 'text' && !t.isBinary && !t.loading && t.content !== t.original
+
+function extOf(name: string): string {
+  const i = name.lastIndexOf('.')
+  return i < 0 ? '' : name.slice(i + 1).toLowerCase()
+}
+function tabKind(name: string): TabKind {
+  const e = extOf(name)
+  if (e === 'pdf') return 'pdf'
+  if (IMAGE_EXTS.has(e)) return 'image'
+  return 'text'
+}
 
 function parentOf(path: string): string {
   const i = path.lastIndexOf('/')
@@ -116,6 +167,74 @@ function setChildrenById(nodes: FileNode[], dirId: string, children: FileNode[])
   })
 }
 
+// ---- Layout-tree helpers (pure) ----
+
+function leafGroupIds(node: LayoutNode | null): string[] {
+  if (!node) return []
+  if (node.kind === 'leaf') return [node.groupId]
+  return [...leafGroupIds(node.a), ...leafGroupIds(node.b)]
+}
+
+function removeLeaf(node: LayoutNode, groupId: string): LayoutNode | null {
+  if (node.kind === 'leaf') return node.groupId === groupId ? null : node
+  const a = removeLeaf(node.a, groupId)
+  const b = removeLeaf(node.b, groupId)
+  if (a === null) return b
+  if (b === null) return a
+  if (a === node.a && b === node.b) return node
+  return { ...node, a, b }
+}
+
+function splitLeaf(
+  node: LayoutNode,
+  targetGroupId: string,
+  dir: 'horizontal' | 'vertical',
+  newLeaf: LayoutNode,
+  placeNewFirst: boolean,
+  splitId: string,
+): LayoutNode {
+  if (node.kind === 'leaf') {
+    if (node.groupId !== targetGroupId) return node
+    return {
+      id: splitId,
+      kind: 'split',
+      dir,
+      a: placeNewFirst ? newLeaf : node,
+      b: placeNewFirst ? node : newLeaf,
+    }
+  }
+  return {
+    ...node,
+    a: splitLeaf(node.a, targetGroupId, dir, newLeaf, placeNewFirst, splitId),
+    b: splitLeaf(node.b, targetGroupId, dir, newLeaf, placeNewFirst, splitId),
+  }
+}
+
+// ---- Download helper (CTR-0136 v2) ----
+
+/** Revoke an image/pdf preview object URL when its tab is removed. */
+function revokeTab(t: Tab): void {
+  if (t.blobUrl) URL.revokeObjectURL(t.blobUrl)
+}
+
+async function downloadUrl(url: string, filename: string): Promise<void> {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return
+    const blob = await res.blob()
+    const objectUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = objectUrl
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(objectUrl)
+  } catch {
+    // silent: download is best-effort
+  }
+}
+
 function useElementSize() {
   const [size, setSize] = useState({ width: 0, height: 0 })
   // Callback ref (not useRef): re-runs whenever the node attaches/detaches. The
@@ -140,8 +259,23 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
   const [rootLoaded, setRootLoaded] = useState(false)
   const loadedRef = useRef<Set<string>>(new Set())
 
-  const [tabs, setTabs] = useState<Tab[]>([])
-  const [activePath, setActivePath] = useState<string | null>(null)
+  // Editor groups + layout tree (UDR-0071 D6).
+  const [groups, setGroups] = useState<Record<string, EditorGroup>>({})
+  const [layout, setLayout] = useState<LayoutNode | null>(null)
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(null)
+
+  // Unique-id generator for groups / split nodes (instance-scoped).
+  const uidRef = useRef(0)
+  const newId = useCallback((p: string) => `${p}${++uidRef.current}`, [])
+
+  // Refs mirror the latest state for use inside event callbacks (drag end, open effect)
+  // without stale closures.
+  const groupsRef = useRef(groups)
+  groupsRef.current = groups
+  const layoutRef = useRef(layout)
+  layoutRef.current = layout
+  const activeGroupRef = useRef(activeGroupId)
+  activeGroupRef.current = activeGroupId
 
   const [createTarget, setCreateTarget] = useState<{ dir: string; kind: 'file' | 'dir' } | null>(null)
   const [createName, setCreateName] = useState('')
@@ -151,13 +285,15 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
   const [renameBusy, setRenameBusy] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ path: string; isDir: boolean } | null>(null)
   const [deleting, setDeleting] = useState(false)
-  const [pendingCloseTab, setPendingCloseTab] = useState<string | null>(null)
-  // Bulk "Close all / Close others" when some target tabs are unsaved (issue 2).
-  const [pendingBulkClose, setPendingBulkClose] = useState<string[] | null>(null)
-  // Overlay-close warning when there are unsaved tabs (issue 1).
+  const [pendingCloseTab, setPendingCloseTab] = useState<{ groupId: string; path: string } | null>(null)
+  const [pendingBulkClose, setPendingBulkClose] = useState<{ groupId: string; paths: string[] } | null>(null)
   const [leaveConfirm, setLeaveConfirm] = useState(false)
 
+  const [dragTab, setDragTab] = useState<{ groupId: string; path: string; name: string } | null>(null)
+
   const [treeRef, treeSize] = useElementSize()
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
   // ---- Tree data loading ----
 
@@ -183,6 +319,30 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
     if (open && !rootLoaded) void reloadDir('')
   }, [open, rootLoaded, reloadDir])
 
+  // On (re)open, flatten all open tabs into a single group (UDR-0071 D8: layout is
+  // ephemeral and reset on reopen; open files are preserved).
+  const wasOpenRef = useRef(false)
+  useEffect(() => {
+    if (open && !wasOpenRef.current) {
+      const ids = leafGroupIds(layoutRef.current)
+      const all = ids.flatMap((id) => groupsRef.current[id]?.tabs ?? [])
+      const gid = newId('g')
+      const prevActive = activeGroupRef.current ? groupsRef.current[activeGroupRef.current]?.activePath : null
+      const active = all.find((t) => t.path === prevActive)?.path ?? all[all.length - 1]?.path ?? null
+      setGroups({ [gid]: { id: gid, tabs: all, activePath: active } })
+      setLayout({ id: gid, kind: 'leaf', groupId: gid })
+      setActiveGroupId(gid)
+    }
+    wasOpenRef.current = open
+  }, [open, newId])
+
+  // Keep activeGroupId pointing at a live group.
+  useEffect(() => {
+    if (activeGroupId && !groups[activeGroupId]) {
+      setActiveGroupId(leafGroupIds(layout)[0] ?? null)
+    }
+  }, [groups, layout, activeGroupId])
+
   const onToggle = useCallback(
     (id: string) => {
       if (!loadedRef.current.has(id)) void reloadDir(id)
@@ -190,77 +350,126 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
     [reloadDir],
   )
 
-  // ---- Editor tabs ----
+  // ---- Tab helpers ----
 
-  const openFile = useCallback(async (path: string) => {
-    setActivePath(path)
-    setTabs((prev) => {
-      if (prev.some((t) => t.path === path)) return prev
-      return [
-        ...prev,
-        {
-          path,
-          name: baseName(path),
-          loading: true,
-          saving: false,
-          error: null,
-          content: '',
-          original: '',
-          mtime: 0,
-          isBinary: false,
-        },
-      ]
-    })
-    try {
-      const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`)
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}))
-        setTabs((prev) =>
-          prev.map((t) => (t.path === path ? { ...t, loading: false, error: detail.detail || 'Failed to open' } : t)),
-        )
-        return
+  // Update a tab (matched by unique path) across every group.
+  const mapTab = useCallback((path: string, fn: (t: Tab) => Tab) => {
+    setGroups((prev) => {
+      const next: Record<string, EditorGroup> = {}
+      for (const [id, g] of Object.entries(prev)) {
+        next[id] = { ...g, tabs: g.tabs.map((t) => (t.path === path ? fn(t) : t)) }
       }
-      const json = await res.json()
-      setTabs((prev) =>
-        prev.map((t) =>
-          t.path === path
-            ? {
-                ...t,
-                loading: false,
-                error: null,
-                content: json.content ?? '',
-                original: json.content ?? '',
-                mtime: json.mtime ?? 0,
-                isBinary: !!json.is_binary,
-              }
-            : t,
-        ),
-      )
-    } catch {
-      setTabs((prev) => prev.map((t) => (t.path === path ? { ...t, loading: false, error: 'Failed to open' } : t)))
-    }
+      return next
+    })
   }, [])
 
-  const activeTab = tabs.find((t) => t.path === activePath) ?? null
+  // Locate a tab (path is unique across groups). Reads the live ref, so it is stable.
+  const findTab = useCallback((path: string): { groupId: string; tab: Tab } | null => {
+    for (const g of Object.values(groupsRef.current)) {
+      const tab = g.tabs.find((t) => t.path === path)
+      if (tab) return { groupId: g.id, tab }
+    }
+    return null
+  }, [])
+
+  const openFile = useCallback(
+    async (path: string) => {
+      // Already open: focus its tab + group (path is unique across groups).
+      const existing = findTab(path)
+      if (existing) {
+        setActiveGroupId(existing.groupId)
+        setGroups((prev) => {
+          const g = prev[existing.groupId]
+          if (!g) return prev
+          return { ...prev, [existing.groupId]: { ...g, activePath: path } }
+        })
+        return
+      }
+
+      const kind = tabKind(baseName(path))
+      // Resolve the destination group (active, else create one).
+      let targetId = activeGroupRef.current
+      if (!targetId || !groupsRef.current[targetId]) targetId = newId('g')
+      const tid = targetId
+
+      const newTab: Tab = {
+        path,
+        name: baseName(path),
+        kind,
+        loading: true,
+        saving: false,
+        error: null,
+        content: '',
+        original: '',
+        mtime: 0,
+        isBinary: false,
+      }
+      setGroups((prev) => {
+        const next = { ...prev }
+        const g = next[tid] ?? { id: tid, tabs: [], activePath: null }
+        if (g.tabs.some((t) => t.path === path)) {
+          next[tid] = { ...g, activePath: path }
+        } else {
+          next[tid] = { ...g, tabs: [...g.tabs, newTab], activePath: path }
+        }
+        return next
+      })
+      setLayout((prev) => prev ?? { id: tid, kind: 'leaf', groupId: tid })
+      setActiveGroupId(tid)
+
+      try {
+        if (kind === 'text') {
+          const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`)
+          if (!res.ok) {
+            const detail = await res.json().catch(() => ({}))
+            mapTab(path, (t) => ({ ...t, loading: false, error: detail.detail || 'Failed to open' }))
+            return
+          }
+          const json = await res.json()
+          mapTab(path, (t) => ({
+            ...t,
+            loading: false,
+            error: null,
+            content: json.content ?? '',
+            original: json.content ?? '',
+            mtime: json.mtime ?? 0,
+            isBinary: !!json.is_binary,
+          }))
+        } else {
+          const res = await fetch(`/api/workspace/raw?path=${encodeURIComponent(path)}`)
+          if (!res.ok) {
+            const detail = await res.json().catch(() => ({}))
+            mapTab(path, (t) => ({ ...t, loading: false, error: detail.detail || 'Failed to open' }))
+            return
+          }
+          const blob = await res.blob()
+          const blobUrl = URL.createObjectURL(blob)
+          mapTab(path, (t) => ({ ...t, loading: false, error: null, blobUrl }))
+        }
+      } catch {
+        mapTab(path, (t) => ({ ...t, loading: false, error: 'Failed to open' }))
+      }
+    },
+    [mapTab, newId, findTab],
+  )
 
   const onEditorChange = useCallback(
     (value: string | undefined) => {
-      if (activePath == null) return
-      setTabs((prev) => prev.map((t) => (t.path === activePath ? { ...t, content: value ?? '' } : t)))
+      const gid = activeGroupRef.current
+      const g = gid ? groupsRef.current[gid] : null
+      const path = g?.activePath
+      if (!path) return
+      mapTab(path, (t) => ({ ...t, content: value ?? '' }))
     },
-    [activePath],
+    [mapTab],
   )
 
   const saveTab = useCallback(
     async (path: string) => {
-      let target: Tab | undefined
-      setTabs((prev) => {
-        target = prev.find((t) => t.path === path)
-        return target && isDirty(target)
-          ? prev.map((t) => (t.path === path ? { ...t, saving: true, error: null } : t))
-          : prev
-      })
+      const found = findTab(path)
+      const target = found?.tab
       if (!target || !isDirty(target)) return
+      mapTab(path, (t) => ({ ...t, saving: true, error: null }))
       try {
         const res = await fetch('/api/workspace/file', {
           method: 'PUT',
@@ -270,73 +479,169 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
         if (!res.ok) {
           const detail = await res.json().catch(() => ({}))
           const msg = res.status === 409 ? 'File changed on disk; reopen to merge.' : detail.detail || 'Save failed'
-          setTabs((prev) => prev.map((t) => (t.path === path ? { ...t, saving: false, error: msg } : t)))
+          mapTab(path, (t) => ({ ...t, saving: false, error: msg }))
           return
         }
         const json = await res.json()
-        setTabs((prev) =>
-          prev.map((t) =>
-            t.path === path
-              ? { ...t, saving: false, error: null, original: t.content, mtime: json.mtime ?? t.mtime }
-              : t,
-          ),
-        )
+        mapTab(path, (t) => ({ ...t, saving: false, error: null, original: t.content, mtime: json.mtime ?? t.mtime }))
         void reloadDir(parentOf(path))
       } catch {
-        setTabs((prev) => prev.map((t) => (t.path === path ? { ...t, saving: false, error: 'Save failed' } : t)))
+        mapTab(path, (t) => ({ ...t, saving: false, error: 'Save failed' }))
       }
     },
-    [reloadDir],
+    [mapTab, reloadDir, findTab],
   )
 
-  // Stable ref so the monaco Ctrl/Cmd+S command always saves the current tab.
+  // Stable ref so the monaco Ctrl/Cmd+S command always saves the active group's active tab.
   const saveActiveRef = useRef<() => void>(() => {})
   saveActiveRef.current = () => {
-    if (activePath) void saveTab(activePath)
+    const gid = activeGroupRef.current
+    const path = gid ? groupsRef.current[gid]?.activePath : null
+    if (path) void saveTab(path)
   }
-
   const handleMount: OnMount = useCallback((editor, monaco) => {
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveActiveRef.current())
   }, [])
 
-  const removeTab = useCallback((path: string) => {
-    setTabs((prev) => {
-      const next = prev.filter((t) => t.path !== path)
-      setActivePath((cur) => (cur === path ? (next.length ? next[next.length - 1].path : null) : cur))
+  // ---- Close / move / split tabs (group-aware) ----
+
+  const removeTabsFrom = useCallback((groupId: string, paths: string[]) => {
+    const drop = new Set(paths)
+    const g = groupsRef.current[groupId]
+    g?.tabs.forEach((t) => {
+      if (drop.has(t.path)) revokeTab(t)
+    })
+    const emptied = !!g && g.tabs.every((t) => drop.has(t.path))
+    setGroups((prev) => {
+      const f = prev[groupId]
+      if (!f) return prev
+      const tabs = f.tabs.filter((t) => !drop.has(t.path))
+      const next = { ...prev }
+      if (tabs.length) {
+        const activePath = f.activePath && drop.has(f.activePath) ? (tabs[tabs.length - 1]?.path ?? null) : f.activePath
+        next[groupId] = { ...f, tabs, activePath }
+      } else {
+        delete next[groupId]
+      }
       return next
     })
+    if (emptied) setLayout((prev) => (prev ? (removeLeaf(prev, groupId) ?? prev) : prev))
   }, [])
 
   const requestCloseTab = useCallback(
-    (path: string) => {
-      const t = tabs.find((x) => x.path === path)
-      if (t && isDirty(t)) setPendingCloseTab(path)
-      else removeTab(path)
+    (groupId: string, path: string) => {
+      const t = groupsRef.current[groupId]?.tabs.find((x) => x.path === path)
+      if (t && isDirty(t)) setPendingCloseTab({ groupId, path })
+      else removeTabsFrom(groupId, [path])
     },
-    [tabs, removeTab],
+    [removeTabsFrom],
   )
 
-  // Remove a set of tabs at once, keeping the active tab valid.
-  const doCloseTabs = useCallback((paths: string[]) => {
-    const drop = new Set(paths)
-    setTabs((prev) => {
-      const next = prev.filter((t) => !drop.has(t.path))
-      setActivePath((cur) => (cur && drop.has(cur) ? (next.length ? next[next.length - 1].path : null) : cur))
-      return next
-    })
-  }, [])
-
-  // Close many tabs (Close All / Close Others). If any target tab is unsaved, confirm
-  // first so edits are not lost silently (issue 2).
   const requestCloseTabs = useCallback(
-    (paths: string[]) => {
+    (groupId: string, paths: string[]) => {
       if (!paths.length) return
       const drop = new Set(paths)
-      const anyDirtyAmong = tabs.some((t) => drop.has(t.path) && isDirty(t))
-      if (anyDirtyAmong) setPendingBulkClose(paths)
-      else doCloseTabs(paths)
+      const anyDirty = groupsRef.current[groupId]?.tabs.some((t) => drop.has(t.path) && isDirty(t))
+      if (anyDirty) setPendingBulkClose({ groupId, paths })
+      else removeTabsFrom(groupId, paths)
     },
-    [tabs, doCloseTabs],
+    [removeTabsFrom],
+  )
+
+  // Move a tab to another group (drag-and-drop; relocation keeps a path in one group).
+  const moveTabToGroup = useCallback((path: string, fromId: string, toId: string) => {
+    if (fromId === toId) return
+    const from = groupsRef.current[fromId]
+    const tab = from?.tabs.find((t) => t.path === path)
+    if (!from || !tab) return
+    const emptied = from.tabs.length === 1
+    setGroups((prev) => {
+      const next = { ...prev }
+      const f = next[fromId]
+      const to = next[toId]
+      if (!f || !to) return prev
+      const fromTabs = f.tabs.filter((t) => t.path !== path)
+      if (fromTabs.length) {
+        const activePath = f.activePath === path ? (fromTabs[fromTabs.length - 1]?.path ?? null) : f.activePath
+        next[fromId] = { ...f, tabs: fromTabs, activePath }
+      } else {
+        delete next[fromId]
+      }
+      next[toId] = { ...to, tabs: to.tabs.some((t) => t.path === path) ? to.tabs : [...to.tabs, tab], activePath: path }
+      return next
+    })
+    if (emptied) setLayout((prev) => (prev ? (removeLeaf(prev, fromId) ?? prev) : prev))
+    setActiveGroupId(toId)
+  }, [])
+
+  // Split a target group by pulling a tab out into a new group on the given side.
+  const splitWithTab = useCallback(
+    (path: string, fromId: string, targetId: string, side: EdgeSide) => {
+      const from = groupsRef.current[fromId]
+      const tab = from?.tabs.find((t) => t.path === path)
+      if (!from || !tab) return
+      const onlyTab = from.tabs.length === 1
+      if (fromId === targetId && onlyTab) return // nothing to gain
+      const newGroupId = newId('g')
+      const splitId = newId('s')
+      const dir = side === 'left' || side === 'right' ? 'horizontal' : 'vertical'
+      const placeNewFirst = side === 'left' || side === 'top'
+      setGroups((prev) => {
+        const next = { ...prev }
+        const f = next[fromId]
+        if (!f) return prev
+        const fromTabs = f.tabs.filter((t) => t.path !== path)
+        if (fromTabs.length) {
+          const activePath = f.activePath === path ? (fromTabs[fromTabs.length - 1]?.path ?? null) : f.activePath
+          next[fromId] = { ...f, tabs: fromTabs, activePath }
+        } else {
+          delete next[fromId]
+        }
+        next[newGroupId] = { id: newGroupId, tabs: [tab], activePath: path }
+        return next
+      })
+      setLayout((prev) => {
+        if (!prev) return prev
+        let l = splitLeaf(
+          prev,
+          targetId,
+          dir,
+          { id: newGroupId, kind: 'leaf', groupId: newGroupId },
+          placeNewFirst,
+          splitId,
+        )
+        if (onlyTab && fromId !== targetId) l = removeLeaf(l, fromId) ?? l
+        return l
+      })
+      setActiveGroupId(newGroupId)
+    },
+    [newId],
+  )
+
+  const splitActiveRight = useCallback(
+    (groupId: string) => {
+      const g = groupsRef.current[groupId]
+      if (!g || g.tabs.length < 2 || !g.activePath) return
+      splitWithTab(g.activePath, groupId, groupId, 'right')
+    },
+    [splitWithTab],
+  )
+
+  const onDragStart = useCallback((e: DragStartEvent) => {
+    const d = e.active.data.current as { groupId: string; path: string; name: string } | undefined
+    if (d) setDragTab(d)
+  }, [])
+
+  const onDragEnd = useCallback(
+    (e: DragEndEvent) => {
+      const active = e.active.data.current as { groupId: string; path: string } | undefined
+      const over = e.over?.data.current as { type: 'strip' | 'edge'; groupId: string; side?: EdgeSide } | undefined
+      setDragTab(null)
+      if (!active || !over) return
+      if (over.type === 'strip') moveTabToGroup(active.path, active.groupId, over.groupId)
+      else if (over.type === 'edge' && over.side) splitWithTab(active.path, active.groupId, over.groupId, over.side)
+    },
+    [moveTabToGroup, splitWithTab],
   )
 
   // ---- Mutations: create / rename-move / delete ----
@@ -364,8 +669,29 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
     }
   }, [createTarget, createName, reloadDir, openFile])
 
-  // Single rename primitive shared by the rename dialog and react-arborist's inline
-  // edit. Returns true on success / no-op so the caller can clear its UI.
+  // Re-point any open tab whose path (or whose ancestor dir) was renamed/moved.
+  const repointTabs = useCallback((from: string, next: string) => {
+    const prefix = `${from}/`
+    setGroups((prev) => {
+      const out: Record<string, EditorGroup> = {}
+      for (const [id, g] of Object.entries(prev)) {
+        const tabs = g.tabs.map((t) => {
+          if (t.path === from) return { ...t, path: next, name: baseName(next) }
+          if (t.path.startsWith(prefix)) return { ...t, path: next + t.path.slice(from.length) }
+          return t
+        })
+        const activePath =
+          g.activePath === from
+            ? next
+            : g.activePath?.startsWith(prefix)
+              ? next + g.activePath.slice(from.length)
+              : g.activePath
+        out[id] = { ...g, tabs, activePath }
+      }
+      return out
+    })
+  }, [])
+
   const renameTo = useCallback(
     async (from: string, rawName: string): Promise<boolean> => {
       const name = rawName.trim()
@@ -378,27 +704,12 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
       })
       if (!res.ok) return false
       await reloadDir(parentOf(from))
-      // Re-point an open tab whose path (or whose ancestor dir) was renamed.
-      const prefix = `${from}/`
-      setTabs((prev) =>
-        prev.map((t) => {
-          if (t.path === from) return { ...t, path: next, name: baseName(next) }
-          if (t.path.startsWith(prefix)) {
-            const moved = next + t.path.slice(from.length)
-            return { ...t, path: moved }
-          }
-          return t
-        }),
-      )
-      setActivePath((cur) => (cur === from ? next : cur?.startsWith(prefix) ? next + cur.slice(from.length) : cur))
+      repointTabs(from, next)
       return true
     },
-    [reloadDir],
+    [reloadDir, repointTabs],
   )
 
-  // react-arborist inline-edit handler (F2 etc.). The context-menu Rename uses a
-  // dialog instead, because Radix returns focus on menu close and instantly blurs the
-  // inline input (cancelling the edit before the user can type).
   const handleRename = useCallback(
     ({ id, name }: { id: string; name: string }) => {
       void renameTo(id, name)
@@ -422,22 +733,23 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
     }
   }, [renameTarget, renameName, renameTo])
 
-  const handleMove = useCallback(
+  const handleTreeMove = useCallback(
     async ({ dragIds, parentId }: { dragIds: string[]; parentId: string | null }) => {
       const targetDir = parentId ?? ''
       for (const from of dragIds) {
         const to = joinPath(targetDir, baseName(from))
         if (to === from) continue
-        await fetch('/api/workspace/move', {
+        const res = await fetch('/api/workspace/move', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ from, to }),
         })
+        if (res.ok) repointTabs(from, to)
         await reloadDir(parentOf(from))
       }
       await reloadDir(targetDir)
     },
-    [reloadDir],
+    [reloadDir, repointTabs],
   )
 
   const confirmDelete = useCallback(async () => {
@@ -449,31 +761,46 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
       })
       if (res.ok) {
         await reloadDir(parentOf(deleteTarget.path))
-        // Drop any open tab under the deleted path (file or directory subtree).
+        // Drop any open tab under the deleted path (file or directory subtree), per group.
         const prefix = `${deleteTarget.path}/`
-        setTabs((prev) => prev.filter((t) => t.path !== deleteTarget.path && !t.path.startsWith(prefix)))
-        setActivePath((cur) => (cur && (cur === deleteTarget.path || cur.startsWith(prefix)) ? null : cur))
+        const dropped = (t: Tab) => t.path === deleteTarget.path || t.path.startsWith(prefix)
+        for (const g of Object.values(groupsRef.current)) {
+          const paths = g.tabs.filter(dropped).map((t) => t.path)
+          if (paths.length) removeTabsFrom(g.id, paths)
+        }
         setDeleteTarget(null)
       }
     } finally {
       setDeleting(false)
     }
-  }, [deleteTarget, reloadDir])
+  }, [deleteTarget, reloadDir, removeTabsFrom])
 
-  // ---- Overlay close: warn if unsaved, then discard + reset on confirm (issue 1) ----
+  // ---- Download (CTR-0136 v2) ----
 
-  // Reset every dirty tab back to its opened content (discard in-progress edits) and close.
+  const downloadFile = useCallback((path: string) => {
+    void downloadUrl(`/api/workspace/raw?path=${encodeURIComponent(path)}`, baseName(path) || 'download')
+  }, [])
+  const downloadFolder = useCallback((path: string) => {
+    void downloadUrl(`/api/workspace/archive?path=${encodeURIComponent(path)}`, `${baseName(path) || 'workspace'}.zip`)
+  }, [])
+
+  // ---- Overlay close: warn if unsaved, then discard + reset on confirm ----
+
   const discardAndClose = useCallback(() => {
-    setTabs((prev) => prev.map((t) => (isDirty(t) ? { ...t, content: t.original, error: null } : t)))
+    setGroups((prev) => {
+      const out: Record<string, EditorGroup> = {}
+      for (const [id, g] of Object.entries(prev)) {
+        out[id] = { ...g, tabs: g.tabs.map((t) => (isDirty(t) ? { ...t, content: t.original, error: null } : t)) }
+      }
+      return out
+    })
     setLeaveConfirm(false)
     onOpenChange(false)
   }, [onOpenChange])
 
-  const anyDirty = tabs.some(isDirty)
+  const anyDirty = Object.values(groups).some((g) => g.tabs.some(isDirty))
   const handleOpenChange = useCallback(
     (next: boolean) => {
-      // Closing with unsaved tabs warns first; confirming restores the opened (clean)
-      // state and closes. A clean close (or opening) passes straight through.
       if (!next && anyDirty) {
         setLeaveConfirm(true)
         return
@@ -488,8 +815,7 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
   const NodeRenderer = useCallback(
     ({ node, style, dragHandle }: NodeRendererProps<FileNode>) => {
       const d = node.data
-      // Single click selects (and a folder also toggles); double click opens a file.
-      // Keyboard Enter/Space opens a file (a11y parity with double click).
+      const activePathOfActiveGroup = activeGroupId ? groups[activeGroupId]?.activePath : null
       const onRowClick = () => {
         if (node.isEditing) return
         node.select()
@@ -522,7 +848,7 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
               className={cn(
                 'flex h-7 cursor-pointer select-none items-center gap-1 rounded px-1 text-[13px] text-zinc-700 hover:bg-zinc-100',
                 node.isSelected && 'bg-blue-100 text-zinc-900',
-                activePath === d.id && !d.isDir && 'bg-blue-50',
+                activePathOfActiveGroup === d.id && !d.isDir && 'bg-blue-50',
               )}>
               <span className="flex w-4 shrink-0 items-center justify-center text-zinc-400">
                 {d.isDir ? (
@@ -574,11 +900,19 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
                   }}>
                   <FolderPlus className="h-4 w-4" /> New Folder
                 </ContextMenuItem>
+                <ContextMenuItem onSelect={() => downloadFolder(d.id)}>
+                  <Download className="h-4 w-4" /> Download as ZIP
+                </ContextMenuItem>
               </>
             ) : (
-              <ContextMenuItem onSelect={() => void openFile(d.id)}>
-                <FileIcon className="h-4 w-4" /> Open
-              </ContextMenuItem>
+              <>
+                <ContextMenuItem onSelect={() => void openFile(d.id)}>
+                  <FileIcon className="h-4 w-4" /> Open
+                </ContextMenuItem>
+                <ContextMenuItem onSelect={() => downloadFile(d.id)}>
+                  <Download className="h-4 w-4" /> Download
+                </ContextMenuItem>
+              </>
             )}
             <ContextMenuItem
               onSelect={() => {
@@ -595,8 +929,55 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
         </ContextMenu>
       )
     },
-    [activePath, openFile],
+    [activeGroupId, groups, openFile, downloadFile, downloadFolder],
   )
+
+  // ---- Editor group rendering ----
+
+  const renderLayout = (node: LayoutNode): React.ReactNode => {
+    if (node.kind === 'leaf') {
+      const g = groups[node.groupId]
+      if (!g) return null
+      return (
+        <GroupView
+          key={node.groupId}
+          group={g}
+          isActiveGroup={activeGroupId === node.groupId}
+          dragging={dragTab !== null}
+          onFocusGroup={setActiveGroupId}
+          onActivateTab={(path) =>
+            setGroups((prev) => {
+              const grp = prev[node.groupId]
+              return grp ? { ...prev, [node.groupId]: { ...grp, activePath: path } } : prev
+            })
+          }
+          onCloseTab={requestCloseTab}
+          onCloseTabs={requestCloseTabs}
+          onSplit={splitActiveRight}
+          onSave={saveTab}
+          onEditorChange={onEditorChange}
+          onEditorMount={handleMount}
+          onDownloadTab={downloadFile}
+        />
+      )
+    }
+    return (
+      <PanelGroup key={node.id} direction={node.dir} className="min-h-0 flex-1">
+        <Panel id={node.a.id} order={1} minSize={15} className="flex min-h-0 min-w-0 flex-col">
+          {renderLayout(node.a)}
+        </Panel>
+        <PanelResizeHandle
+          className={cn(
+            'bg-zinc-200 transition-colors hover:bg-blue-400 data-[resize-handle-state=drag]:bg-blue-500',
+            node.dir === 'horizontal' ? 'w-px' : 'h-px',
+          )}
+        />
+        <Panel id={node.b.id} order={2} minSize={15} className="flex min-h-0 min-w-0 flex-col">
+          {renderLayout(node.b)}
+        </Panel>
+      </PanelGroup>
+    )
+  }
 
   return (
     <>
@@ -639,6 +1020,14 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
                   variant="ghost"
                   size="icon"
                   className="h-6 w-6 text-zinc-500"
+                  title="Download workspace as ZIP"
+                  onClick={() => downloadFolder('')}>
+                  <Download className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 text-zinc-500"
                   title="Refresh"
                   onClick={() => {
                     loadedRef.current.clear()
@@ -657,7 +1046,7 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
                   indent={14}
                   onToggle={onToggle}
                   onRename={handleRename}
-                  onMove={handleMove}>
+                  onMove={handleTreeMove}>
                   {NodeRenderer}
                 </Tree>
               </div>
@@ -665,109 +1054,28 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
 
             <PanelResizeHandle className="w-px bg-zinc-200 transition-colors hover:bg-blue-400 data-[resize-handle-state=drag]:bg-blue-500" />
 
-            {/* Right: tabbed editor */}
+            {/* Right: editor groups */}
             <Panel minSize={30} className="flex min-w-0 flex-col">
-              <div className="flex shrink-0 items-center overflow-x-auto border-b bg-zinc-50">
-                {tabs.map((t) => (
-                  <ContextMenu key={t.path}>
-                    <ContextMenuTrigger asChild>
-                      {/* biome-ignore lint/a11y/noStaticElementInteractions: editor tab is a click/keyboard target with a nested close button (cannot be a <button>) */}
-                      <div
-                        onClick={() => setActivePath(t.path)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            setActivePath(t.path)
-                          }
-                        }}
-                        className={cn(
-                          'flex max-w-[14rem] cursor-pointer items-center gap-1 border-r px-3 py-1.5 text-[13px]',
-                          activePath === t.path ? 'bg-white text-zinc-900' : 'text-zinc-500 hover:bg-zinc-100',
-                        )}
-                        title={t.path}>
-                        {t.saving || t.loading ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                        <span className="truncate">{t.name}</span>
-                        {isDirty(t) ? <span className="ml-1 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500" /> : null}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            requestCloseTab(t.path)
-                          }}
-                          className="ml-1 rounded p-0.5 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700"
-                          aria-label={`Close ${t.name}`}>
-                          <X className="h-3 w-3" />
-                        </button>
-                      </div>
-                    </ContextMenuTrigger>
-                    <ContextMenuContent>
-                      <ContextMenuItem onSelect={() => requestCloseTab(t.path)}>Close</ContextMenuItem>
-                      <ContextMenuItem
-                        disabled={tabs.length < 2}
-                        onSelect={() => requestCloseTabs(tabs.filter((x) => x.path !== t.path).map((x) => x.path))}>
-                        Close Others
-                      </ContextMenuItem>
-                      <ContextMenuItem onSelect={() => requestCloseTabs(tabs.map((x) => x.path))}>
-                        Close All
-                      </ContextMenuItem>
-                    </ContextMenuContent>
-                  </ContextMenu>
-                ))}
-                {activeTab ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="ml-auto mr-1 h-7 gap-1 text-[12px] text-zinc-600"
-                    disabled={!isDirty(activeTab) || activeTab.saving}
-                    onClick={() => void saveTab(activeTab.path)}>
-                    {activeTab.saving ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Save className="h-3.5 w-3.5" />
-                    )}
-                    Save
-                  </Button>
-                ) : null}
-              </div>
-
-              <div className="relative min-h-0 flex-1 bg-white">
-                {activeTab == null ? (
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragStart={onDragStart}
+                onDragEnd={onDragEnd}>
+                {layout ? (
+                  renderLayout(layout)
+                ) : (
                   <div className="flex h-full items-center justify-center text-sm text-zinc-400">
                     Select a file from the tree to open it.
                   </div>
-                ) : activeTab.loading ? (
-                  <div className="flex h-full items-center justify-center gap-2 text-sm text-zinc-500">
-                    <Loader2 className="h-4 w-4 animate-spin" /> Opening {activeTab.name}...
-                  </div>
-                ) : activeTab.isBinary ? (
-                  <div className="flex h-full items-center justify-center text-sm text-zinc-400">
-                    Binary file -- opened read-only (not editable).
-                  </div>
-                ) : (
-                  <>
-                    {activeTab.error ? (
-                      <div className="border-b border-red-200 bg-red-50 px-3 py-1 text-[12px] text-red-700">
-                        {activeTab.error}
-                      </div>
-                    ) : null}
-                    <Editor
-                      path={activeTab.path}
-                      value={activeTab.content}
-                      theme="vs"
-                      onChange={onEditorChange}
-                      onMount={handleMount}
-                      options={{
-                        readOnly: false,
-                        minimap: { enabled: false },
-                        fontSize: 13,
-                        automaticLayout: true,
-                        scrollBeyondLastLine: false,
-                        tabSize: 2,
-                      }}
-                    />
-                  </>
                 )}
-              </div>
+                <DragOverlay>
+                  {dragTab ? (
+                    <div className="rounded border bg-white px-3 py-1.5 text-[13px] text-zinc-700 shadow">
+                      {dragTab.name}
+                    </div>
+                  ) : null}
+                </DragOverlay>
+              </DndContext>
             </Panel>
           </PanelGroup>
         </DialogContent>
@@ -868,7 +1176,7 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
             <AlertDialogCancel>Keep editing</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                if (pendingCloseTab) removeTab(pendingCloseTab)
+                if (pendingCloseTab) removeTabsFrom(pendingCloseTab.groupId, [pendingCloseTab.path])
                 setPendingCloseTab(null)
               }}>
               Discard
@@ -877,7 +1185,7 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Overlay-close warning: confirm discards edits and resets tabs to opened state (issue 1) */}
+      {/* Overlay-close warning: confirm discards edits and resets tabs to opened state */}
       <AlertDialog open={leaveConfirm} onOpenChange={(o) => !o && setLeaveConfirm(false)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -894,14 +1202,14 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Bulk Close All / Close Others when some target tabs are unsaved (issue 2) */}
+      {/* Bulk Close All / Close Others when some target tabs are unsaved */}
       <AlertDialog open={pendingBulkClose !== null} onOpenChange={(o) => !o && setPendingBulkClose(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
             <AlertDialogDescription>
               {pendingBulkClose
-                ? `${pendingBulkClose.filter((p) => tabs.some((t) => t.path === p && isDirty(t))).length} of the tabs being closed have unsaved changes. Closing them will discard those changes.`
+                ? `${pendingBulkClose.paths.filter((p) => groups[pendingBulkClose.groupId]?.tabs.some((t) => t.path === p && isDirty(t))).length} of the tabs being closed have unsaved changes. Closing them will discard those changes.`
                 : ''}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -909,7 +1217,7 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
             <AlertDialogCancel>Keep editing</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                if (pendingBulkClose) doCloseTabs(pendingBulkClose)
+                if (pendingBulkClose) removeTabsFrom(pendingBulkClose.groupId, pendingBulkClose.paths)
                 setPendingBulkClose(null)
               }}>
               Close anyway
@@ -917,6 +1225,259 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </>
+  )
+}
+
+// ---- Inner components (need @dnd-kit hooks per group / tab) ----
+
+interface GroupViewProps {
+  group: EditorGroup
+  isActiveGroup: boolean
+  dragging: boolean
+  onFocusGroup: (groupId: string) => void
+  onActivateTab: (path: string) => void
+  onCloseTab: (groupId: string, path: string) => void
+  onCloseTabs: (groupId: string, paths: string[]) => void
+  onSplit: (groupId: string) => void
+  onSave: (path: string) => void
+  onEditorChange: (value: string | undefined) => void
+  onEditorMount: OnMount
+  onDownloadTab: (path: string) => void
+}
+
+function GroupView({
+  group,
+  isActiveGroup,
+  dragging,
+  onFocusGroup,
+  onActivateTab,
+  onCloseTab,
+  onCloseTabs,
+  onSplit,
+  onSave,
+  onEditorChange,
+  onEditorMount,
+  onDownloadTab,
+}: GroupViewProps) {
+  const activeTab = group.tabs.find((t) => t.path === group.activePath) ?? null
+  const { setNodeRef: setStripRef, isOver: stripOver } = useDroppable({
+    id: `strip:${group.id}`,
+    data: { type: 'strip', groupId: group.id },
+  })
+
+  return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: clicking the group focuses it (keyboard focus handled by inner controls)
+    <div className="flex h-full min-h-0 flex-col" onMouseDown={() => onFocusGroup(group.id)}>
+      <div
+        ref={setStripRef}
+        className={cn(
+          'flex shrink-0 items-center overflow-x-auto border-b bg-zinc-50',
+          stripOver && 'bg-blue-50 ring-1 ring-inset ring-blue-300',
+        )}>
+        {group.tabs.map((t) => (
+          <DraggableTab
+            key={t.path}
+            tab={t}
+            groupId={group.id}
+            active={group.activePath === t.path}
+            onActivate={onActivateTab}
+            onClose={(path) => onCloseTab(group.id, path)}
+            onCloseOthers={() =>
+              onCloseTabs(
+                group.id,
+                group.tabs.filter((x) => x.path !== t.path).map((x) => x.path),
+              )
+            }
+            onCloseAll={() =>
+              onCloseTabs(
+                group.id,
+                group.tabs.map((x) => x.path),
+              )
+            }
+            onDownload={onDownloadTab}
+            disableCloseOthers={group.tabs.length < 2}
+          />
+        ))}
+        <div className="ml-auto flex items-center pr-1">
+          {activeTab && isDirty(activeTab) ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 text-[12px] text-zinc-600"
+              disabled={activeTab.saving}
+              onClick={() => onSave(activeTab.path)}>
+              {activeTab.saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+              Save
+            </Button>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-zinc-500"
+            title="Split editor right"
+            disabled={group.tabs.length < 2}
+            onClick={() => onSplit(group.id)}>
+            <SplitSquareHorizontal className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </div>
+
+      <div className={cn('relative min-h-0 flex-1 bg-white', isActiveGroup && 'ring-1 ring-inset ring-blue-200')}>
+        {activeTab == null ? (
+          <div className="flex h-full items-center justify-center text-sm text-zinc-400">
+            Select a file from the tree to open it.
+          </div>
+        ) : activeTab.loading ? (
+          <div className="flex h-full items-center justify-center gap-2 text-sm text-zinc-500">
+            <Loader2 className="h-4 w-4 animate-spin" /> Opening {activeTab.name}...
+          </div>
+        ) : activeTab.error ? (
+          <div className="flex h-full flex-col">
+            <div className="border-b border-red-200 bg-red-50 px-3 py-1 text-[12px] text-red-700">
+              {activeTab.error}
+            </div>
+            {activeTab.kind === 'text' && !activeTab.isBinary ? (
+              <Editor
+                path={activeTab.path}
+                value={activeTab.content}
+                theme="vs"
+                onChange={onEditorChange}
+                onMount={onEditorMount}
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: 13,
+                  automaticLayout: true,
+                  scrollBeyondLastLine: false,
+                  tabSize: 2,
+                }}
+              />
+            ) : null}
+          </div>
+        ) : activeTab.kind === 'image' && activeTab.blobUrl ? (
+          <ImageViewer url={activeTab.blobUrl} name={activeTab.name} />
+        ) : activeTab.kind === 'pdf' && activeTab.blobUrl ? (
+          <PdfViewer url={activeTab.blobUrl} name={activeTab.name} />
+        ) : activeTab.isBinary ? (
+          <div className="flex h-full items-center justify-center text-sm text-zinc-400">
+            Binary file -- opened read-only (not editable).
+          </div>
+        ) : (
+          <Editor
+            path={activeTab.path}
+            value={activeTab.content}
+            theme="vs"
+            onChange={onEditorChange}
+            onMount={onEditorMount}
+            options={{
+              minimap: { enabled: false },
+              fontSize: 13,
+              automaticLayout: true,
+              scrollBeyondLastLine: false,
+              tabSize: 2,
+            }}
+          />
+        )}
+
+        {/* Edge drop zones for split-on-drop (only while a tab is being dragged). */}
+        {dragging ? <EdgeZones groupId={group.id} /> : null}
+      </div>
+    </div>
+  )
+}
+
+interface DraggableTabProps {
+  tab: Tab
+  groupId: string
+  active: boolean
+  onActivate: (path: string) => void
+  onClose: (path: string) => void
+  onCloseOthers: () => void
+  onCloseAll: () => void
+  onDownload: (path: string) => void
+  disableCloseOthers: boolean
+}
+
+function DraggableTab({
+  tab,
+  groupId,
+  active,
+  onActivate,
+  onClose,
+  onCloseOthers,
+  onCloseAll,
+  onDownload,
+  disableCloseOthers,
+}: DraggableTabProps) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `tab:${groupId}:${tab.path}`,
+    data: { groupId, path: tab.path, name: tab.name },
+  })
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: drag handle + click target with a nested close button (cannot be a <button>) */}
+        <div
+          ref={setNodeRef}
+          {...attributes}
+          {...listeners}
+          onClick={() => onActivate(tab.path)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              onActivate(tab.path)
+            }
+          }}
+          className={cn(
+            'flex max-w-[14rem] cursor-pointer items-center gap-1 border-r px-3 py-1.5 text-[13px]',
+            active ? 'bg-white text-zinc-900' : 'text-zinc-500 hover:bg-zinc-100',
+            isDragging && 'opacity-50',
+          )}
+          title={tab.path}>
+          {tab.saving || tab.loading ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+          <span className="truncate">{tab.name}</span>
+          {isDirty(tab) ? <span className="ml-1 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500" /> : null}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()
+              onClose(tab.path)
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="ml-1 rounded p-0.5 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700"
+            aria-label={`Close ${tab.name}`}>
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={() => onClose(tab.path)}>Close</ContextMenuItem>
+        <ContextMenuItem disabled={disableCloseOthers} onSelect={onCloseOthers}>
+          Close Others
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={onCloseAll}>Close All</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => onDownload(tab.path)}>
+          <Download className="h-4 w-4" /> Download
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
+function EdgeZones({ groupId }: { groupId: string }) {
+  const left = useDroppable({ id: `edge:${groupId}:left`, data: { type: 'edge', groupId, side: 'left' } })
+  const right = useDroppable({ id: `edge:${groupId}:right`, data: { type: 'edge', groupId, side: 'right' } })
+  const top = useDroppable({ id: `edge:${groupId}:top`, data: { type: 'edge', groupId, side: 'top' } })
+  const bottom = useDroppable({ id: `edge:${groupId}:bottom`, data: { type: 'edge', groupId, side: 'bottom' } })
+  const zone = 'absolute z-10 bg-blue-400/0 transition-colors'
+  const onCls = 'bg-blue-400/30'
+  return (
+    <>
+      <div ref={left.setNodeRef} className={cn(zone, 'left-0 top-0 h-full w-1/4', left.isOver && onCls)} />
+      <div ref={right.setNodeRef} className={cn(zone, 'right-0 top-0 h-full w-1/4', right.isOver && onCls)} />
+      <div ref={top.setNodeRef} className={cn(zone, 'left-1/4 top-0 h-1/3 w-1/2', top.isOver && onCls)} />
+      <div ref={bottom.setNodeRef} className={cn(zone, 'bottom-0 left-1/4 h-1/3 w-1/2', bottom.isOver && onCls)} />
     </>
   )
 }

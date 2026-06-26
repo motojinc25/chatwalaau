@@ -11,18 +11,29 @@ localhost-first dev zero-config (UDR-0069 D4).
 Endpoints (all under the existing ``/api/workspace`` prefix):
     GET    /api/workspace/tree?dir=<rel>     -- one directory level (lazy).
     GET    /api/workspace/file?path=<rel>    -- read a text file + metadata.
+    GET    /api/workspace/raw?path=<rel>     -- stream one file's raw bytes (download/preview).
+    GET    /api/workspace/archive?path=<rel> -- stream a directory as an on-the-fly ZIP.
     PUT    /api/workspace/file               -- save content (optional mtime guard).
     POST   /api/workspace/entry              -- create a file or a directory.
     POST   /api/workspace/move               -- rename / move (also drag-move).
     DELETE /api/workspace/entry?path=<rel>   -- delete a file or a directory.
+
+CTR-0136 v2 (PRP-0093, UDR-0071) adds the two GET download/preview reads (``/raw`` and
+``/archive``); both stay inside the same CTR-0031 jail and double gate. ``/raw`` powers the
+PDF/image preview tabs and single-file download; ``/archive`` powers folder download. They are
+bounded by FILE_EXPLORER_MAX_DOWNLOAD_BYTES / _ENTRIES (separate from the editor open/save cap).
 """
 
+from collections.abc import Iterator
 import logging
+import mimetypes
 import os
 from pathlib import Path
 import shutil
+import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.auth import verify_api_key
@@ -63,6 +74,37 @@ def _rel_of(base: str, abs_path: str) -> str:
     """Workspace-relative POSIX path for an absolute path inside the jail."""
     rel = os.path.relpath(abs_path, base)
     return "" if rel == "." else rel.replace("\\", "/")
+
+
+def _ascii_filename(name: str, fallback: str = "download") -> str:
+    """ASCII-safe Content-Disposition filename (non-ASCII / quotes stripped)."""
+    cleaned = "".join(c for c in name if c.isascii() and c not in '"\\\r\n').strip()
+    return cleaned or fallback
+
+
+class _ZipSink:
+    """Write-only sink for streaming a ZIP (CTR-0136 v2, UDR-0071 D2).
+
+    Having no seek()/tell() forces ``zipfile`` into non-seekable mode (data descriptors,
+    no seek-back to patch local headers), so the bytes yielded to the client form a valid
+    archive. ``take()`` drains the buffer between entries to keep memory bounded.
+    """
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+
+    def write(self, data: bytes) -> int:
+        self._buf += data
+        return len(data)
+
+    def flush(self) -> None:
+        # File-like protocol no-op (zipfile may call flush()).
+        pass
+
+    def take(self) -> bytes:
+        chunk = bytes(self._buf)
+        self._buf.clear()
+        return chunk
 
 
 # ---- Read endpoints (auth-gated; loopback bypass) ----
@@ -135,6 +177,116 @@ async def read_file(path: str) -> dict:
 
     content = raw.decode("utf-8", errors="replace")
     return {"path": rel, "content": content, "size": size, "mtime": mtime, "encoding": "utf-8", "is_binary": False}
+
+
+# ---- Download / preview reads (CTR-0136 v2, PRP-0093, UDR-0071 D2) ----
+
+
+@router.get("/raw", dependencies=[Depends(verify_api_key)])
+async def read_raw(path: str) -> FileResponse:
+    """Stream a single file's raw bytes (download + PDF/image preview).
+
+    Used by the PDF/image viewer tabs (fetched as a blob URL) and by single-file
+    download. Streamed via FileResponse (no full in-memory read); the Content-Type is
+    guessed from the extension. Bounded by FILE_EXPLORER_MAX_DOWNLOAD_BYTES (UDR-0071 D2).
+    """
+    base = _explorer_base()
+    safe = _safe(base, path)
+    p = Path(safe)
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        size = p.stat().st_size
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="failed to stat file") from exc
+
+    cap = settings.file_explorer_max_download_bytes
+    if size > cap:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large to download ({size} bytes; limit {cap}).",
+        )
+
+    media_type = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+    # inline so the SPA can render it in a viewer (it still saves via <a download> for download)
+    return FileResponse(
+        safe,
+        media_type=media_type,
+        headers={"Content-Disposition": f'inline; filename="{_ascii_filename(p.name)}"'},
+    )
+
+
+@router.get("/archive", dependencies=[Depends(verify_api_key)])
+async def read_archive(path: str = "") -> StreamingResponse:
+    """Stream a directory as an on-the-fly ZIP (folder download).
+
+    The directory subtree is walked within the jail, bounded by
+    FILE_EXPLORER_MAX_DOWNLOAD_ENTRIES (file count) and FILE_EXPLORER_MAX_DOWNLOAD_BYTES
+    (total uncompressed); an over-cap folder is refused with 400. The ZIP is streamed
+    (no full in-memory buffer) (UDR-0071 D2). ``path=""`` archives the workspace root.
+    """
+    base = _explorer_base()
+    safe = _safe(base, path)
+    p = Path(safe)
+    if not p.is_dir():
+        raise HTTPException(status_code=400, detail="Path is not a directory")
+
+    max_entries = max(1, settings.file_explorer_max_download_entries)
+    max_bytes = settings.file_explorer_max_download_bytes
+
+    # Collect the file list up front so caps are enforced BEFORE streaming any bytes.
+    members: list[tuple[str, str]] = []  # (absolute path, arcname)
+    total = 0
+    root_name = p.name or "workspace"
+    for fp in p.rglob("*"):
+        # Skip symlinks defensively (do not follow out of the jail) and non-files.
+        if fp.is_symlink() or not fp.is_file():
+            continue
+        try:
+            total += fp.stat().st_size
+        except OSError:
+            continue
+        if len(members) >= max_entries:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Folder has too many files to download (limit {max_entries}).",
+            )
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Folder too large to download (over {max_bytes} bytes uncompressed).",
+            )
+        arc = f"{root_name}/{fp.relative_to(p).as_posix()}"
+        members.append((str(fp), arc))
+
+    def _stream() -> Iterator[bytes]:
+        # A write-only sink (no seek/tell) so zipfile streams in non-seekable mode --
+        # it writes data descriptors and never seeks back, keeping entry offsets
+        # consistent in the concatenated output. (A seekable BytesIO that is truncated
+        # between entries corrupts the central-directory offsets: namelist() still works
+        # but EXTRACTION fails, e.g. Windows "cannot open the folder".)
+        sink = _ZipSink()
+        with zipfile.ZipFile(sink, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for abs_path, arc in members:
+                try:
+                    zf.write(abs_path, arc)
+                except OSError:
+                    continue
+                chunk = sink.take()
+                if chunk:
+                    yield chunk
+        # Closing the ZipFile (end of the with block) writes the central directory.
+        tail = sink.take()
+        if tail:
+            yield tail
+
+    logger.info("File Explorer archiving %d files from %s", len(members), _rel_of(base, safe))
+    return StreamingResponse(
+        _stream(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{_ascii_filename(root_name)}.zip"'},
+    )
 
 
 # ---- Mutating endpoints (consume CTR-0083) ----
