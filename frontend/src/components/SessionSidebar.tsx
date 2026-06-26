@@ -652,6 +652,11 @@ export function SessionSidebar({
                       API
                     </span>
                   )}
+                  {session.source === 'teams' && (
+                    <span className="inline-block shrink-0 rounded bg-indigo-100 px-1 py-0.5 text-[10px] font-medium leading-none text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300">
+                      Teams
+                    </span>
+                  )}
                 </p>
               </>
             )}

@@ -157,6 +157,11 @@ export function SessionSearchDialog({ sessions, open, onOpenChange, onSelect }: 
                         API
                       </span>
                     )}
+                    {session.source === 'teams' && (
+                      <span className="inline-block shrink-0 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300">
+                        Teams
+                      </span>
+                    )}
                   </span>
                 </div>
                 {session.snippet && (

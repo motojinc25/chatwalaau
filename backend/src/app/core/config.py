@@ -324,6 +324,32 @@ class Settings(BaseSettings):
     cron_run_timeout_seconds: int = 900  # per-run subprocess wall-clock timeout
     cron_output_max_bytes: int = 1_048_576  # cap per captured stdout/stderr log
 
+    # Microsoft Teams Integration (CTR-0006, CTR-0138..0141, PRP-0092, UDR-0070)
+    # First external chat-channel integration (FEAT-0050). The whole feature is OFF
+    # unless TEAMS_ENABLED (UDR-0070 D10): when false the Teams router is not mounted
+    # and the microsoft-teams-apps SDK is not constructed -- byte-for-byte unchanged.
+    teams_enabled: bool = False
+    # Bot/app CLIENT_ID (Entra application/client id); the Bot Framework JWT audience.
+    teams_app_id: str = ""
+    # CLIENT_SECRET (Entra client secret). Secret; never logged.
+    teams_app_password: str = ""
+    # Entra TENANT_ID.
+    teams_tenant_id: str = ""
+    # Comma-separated Microsoft Entra ID Object IDs (aadObjectId) allowed to use the
+    # bot; empty = everyone (UDR-0070 D5). Authorization is per-sender, after JWT.
+    teams_allowed_users: str = ""
+    # Inbound path mounted into the app and registered as the bot messaging endpoint
+    # (with the tunnel host). Default /api/teams/messages (UDR-0070 D3).
+    teams_messaging_endpoint_path: str = "/api/teams/messages"
+    # Max characters per outbound Teams message chunk (Teams size-limit guard,
+    # UDR-0070 D6). A longer reply is split into ordered chunks.
+    teams_max_reply_chars: int = 25000
+
+    @property
+    def teams_allowed_users_set(self) -> frozenset[str]:
+        """Parse TEAMS_ALLOWED_USERS into a set of Entra Object IDs (empty = all)."""
+        return frozenset(u.strip() for u in self.teams_allowed_users.split(",") if u.strip())
+
     # RAG Pipeline (CTR-0075, PRP-0037)
     chroma_dir: str = ".chroma"
     rag_collection_name: str = "default"

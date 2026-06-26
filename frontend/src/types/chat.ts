@@ -113,7 +113,7 @@ export interface SessionSummary {
   image_count: number
   pinned_at: string | null
   folder_id: string | null
-  source?: 'ag-ui' | 'openai-api'
+  source?: 'ag-ui' | 'openai-api' | 'teams'
   /**
    * Auto Session Title pending state (PRP-0077, CTR-0109). True while the
    * background title task is running; drives the sidebar spinner. Cleared by

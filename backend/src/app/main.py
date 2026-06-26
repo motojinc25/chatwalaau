@@ -136,6 +136,14 @@ async def lifespan(_app: FastAPI):
         from app.cron.engine import start_scheduler
 
         start_scheduler()
+    # Microsoft Teams integration (PRP-0092, CTR-0138, UDR-0070 D2). When
+    # TEAMS_ENABLED, register the SDK messaging route onto this app + set up Bot
+    # Framework JWT validation WITHOUT starting the SDK's own server (app.initialize,
+    # not app.start). No-op when disabled.
+    if settings.teams_enabled:
+        from app.teams import initialize_teams
+
+        await initialize_teams()
     yield
     # Shutdown: stop the cron scheduler (cancel loop + drain in-flight runs).
     if settings.cron_enabled:
@@ -354,6 +362,17 @@ app.include_router(cron_router)
 from app.notifications import register_notifications_endpoint
 
 register_notifications_endpoint(app)
+
+# Microsoft Teams integration (CTR-0138, PRP-0092, UDR-0070). NO-OP unless
+# TEAMS_ENABLED: when disabled the router is not mounted and the microsoft-teams-apps
+# SDK is never imported/constructed -- byte-for-byte unchanged (UDR-0070 D10). When
+# enabled, the inbound POST /api/teams/messages is mounted into THIS FastAPI app
+# (ChatWalaʻau owns the HTTP lifecycle; the SDK owns Teams protocol handling -- D2).
+# The endpoint is Bot Framework JWT-authenticated and exempt from CTR-0083 (CAP-009,
+# D3). The Teams adapter reuses this app's agent registry unchanged.
+from app.teams import register_teams
+
+register_teams(app, agent_registry=agent_registry)
 
 # OpenAI-compatible Responses API (CTR-0057, PRP-0030)
 register_openai_api(app, agent_registry=agent_registry)

@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.87.0"
+version = "0.88.1"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -43,6 +43,13 @@ dependencies = [
     # IANA timezone database so CRON_TIMEZONE named zones work on hosts without a
     # system zoneinfo (Windows). Data-only; code degrades to local tz if absent.
     "tzdata>=2024.1",
+    # Microsoft Teams integration (PRP-0092, FEAT-0050, UDR-0070). The Microsoft
+    # Teams SDK for Python (Teams AI Library v2). Installed by DEFAULT (operator
+    # decision); it transitively pulls microsoft-teams-api / -cards / -common, so
+    # only the top-level package is declared (-botbuilder is not used). The SDK is
+    # still IMPORTED only when TEAMS_ENABLED (lazy, UDR-0070 D10); the floor is
+    # pinned to the Python-3.12-verified release (UDR-0070 D12).
+    "microsoft-teams-apps>=2.0.13",
 ]
 
 [project.optional-dependencies]

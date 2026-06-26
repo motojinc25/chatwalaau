@@ -1002,7 +1002,7 @@ wheels = [
 
 [[package]]
 name = "chatwalaau"
-version = "0.87.0"
+version = "0.88.1"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework" },
@@ -1017,6 +1017,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "httpx-sse" },
+    { name = "microsoft-teams-apps" },
     { name = "pydantic-settings" },
     { name = "pymupdf" },
     { name = "python-dotenv" },
@@ -1052,6 +1053,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "httpx-sse", specifier = ">=0.4.0" },
+    { name = "microsoft-teams-apps", specifier = ">=2.0.13" },
     { name = "pip-system-certs", marker = "extra == 'corp'", specifier = ">=4.0" },
     { name = "pydantic-settings", specifier = ">=2.9.0" },
     { name = "pymupdf", specifier = ">=1.25.0" },
@@ -1225,6 +1227,24 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/96/93/682d2b43c1d5f1406ed048f377c0fc9fc8f7b0447a478d5c65ab3d3a66eb/cryptography-46.0.5-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:ced80795227d70549a411a4ab66e8ce307899fad2220ce5ab2f296e687eacde9", size = 4667123, upload-time = "2026-02-10T19:18:15.886Z" },
     { url = "https://files.pythonhosted.org/packages/45/2d/9c5f2926cb5300a8eefc3f4f0b3f3df39db7f7ce40c8365444c49363cbda/cryptography-46.0.5-cp38-abi3-win32.whl", hash = "sha256:02f547fce831f5096c9a567fd41bc12ca8f11df260959ecc7c3202555cc47a72", size = 3010220, upload-time = "2026-02-10T19:18:17.361Z" },
     { url = "https://files.pythonhosted.org/packages/48/ef/0c2f4a8e31018a986949d34a01115dd057bf536905dca38897bacd21fac3/cryptography-46.0.5-cp38-abi3-win_amd64.whl", hash = "sha256:556e106ee01aa13484ce9b0239bca667be5004efb0aabbed28d353df86445595", size = 3467050, upload-time = "2026-02-10T19:18:18.899Z" },
+]
+
+[[package]]
+name = "dependency-injector"
+version = "4.49.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d1/84/5e05c2997a196155b86446d48b9e5b2a055087c574746389fdc3c530f5b5/dependency_injector-4.49.1.tar.gz", hash = "sha256:b4614fa3731ffec00a381aebc1d17317b0a3a407aa679f164a3ea03c347de691", size = 1171204, upload-time = "2026-06-18T17:51:48.221Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/1e/9f3abdf0ac42cac1c319b210aa060669ea9d29f06caf00c27fe72fa5335c/dependency_injector-4.49.1-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:b1b71d6f500c001230a53e5bee01ea01c6d3bb2089f64ecc841b42672924a19a", size = 1771519, upload-time = "2026-06-18T17:50:58.476Z" },
+    { url = "https://files.pythonhosted.org/packages/68/20/fc1812f20ec75af2d4b5e391e93f15621af3102da46142e26177eb506b32/dependency_injector-4.49.1-cp310-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:10e481880b307a6a438c1cc7b0a1fa8754247239ef5a2e8fe82bd8a1e76e7682", size = 1854593, upload-time = "2026-06-18T17:51:02.069Z" },
+    { url = "https://files.pythonhosted.org/packages/32/ab/b1e1826aacc37d07ba0101230de7b5cbbb5ac6364b78ca3957f0a90d6a51/dependency_injector-4.49.1-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e05da5bc73a3e026f962a223672002934c0f415064b6e2c3db0b255e46c7b521", size = 1767354, upload-time = "2026-06-18T17:51:03.715Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/ab/1d873876e9adb612f8fba1e801820bf5a69cd7d864e01dca81651edd40f6/dependency_injector-4.49.1-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:5760390d295af0b605aacd02bb8ac2e9fe206f9c4fbe7770d0843a6cbfb9c2cd", size = 1748758, upload-time = "2026-06-18T17:51:05.287Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/ef/d715f4cd2e947fddc4c8763be1c4099793caf38aa1a099b6d621ecfeb768/dependency_injector-4.49.1-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:ba7e94e4323219c93dac35aabba7efa4e91c9afeac044b1d50bdc66a00a07238", size = 1845636, upload-time = "2026-06-18T17:51:07.023Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/32/03d1e5e0c6b79eaabf2ed4155302df05832e54789cc9f670cc62af20897b/dependency_injector-4.49.1-cp310-abi3-win32.whl", hash = "sha256:5a6e3a0df8cff636da3d7212473e30dff897c5bdbca2dd3049b5363012a495fa", size = 1548655, upload-time = "2026-06-18T17:51:08.721Z" },
+    { url = "https://files.pythonhosted.org/packages/93/51/ce3ca96314f93f44358523cb8cdf81c8c1e002b4e097141e460bc598c87f/dependency_injector-4.49.1-cp310-abi3-win_amd64.whl", hash = "sha256:153f6b8d1db35d1fc9b001e41564a47ab2a7708038fecefadf3afada8ec7f814", size = 1676934, upload-time = "2026-06-18T17:51:10.465Z" },
 ]
 
 [[package]]
@@ -2116,6 +2136,63 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/0b/88/aa4af5d7e72c5e985497178a24c3d1f45757d31ccd26117121bd32ab51bb/microsoft_agents_hosting_core-0.9.0.dev1.tar.gz", hash = "sha256:77e4eb428552323db6395a5ce6cf3b626f07ea3b9392d78a467b0d98e086c9e3", size = 94303, upload-time = "2026-02-25T09:07:13.303Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2d/37/81de676a4a8bf7e7bc086d9ff9939fae05c1400bdc41e2219b660001c247/microsoft_agents_hosting_core-0.9.0.dev1-py3-none-any.whl", hash = "sha256:e39543bc49a5666fb05c5a9872b44d0158cd278e229c6c1c917eb2e9a9f88582", size = 139672, upload-time = "2026-02-25T09:07:23.737Z" },
+]
+
+[[package]]
+name = "microsoft-teams-api"
+version = "2.0.13.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "microsoft-teams-cards" },
+    { name = "microsoft-teams-common" },
+    { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e1/7f/dc1995f72a8d23e723b168db20bac67b819ef2fa734bc23f63bc8086c41b/microsoft_teams_api-2.0.13.4.tar.gz", hash = "sha256:d16f88ae90f65bcce83ede9ecc57773f7b1a19cbecde63be624b586b59e34fc9", size = 51779, upload-time = "2026-06-08T19:24:02.661Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/15/e1a1369a22c265b52da3ac4b3ee67b5c02911300db045894868bd7be932f/microsoft_teams_api-2.0.13.4-py3-none-any.whl", hash = "sha256:be52ef7765ea5851e0982de1ff6b1192869c85fc74e890ae20029bd99064b532", size = 149825, upload-time = "2026-06-08T19:24:13.202Z" },
+]
+
+[[package]]
+name = "microsoft-teams-apps"
+version = "2.0.13.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "dependency-injector" },
+    { name = "fastapi" },
+    { name = "microsoft-teams-api" },
+    { name = "microsoft-teams-common" },
+    { name = "msal" },
+    { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "python-dotenv" },
+    { name = "uvicorn" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/61/0a/733f05f8decee2da6e53ee38757e742520ae56363bc2d006b309cdbf9cfe/microsoft_teams_apps-2.0.13.4.tar.gz", hash = "sha256:d0b12e5e82024cffd3739b329b098b98a08803753eb5484bf96dbb6ce1237e04", size = 91366, upload-time = "2026-06-08T19:24:04.591Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3a/d4/3c4205258642035d160c09f598a302260776dcb6d5bdf659eea7c6066d5e/microsoft_teams_apps-2.0.13.4-py3-none-any.whl", hash = "sha256:db16f714ec658b592929c6386a29792e90bb73840732f8ae65a198cda1fea96c", size = 71406, upload-time = "2026-06-08T19:24:15.034Z" },
+]
+
+[[package]]
+name = "microsoft-teams-cards"
+version = "2.0.13.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/7f/cce9633f635d9e1b2318ce2146a804a14a46c9e34e855c3784beb8ab39b3/microsoft_teams_cards-2.0.13.4.tar.gz", hash = "sha256:de54956a2afbbcf187f2531459967515b4f4743fa784bd0f454eaff1ac675c90", size = 28108, upload-time = "2026-06-08T19:24:07.841Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/09/95cad44d4417e33df11a15c82ca1bde442c1f1f77396f936f18896f116c1/microsoft_teams_cards-2.0.13.4-py3-none-any.whl", hash = "sha256:b8b887466c8144675ff5704064daf05ec3ebdf4d322658ab9a25bfc1373d7909", size = 29617, upload-time = "2026-06-08T19:24:17.373Z" },
+]
+
+[[package]]
+name = "microsoft-teams-common"
+version = "2.0.13.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6c/f1/a32821cfdde6c0d33a1e4022492a2211af670a81ec1fab727c49cddd4f7a/microsoft_teams_common-2.0.13.4.tar.gz", hash = "sha256:ed3175316f77f083a500da0a84ddf53ac31c6de008a252f0cfd86bdb70120bf3", size = 11122, upload-time = "2026-06-08T19:24:09.694Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/04/859b3d7fadd1d61ab581f79afb6125c16c60cecf2a2e6bbb2ebbcfd34f80/microsoft_teams_common-2.0.13.4-py3-none-any.whl", hash = "sha256:19524ec75587d797d07c5a78e9b72921b6d58f33d39512ca2d33468160fd0d82", size = 16588, upload-time = "2026-06-08T19:24:18.325Z" },
 ]
 
 [[package]]
@@ -3145,11 +3222,11 @@ wheels = [
 
 [[package]]
 name = "pyjwt"
-version = "2.11.0"
+version = "2.13.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/5c/5a/b46fa56bf322901eee5b0454a34343cdbdae202cd421775a8ee4e42fd519/pyjwt-2.11.0.tar.gz", hash = "sha256:35f95c1f0fbe5d5ba6e43f00271c275f7a1a4db1dab27bf708073b75318ea623", size = 98019, upload-time = "2026-01-30T19:59:55.694Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3b/81/58d0ac84e1ef3a3843791d6954d94c0b33d526c75eeb1efbce9d0a4c4077/pyjwt-2.13.0.tar.gz", hash = "sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423", size = 107515, upload-time = "2026-05-21T19:54:36.618Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6f/01/c26ce75ba460d5cd503da9e13b21a33804d38c2165dec7b716d06b13010c/pyjwt-2.11.0-py3-none-any.whl", hash = "sha256:94a6bde30eb5c8e04fee991062b534071fd1439ef58d2adc9ccb823e7bcd0469", size = 28224, upload-time = "2026-01-30T19:59:54.539Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl", hash = "sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728", size = 31274, upload-time = "2026-05-21T19:54:35.362Z" },
 ]
 
 [package.optional-dependencies]
