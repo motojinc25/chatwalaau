@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.89.0"
+version = "0.90.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -27,6 +27,12 @@ dependencies = [
     # support (PRP-0069, UDR-0045 D8). Already resolved transitively via
     # agent-framework-core[all]; declared explicitly to guarantee the capability.
     "agent-framework-anthropic>=1.0.0b260521",
+    # Declarative agents (PRP-0094, FEAT-0051, UDR-0072): the MAF AgentFactory front
+    # end (create_agent_from_yaml / create_agent_from_yaml_path) used to PARSE and
+    # VALIDATE declarative agent YAML. The runtime agent is built by ChatWalaʻau
+    # (UDR-0072 D2), so the package is used for schema validation only; the loader
+    # degrades gracefully to its own structural checks if it is unavailable.
+    "agent-framework-declarative>=1.0.0b260402",
     "azure-identity>=1.23.0",
     "httpx>=0.28.0",
     "elevenlabs>=2.39.0",

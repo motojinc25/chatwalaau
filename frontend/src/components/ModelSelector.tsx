@@ -1,5 +1,6 @@
 import { Check, ChevronDown } from 'lucide-react'
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useState } from 'react'
+import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { cn } from '@/lib/utils'
 
 interface ModelInfo {
@@ -36,13 +37,14 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, ModelSelectorProps>
   const [selectedModel, setSelectedModel] = useState<string>('')
   const [isOpen, setIsOpen] = useState(false)
 
-  // Fetch available models from backend
-  useEffect(() => {
+  // Fetch available models from backend. Reused on mount and on an agent switch
+  // (CTR-0144): a declarative agent may change the default model, so re-read it.
+  const loadModels = useCallback(() => {
     fetch('/api/model')
       .then((res) => res.json())
       .then((data: ModelInfo) => {
         setModelInfo(data)
-        // Restore per-session model from localStorage, or use default
+        // Restore per-session model from localStorage, or use the (possibly new) default.
         const stored = localStorage.getItem(`${MODEL_STORAGE_PREFIX}${threadId}`)
         const initial = stored && data.models.includes(stored) ? stored : data.default_model
         setSelectedModel(initial)
@@ -50,6 +52,18 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, ModelSelectorProps>
       })
       .catch(() => {})
   }, [threadId, onModelChange])
+
+  useEffect(() => {
+    loadModels()
+  }, [loadModels])
+
+  // Re-read /api/model when the active declarative agent changes so the selector
+  // reflects the new preferred default model immediately (CTR-0144, PRP-0094).
+  useEffect(() => {
+    const handler = () => loadModels()
+    window.addEventListener(ACTIVE_AGENT_CHANGED_EVENT, handler)
+    return () => window.removeEventListener(ACTIVE_AGENT_CHANGED_EVENT, handler)
+  }, [loadModels])
 
   const handleSelect = useCallback(
     (model: string) => {

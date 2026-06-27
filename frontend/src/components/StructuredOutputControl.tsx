@@ -1,5 +1,6 @@
 import { Braces, Check } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
+import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { cn } from '@/lib/utils'
 
 /**
@@ -37,6 +38,8 @@ interface ModelInfo {
   models: string[]
   default_model: string
   structured_output?: Record<string, StructuredCapability>
+  /** Active declarative agent's structured-output default (CTR-0144, PRP-0094). */
+  active_agent?: { output_format?: string; output_schema?: Record<string, unknown> | null }
 }
 
 interface StructuredOutputControlProps {
@@ -78,22 +81,46 @@ export function StructuredOutputControl({ threadId, selectedModel, onChange }: S
   const [schemaText, setSchemaText] = useState('')
   const [editorOpen, setEditorOpen] = useState(false)
 
-  useEffect(() => {
+  const loadInfo = useCallback(() => {
     fetch('/api/model')
       .then((res) => res.json())
       .then((data: ModelInfo) => setInfo(data))
       .catch(() => {})
   }, [])
 
-  // Restore the per-session selection once on mount / thread change.
+  useEffect(() => {
+    loadInfo()
+  }, [loadInfo])
+
+  // Re-read /api/model when the active declarative agent changes so the control
+  // reflects the new agent's structured-output default (CTR-0144, PRP-0094).
+  useEffect(() => {
+    const handler = () => loadInfo()
+    window.addEventListener(ACTIVE_AGENT_CHANGED_EVENT, handler)
+    return () => window.removeEventListener(ACTIVE_AGENT_CHANGED_EVENT, handler)
+  }, [loadInfo])
+
+  // Seed the selection: a per-session localStorage choice wins; otherwise the active
+  // declarative agent's structured-output default (its JSON Schema is shown in the
+  // editor); otherwise off. Re-runs when info refreshes (agent switch) or the thread
+  // changes.
   useEffect(() => {
     const storedFmt = localStorage.getItem(fmtKey(threadId))
-    const storedSchema = localStorage.getItem(schemaKey(threadId)) ?? ''
-    const fmt: OutputFormat =
-      storedFmt === 'json_object' || storedFmt === 'json_schema' ? (storedFmt as OutputFormat) : 'none'
-    setFormat(fmt)
-    setSchemaText(storedSchema)
-  }, [threadId])
+    if (storedFmt === 'json_object' || storedFmt === 'json_schema') {
+      setFormat(storedFmt as OutputFormat)
+      setSchemaText(localStorage.getItem(schemaKey(threadId)) ?? '')
+      return
+    }
+    const agent = info?.active_agent
+    if (agent?.output_format && agent.output_format !== 'none') {
+      const useSchema = agent.output_format === 'json_schema' && agent.output_schema
+      setFormat(useSchema ? 'json_schema' : 'json_object')
+      setSchemaText(agent.output_schema ? JSON.stringify(agent.output_schema, null, 2) : '')
+    } else {
+      setFormat('none')
+      setSchemaText('')
+    }
+  }, [info, threadId])
 
   // Report the resolved selection whenever it changes.
   useEffect(() => {

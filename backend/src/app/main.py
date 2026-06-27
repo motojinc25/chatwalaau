@@ -329,6 +329,17 @@ from app.skills.router import register_skills_management
 
 register_skills_management(app, agent_registry=agent_registry)
 
+# Declarative Agent Management API (CTR-0143, PRP-0094, UDR-0072) -- inventory +
+# activate + reload of declarative agents. The YAML is a SPECIFICATION; ChatWalaʻau
+# owns construction (the registry was already built from the active spec above, which
+# defaults to the CORE agent = current behavior). Switching rebuilds the registry
+# atomically (CTR-0070). Switching is SPA-only; API/Teams follow the active agent.
+from app.agent.declarative import active_spec, log_active_agent
+from app.agent.declarative.router import register_declarative_agents
+
+register_declarative_agents(app, agent_registry=agent_registry)
+log_active_agent()
+
 # Slash Commands API (CTR-0126, PRP-0088) -- read-only merged command inventory
 # of built-ins plus prompt-template-derived and skill-derived commands. Dispatch
 # is client-side per UDR-0066 D1, so no agent_registry is needed.
@@ -415,6 +426,28 @@ async def get_model_info():
         # PRP-0082): model -> {supported, native, fallback}. The UI enables /
         # annotates the structured-output control per model (UDR-0058 D6).
         "structured_output": providers.structured_output_map(agent_registry.available_models),
+        # Active declarative agent (CTR-0142 / CTR-0144, PRP-0094, UDR-0072): its
+        # mapped option defaults + structured-output default, so the SPA reflects the
+        # active agent's effort / verbosity / structured output and refreshes them when
+        # the agent is switched. Behavior is enforced server-side regardless (the AG-UI
+        # endpoint applies these as defaults); this is for the UI to display.
+        "active_agent": _active_agent_info(),
+    }
+
+
+def _active_agent_info() -> dict:
+    """Compact view of the active declarative agent for the model UI (PRP-0094)."""
+    spec = active_spec()
+    so = spec.structured_output or {}
+    return {
+        "id": spec.id,
+        "name": spec.name,
+        "model_options": spec.model_options_override or {},
+        "output_format": so.get("mode", "none"),
+        "has_schema": bool(so.get("schema")),
+        # The actual mapped JSON Schema so the SPA structured-output editor can show it
+        # when the agent declares one (CTR-0144, PRP-0094).
+        "output_schema": so.get("schema"),
     }
 
 

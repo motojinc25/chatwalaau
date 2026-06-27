@@ -17,13 +17,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_framework import Agent
 
 from app import providers
+from app.agent.declarative import active_spec
 from app.agent.identity import build_capability_block, load_identity
 from app.demo import is_demo_mode, resolve_demo_models
+
+if TYPE_CHECKING:
+    from app.agent.declarative.spec import DeclarativeAgentSpec
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +165,11 @@ class AgentRegistry:
         web search instruction exactly as before, and carry no per-provider
         reasoning options.
         """
+        # The active declarative agent (CTR-0142, UDR-0072) may override the
+        # persona (Identity slot #1). DEMO_MODE keeps the fixed demo model set and
+        # carries no provider options, so model_filter / model_options are not
+        # applied here (UDR-0072 D4); the CORE spec is a no-op (D13).
+        spec = active_spec()
         models = resolve_demo_models()
         configured = list(models)
         default = models[0]
@@ -176,7 +185,7 @@ class AgentRegistry:
             client = _build_chat_client(model)
             agent = Agent(
                 name=f"ChatWalaau-Agent-{model}",
-                instructions=self._bake_instructions(demo_caps),
+                instructions=self._bake_instructions(demo_caps, spec),
                 client=client,
                 tools=demo_tools,
                 context_providers=context_providers,
@@ -201,9 +210,21 @@ class AgentRegistry:
         v0.66.0 -- the hosted web search tool. The web search instruction is
         appended only when a web search tool is supplied.
         """
+        # Apply the active declarative agent spec (CTR-0142, UDR-0072): set the
+        # PREFERRED default model (D4), override the persona / Identity slot #1 (D6),
+        # layer the mapped model options (D5), and apply a default structured output
+        # (D5). model.id sets the default model but does NOT remove the other
+        # configured models -- the full set stays selectable so the model selector
+        # never vanishes (UDR-0072 D4, amended per operator feedback). The CORE spec
+        # is all-None, so this loop is byte-for-byte the prior build (D13).
+        spec = active_spec()
         resolved = providers.resolve_models()
         configured = [model for model, _ in resolved]
         default = configured[0] if configured else ""
+        if spec.model_filter:
+            preferred = next((m for m in spec.model_filter if m in configured), None)
+            if preferred:
+                default = preferred
         agents: dict[str, Agent] = {}
         caps: dict[str, str] = {}
 
@@ -213,11 +234,18 @@ class AgentRegistry:
             model_tools = [web_search, *tools] if web_search is not None else list(tools)
             model_caps = instructions + (WEB_SEARCH_INSTRUCTION if web_search is not None else "")
             caps[model] = model_caps
-            model_options = providers.build_model_options(model)
+            model_options = providers.build_model_options(model, spec.model_options_override)
+            if spec.structured_output is not None:
+                so = providers.build_structured_output(
+                    model,
+                    spec.structured_output.get("schema"),
+                    spec.structured_output.get("mode", "json_schema"),
+                )
+                model_options = providers.merge_generation_options(model_options, so)
 
             agent = Agent(
                 name=f"ChatWalaau-Agent-{model}",
-                instructions=self._bake_instructions(model_caps),
+                instructions=self._bake_instructions(model_caps, spec),
                 client=client,
                 tools=model_tools,
                 context_providers=context_providers,
@@ -240,10 +268,19 @@ class AgentRegistry:
             raise ValueError(msg)
         return agent
 
-    def _bake_instructions(self, capability_instructions: str) -> str:
+    def _bake_instructions(
+        self,
+        capability_instructions: str,
+        spec: DeclarativeAgentSpec | None = None,
+    ) -> str:
         """Return the agent-level (baked) instructions for one model (CTR-0105, CTR-0106).
 
-        Always bake ONLY the Identity block (slot #1). The per-run remainder --
+        Bakes ONLY the Identity block (slot #1). When the active declarative agent
+        overrides the persona (``spec.instructions_override``, CTR-0142 / UDR-0072
+        D6) that text is the Identity block; otherwise the runtime Global Agent
+        Identity (.agent/IDENTITY.md) is used unchanged. The CORE spec has no
+        override, so this is byte-for-byte the prior behavior (UDR-0072 D13). The
+        per-run remainder --
         the Memory Block (slot #2, when USER_PROFILE_ENABLED) plus the capability
         guidance, OR nothing for a Temporary Chat run -- is supplied via
         ``run_instructions()`` and concatenated by MAF AFTER the baked Identity,
@@ -254,6 +291,8 @@ class AgentRegistry:
         effective prompt to the Identity block alone (UDR-0052 D6) by supplying an
         empty remainder, which the prior conditional full-bake made impossible.
         """
+        if spec is not None and spec.instructions_override:
+            return spec.instructions_override
         return load_identity()
 
     def run_instructions(

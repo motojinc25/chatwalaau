@@ -62,6 +62,7 @@ from app.agent.approval import (
     truncate_arguments_preview,
 )
 from app.agent.approval_iteration import IterationContentAccumulator
+from app.agent.declarative import active_spec
 from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_path
 from app.agent.user_memory import session_user_profile_snapshot
 from app.agui.agent_registry import AgentRegistry
@@ -626,6 +627,30 @@ async def _stream_with_reasoning(
         # the usage event's back-compat `reasoning` field.
         effective_model = selected_model or agent_registry.default_model
         resolved_options = providers.resolve_options(effective_model, requested_options)
+
+        # Active declarative agent option DEFAULTS (PRP-0094, CTR-0142, UDR-0072 D5).
+        # The agent's mapped options (effort / verbosity) are applied for any option the
+        # operator has NOT explicitly changed in the chat panel -- i.e. the panel still
+        # reports the model's catalog default -- and are overridden by an explicit
+        # per-message selection. This makes the active agent's options actually take
+        # effect (the panel always reports a full selection, so they cannot ride on the
+        # agent's startup default_options alone) while preserving per-message override.
+        spec = active_spec()
+        spec_opts = spec.model_options_override or {}
+        if spec_opts:
+            catalog_defaults = {
+                d["key"]: d.get("default") for d in providers.model_options_catalog(effective_model)["options"]
+            }
+            for key, value in spec_opts.items():
+                if resolved_options.get(key) == catalog_defaults.get(key):
+                    resolved_options[key] = value
+        # The agent's default structured output applies when the chat has not explicitly
+        # enabled structured output (UDR-0072 D5; per-message control still wins).
+        if not structured_active and spec.structured_output is not None:
+            output_schema = spec.structured_output.get("schema")
+            output_format = spec.structured_output.get("mode", "json_schema")
+            structured_active = output_format != "none"
+
         resolved_reasoning = resolved_options.get("effort", providers.resolve_effort(effective_model, None))
 
         # Validate continuation_token format: MAF expects dict with "response_id"
@@ -657,7 +682,7 @@ async def _stream_with_reasoning(
         # present with its effort/verbosity defaults) and then deep-merge the
         # structured fragment into it via merge_generation_options, so the format and
         # the effort/verbosity coexist instead of clobbering each other.
-        if (requested_options or structured_active) and not is_demo_mode():
+        if (requested_options or structured_active or spec_opts) and not is_demo_mode():
             gen_options = providers.build_model_options(effective_model, resolved_options)
             if structured_active:
                 providers.merge_generation_options(

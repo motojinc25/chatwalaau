@@ -305,6 +305,17 @@ class Settings(BaseSettings):
     # Agent Skills (CTR-0042, PRP-0024)
     skills_dir: str = ".skills"
 
+    # Declarative Agents (CTR-0006, CTR-0142..0144, PRP-0094, UDR-0072)
+    # Folder of CUSTOM declarative agent YAML files (*.yaml / *.yml, nested folders
+    # allowed) discovered through a realpath jail rooted here. Empty (default) =
+    # no custom agents; only the bundled CORE agent exists and the runtime is
+    # byte-for-byte the pre-PRP-0094 behavior (UDR-0072 D11/D13). The active
+    # selection is in-memory only (restart re-initializes to CORE, D7); there is no
+    # env var for it. The YAML is a SPECIFICATION; ChatWalaʻau owns construction
+    # (D1/D2): credentials / connection are never honored, and sampling params
+    # (temperature / top_p / ...) are rejected at activation (D3/D5).
+    declarative_agents_dir: str = ""
+
     # Prompt Templates (CTR-0046, PRP-0026)
     templates_dir: str = ".templates"
 

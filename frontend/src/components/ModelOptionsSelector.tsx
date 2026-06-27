@@ -1,6 +1,7 @@
 import { Check, ChevronDown, Gauge, MessageSquareText, SlidersHorizontal } from 'lucide-react'
 import type { ComponentType } from 'react'
 import { useCallback, useEffect, useState } from 'react'
+import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { cn } from '@/lib/utils'
 
 /**
@@ -35,6 +36,8 @@ interface ModelInfo {
   model_options?: Record<string, ModelOptionCatalog>
   /** Legacy reasoning-only catalog (CTR-0069 v3); used as a fallback. */
   reasoning_options?: Record<string, LegacyReasoningCatalog>
+  /** Active declarative agent option defaults (CTR-0144, PRP-0094). */
+  active_agent?: { model_options?: Record<string, string> }
 }
 
 interface ModelOptionsSelectorProps {
@@ -87,32 +90,52 @@ export function ModelOptionsSelector({ threadId, selectedModel, onOptionsChange 
   const [selections, setSelections] = useState<Record<string, string>>({})
   const [openKey, setOpenKey] = useState<string | null>(null)
 
-  useEffect(() => {
+  const loadInfo = useCallback(() => {
     fetch('/api/model')
       .then((res) => res.json())
       .then((data: ModelInfo) => setInfo(data))
       .catch(() => {})
   }, [])
 
+  useEffect(() => {
+    loadInfo()
+  }, [loadInfo])
+
+  // Re-read /api/model when the active declarative agent changes so the panel
+  // reflects the new agent's option defaults immediately (CTR-0144, PRP-0094).
+  useEffect(() => {
+    const handler = () => loadInfo()
+    window.addEventListener(ACTIVE_AGENT_CHANGED_EVENT, handler)
+    return () => window.removeEventListener(ACTIVE_AGENT_CHANGED_EVENT, handler)
+  }, [loadInfo])
+
   const catalog = info ? catalogFor(info, selectedModel) : undefined
 
   // When the model (and therefore the catalog) changes, derive each option's
-  // value: keep the stored choice if still valid for this model, else the
-  // option default. Report the full selection so the backend resolves it.
+  // value: keep the stored per-session choice if still valid; else the active
+  // declarative agent's default for that option (CTR-0144); else the catalog
+  // default. Report the full selection so the backend resolves it.
   useEffect(() => {
     if (!catalog) return
+    const agentDefaults = info?.active_agent?.model_options ?? {}
     const next: Record<string, string> = {}
     for (const opt of catalog.options) {
       if (opt.kind !== 'enum') continue // number kind reserved (UDR-0057 D3)
       const allowed = opt.allowed ?? []
       const stored = localStorage.getItem(storageKey(threadId, opt.key))
-      next[opt.key] = stored && allowed.includes(stored) ? stored : opt.default
+      const agentDefault = agentDefaults[opt.key]
+      next[opt.key] =
+        stored && allowed.includes(stored)
+          ? stored
+          : agentDefault && allowed.includes(agentDefault)
+            ? agentDefault
+            : opt.default
     }
     setSelections(next)
     onOptionsChange(next)
-    // `catalog` changes when selectedModel changes (per-model entry), so the
-    // selection re-derives on model switch without listing selectedModel.
-  }, [catalog, threadId, onOptionsChange])
+    // `catalog` changes when selectedModel changes or info refreshes (agent switch),
+    // so the selection re-derives without listing selectedModel.
+  }, [catalog, info, threadId, onOptionsChange])
 
   const handleSelect = useCallback(
     (optionKey: string, value: string) => {

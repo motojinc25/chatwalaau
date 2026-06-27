@@ -228,16 +228,17 @@ all = [
 
 [[package]]
 name = "agent-framework-declarative"
-version = "1.0.0b260304"
+version = "1.0.0b260521"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
+    { name = "httpx" },
     { name = "powerfx", marker = "python_full_version < '3.14'" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c6/d3/4895aaf80c80ec4aa5ad0495f17c97c146c7746d17ff6df5958cf33c6efc/agent_framework_declarative-1.0.0b260304.tar.gz", hash = "sha256:7aa828dcbd535a57c58cfa03473b1b8d7a2bfbb92ed3242f5212fa86b8955822", size = 69054, upload-time = "2026-03-04T22:05:17.713Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1f/77/d65b50bc4242437fefa4772930d57ee935054148daad9f9a61c9d79c9535/agent_framework_declarative-1.0.0b260521.tar.gz", hash = "sha256:f161df72875b7d386a2301f8cd62589450f9c892215e1583113a9ae726327051", size = 90003, upload-time = "2026-05-22T02:23:52.991Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f6/ec/913074fa7b2562847745875c18430e1bfa34ae5791eaff9d262f49b23185/agent_framework_declarative-1.0.0b260304-py3-none-any.whl", hash = "sha256:141b81badfaeb9e6569203f340864815f13ca05f565ba3ad09d7fc92b2e812ff", size = 77061, upload-time = "2026-03-04T22:05:16.42Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/cb/086b14addb03ec74cb88b54fbd777cf8f6849d17d9a424531b8dd8a67302/agent_framework_declarative-1.0.0b260521-py3-none-any.whl", hash = "sha256:f9733938ef81f36d494df2467445a3724917d8d5309aafa4b94181791457f48a", size = 103528, upload-time = "2026-05-22T02:24:24.945Z" },
 ]
 
 [[package]]
@@ -1002,12 +1003,13 @@ wheels = [
 
 [[package]]
 name = "chatwalaau"
-version = "0.89.0"
+version = "0.90.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework" },
     { name = "agent-framework-ag-ui" },
     { name = "agent-framework-anthropic" },
+    { name = "agent-framework-declarative" },
     { name = "agent-framework-devui" },
     { name = "av" },
     { name = "azure-identity" },
@@ -1044,6 +1046,7 @@ requires-dist = [
     { name = "agent-framework", specifier = ">=1.6.0,<2" },
     { name = "agent-framework-ag-ui", specifier = ">=1.0.0b260402" },
     { name = "agent-framework-anthropic", specifier = ">=1.0.0b260521" },
+    { name = "agent-framework-declarative", specifier = ">=1.0.0b260402" },
     { name = "agent-framework-devui", specifier = ">=1.0.0b260402" },
     { name = "av", specifier = ">=12.0" },
     { name = "azure-identity", specifier = ">=1.23.0" },

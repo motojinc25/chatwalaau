@@ -52,6 +52,7 @@ import {
   useState,
 } from 'react'
 import { AboutDialog } from '@/components/AboutDialog'
+import { DeclarativeAgentManager } from '@/components/DeclarativeAgentManager'
 import { PermissionsDisabledBanner } from '@/components/PermissionsDisabledBanner'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
 import {
@@ -908,6 +909,9 @@ export function SessionSidebar({
       <div className="flex h-9 shrink-0 items-center justify-between border-t px-3">
         <span className="text-[11px] text-muted-foreground">{auth.version ? `v${auth.version}` : ''}</span>
         <div className="flex items-center gap-1">
+          {/* Declarative Agent management (CTR-0144, PRP-0094): self-probing icon next to
+              the File Explorer icon; always shown when the endpoint is reachable. */}
+          <DeclarativeAgentManager />
           {/* File Explorer launcher (CTR-0137, PRP-0091): shown only when FILE_EXPLORER_ENABLED. */}
           {fileExplorerAvailable && (
             <Button
