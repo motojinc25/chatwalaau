@@ -67,17 +67,28 @@ def _build_coding_instructions() -> str:
 
 
 def _validate_coding_config() -> None:
-    """Validate coding configuration at startup (CTR-0032)."""
+    """Validate coding configuration at startup (CTR-0032).
+
+    The workspace directory is auto-created when missing (v0.90.1): operators no
+    longer have to pre-create CODING_WORKSPACE_DIR. A creation failure (e.g. a
+    read-only parent, a permission error, or a non-directory path component) is
+    surfaced as a clear ValueError rather than letting later file operations fail.
+    """
     workspace = settings.coding_workspace_dir
     if not workspace:
         msg = "CODING_WORKSPACE_DIR must be set when CODING_ENABLED=true"
         raise ValueError(msg)
-    if not Path(workspace).is_absolute():
+    path = Path(workspace)
+    if not path.is_absolute():
         msg = f"CODING_WORKSPACE_DIR must be an absolute path: {workspace}"
         raise ValueError(msg)
-    if not Path(workspace).is_dir():
-        msg = f"CODING_WORKSPACE_DIR does not exist: {workspace}"
-        raise ValueError(msg)
+    if not path.is_dir():
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            logger.info("Created CODING_WORKSPACE_DIR: %s", workspace)
+        except OSError as exc:
+            msg = f"CODING_WORKSPACE_DIR does not exist and could not be created: {workspace} ({exc})"
+            raise ValueError(msg) from exc
 
 
 def _build_tools_and_instructions(

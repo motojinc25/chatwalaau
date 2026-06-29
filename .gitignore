@@ -48,6 +48,9 @@ __pycache__/
 # Agent Identity (PRP-0073: operator-owned; default auto-generated from code)
 .agent/
 
+# Declarative agents (PRP-0094: operator-authored YAML; default DECLARATIVE_AGENTS_DIR=.agents)
+.agents/
+
 # TLS Certificates
 .certs/
 

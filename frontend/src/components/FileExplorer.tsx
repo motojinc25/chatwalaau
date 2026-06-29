@@ -285,6 +285,7 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
   const [renameBusy, setRenameBusy] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ path: string; isDir: boolean } | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [pendingCloseTab, setPendingCloseTab] = useState<{ groupId: string; path: string } | null>(null)
   const [pendingBulkClose, setPendingBulkClose] = useState<{ groupId: string; paths: string[] } | null>(null)
   const [leaveConfirm, setLeaveConfirm] = useState(false)
@@ -314,6 +315,21 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
       // silent
     }
   }, [])
+
+  // Refresh the whole tree from the root, showing a spinning indicator until the
+  // reload completes (v0.90.1). Collapses the lazy-loaded cache so every level is
+  // re-fetched on next expand. The indicator is held for at least one full spin
+  // cycle (1s, matching Tailwind's animate-spin) so a fast refresh is still visible.
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true)
+    loadedRef.current.clear()
+    const minSpin = new Promise((resolve) => setTimeout(resolve, 1000))
+    try {
+      await Promise.all([reloadDir(''), minSpin])
+    } finally {
+      setRefreshing(false)
+    }
+  }, [reloadDir])
 
   useEffect(() => {
     if (open && !rootLoaded) void reloadDir('')
@@ -1020,20 +1036,10 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
                   variant="ghost"
                   size="icon"
                   className="h-6 w-6 text-zinc-500"
-                  title="Download workspace as ZIP"
-                  onClick={() => downloadFolder('')}>
-                  <Download className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6 text-zinc-500"
                   title="Refresh"
-                  onClick={() => {
-                    loadedRef.current.clear()
-                    void reloadDir('')
-                  }}>
-                  <RefreshCw className="h-3.5 w-3.5" />
+                  disabled={refreshing}
+                  onClick={() => void handleRefresh()}>
+                  <RefreshCw className={cn('h-3.5 w-3.5', refreshing && 'animate-spin')} />
                 </Button>
               </div>
               <div ref={treeRef} className="min-h-0 flex-1 overflow-hidden bg-white">
