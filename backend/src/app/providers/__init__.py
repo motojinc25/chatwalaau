@@ -5,10 +5,11 @@ model id, dispatch to the owning provider to build the MAF ChatClient, the
 per-model ``default_options``, and the provider-supplied web search tool.
 
 Model -> provider routing comes from the per-provider env namespaces
-(``AZURE_OPENAI_MODELS`` -> azure-openai, ``ANTHROPIC_MODELS`` -> anthropic).
-``resolve_models()`` is the SSOT for the merged ordered list (Azure first,
-then Anthropic; UDR-0045 D3). DEMO_MODE never reaches this module -- the
-registry short-circuits to DemoChatClient before dispatch (UDR-0045 D7).
+(``AZURE_OPENAI_MODELS`` -> azure-openai, ``ANTHROPIC_MODELS`` -> anthropic,
+``OPENAI_MODELS`` -> openai). ``resolve_models()`` is the SSOT for the merged
+ordered list (Azure first, then Anthropic, then OpenAI; UDR-0045 D3 / UDR-0073
+D3). DEMO_MODE never reaches this module -- the registry short-circuits to
+DemoChatClient before dispatch (UDR-0045 D7).
 """
 
 from __future__ import annotations
@@ -18,21 +19,24 @@ from typing import Any
 from app.providers.anthropic import AnthropicProvider, anthropic_web_search_tool
 from app.providers.azure_openai import AzureOpenAIProvider, openai_web_search_tool
 from app.providers.base import Provider
+from app.providers.openai import OpenAIProvider
 
 _AZURE = AzureOpenAIProvider()
 _ANTHROPIC = AnthropicProvider()
+_OPENAI = OpenAIProvider()
 
-# Ordered for merged-list construction: Azure first, then Anthropic.
-_ORDERED: tuple[Provider, ...] = (_AZURE, _ANTHROPIC)
+# Ordered for merged-list construction: Azure first, then Anthropic, then OpenAI.
+_ORDERED: tuple[Provider, ...] = (_AZURE, _ANTHROPIC, _OPENAI)
 PROVIDERS: dict[str, Provider] = {p.name: p for p in _ORDERED}
 
 
 def resolve_models() -> list[tuple[str, str]]:
-    """Return the merged ordered ``(model, provider_name)`` list (UDR-0045 D3).
+    """Return the merged ordered ``(model, provider_name)`` list (UDR-0045 D3 / UDR-0073 D3).
 
-    Azure models first (preserving the pre-PRP-0069 default), then Anthropic.
-    Ids are unique across providers (enforced by Settings._validate_anthropic);
-    a defensive de-dup keeps the first occurrence if a duplicate slips through.
+    Azure models first (preserving the pre-PRP-0069 default), then Anthropic,
+    then OpenAI. Ids are unique across providers (enforced by
+    Settings._validate_anthropic); a defensive de-dup keeps the first occurrence
+    if a duplicate slips through.
     """
     out: list[tuple[str, str]] = []
     seen: set[str] = set()

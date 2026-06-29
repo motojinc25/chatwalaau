@@ -38,6 +38,13 @@ ANTHROPIC_MODELS=claude-sonnet-4-5-20250929
 ANTHROPIC_API_KEY=sk-ant-...         # "direct" hosting; Azure AI Foundry hosting is also supported
 ```
 
+**OpenAI** (direct) -- standalone or alongside the others
+
+```ini
+OPENAI_MODELS=gpt-5.1                 # reasoning models (gpt-5.x / o-series)
+OPENAI_API_KEY=sk-...                 # OPENAI_BASE_URL optional (OpenAI-compatible gateways)
+```
+
 Then start the server:
 
 ```bash
@@ -65,7 +72,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 
 - **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, Temporary Chat, and **slash commands** (`/help`, `/prompt`, `/skill`, `/model`) with completion and dynamic arguments
 - **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow, prompt templates, and Agent Skills (enable/disable or hot-reload from disk at runtime)
-- **Models** -- switch between **Azure OpenAI** and **Anthropic (Claude)** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
+- **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, and **OpenAI** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
 - **Knowledge** -- RAG over your PDFs (ChromaDB) and background batch jobs with a live dashboard
 - **MCP native** -- connect any MCP server (Claude Desktop-compatible config); enable/disable servers and individual tools at runtime to control token usage, or hot-reload the config (reconnect) without a restart; MCP Apps render interactive UI in chat
 - **Memory** -- a configurable Agent Identity and a self-maintaining User Preference Memory that the agent curates inline and (opt-in) reconciles in the background, superseding stale or conflicting preferences instead of just piling them up

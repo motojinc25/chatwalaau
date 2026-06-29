@@ -78,6 +78,23 @@ class Settings(BaseSettings):
     # tier). Default 8192 = the low-effort tier.
     anthropic_max_tokens: int = 8192
 
+    # ---- OpenAI provider (CTR-0069, CTR-0102, PRP-0095, UDR-0073) ----
+    # Comma-separated OpenAI model ids routed to the "openai" provider (direct
+    # OpenAI public API, API-key auth). Empty (default) = OpenAI disabled; the
+    # runtime behaves exactly as the pre-PRP-0095 build. v1 scope: REASONING
+    # models only (e.g. gpt-5.x / o-series) -- the option catalog reuses the
+    # azure-openai reasoning-only catalog (UDR-0073 D5). Model ids must be unique
+    # across AZURE_OPENAI_MODELS, ANTHROPIC_MODELS and OPENAI_MODELS (validated
+    # at startup). The merged selector lists Azure first, then Anthropic, then
+    # these (UDR-0073 D3).
+    openai_models: str = ""
+
+    # Direct hosting auth. OPENAI_BASE_URL is an optional endpoint override for
+    # OpenAI-compatible gateways; no Entra ID / managed-identity lane exists for
+    # the public OpenAI API (UDR-0073 D4).
+    openai_api_key: str = ""
+    openai_base_url: str = ""
+
     # Web Search
     web_search_country: str = "US"
 
@@ -513,17 +530,23 @@ class Settings(BaseSettings):
         return [m.strip() for m in self.anthropic_models.split(",") if m.strip()]
 
     @property
-    def all_model_list(self) -> list[str]:
-        """Merged ordered model list across providers (Azure first, then Anthropic).
+    def openai_model_list(self) -> list[str]:
+        """Parse OPENAI_MODELS into an ordered list of OpenAI model ids (PRP-0095)."""
+        return [m.strip() for m in self.openai_models.split(",") if m.strip()]
 
-        UDR-0045 D3: ordering is Azure-first then Anthropic, so the default
-        model is the first Azure model when any is configured (preserving the
-        pre-PRP-0069 default), and falls back to the first Anthropic model for
-        an Anthropic-only deployment. Model ids are unique across providers
-        (enforced by _validate_anthropic), but a defensive de-dup keeps order.
+    @property
+    def all_model_list(self) -> list[str]:
+        """Merged ordered model list across providers (Azure, then Anthropic, then OpenAI).
+
+        UDR-0045 D3 / UDR-0073 D3: ordering is Azure-first, then Anthropic, then
+        OpenAI, so the default model is the first Azure model when any is
+        configured (preserving the pre-PRP-0069 default) and falls back to the
+        first Anthropic / OpenAI model otherwise. Model ids are unique across
+        providers (enforced by _validate_anthropic), but a defensive de-dup keeps
+        order.
         """
         merged = list(self.model_list)
-        for m in self.anthropic_model_list:
+        for m in (*self.anthropic_model_list, *self.openai_model_list):
             if m not in merged:
                 merged.append(m)
         return merged
@@ -610,8 +633,8 @@ class Settings(BaseSettings):
             )
         if not self.all_model_list:
             _logger.warning(
-                "No models configured (AZURE_OPENAI_MODELS and ANTHROPIC_MODELS are both empty); "
-                "agent creation will be skipped."
+                "No models configured (AZURE_OPENAI_MODELS, ANTHROPIC_MODELS and OPENAI_MODELS "
+                "are all empty); agent creation will be skipped."
             )
         return self
 
@@ -643,11 +666,26 @@ class Settings(BaseSettings):
             msg = "ANTHROPIC_HOSTING=foundry requires ANTHROPIC_FOUNDRY_RESOURCE or ANTHROPIC_FOUNDRY_BASE_URL."
             raise ValueError(msg)
 
-        dupes = sorted(set(self.model_list) & set(self.anthropic_model_list))
+        # Cross-provider model-id uniqueness across all three namespaces
+        # (UDR-0045 D3 extended by UDR-0073 D2). A collision under any two
+        # providers is a startup error; OpenAI-disabled deployments are
+        # unaffected (openai_model_list is empty).
+        namespaces = (
+            ("AZURE_OPENAI_MODELS", self.model_list),
+            ("ANTHROPIC_MODELS", self.anthropic_model_list),
+            ("OPENAI_MODELS", self.openai_model_list),
+        )
+        seen: dict[str, str] = {}
+        dupes: set[str] = set()
+        for ns_name, ids in namespaces:
+            for mid in ids:
+                if mid in seen and seen[mid] != ns_name:
+                    dupes.add(mid)
+                seen[mid] = ns_name
         if dupes:
             msg = (
-                f"Model id(s) {dupes} appear under multiple providers; ids must be unique "
-                "across AZURE_OPENAI_MODELS and ANTHROPIC_MODELS."
+                f"Model id(s) {sorted(dupes)} appear under multiple providers; ids must be unique "
+                "across AZURE_OPENAI_MODELS, ANTHROPIC_MODELS and OPENAI_MODELS."
             )
             raise ValueError(msg)
 

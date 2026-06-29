@@ -184,8 +184,8 @@ _MSG_BILLING = (
     "The model provider rejected the request because the account is out of "
     "credits or quota (a billing issue, not a transient error -- retrying will "
     "not help). Add credits or upgrade the plan for the active provider "
-    "(e.g. Anthropic Plans & Billing, or raise the Azure OpenAI quota), or "
-    "switch to another configured model, then resend."
+    "(e.g. OpenAI Billing, Anthropic Plans & Billing, or raise the Azure "
+    "OpenAI quota), or switch to another configured model, then resend."
 )
 _MSG_RATE_LIMIT = (
     "Rate limited by the model provider (429 Too Many Requests). "
