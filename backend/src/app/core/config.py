@@ -359,6 +359,19 @@ class Settings(BaseSettings):
     cron_run_timeout_seconds: int = 900  # per-run subprocess wall-clock timeout
     cron_output_max_bytes: int = 1_048_576  # cap per captured stdout/stderr log
 
+    # Pipeline Job subsystem (CTR-0006, CTR-0072, CTR-0145/0146, PRP-0096, UDR-0074)
+    # In-process, file-backed engine for curated DATA-PROCESSING job types (rag-ingest
+    # first). Unlike CRON_ENABLED (default false; arbitrary scripts), pipeline jobs run
+    # only curated in-process job types (no shell, no CODING_ENABLED), so the subsystem
+    # is ON by default to preserve RAG ingestion availability (UDR-0074 D8). When false
+    # the /api/pipeline/* surface 404s, the SPA hides the launcher icon, and the
+    # manage_pipeline agent tool is not registered. PIPELINE_JOBS_DIR replaces the
+    # removed BATCH_JOBS_DIR (UDR-0074 D11); run logs live under <dir>/output/.
+    pipeline_enabled: bool = True
+    pipeline_jobs_dir: str = ".pipeline"
+    pipeline_output_max_bytes: int = 1_048_576  # cap per captured run log
+    pipeline_max_concurrent_jobs: int = 2  # in-process worker pool bound
+
     # Microsoft Teams Integration (CTR-0006, CTR-0138..0141, PRP-0092, UDR-0070)
     # First external chat-channel integration (FEAT-0050). The whole feature is OFF
     # unless TEAMS_ENABLED (UDR-0070 D10): when false the Teams router is not mounted

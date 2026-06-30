@@ -61,6 +61,7 @@ backend/.sessions/
 backend/.uploads/
 backend/.archived/
 backend/.certs/
+backend/.pipeline/
 backend/.jobs/
 backend/.chroma/
 backend/.skills/

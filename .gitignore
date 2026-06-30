@@ -58,7 +58,10 @@ __pycache__/
 mcp_servers.jsonc
 mcp_servers.json
 
-# Batch Jobs
+# Pipeline Jobs store + run logs (PRP-0096; replaces .jobs)
+.pipeline/
+
+# Batch Jobs (legacy; retired by PRP-0096, kept ignored for old working copies)
 .jobs/
 
 # ChromaDB

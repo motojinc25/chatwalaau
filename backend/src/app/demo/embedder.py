@@ -1,6 +1,6 @@
 """DemoEmbedder -- deterministic 1536-dim float vectors (PRP-0066, UDR-0041).
 
-Replaces ``app.mcp_batch.rag.embedder.embed_texts`` and the query-side
+Replaces ``app.pipeline.rag.embedder.embed_texts`` and the query-side
 ``_embed_query`` in ``app.rag.tools`` when ``DEMO_MODE=true``.
 
 Design points:

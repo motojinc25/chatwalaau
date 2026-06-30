@@ -136,6 +136,13 @@ async def lifespan(_app: FastAPI):
         from app.cron.engine import start_scheduler
 
         start_scheduler()
+    # Pipeline Job engine (PRP-0096, CTR-0073, UDR-0074). In-process, ON by default
+    # (PIPELINE_ENABLED). Ensures the jobs dir and logs the registered job types; the
+    # queue runs jobs as asyncio tasks on submit, so there is no tick loop to start.
+    if settings.pipeline_enabled:
+        from app.pipeline.engine import start_pipeline
+
+        start_pipeline()
     # Microsoft Teams integration (PRP-0092, CTR-0138, UDR-0070 D2). When
     # TEAMS_ENABLED, register the SDK messaging route onto this app + set up Bot
     # Framework JWT validation WITHOUT starting the SDK's own server (app.initialize,
@@ -150,6 +157,11 @@ async def lifespan(_app: FastAPI):
         from app.cron.engine import stop_scheduler
 
         await stop_scheduler()
+    # Shutdown: drain in-flight pipeline jobs (PRP-0096, CTR-0073).
+    if settings.pipeline_enabled:
+        from app.pipeline.engine import stop_pipeline
+
+        await stop_pipeline()
     # Shutdown: stop MCP servers
     await shutdown_mcp()
     # Drain in-flight background tasks (PRP-0077, CTR-0108). Best-effort: gives
@@ -367,6 +379,14 @@ app.include_router(file_explorer_router)
 from app.cron.router import router as cron_router
 
 app.include_router(cron_router)
+
+# Pipeline Management API (CTR-0146, PRP-0096) -- pipeline job CRUD + cancel + run
+# history/detail + job-type schema. The surface returns 404 when PIPELINE_ENABLED is
+# false so the SPA can gate its launcher icon by probing it (UDR-0074 D5). Mutating
+# endpoints consume CTR-0083.
+from app.pipeline.router import router as pipeline_router
+
+app.include_router(pipeline_router)
 
 # Server -> client notification WebSocket (CTR-0110, PRP-0077). Real-time push
 # channel; first event type is session_title (CTR-0109).

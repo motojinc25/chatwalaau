@@ -39,6 +39,7 @@ import {
   Search,
   Trash2,
   Upload,
+  Workflow,
   X,
 } from 'lucide-react'
 import {
@@ -123,6 +124,9 @@ interface SessionSidebarProps {
   /** File Explorer launcher (CTR-0137, PRP-0091): footer icon next to Cron. */
   fileExplorerAvailable?: boolean
   onOpenFiles?: () => void
+  /** Pipeline jobs launcher (CTR-0148, PRP-0096): footer icon next to Declarative Agents. */
+  pipelineAvailable?: boolean
+  onOpenPipeline?: () => void
 }
 
 // Per-device open/closed state (UDR-0046 D4): the set of explicitly-expanded
@@ -373,6 +377,8 @@ export function SessionSidebar({
   onOpenCron,
   fileExplorerAvailable,
   onOpenFiles,
+  pipelineAvailable,
+  onOpenPipeline,
 }: SessionSidebarProps) {
   const sortedSessions = useMemo(() => sortSessions(sessions), [sessions])
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
@@ -912,6 +918,18 @@ export function SessionSidebar({
           {/* Declarative Agent management (CTR-0144, PRP-0094): self-probing icon next to
               the File Explorer icon; always shown when the endpoint is reachable. */}
           <DeclarativeAgentManager />
+          {/* Pipeline jobs launcher (CTR-0148, PRP-0096): shown only when PIPELINE_ENABLED. */}
+          {pipelineAvailable && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-muted-foreground"
+              onClick={() => onOpenPipeline?.()}
+              aria-label="Pipeline jobs"
+              title="Pipeline jobs">
+              <Workflow className="h-4 w-4" />
+            </Button>
+          )}
           {/* File Explorer launcher (CTR-0137, PRP-0091): shown only when FILE_EXPLORER_ENABLED. */}
           {fileExplorerAvailable && (
             <Button

@@ -7,7 +7,7 @@ and wait for a batch ingest job. Idempotent: skipped when the
 collection is non-empty.
 
 The seeding pipeline reuses the same chunker that the live RAG ingest
-job uses (``app.mcp_batch.rag.chunker.chunk_pages``) and the
+job uses (``app.pipeline.rag.chunker.chunk_pages``) and the
 ``DemoEmbedder`` so the demo and live code paths share their parsing
 / chunking surface.
 """
@@ -30,8 +30,8 @@ def _seed_collection_sync() -> dict[str, Any]:
 
     from app.core.config import settings
     from app.demo.embedder import embed_demo_batch
-    from app.mcp_batch.rag.chunker import chunk_pages
-    from app.mcp_batch.rag.pdf_parser import extract_pages
+    from app.pipeline.rag.chunker import chunk_pages
+    from app.pipeline.rag.pdf_parser import extract_pages
 
     if not _ASSET_PDF.is_file():
         logger.warning("Demo RAG corpus missing at %s; seeding skipped.", _ASSET_PDF)

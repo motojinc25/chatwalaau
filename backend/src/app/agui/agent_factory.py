@@ -273,6 +273,17 @@ def _build_tools_and_instructions(
         tools.append(manage_cron)
         instructions += CRON_TOOL_INSTRUCTION
 
+    # Pipeline management tool (PRP-0096, CTR-0147, UDR-0074 D9). Registered on the
+    # shared agent only when PIPELINE_ENABLED so the LLM can submit data-processing jobs
+    # (rag-ingest). Replaces the former batch MCP tools; writes through the same engine +
+    # store as the REST API (CTR-0146). NOT in the approval require-set (curated job
+    # types, no shell).
+    if settings.pipeline_enabled:
+        from app.pipeline.tool import PIPELINE_TOOL_INSTRUCTION, manage_pipeline
+
+        tools.append(manage_pipeline)
+        instructions += PIPELINE_TOOL_INSTRUCTION
+
     # Tool approval gating (PRP-0067, CTR-0099, UDR-0043 D1).
     # The agent factory is the single chokepoint where bare Python
     # callables are turned into MAF tool surfaces; this is the right

@@ -3,11 +3,13 @@ import { lazy, Suspense, useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
 import { CronManager } from '@/components/CronManager'
+import { PipelineManager } from '@/components/PipelineManager'
 import { SessionSidebar } from '@/components/SessionSidebar'
 import { TemporaryChatToggle } from '@/components/TemporaryChatToggle'
 import { Button } from '@/components/ui/button'
 import { useCronAvailable } from '@/hooks/useCronAvailable'
 import { useFileExplorerAvailable } from '@/hooks/useFileExplorerAvailable'
+import { usePipelineAvailable } from '@/hooks/usePipelineAvailable'
 import { useSession } from '@/hooks/useSession'
 import { useTemporaryChat } from '@/hooks/useTemporaryChat'
 
@@ -59,6 +61,11 @@ export function ChatPage() {
   // sidebar-footer launcher icon and the /cron slash command open the same modal.
   const cronAvailable = useCronAvailable()
   const [cronOpen, setCronOpen] = useState(false)
+
+  // Pipeline Jobs portal (CTR-0148, PRP-0096). Lifted here so the sidebar-footer
+  // launcher icon (next to Declarative Agents) opens the same modal instance.
+  const pipelineAvailable = usePipelineAvailable()
+  const [pipelineOpen, setPipelineOpen] = useState(false)
 
   // File Explorer overlay (CTR-0137, PRP-0091). Lifted here so both the sidebar-footer
   // launcher icon and the /files slash command open the same overlay instance.
@@ -133,10 +140,14 @@ export function ChatPage() {
           onOpenCron={() => setCronOpen(true)}
           fileExplorerAvailable={fileExplorerAvailable}
           onOpenFiles={() => setFilesOpen(true)}
+          pipelineAvailable={pipelineAvailable}
+          onOpenPipeline={() => setPipelineOpen(true)}
         />
       )}
 
       {cronAvailable && <CronManager open={cronOpen} onOpenChange={setCronOpen} />}
+
+      {pipelineAvailable && <PipelineManager open={pipelineOpen} onOpenChange={setPipelineOpen} />}
 
       {fileExplorerAvailable && (
         <Suspense fallback={null}>

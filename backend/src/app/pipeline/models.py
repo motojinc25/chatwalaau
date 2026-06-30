@@ -1,4 +1,4 @@
-"""Job data model for Batch Processing MCP Server (CTR-0073)."""
+"""Job data model for the Pipeline Job Engine (CTR-0073, PRP-0096)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ class JobStatus(StrEnum):
 
 
 class Job(BaseModel):
-    """Batch job record persisted as individual JSON file."""
+    """Pipeline job record persisted as an individual JSON file."""
 
     id: str
     type: str
@@ -31,3 +31,6 @@ class Job(BaseModel):
     created_at: str
     started_at: str | None = None
     completed_at: str | None = None
+    # PRP-0096 (CTR-0145): id of the latest run-history record for this job, so the
+    # SPA can deep-link to the run detail (run logs live under output/{job_id}/{run}/).
+    last_run_id: str | None = None

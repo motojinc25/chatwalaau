@@ -18,11 +18,11 @@ Four lanes (PRP-0059 extends PRP-0058's original two):
 Precedence: API key > AZURE_CREDENTIAL_MODE. This matches UDR-0034
 Decision 2 (unchanged from PRP-0058).
 
-The module is consumed from both the main backend process and the batch
-MCP server entry point (`python -m app.mcp_batch.server`). Both processes
-call `dotenv.load_dotenv()` before reaching consumers, so reading the
-value with `os.environ.get()` works uniformly without forcing the batch
-server to construct the full `Settings` object.
+The module is consumed across the backend (e.g. the in-process Pipeline Job
+Engine's RAG embedder, app.pipeline.rag.embedder). Consumers call
+`dotenv.load_dotenv()` before reaching it, so reading the value with
+`os.environ.get()` works uniformly without forcing every caller to construct
+the full `Settings` object.
 
 Caching: credential instances and bearer-token provider callables are
 cached at module scope per active mode on first use, preserving the

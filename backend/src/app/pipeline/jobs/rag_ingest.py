@@ -1,7 +1,11 @@
-"""RAG Ingest job for Batch MCP Server (CTR-0076, PRP-0037).
+"""RAG Ingest job type for the Pipeline Job Engine (CTR-0076, PRP-0037, PRP-0096).
 
 Pipeline: PDF parse -> chunk -> embed -> ChromaDB store.
 Supports cooperative cancellation and progress tracking.
+
+PRP-0096 (UDR-0074 D3): relocated from app.mcp_batch into app.pipeline and run as a
+registered job type under the in-process Pipeline Job Engine. The pipeline stages,
+progress events, deterministic chunk IDs, and cooperative cancellation are unchanged.
 """
 
 from __future__ import annotations
@@ -15,20 +19,20 @@ from typing import TYPE_CHECKING
 
 import chromadb
 
-from app.mcp_batch.models import Job, JobStatus
-from app.mcp_batch.rag.chunker import chunk_pages
-from app.mcp_batch.rag.embedder import EMBEDDING_BATCH_SIZE, embed_texts
-from app.mcp_batch.rag.pdf_parser import extract_pages
+from app.pipeline.models import Job, JobStatus
+from app.pipeline.rag.chunker import chunk_pages
+from app.pipeline.rag.embedder import EMBEDDING_BATCH_SIZE, embed_texts
+from app.pipeline.rag.pdf_parser import extract_pages
 
 if TYPE_CHECKING:
-    from app.mcp_batch.storage import JobStorage
+    from app.pipeline.store import PipelineStore
 
 logger = logging.getLogger(__name__)
 
 
 async def run_rag_ingest_job(
     job: Job,
-    storage: JobStorage,
+    storage: PipelineStore,
     cancel_event: asyncio.Event,
 ) -> None:
     """Ingest a PDF document into ChromaDB collection.
@@ -194,7 +198,7 @@ async def run_rag_ingest_job(
     )
 
 
-def _set_cancelled(job: Job, storage: JobStorage) -> None:
+def _set_cancelled(job: Job, storage: PipelineStore) -> None:
     """Mark job as cancelled."""
     job.status = JobStatus.cancelled
     job.completed_at = datetime.now(UTC).isoformat()

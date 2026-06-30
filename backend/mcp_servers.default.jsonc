@@ -13,18 +13,11 @@
 //   "request_timeout": positive int seconds, default MAF
 {
   "mcpServers": {
-    // Built-in batch processing server.
-    // Provides asynchronous job management + RAG ingestion.
-    // `env` is intentionally empty: BATCH_JOBS_DIR / RAG_CHUNK_*
-    // live in backend/.env and are loaded by the batch subprocess
-    // via load_dotenv(override=False). Add keys here only to pin
-    // a per-batch override (highest precedence).
-    "batch": {
-      "command": "uv",
-      "args": ["run", "python", "-m", "app.mcp_batch.server"],
-      "env": {},
-      "load_prompts": false
-    },
+    // PRP-0096 (UDR-0074 D1): the former "batch" stdio server was retired. Pipeline
+    // jobs (RAG ingestion + future data-processing types) now run IN the main backend
+    // process via the Pipeline Job Engine, managed through /api/pipeline/* (CTR-0146),
+    // the native portal (CTR-0148), and the manage_pipeline agent tool (CTR-0147).
+    //
     // Microsoft Learn documentation MCP server (HTTP/SSE).
     "microsoft-learn": {
       "url": "https://learn.microsoft.com/api/mcp"
