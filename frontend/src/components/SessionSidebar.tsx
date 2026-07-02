@@ -39,6 +39,7 @@ import {
   Search,
   Trash2,
   Upload,
+  Webhook,
   Workflow,
   X,
 } from 'lucide-react'
@@ -127,6 +128,8 @@ interface SessionSidebarProps {
   /** Pipeline jobs launcher (CTR-0148, PRP-0096): footer icon next to Declarative Agents. */
   pipelineAvailable?: boolean
   onOpenPipeline?: () => void
+  webhookAvailable?: boolean
+  onOpenWebhook?: () => void
 }
 
 // Per-device open/closed state (UDR-0046 D4): the set of explicitly-expanded
@@ -379,6 +382,8 @@ export function SessionSidebar({
   onOpenFiles,
   pipelineAvailable,
   onOpenPipeline,
+  webhookAvailable,
+  onOpenWebhook,
 }: SessionSidebarProps) {
   const sortedSessions = useMemo(() => sortSessions(sessions), [sessions])
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
@@ -918,6 +923,19 @@ export function SessionSidebar({
           {/* Declarative Agent management (CTR-0144, PRP-0094): self-probing icon next to
               the File Explorer icon; always shown when the endpoint is reachable. */}
           <DeclarativeAgentManager />
+          {/* Webhook gateway launcher (CTR-0157, PRP-0097): next to Declarative Agents;
+              shown only when WEBHOOK_ENABLED. */}
+          {webhookAvailable && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-muted-foreground"
+              onClick={() => onOpenWebhook?.()}
+              aria-label="Webhooks"
+              title="Webhooks">
+              <Webhook className="h-4 w-4" />
+            </Button>
+          )}
           {/* Pipeline jobs launcher (CTR-0148, PRP-0096): shown only when PIPELINE_ENABLED. */}
           {pipelineAvailable && (
             <Button

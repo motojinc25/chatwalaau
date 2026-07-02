@@ -79,8 +79,20 @@ async def update_job(job_id: str, body: CronJobUpdate) -> dict:
 
 @router.delete("/jobs/{job_id}", dependencies=[Depends(verify_api_key)])
 async def delete_job(job_id: str) -> dict:
-    """Delete a job (run logs are left in place)."""
+    """Delete a job (run logs are left in place).
+
+    A system-managed (``protected``) job -- e.g. the webhook subscription maintenance job
+    (PRP-0097) -- cannot be deleted; it is owned by its feature, not the operator.
+    """
     _require_enabled()
+    existing = store.get_job(job_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail={"error": "job_not_found"})
+    if existing.get("protected"):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "protected_job", "message": "This is a system-managed job and cannot be deleted."},
+        )
     ok = store.delete_job(job_id)
     if not ok:
         raise HTTPException(status_code=404, detail={"error": "job_not_found"})

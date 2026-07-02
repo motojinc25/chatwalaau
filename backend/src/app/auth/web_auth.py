@@ -91,15 +91,39 @@ def _reset_password_hash_cache_for_tests() -> None:
 # ---- Cookie helpers ----
 
 
+def _request_scheme(request: Request) -> str:
+    """The effective client-facing scheme, honoring a TLS-terminating proxy.
+
+    Behind a reverse proxy / tunnel (e.g. Microsoft Dev Tunnels) the backend serves
+    plain HTTP while the browser is on HTTPS; the proxy advertises the real scheme via
+    ``X-Forwarded-Proto``. Trusting it keeps the cookie's Secure attribute correct even
+    when uvicorn proxy-header handling is not configured.
+    """
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip().lower()
+    return request.url.scheme
+
+
 def _cookie_secure_for_request(request: Request) -> bool:
     """Resolve the Secure attribute for the response cookie."""
+    # SameSite=None is only honored by browsers on a Secure cookie -- force it.
+    if settings.auth_cookie_samesite == "none":
+        return True
     mode = settings.auth_cookie_secure
     if mode == "true":
         return True
     if mode == "false":
         return False
     # "auto"
-    return request.url.scheme == "https"
+    return _request_scheme(request) == "https"
+
+
+def _cookie_samesite() -> Literal["lax", "strict", "none"]:
+    value = settings.auth_cookie_samesite
+    if value in ("lax", "strict", "none"):
+        return value  # type: ignore[return-value]
+    return "lax"
 
 
 def _set_session_cookie(response: Response, token: str, request: Request) -> None:
@@ -110,7 +134,7 @@ def _set_session_cookie(response: Response, token: str, request: Request) -> Non
         path="/",
         httponly=True,
         secure=_cookie_secure_for_request(request),
-        samesite="strict",
+        samesite=_cookie_samesite(),
     )
 
 
@@ -125,7 +149,7 @@ def _clear_session_cookie(response: Response, request: Request) -> None:
         path="/",
         httponly=True,
         secure=_cookie_secure_for_request(request),
-        samesite="strict",
+        samesite=_cookie_samesite(),
     )
 
 

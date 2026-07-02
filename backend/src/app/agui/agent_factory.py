@@ -284,6 +284,16 @@ def _build_tools_and_instructions(
         tools.append(manage_pipeline)
         instructions += PIPELINE_TOOL_INSTRUCTION
 
+    # Webhook management tool (PRP-0097, CTR-0155, UDR-0075). Registered on the shared
+    # agent only when WEBHOOK_ENABLED so the LLM can manage Graph subscriptions and run
+    # the Teams meeting pipeline on demand. Writes through the same store + Graph client +
+    # pipeline engine as the REST API (CTR-0154). NOT in the approval require-set.
+    if settings.webhook_enabled:
+        from app.webhook.tool import WEBHOOK_TOOL_INSTRUCTION, manage_webhook
+
+        tools.append(manage_webhook)
+        instructions += WEBHOOK_TOOL_INSTRUCTION
+
     # Tool approval gating (PRP-0067, CTR-0099, UDR-0043 D1).
     # The agent factory is the single chokepoint where bare Python
     # callables are turned into MAF tool surfaces; this is the right

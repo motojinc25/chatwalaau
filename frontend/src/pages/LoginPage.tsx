@@ -29,15 +29,20 @@ export function LoginPage() {
 
   const redirectTarget = searchParams.get('redirect') || DEFAULT_REDIRECT
 
-  // If the auth lane is not active OR the visitor is already
-  // authenticated, send them to the target without showing the form.
+  // Navigation rules:
+  // - open mode (loopback / auth disabled): no login needed -> go to the app.
+  // - login-required + already authenticated: go to the app.
+  // - login-required + not authenticated: stay and show the form.
+  // - api-key-only: a browser cannot present the Bearer API_KEY, so there is NO
+  //   browser login. Do NOT bounce back to the app (that caused a /login <-> /chat
+  //   loop); stay here and show an informational message (PRP-0097 fix).
   useEffect(() => {
     if (auth.loading) return
-    if (auth.mode !== 'login-required') {
+    if (auth.mode === 'open') {
       navigate(redirectTarget, { replace: true })
       return
     }
-    if (auth.authenticated) {
+    if (auth.mode === 'login-required' && auth.authenticated) {
       navigate(redirectTarget, { replace: true })
     }
   }, [auth.loading, auth.mode, auth.authenticated, navigate, redirectTarget])
@@ -64,6 +69,28 @@ export function LoginPage() {
     } else {
       setErrorMessage('Login service is unavailable. Please try again.')
     }
+  }
+
+  // api-key-only: browser sign-in is not enabled on this instance. Show guidance instead
+  // of a form (a browser cannot send the Bearer API_KEY), which also breaks the loop.
+  if (!auth.loading && auth.mode === 'api-key-only') {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background px-4">
+        <div className="w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-xs">
+          <h1 className="mb-2 text-xl font-semibold">Browser sign-in is not enabled</h1>
+          <p className="mb-3 text-sm text-muted-foreground">
+            This server is reachable over the network and is protected by an API key, which only command-line / SDK
+            clients can send. Web browsers cannot present it.
+          </p>
+          <p className="text-sm text-muted-foreground">
+            To use ChatWalaʻau in the browser from here, the operator must enable the web sign-in lane by setting{' '}
+            <code className="rounded bg-muted px-1">AUTH_USERNAME</code> and{' '}
+            <code className="rounded bg-muted px-1">AUTH_PASSWORD_HASH</code> in the backend{' '}
+            <code className="rounded bg-muted px-1">.env</code>, then restart. See the Web Authentication guide.
+          </p>
+        </div>
+      </div>
+    )
   }
 
   return (

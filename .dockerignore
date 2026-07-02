@@ -69,6 +69,7 @@ backend/.templates/
 backend/.cron/
 backend/.agent/
 backend/.agents/
+backend/.webhooks/
 backend/batch-server.log
 
 # ---- IDE / OS ----

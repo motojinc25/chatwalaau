@@ -1,5 +1,5 @@
 import { Loader2, Menu } from 'lucide-react'
-import { lazy, Suspense, useCallback, useState } from 'react'
+import { Suspense, useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
 import { CronManager } from '@/components/CronManager'
@@ -7,15 +7,22 @@ import { PipelineManager } from '@/components/PipelineManager'
 import { SessionSidebar } from '@/components/SessionSidebar'
 import { TemporaryChatToggle } from '@/components/TemporaryChatToggle'
 import { Button } from '@/components/ui/button'
+import { WebhookManager } from '@/components/WebhookManager'
 import { useCronAvailable } from '@/hooks/useCronAvailable'
 import { useFileExplorerAvailable } from '@/hooks/useFileExplorerAvailable'
 import { usePipelineAvailable } from '@/hooks/usePipelineAvailable'
 import { useSession } from '@/hooks/useSession'
 import { useTemporaryChat } from '@/hooks/useTemporaryChat'
+import { useWebhookAvailable } from '@/hooks/useWebhookAvailable'
+import { lazyWithReload } from '@/lib/lazy-with-reload'
 
 // Lazy-loaded so the heavy monaco-editor bundle is fetched only when the File
-// Explorer is enabled and first opened (CTR-0137, UDR-0069 D5).
-const FileExplorer = lazy(() => import('@/components/FileExplorer').then((m) => ({ default: m.FileExplorer })))
+// Explorer is enabled and first opened (CTR-0137, UDR-0069 D5). lazyWithReload recovers
+// from a stale chunk hash after a rebuild/redeploy (PRP-0097 fix) instead of throwing
+// "Failed to fetch dynamically imported module".
+const FileExplorer = lazyWithReload(() =>
+  import('@/components/FileExplorer').then((m) => ({ default: m.FileExplorer })),
+)
 
 export function ChatPage() {
   const navigate = useNavigate()
@@ -66,6 +73,11 @@ export function ChatPage() {
   // launcher icon (next to Declarative Agents) opens the same modal instance.
   const pipelineAvailable = usePipelineAvailable()
   const [pipelineOpen, setPipelineOpen] = useState(false)
+
+  // Webhook Gateway portal (CTR-0157, PRP-0097). Lifted here so the sidebar-footer
+  // launcher icon (next to Declarative Agents) opens the same modal instance.
+  const webhookAvailable = useWebhookAvailable()
+  const [webhookOpen, setWebhookOpen] = useState(false)
 
   // File Explorer overlay (CTR-0137, PRP-0091). Lifted here so both the sidebar-footer
   // launcher icon and the /files slash command open the same overlay instance.
@@ -142,12 +154,16 @@ export function ChatPage() {
           onOpenFiles={() => setFilesOpen(true)}
           pipelineAvailable={pipelineAvailable}
           onOpenPipeline={() => setPipelineOpen(true)}
+          webhookAvailable={webhookAvailable}
+          onOpenWebhook={() => setWebhookOpen(true)}
         />
       )}
 
       {cronAvailable && <CronManager open={cronOpen} onOpenChange={setCronOpen} />}
 
       {pipelineAvailable && <PipelineManager open={pipelineOpen} onOpenChange={setPipelineOpen} />}
+
+      {webhookAvailable && <WebhookManager open={webhookOpen} onOpenChange={setWebhookOpen} />}
 
       {fileExplorerAvailable && (
         <Suspense fallback={null}>

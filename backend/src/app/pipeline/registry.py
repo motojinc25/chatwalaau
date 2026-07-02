@@ -95,6 +95,20 @@ JOB_TYPES: dict[str, JobType] = {
 }
 
 
+def register_job_type(job_type: JobType, *, replace: bool = False) -> None:
+    """Register a job type into the engine's registry (PRP-0097, UDR-0074 D7).
+
+    The single extension point. A built-in type (rag-ingest) is declared above; a
+    type CONTRIBUTED by another capability (e.g. CAP-010's ``teams-meeting``,
+    UDR-0076 D2) calls this at startup so the engine, store, REST API, agent tool,
+    and portal host it with no per-type change. Idempotent unless ``replace`` is set;
+    a duplicate name without ``replace`` is ignored (a re-import never clobbers).
+    """
+    if job_type.name in JOB_TYPES and not replace:
+        return
+    JOB_TYPES[job_type.name] = job_type
+
+
 def get_runner(job_type: str) -> JobRunner | None:
     """Return the runner for a job type, or None if unknown."""
     jt = JOB_TYPES.get(job_type)
@@ -118,4 +132,5 @@ __all__ = [
     "get_available_types",
     "get_runner",
     "job_types_info",
+    "register_job_type",
 ]

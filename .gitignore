@@ -64,6 +64,9 @@ mcp_servers.json
 # Batch Jobs (legacy; retired by PRP-0096, kept ignored for old working copies)
 .jobs/
 
+# Webhook gateway store + receipt records + subscriptions (PRP-0097)
+.webhooks/
+
 # ChromaDB
 .chroma/
 

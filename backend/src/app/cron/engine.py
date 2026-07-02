@@ -24,7 +24,7 @@ import logging
 
 from app.core.config import settings
 from app.cron import store
-from app.cron.executor import RunResult, run_script
+from app.cron.executor import RunResult, run_internal, run_script
 from app.cron.lock import acquire, release
 from app.cron.models import (
     RUN_FAILED,
@@ -118,7 +118,12 @@ async def _execute(job_id: str, job: dict, run_dir, is_oneshot: bool) -> None:
     """Run the script, write the run log, and record the outcome on the job."""
     started = datetime.now(UTC)
     try:
-        result = await run_script(job.get("script") or {})
+        # Managed jobs (kind="internal") run a registered in-process handler (no script,
+        # no CODING_ENABLED); ordinary jobs run their workspace script (PRP-0097 task 4).
+        if job.get("kind") == "internal":
+            result = await run_internal(str(job.get("internal_action", "")))
+        else:
+            result = await run_script(job.get("script") or {})
     except Exception:  # the harness shouldn't raise, but never let a run crash the loop
         logger.exception("cron run crashed for job %s", job_id)
         result = RunResult(RUN_FAILED, None, "", "", "internal error")

@@ -14,6 +14,7 @@ FEAT-0004); when false the run is refused (UDR-0067 D7).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess
@@ -127,4 +128,35 @@ def _run_sync(cmd: list[str], cwd: str, interpreter_label: str, timeout: int) ->
     return RunResult(status, proc.returncode, interpreter_label, proc.stdout or "", proc.stderr or "")
 
 
-__all__ = ["RunResult", "run_script"]
+# ---------------------------------------------------------------------------
+# Internal (managed) job handlers (PRP-0097 task 4)
+# ---------------------------------------------------------------------------
+#
+# A managed cron job (kind="internal") runs a registered in-process coroutine instead of a
+# workspace script. Unlike script runs it does NOT require CODING_ENABLED and never spawns
+# a subprocess. The first consumer is the webhook subscription maintenance loop (CAP-010),
+# which registers its handler at startup so the renewal job can be consolidated into and
+# visualized in the Cron Scheduler.
+
+InternalHandler = Callable[[], Awaitable[str]]
+INTERNAL_HANDLERS: dict[str, InternalHandler] = {}
+
+
+def register_internal_handler(name: str, handler: InternalHandler) -> None:
+    """Register an internal cron handler (idempotent; last registration wins)."""
+    INTERNAL_HANDLERS[name] = handler
+
+
+async def run_internal(action: str) -> RunResult:
+    """Run a registered internal handler. Never raises; returns a terminal RunResult."""
+    handler = INTERNAL_HANDLERS.get(action)
+    if handler is None:
+        return RunResult(RUN_FAILED, None, "internal", "", f"No internal handler registered for '{action}'.")
+    try:
+        out = await handler()
+    except Exception as exc:  # an internal job must never crash the tick loop
+        return RunResult(RUN_FAILED, None, "internal", "", f"Internal job '{action}' failed: {exc}")
+    return RunResult(RUN_SUCCESS, 0, "internal", str(out or ""), "")
+
+
+__all__ = ["INTERNAL_HANDLERS", "RunResult", "register_internal_handler", "run_internal", "run_script"]

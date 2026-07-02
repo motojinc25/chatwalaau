@@ -151,6 +151,13 @@ async def lifespan(_app: FastAPI):
         from app.teams import initialize_teams
 
         await initialize_teams()
+    # Inbound Webhook Gateway (PRP-0097, CTR-0152, UDR-0075 D8). Starts the internal
+    # maintenance scheduler that auto-renews Graph subscriptions ONLY while CRON_ENABLED.
+    # No-op unless WEBHOOK_ENABLED.
+    if settings.webhook_enabled:
+        from app.webhook import initialize_webhook
+
+        await initialize_webhook()
     yield
     # Shutdown: stop the cron scheduler (cancel loop + drain in-flight runs).
     if settings.cron_enabled:
@@ -162,6 +169,11 @@ async def lifespan(_app: FastAPI):
         from app.pipeline.engine import stop_pipeline
 
         await stop_pipeline()
+    # Shutdown: stop the webhook maintenance scheduler (PRP-0097, CTR-0152).
+    if settings.webhook_enabled:
+        from app.webhook import shutdown_webhook
+
+        await shutdown_webhook()
     # Shutdown: stop MCP servers
     await shutdown_mcp()
     # Drain in-flight background tasks (PRP-0077, CTR-0108). Best-effort: gives
@@ -405,6 +417,17 @@ from app.teams import register_teams
 
 register_teams(app, agent_registry=agent_registry)
 
+# Inbound Webhook Gateway (CTR-0149/0154, PRP-0097, UDR-0075). A separate
+# external-boundary capability (CAP-010), mounted into THIS FastAPI app (ChatWalaʻau
+# owns the single HTTP lifecycle, as it does for CAP-009 Teams). The public ingress
+# (POST/GET /api/webhook/{source}) is EXEMPT from CTR-0083 and protected by the source's
+# own validation (validation handshake + clientState HMAC); the management API
+# (/api/webhooks/*) consumes CTR-0083. Both routers 404 unless WEBHOOK_ENABLED, and the
+# msgraph source + teams-meeting job type are registered only when enabled (UDR-0075 D11).
+from app.webhook import register_webhook
+
+register_webhook(app)
+
 # OpenAI-compatible Responses API (CTR-0057, PRP-0030)
 register_openai_api(app, agent_registry=agent_registry)
 
@@ -496,10 +519,19 @@ else:
 if dist_path is not None:
     app.mount("/assets", StaticFiles(directory=dist_path / "assets"), name="static-assets")
 
+    # index.html must never be cached: it is the manifest that points at the
+    # content-hashed /assets/*.js chunks. If a browser (or a tunnel / CDN) serves a stale
+    # index after the frontend is rebuilt, its lazy imports request old chunk hashes that
+    # no longer exist on disk -> 404 "Failed to fetch dynamically imported module". The
+    # hashed assets themselves are immutable and safe to cache for a long time.
+    _INDEX_NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
         """SPA fallback: serve index.html for all non-API routes."""
         resolved = (dist_path / full_path).resolve()
         if resolved.is_file() and resolved.is_relative_to(dist_path):
-            return FileResponse(resolved)
-        return FileResponse(dist_path / "index.html")
+            # A real file other than the SPA shell (e.g. favicon) -- serve as-is.
+            if resolved.name != "index.html":
+                return FileResponse(resolved)
+        return FileResponse(dist_path / "index.html", headers=_INDEX_NO_CACHE)

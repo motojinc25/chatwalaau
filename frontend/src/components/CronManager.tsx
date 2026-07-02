@@ -47,6 +47,11 @@ interface CronJob {
   last_status: string | null
   state: string
   created_by: string
+  // PRP-0097 task 4: system-managed jobs (e.g. webhook subscription maintenance) run an
+  // internal handler and cannot be deleted by the operator.
+  managed?: boolean
+  protected?: boolean
+  kind?: string
 }
 
 interface CronRun {
@@ -270,6 +275,11 @@ export function CronManager({ open, onOpenChange }: CronManagerProps) {
 
   const set = useCallback((patch: Partial<DraftState>) => setDraft((d) => ({ ...d, ...patch })), [])
 
+  // PRP-0097 task 4: the selected job may be system-managed (e.g. webhook subscription
+  // maintenance) -- such jobs are read-only and cannot be deleted from the portal.
+  const selectedJob = jobs.find((j) => j.id === draft.id) ?? null
+  const isProtected = !!selectedJob?.protected
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[90vh] w-[90vw] max-w-[90vw] flex-col gap-0 p-0">
@@ -441,11 +451,18 @@ export function CronManager({ open, onOpenChange }: CronManagerProps) {
                 Enabled
               </label>
 
+              {isProtected && (
+                <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-400">
+                  System-managed job (owned by a feature, e.g. webhook subscription maintenance). It cannot be edited or
+                  deleted here.
+                </p>
+              )}
+
               <div className="flex items-center gap-2">
-                <Button size="sm" onClick={() => void save()} disabled={saving}>
+                <Button size="sm" onClick={() => void save()} disabled={saving || isProtected}>
                   {draft.id ? 'Save changes' : 'Create job'}
                 </Button>
-                {draft.id && (
+                {draft.id && !isProtected && (
                   <Button variant="destructive" size="sm" onClick={() => setConfirmDelete(true)} disabled={saving}>
                     <Trash2 className="mr-1 h-3.5 w-3.5" /> Delete
                   </Button>

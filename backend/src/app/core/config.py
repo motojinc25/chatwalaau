@@ -398,6 +398,62 @@ class Settings(BaseSettings):
         """Parse TEAMS_ALLOWED_USERS into a set of Entra Object IDs (empty = all)."""
         return frozenset(u.strip() for u in self.teams_allowed_users.split(",") if u.strip())
 
+    # Inbound Webhook Gateway (CTR-0006, CTR-0149..0157, PRP-0097, UDR-0075/0076)
+    # A new external-boundary capability (CAP-010). The whole feature is OFF unless
+    # WEBHOOK_ENABLED (UDR-0075 D11): when false the /api/webhook/* ingress and
+    # /api/webhooks/* management routers are not mounted (404), the maintenance
+    # scheduler does not run, the sidebar icon is hidden, the manage_webhook tool is
+    # not registered, and the teams-meeting pipeline job type is not registered.
+    webhook_enabled: bool = False
+    # Public base path for inbound notifications; sources mount at <base>/{source}.
+    webhook_ingress_base_path: str = "/api/webhook"
+    # Per-source enable/disable state + per-source receipt records live here.
+    webhook_store_dir: str = ".webhooks"
+    # Cap per captured receipt record body in bytes (0 = unbounded).
+    webhook_receipt_max_bytes: int = 1_048_576
+
+    # Microsoft Graph webhook source (the first registered source; UDR-0075 D2)
+    # clientState shared secret used to validate notifications (HMAC-safe compare).
+    msgraph_webhook_client_state: str = ""
+    # Public, tunnel-reachable notification URL given to Graph at subscribe time.
+    msgraph_webhook_notification_url: str = ""
+    # Graph resource to subscribe (e.g. communications/onlineMeetings/getAllTranscripts).
+    msgraph_webhook_resource: str = ""
+    # Subscription renewal interval in hours; MUST be shorter than the resource max
+    # expiry (UDR-0075 D7). Auto-renewal runs only while CRON_ENABLED (UDR-0075 D8).
+    msgraph_subscription_renew_hours: int = 12
+    # Optional source CIDR allowlist (comma-separated; empty = off).
+    msgraph_webhook_allowed_cidrs: str = ""
+    # Optional resource allowlist (comma-separated; empty = off).
+    msgraph_webhook_allowed_resources: str = ""
+
+    # Microsoft Graph app-only credentials (dedicated GRAPH_* namespace; UDR-0075 D6)
+    graph_tenant_id: str = ""
+    graph_client_id: str = ""
+    graph_client_secret: str = ""
+    graph_base_url: str = "https://graph.microsoft.com/v1.0"
+
+    # Teams Meeting Pipeline (FEAT-0053, CTR-0156, PRP-0097, UDR-0076)
+    # Output subdir within the coding workspace for the summary JSON (CTR-0031 jail).
+    teams_meeting_output_dir: str = "meeting-summaries"
+    # Summary model override; empty = the registry/session default model.
+    teams_meeting_summary_model: str = ""
+    # A transcript artifact is often not ready right when a meeting ends. The fetch stage
+    # polls for it up to this many seconds (default 600 = 10 min) before failing.
+    teams_meeting_transcript_max_wait_seconds: int = 600
+    # Poll interval while waiting for the transcript artifact (seconds).
+    teams_meeting_transcript_poll_seconds: int = 30
+
+    @property
+    def msgraph_webhook_allowed_cidr_list(self) -> list[str]:
+        """Parse MSGRAPH_WEBHOOK_ALLOWED_CIDRS (empty = no restriction)."""
+        return [c.strip() for c in self.msgraph_webhook_allowed_cidrs.split(",") if c.strip()]
+
+    @property
+    def msgraph_webhook_allowed_resource_list(self) -> list[str]:
+        """Parse MSGRAPH_WEBHOOK_ALLOWED_RESOURCES (empty = no restriction)."""
+        return [r.strip() for r in self.msgraph_webhook_allowed_resources.split(",") if r.strip()]
+
     # RAG Pipeline (CTR-0075, PRP-0037)
     chroma_dir: str = ".chroma"
     rag_collection_name: str = "default"
@@ -432,6 +488,13 @@ class Settings(BaseSettings):
     auth_session_ttl_seconds: int = 86400
     auth_cookie_secure: str = "auto"
     auth_cookie_name: str = "chatwalaau_session"
+    # SameSite policy for the session cookie. Default "lax" (PRP-0097 fix): "strict" drops
+    # the cookie on cross-site top-level navigations into the app, which breaks login behind
+    # a TLS-terminating tunnel / reverse proxy (e.g. Microsoft Dev Tunnels, whose access
+    # page redirects cross-site into the tunnel domain) and causes a login redirect loop.
+    # "lax" still blocks cross-site POST cookies (the main CSRF vector). "none" enables
+    # cross-site embedding but REQUIRES a Secure cookie (forced on automatically).
+    auth_cookie_samesite: str = "lax"
 
     # DevUI (CTR-0024, PRP-0016, PRP-0046)
     devui_enabled: bool = False
@@ -797,6 +860,12 @@ class Settings(BaseSettings):
             msg = f"AUTH_COOKIE_SECURE must be one of: auto, true, false. Got: {self.auth_cookie_secure!r}"
             raise ValueError(msg)
         self.auth_cookie_secure = cookie_secure
+
+        cookie_samesite = self.auth_cookie_samesite.strip().lower()
+        if cookie_samesite not in {"lax", "strict", "none"}:
+            msg = f"AUTH_COOKIE_SAMESITE must be one of: lax, strict, none. Got: {self.auth_cookie_samesite!r}"
+            raise ValueError(msg)
+        self.auth_cookie_samesite = cookie_samesite
 
         if self.web_auth_enabled:
             if self.auth_session_ttl_seconds < 60:
