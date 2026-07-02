@@ -1,4 +1,4 @@
-import { Loader2, Play, Plus, RefreshCw, Trash2, Webhook } from 'lucide-react'
+import { ExternalLink, KeyRound, Loader2, Play, Plus, RefreshCw, Trash2, Webhook } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -74,6 +74,16 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
   const [health, setHealth] = useState<Record<string, unknown> | null>(null)
   const [fetchOrganizer, setFetchOrganizer] = useState('')
   const [fetchMeeting, setFetchMeeting] = useState('')
+  // Dedicated (user-delegated) device-code flow state (CTR-0159, FEAT-0054).
+  const [dedicatedMeeting, setDedicatedMeeting] = useState('')
+  const [dedicatedFlow, setDedicatedFlow] = useState<{
+    flow_id: string
+    user_code: string
+    verification_uri: string
+  } | null>(null)
+  const [dedicatedState, setDedicatedState] = useState<string | null>(null)
+  const [dedicatedJobId, setDedicatedJobId] = useState<string | null>(null)
+  const [dedicatedBusy, setDedicatedBusy] = useState(false)
   const [loading, setLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -302,6 +312,81 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
     }
   }, [fetchOrganizer, fetchMeeting, callGraph])
 
+  // Dedicated (user-delegated) device-code login + fetch (CTR-0159, FEAT-0054). The user
+  // signs in AS THEMSELVES; access is user-scoped and limited to meetings they organized.
+  const startDedicated = useCallback(async () => {
+    const meeting = dedicatedMeeting.trim()
+    if (!meeting) {
+      setError('Enter a meeting id or join URL.')
+      return
+    }
+    setDedicatedBusy(true)
+    setError(null)
+    setNotice(null)
+    setDedicatedFlow(null)
+    setDedicatedState(null)
+    setDedicatedJobId(null)
+    const isUrl = meeting.startsWith('http')
+    try {
+      const res = await fetch('/api/webhooks/msgraph/dedicated/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ meeting_id: isUrl ? '' : meeting, join_web_url: isUrl ? meeting : '' }),
+      })
+      const data = await res.json().catch(() => null)
+      if (!res.ok) {
+        throw new Error(
+          (data?.detail?.message as string) ?? (data?.detail?.error as string) ?? 'Failed to start sign-in',
+        )
+      }
+      setDedicatedFlow({ flow_id: data.flow_id, user_code: data.user_code, verification_uri: data.verification_uri })
+      setDedicatedState('pending_auth')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start sign-in')
+    } finally {
+      setDedicatedBusy(false)
+    }
+  }, [dedicatedMeeting])
+
+  const cancelDedicated = useCallback(async () => {
+    if (!dedicatedFlow) return
+    try {
+      await fetch(`/api/webhooks/msgraph/dedicated/cancel/${dedicatedFlow.flow_id}`, { method: 'POST' })
+    } catch {
+      // best-effort
+    }
+    setDedicatedFlow(null)
+    setDedicatedState(null)
+  }, [dedicatedFlow])
+
+  // Poll the device-code flow status until it reaches a terminal state.
+  useEffect(() => {
+    if (!dedicatedFlow) return
+    if (dedicatedState && ['job_enqueued', 'failed', 'cancelled'].includes(dedicatedState)) return
+    let cancelled = false
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/webhooks/msgraph/dedicated/status/${dedicatedFlow.flow_id}`)
+        if (!res.ok || cancelled) return
+        const data = await res.json()
+        setDedicatedState(data.state)
+        if (data.job_id) setDedicatedJobId(data.job_id)
+        if (data.state === 'job_enqueued') {
+          setNotice('Dedicated job submitted. See the Pipeline portal for progress.')
+          setDedicatedMeeting('')
+        } else if (data.state === 'failed') {
+          setError(data.error ?? 'Dedicated fetch failed.')
+        }
+      } catch {
+        // transient; keep polling
+      }
+    }, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [dedicatedFlow, dedicatedState])
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[90vh] w-[90vw] max-w-[90vw] flex-col gap-0 p-0">
@@ -463,6 +548,96 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
                       <pre className="mt-2 max-h-32 overflow-auto rounded bg-muted p-2 text-[11px]">
                         {JSON.stringify(health, null, 2)}
                       </pre>
+                    )}
+                  </div>
+                )}
+
+                {/* Dedicated fetch (user-delegated, device-code sign-in). No app-only
+                    service principal or Application Access Policy required; you summarize a
+                    meeting YOU organized (CTR-0159, FEAT-0054, UDR-0077). */}
+                {isMsGraph && (
+                  <div className="rounded-md border p-3">
+                    <div className="mb-1 flex items-center gap-2">
+                      <KeyRound className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-xs font-semibold text-muted-foreground">
+                        Dedicated fetch (sign in as yourself)
+                      </span>
+                    </div>
+                    <p className="mb-2 text-[11px] text-muted-foreground">
+                      Summarize a meeting <strong>you organized</strong> by signing in with your own account via a
+                      device code. No app-only service principal or Application Access Policy is required. The sign-in
+                      token is used once and never stored.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <input
+                        className="min-w-0 flex-1 rounded-md border bg-background px-2 py-1 font-mono text-xs"
+                        placeholder="Join URL (recommended) or Graph onlineMeeting id"
+                        value={dedicatedMeeting}
+                        disabled={dedicatedBusy || (!!dedicatedFlow && dedicatedState === 'pending_auth')}
+                        onChange={(e) => setDedicatedMeeting(e.target.value)}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={dedicatedBusy || (!!dedicatedFlow && dedicatedState === 'pending_auth')}
+                        onClick={() => void startDedicated()}>
+                        {dedicatedBusy ? (
+                          <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <KeyRound className="mr-1 h-3.5 w-3.5" />
+                        )}
+                        Sign in &amp; fetch
+                      </Button>
+                    </div>
+
+                    {dedicatedFlow && (
+                      <div className="mt-2 rounded border bg-muted/50 p-2 text-[11px]">
+                        {dedicatedState === 'pending_auth' && (
+                          <div className="flex flex-col gap-1">
+                            <span>
+                              Open{' '}
+                              <a
+                                href={dedicatedFlow.verification_uri}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-0.5 text-primary underline">
+                                {dedicatedFlow.verification_uri}
+                                <ExternalLink className="h-3 w-3" />
+                              </a>{' '}
+                              and enter this code:
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <code className="select-all rounded bg-background px-2 py-1 font-mono text-sm font-semibold tracking-widest">
+                                {dedicatedFlow.user_code}
+                              </code>
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                              <span className="text-muted-foreground">Waiting for sign-in...</span>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="ml-auto h-6"
+                                onClick={() => void cancelDedicated()}>
+                                Cancel
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                        {dedicatedState === 'authorized' && (
+                          <span className="flex items-center gap-1 text-muted-foreground">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Signed in. Submitting the job...
+                          </span>
+                        )}
+                        {dedicatedState === 'job_enqueued' && (
+                          <span className="text-emerald-600 dark:text-emerald-500">
+                            Job submitted{dedicatedJobId ? ` (${dedicatedJobId})` : ''}. See the Pipeline portal for
+                            progress.
+                          </span>
+                        )}
+                        {dedicatedState === 'failed' && (
+                          <span className="text-destructive">Sign-in or fetch failed.</span>
+                        )}
+                        {dedicatedState === 'cancelled' && <span className="text-muted-foreground">Cancelled.</span>}
+                      </div>
                     )}
                   </div>
                 )}

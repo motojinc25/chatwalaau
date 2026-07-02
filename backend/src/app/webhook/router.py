@@ -263,10 +263,14 @@ def register_webhook(app) -> None:
     Always includes the routers (they 404 internally when disabled, so the SPA can probe
     them). Registers sources + the job type ONLY when WEBHOOK_ENABLED (UDR-0075 D11).
     """
+    from app.webhook.dedicated import router as dedicated_router
     from app.webhook.ingress import router as ingress_router
 
     app.include_router(ingress_router)
     app.include_router(router)
+    # User-delegated Dedicated Fetch API (CTR-0159, PRP-0098). Always included; it 404s
+    # internally when WEBHOOK_ENABLED is false, so the SPA can probe it.
+    app.include_router(dedicated_router)
     if settings.webhook_enabled:
         register_sources()
 

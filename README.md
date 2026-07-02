@@ -80,7 +80,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - **File Explorer** -- a built-in VSCode-style **file tree + monaco editor** to browse and hand-edit files in your coding workspace, with tabs, create/rename/delete, drag-to-move, **file/folder download (ZIP)**, **PDF & image preview with zoom**, and a **split editor** (drag tabs between panes) (opt-in via `FILE_EXPLORER_ENABLED`)
 - **Microsoft Teams** -- talk to the agent from a Teams personal chat, group chat, or channel (Bot Framework JWT auth, typing indicator, Adaptive Card tool approval, Entra Object-ID allow-list; opt-in via `TEAMS_ENABLED`)
 - **Declarative agents** -- define an agent (persona, model selection, output policy) in a YAML file and switch the active agent at runtime from the web app; the built-in CORE agent reproduces the default behavior (opt-in custom agents via `DECLARATIVE_AGENTS_DIR`)
-- **Inbound webhooks** -- drive the agent from external events via a **Webhook Gateway** with a management portal; the first source is **Microsoft Graph**, which auto-summarizes **Teams meeting transcripts** into the workspace (opt-in via `WEBHOOK_ENABLED`)
+- **Inbound webhooks** -- drive the agent from external events via a **Webhook Gateway** with a management portal; the first source is **Microsoft Graph**, which auto-summarizes **Teams meeting transcripts** into the workspace (opt-in via `WEBHOOK_ENABLED`), or summarize a meeting you organized on demand by signing in yourself (device-code, no service principal or admin policy)
 - **OpenAI-compatible API** -- expose the agent as `/v1/responses` for any OpenAI-SDK app
 - **Yours, local-first** -- file-based sessions, vectors, and uploads stay on your machine; unified API-key auth and an optional web sign-in for LAN/cloud
 

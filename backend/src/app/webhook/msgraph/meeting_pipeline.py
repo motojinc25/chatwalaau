@@ -15,6 +15,12 @@ a live subscription (UDR-0076 D4). Meeting resolution + transcript fetch go thro
 Graph app-only client (CTR-0153, UDR-0076 D5); the summary JSON is produced through the
 registry chokepoint (CTR-0102/CTR-0070, DEMO_MODE honored, UDR-0076 D6); the output is
 written into the CTR-0031 workspace jail (UDR-0076 D7).
+
+PRP-0098 / UDR-0077: the job gains an additive ``auth_mode`` param. ``app_only`` (default)
+is the original organizer-scoped app-only lane (byte-for-byte unchanged). ``delegated`` is
+the user-delegated, user-scoped lane (FEAT-0054): a ``_MeetingAccess`` abstraction swaps
+the Graph client (CTR-0158) and the path root (``me/onlineMeetings``), fed an in-memory
+token addressed by an opaque ``token_ref`` (the token is never persisted, UDR-0077 D3).
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ from app.core.config import settings
 from app.pipeline.models import Job, JobStatus
 from app.pipeline.registry import JobType, ParamSpec, register_job_type
 from app.webhook import store as webhook_store
-from app.webhook.msgraph import SOURCE_NAME, graph_client
+from app.webhook.msgraph import SOURCE_NAME, graph_client, graph_delegated_client
 
 if TYPE_CHECKING:
     from app.pipeline.store import PipelineStore
@@ -57,6 +63,48 @@ _SUMMARY_SYSTEM_PROMPT = (
 )
 
 
+class _MeetingAccess:
+    """How this run talks to Graph for meeting + transcript reads (PRP-0098, UDR-0077 D1/D4).
+
+    ``app_only`` (the default; CTR-0153) is organizer-scoped via
+    ``users/{organizerId}/onlineMeetings`` and requires a Teams Application Access Policy.
+    ``delegated`` (CTR-0158) is the user-delegated, user-scoped lane via
+    ``me/onlineMeetings`` with an in-memory token (held for this run only, never persisted).
+    The transcript-fetch retry logic is shared by both because both raise the same
+    ``graph_client.GraphApiError``.
+    """
+
+    def __init__(self, *, mode: str, organizer_id: str = "", token: str = "") -> None:
+        self.mode = mode
+        self.organizer_id = organizer_id
+        self.token = token
+
+    @property
+    def transcript_base(self) -> str:
+        if self.mode == "delegated":
+            return "me/onlineMeetings"
+        return f"users/{self.organizer_id}/onlineMeetings"
+
+    async def resolve(self, *, meeting_id: str, join_web_url: str) -> dict[str, Any]:
+        if self.mode == "delegated":
+            return await graph_delegated_client.resolve_online_meeting_me(
+                self.token, meeting_id=meeting_id, join_web_url=join_web_url
+            )
+        return await graph_client.resolve_online_meeting(
+            organizer_id=self.organizer_id, meeting_id=meeting_id, join_web_url=join_web_url
+        )
+
+    async def get(self, path: str) -> dict[str, Any]:
+        if self.mode == "delegated":
+            return await graph_delegated_client.get_me(self.token, path)
+        return await graph_client.get(path)
+
+    async def get_text(self, path: str) -> str:
+        if self.mode == "delegated":
+            return await graph_delegated_client.get_text_me(self.token, path)
+        return await graph_client.get_text(path)
+
+
 def _fail(job: Job, storage: PipelineStore, phase: str, error: str) -> None:
     job.status = JobStatus.failed
     job.progress_message = f"failed:{phase}"
@@ -76,27 +124,56 @@ async def run_teams_meeting_job(job: Job, storage: PipelineStore, cancel_event: 
     """Resolve a meeting, fetch its transcript, summarize it, and write the JSON output."""
     _advance(job, storage, PHASE_RECEIVED, "received")
 
+    auth_mode = (str(job.params.get("auth_mode", "app_only")).strip() or "app_only").lower()
     organizer_id = str(job.params.get("organizer_id", "")).strip()
     meeting_id = str(job.params.get("meeting_id", "")).strip()
     join_web_url = str(job.params.get("join_web_url", "")).strip()
     transcript_id = str(job.params.get("transcript_id", "")).strip()
 
-    if not graph_client.is_configured():
-        _fail(job, storage, "resolving_meeting", "Microsoft Graph credentials are not configured.")
-        return
-    if not organizer_id:
-        # App-only Teams meeting/transcript reads are organizer-scoped (UDR-0076 D5):
-        # without the organizer the Graph path /users/{organizer}/onlineMeetings cannot be
-        # built. The webhook path supplies it from the notification; the manual Fetch path
-        # requires the operator to enter it.
-        _fail(
-            job,
-            storage,
-            "resolving_meeting",
-            "Missing organizer user id. App-only access is organizer-scoped: provide the "
-            "meeting organizer's AAD object id or UPN.",
-        )
-        return
+    if auth_mode == "delegated":
+        # User-delegated ("Dedicated") lane (FEAT-0054, UDR-0077). The access token is held
+        # in process memory only (UDR-0077 D3) and addressed by an opaque token_ref in the
+        # persisted params; it is consumed here once. If absent (e.g. after a restart) the
+        # job fails clearly rather than silently falling back to app-only.
+        if not graph_delegated_client.is_configured():
+            _fail(
+                job,
+                storage,
+                "resolving_meeting",
+                "Microsoft Graph delegated credentials are not configured "
+                "(GRAPH_TENANT_ID / GRAPH_CLIENT_ID).",
+            )
+            return
+        token_ref = str(job.params.get("token_ref", "")).strip()
+        token = await graph_delegated_client.take_run_token(token_ref) if token_ref else None
+        if not token:
+            _fail(
+                job,
+                storage,
+                "resolving_meeting",
+                "User-delegated access token is unavailable. It is held in memory only and "
+                "never persisted (UDR-0077 D3); re-run the Dedicated fetch to sign in again.",
+            )
+            return
+        access = _MeetingAccess(mode="delegated", token=token)
+    else:
+        if not graph_client.is_configured():
+            _fail(job, storage, "resolving_meeting", "Microsoft Graph credentials are not configured.")
+            return
+        if not organizer_id:
+            # App-only Teams meeting/transcript reads are organizer-scoped (UDR-0076 D5):
+            # without the organizer the Graph path /users/{organizer}/onlineMeetings cannot
+            # be built. The webhook path supplies it from the notification; the manual Fetch
+            # path requires the operator to enter it.
+            _fail(
+                job,
+                storage,
+                "resolving_meeting",
+                "Missing organizer user id. App-only access is organizer-scoped: provide the "
+                "meeting organizer's AAD object id or UPN.",
+            )
+            return
+        access = _MeetingAccess(mode="app_only", organizer_id=organizer_id)
 
     # --- resolving_meeting ---
     _advance(job, storage, PHASE_RESOLVING, "resolving_meeting")
@@ -105,9 +182,7 @@ async def run_teams_meeting_job(job: Job, storage: PipelineStore, cancel_event: 
     meeting: dict[str, Any] = {}
     if meeting_id or join_web_url:
         try:
-            meeting = await graph_client.resolve_online_meeting(
-                organizer_id=organizer_id, meeting_id=meeting_id, join_web_url=join_web_url
-            )
+            meeting = await access.resolve(meeting_id=meeting_id, join_web_url=join_web_url)
             meeting_id = meeting.get("id", meeting_id)
         except Exception as exc:
             # Resolution is best-effort metadata (subject); the transcript is the goal. If we
@@ -127,7 +202,7 @@ async def run_teams_meeting_job(job: Job, storage: PipelineStore, cancel_event: 
     transcript_text = ""
     try:
         transcript_text = await _fetch_transcript_with_wait(
-            organizer_id=organizer_id,
+            access=access,
             meeting_id=meeting_id,
             transcript_id=transcript_id,
             job=job,
@@ -188,7 +263,7 @@ class _Cancelled(Exception):
 
 async def _fetch_transcript_with_wait(
     *,
-    organizer_id: str,
+    access: _MeetingAccess,
     meeting_id: str,
     transcript_id: str,
     job: Job,
@@ -213,7 +288,7 @@ async def _fetch_transcript_with_wait(
     while True:
         if cancel_event.is_set():
             raise _Cancelled
-        text = await _try_fetch_transcript(organizer_id, meeting_id, transcript_id)
+        text = await _try_fetch_transcript(access, meeting_id, transcript_id)
         if text and text.strip():
             return text
         remaining = deadline - time.monotonic()
@@ -237,17 +312,18 @@ async def _fetch_transcript_with_wait(
             slept += 2.0
 
 
-async def _try_fetch_transcript(organizer_id: str, meeting_id: str, transcript_id: str) -> str | None:
+async def _try_fetch_transcript(access: _MeetingAccess, meeting_id: str, transcript_id: str) -> str | None:
     """One transcript fetch attempt. Returns text, or None when not ready yet.
 
     A 404 (transcript / content not yet produced) maps to None (retry); any other Graph
-    error propagates (it will not be fixed by waiting).
+    error propagates (it will not be fixed by waiting). The Graph path root differs by auth
+    lane (``users/{organizerId}`` app-only vs ``me`` delegated) via ``access`` (UDR-0077 D4).
     """
-    base = f"users/{organizer_id}/onlineMeetings/{meeting_id}/transcripts"
+    base = f"{access.transcript_base}/{meeting_id}/transcripts"
     tid = transcript_id
     if not tid:
         try:
-            listing = await graph_client.get(base)
+            listing = await access.get(base)
         except graph_client.GraphApiError as exc:
             if exc.status_code == 404:
                 return None
@@ -257,7 +333,7 @@ async def _try_fetch_transcript(organizer_id: str, meeting_id: str, transcript_i
             return None
         tid = items[0]["id"]
     try:
-        return await graph_client.get_text(f"{base}/{tid}/content?$format=text/vtt")
+        return await access.get_text(f"{base}/{tid}/content?$format=text/vtt")
     except graph_client.GraphApiError as exc:
         if exc.status_code == 404:
             return None
@@ -466,6 +542,44 @@ async def fetch(*, organizer_id: str = "", meeting_id: str = "", join_web_url: s
     return await submit_meeting_job(params, idempotent=False)
 
 
+async def submit_dedicated_job(token: str, *, meeting_id: str = "", join_web_url: str = "") -> dict[str, Any]:
+    """Submit a user-delegated ("Dedicated") teams-meeting job (FEAT-0054, UDR-0077).
+
+    Used by the Dedicated Fetch API (CTR-0159) once the device-code login has produced a
+    user-delegated access token. The token is stashed in the process-local run-token map
+    under an opaque ref; the persisted job params carry ONLY that ref (UDR-0077 D3), so the
+    token never lands in the CTR-0145 store. ``organizer_id`` is NOT required -- delegated
+    access is user-scoped (``/me/onlineMeetings``, UDR-0077 D4).
+    """
+    import uuid
+
+    if not (meeting_id or join_web_url):
+        msg = "A meeting id or join URL is required."
+        raise ValueError(msg)
+    if meeting_id and meeting_id.replace(" ", "").isdigit():
+        msg = (
+            "That looks like the numeric Teams 'Meeting ID' (the dial-in id), which "
+            "Microsoft Graph cannot resolve directly. Use the meeting Join URL instead, or "
+            "the Graph onlineMeeting id (a long opaque string)."
+        )
+        raise ValueError(msg)
+    token_ref = uuid.uuid4().hex
+    await graph_delegated_client.put_run_token(token_ref, token)
+    params = {
+        "auth_mode": "delegated",
+        "token_ref": token_ref,
+        "meeting_id": meeting_id,
+        "join_web_url": join_web_url,
+        "source": "dedicated",
+    }
+    try:
+        return await submit_meeting_job(params, idempotent=False)
+    except Exception:
+        # Reclaim the stashed token if the job could not be enqueued.
+        await graph_delegated_client.take_run_token(token_ref)
+        raise
+
+
 def register_meeting_job_type() -> None:
     """Register the teams-meeting job type into the pipeline engine (UDR-0074 D7)."""
     register_job_type(
@@ -509,5 +623,6 @@ __all__ = [
     "handle_notification",
     "register_meeting_job_type",
     "run_teams_meeting_job",
+    "submit_dedicated_job",
     "submit_meeting_job",
 ]
