@@ -278,6 +278,12 @@ app.include_router(web_auth_router)
 # Tool Approval REST endpoint (CTR-0099, PRP-0067)
 app.include_router(tool_approval_router)
 
+# Memory Curation API (CTR-0164, PRP-0100) -- per-turn "like" trigger for the
+# Agent Curated Memory (CTR-0162).
+from app.memory.router import router as memory_router  # noqa: E402
+
+app.include_router(memory_router)
+
 # Session management API (CTR-0015)
 app.include_router(session_router)
 

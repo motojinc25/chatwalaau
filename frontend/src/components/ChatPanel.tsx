@@ -20,6 +20,7 @@ import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialo
 import { useChat } from '@/hooks/useChat'
 import { useChatScroll } from '@/hooks/useChatScroll'
 import { type ImageAttachment, useImageAttachment } from '@/hooks/useImageAttachment'
+import { useMemoryCuration } from '@/hooks/useMemoryCuration'
 import { useMessageNavigator } from '@/hooks/useMessageNavigator'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useToolApproval } from '@/hooks/useToolApproval'
@@ -59,6 +60,27 @@ function buildStreamingKey(messages: ChatMessage[], isLoading: boolean): string 
   const toolCallCount = lastMsg?.toolCalls?.length ?? 0
   const lastToolStatus = lastMsg?.toolCalls?.at(-1)?.status ?? ''
   return `${messages.length}:${lastMsg?.content?.length ?? 0}:${toolCallCount}:${lastToolStatus}:${lastMsg?.reasoningBlocks?.length ?? 0}:${isLoading}`
+}
+
+/**
+ * Stable per-turn key for the Agent Memory like (CTR-0165), derived from the
+ * turn's CONTENT (user + assistant text) via FNV-1a, NOT the ephemeral message id.
+ * A content hash is identical at like-time and after reloading a past chat, so the
+ * liked state matches reliably. The length prefix reduces the (already tiny)
+ * collision chance between short identical turns.
+ */
+function fnv1a(str: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(16)
+}
+function turnKeyFromContent(userText: string, assistantText: string): string {
+  const u = userText.trim()
+  const a = assistantText.trim()
+  return `t_${u.length}_${a.length}_${fnv1a(`${u}␟${a}`)}`
 }
 
 export function ChatPanel({
@@ -359,6 +381,63 @@ export function ChatPanel({
   // right gutter and the user-turn count inside the hook.
   const messageNav = useMessageNavigator(scrollRef, messages, { enabled: !compact })
 
+  // Agent Memory curation (CTR-0165, PRP-0100). The "remember this turn" like on
+  // each message toggles the same turn (user + assistant as one set). Resolve a
+  // message index to its turn via a messages ref so onToggleMemoryLike stays
+  // referentially stable (PRP-0074 memoization); a like is only offered for a
+  // COMPLETE turn that has an assistant reply with text.
+  //
+  // turn_key is derived from the turn's CONTENT (a stable hash of the user +
+  // assistant text), NOT the ephemeral message id. Message ids are regenerated
+  // per render/reload unless persisted, so a content-derived key is what makes the
+  // liked state match reliably after reloading a past chat -- independent of the
+  // message-id plumbing and of any timing.
+  const memory = useMemoryCuration(threadId)
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
+  const resolveTurn = useCallback((index: number) => {
+    const msgs = messagesRef.current
+    const msg = msgs[index]
+    if (!msg) return null
+    let assistantIdx = -1
+    if (msg.role === 'assistant') {
+      assistantIdx = index
+    } else if (msg.role === 'user') {
+      for (let j = index + 1; j < msgs.length; j++) {
+        if (msgs[j].role === 'assistant') {
+          assistantIdx = j
+          break
+        }
+        if (msgs[j].role === 'user') break
+      }
+    }
+    if (assistantIdx < 0) return null
+    const assistant = msgs[assistantIdx]
+    if (!assistant.content || !assistant.content.trim()) return null
+    let userText = ''
+    for (let j = assistantIdx - 1; j >= 0; j--) {
+      if (msgs[j].role === 'user') {
+        userText = msgs[j].content
+        break
+      }
+    }
+    return { turnKey: turnKeyFromContent(userText, assistant.content), userText, assistantText: assistant.content }
+  }, [])
+  const selectedModelRef = useRef(selectedModel)
+  selectedModelRef.current = selectedModel
+  const handleToggleMemoryLike = useCallback(
+    (index: number) => {
+      const turn = resolveTurn(index)
+      if (!turn) return
+      memory.toggle(turn.turnKey, {
+        userText: turn.userText,
+        assistantText: turn.assistantText,
+        model: selectedModelRef.current,
+      })
+    },
+    [resolveTurn, memory],
+  )
+
   const latestUsage = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].usage) return messages[i].usage
@@ -435,26 +514,33 @@ export function ChatPanel({
               <p className={cn(compact ? 'text-xs' : 'text-sm')}>{emptyMessage}</p>
             </div>
           )}
-          {messages.map((msg, i) => (
-            <ChatMessageItem
-              key={msg.id}
-              message={msg}
-              messageIndex={i}
-              compact={compact}
-              isLoading={isLoading && i === messages.length - 1}
-              tts={tts}
-              onEditUser={editUserMessage}
-              onEditAssistant={editAssistantMessage}
-              onRegenerateAssistant={regenerateAssistantMessage}
-              onDelete={deleteMessage}
-              onBranch={onBranchFromMessage}
-              onSaveAsTemplate={handleSaveAsTemplate}
-              onMaskEdit={handleMaskEdit}
-              onPaintEdit={handlePaintEditFromHistory}
-              availableModels={availableModels}
-              onRegenerateWithModel={regenerateWithModel}
-            />
-          ))}
+          {messages.map((msg, i) => {
+            // CTR-0165: offer the "remember this turn" like only for a complete
+            // turn (has an assistant reply) and only when the feature is enabled.
+            const turn = memory.enabled ? resolveTurn(i) : null
+            return (
+              <ChatMessageItem
+                key={msg.id}
+                message={msg}
+                messageIndex={i}
+                compact={compact}
+                isLoading={isLoading && i === messages.length - 1}
+                tts={tts}
+                onEditUser={editUserMessage}
+                onEditAssistant={editAssistantMessage}
+                onRegenerateAssistant={regenerateAssistantMessage}
+                onDelete={deleteMessage}
+                onBranch={onBranchFromMessage}
+                onSaveAsTemplate={handleSaveAsTemplate}
+                onMaskEdit={handleMaskEdit}
+                onPaintEdit={handlePaintEditFromHistory}
+                availableModels={availableModels}
+                onRegenerateWithModel={regenerateWithModel}
+                onToggleMemoryLike={turn ? handleToggleMemoryLike : undefined}
+                memoryLikeStatus={turn ? memory.states[turn.turnKey] : undefined}
+              />
+            )
+          })}
           {/* CTR-0100: approval cards render inline at the tail of the
               message flow (the tool-call position) so they scroll with
               the conversation instead of covering the scroll area. */}

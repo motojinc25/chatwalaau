@@ -35,7 +35,7 @@ AZURE_OPENAI_API_KEY=<your-key>      # or authenticate with Entra ID instead (se
 
 ```ini
 ANTHROPIC_MODELS=claude-sonnet-4-5-20250929
-ANTHROPIC_API_KEY=sk-ant-...         # "direct" hosting; Azure AI Foundry hosting is also supported
+ANTHROPIC_API_KEY=sk-ant-...         # "direct" hosting; Microsoft Foundry hosting is also supported
 ```
 
 **OpenAI** (direct) -- standalone or alongside the others
@@ -75,14 +75,14 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 - **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, and **OpenAI** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
 - **Knowledge** -- RAG over your PDFs (ChromaDB), ingested by the built-in **Pipeline Jobs** engine: submit/monitor/cancel jobs from a portal, the API, or the agent, with live progress and run history (on by default)
 - **MCP native** -- connect any MCP server (Claude Desktop-compatible config); enable/disable servers and individual tools at runtime to control token usage, or hot-reload the config (reconnect) without a restart; MCP Apps render interactive UI in chat
-- **Memory** -- a configurable Agent Identity and a self-maintaining User Preference Memory that the agent curates inline and (opt-in) reconciles in the background, superseding stale or conflicting preferences instead of just piling them up
+- **Memory** -- a configurable Agent Identity, a self-maintaining User Preference Memory (about you), and an Agent Memory (about the work -- project conventions, tool quirks, operating rules) that the agent curates inline and you can grow by giving any chat turn a thumbs-up to "remember this turn"
 - **Scheduled execution** -- a built-in **Cron Scheduler** runs workspace scripts on a cron expression, an interval, or once after a delay; manage jobs from a portal, the API, or the agent (opt-in via `CRON_ENABLED`)
 - **File Explorer** -- a built-in VSCode-style **file tree + monaco editor** to browse and hand-edit files in your coding workspace, with tabs, create/rename/delete, drag-to-move, **file/folder download (ZIP)**, **PDF & image preview with zoom**, and a **split editor** (drag tabs between panes) (opt-in via `FILE_EXPLORER_ENABLED`)
 - **Microsoft Teams** -- talk to the agent from a Teams personal chat, group chat, or channel (Bot Framework JWT auth, typing indicator, Adaptive Card tool approval, Entra Object-ID allow-list; opt-in via `TEAMS_ENABLED`)
 - **Declarative agents** -- define an agent (persona, model selection, output policy) in a YAML file and switch the active agent at runtime from the web app; the built-in CORE agent reproduces the default behavior (opt-in custom agents via `DECLARATIVE_AGENTS_DIR`)
 - **Inbound webhooks** -- drive the agent from external events via a **Webhook Gateway** with a management portal; the first source is **Microsoft Graph**, which auto-summarizes **Teams meeting transcripts** into the workspace (opt-in via `WEBHOOK_ENABLED`), or summarize a meeting you organized on demand by signing in yourself (device-code, no service principal or admin policy)
 - **OpenAI-compatible API** -- expose the agent as `/v1/responses` for any OpenAI-SDK app
-- **Yours, local-first** -- file-based sessions, vectors, and uploads stay on your machine; unified API-key auth and an optional web sign-in for LAN/cloud
+- **Yours, local-first** -- file-based sessions, vectors, and uploads stay on your machine; unified API-key auth and an optional web sign-in for LAN/cloud; an opt-in **Prompt Dump** (`PROMPT_DUMP_ENABLED`) writes the exact flowing prompt per run to a folder for debugging
 
 See the [Features documentation](https://www.chatwalaau.com/docs/features/chat-and-ui) for the full list and configuration.
 

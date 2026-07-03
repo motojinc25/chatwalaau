@@ -70,6 +70,9 @@ mcp_servers.json
 # ChromaDB
 .chroma/
 
+# Dumped prompts
+.prompts/
+
 # Batch server log (stdio MCP cannot use stdout)
 batch-server.log
 

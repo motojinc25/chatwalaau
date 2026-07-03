@@ -128,7 +128,7 @@ def _mark_message_breakpoint(msg: dict[str, Any], marker: dict[str, Any]) -> boo
 def _inject_prompt_cache(run_options: dict[str, Any], ttl: str) -> dict[str, Any]:
     """Annotate the stable prefix of an Anthropic request for caching (`system_and_3`).
 
-    Uses the proven layout from the Hermes reference agent and the Anthropic
+    Uses the proven layout from the ChatWalaau reference agent and the Anthropic
     prompt-caching guidance: all 4 allowed `cache_control` breakpoints go on the
     system block + the last 3 (non-system) messages.
 

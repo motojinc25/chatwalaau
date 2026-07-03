@@ -173,6 +173,36 @@ class Settings(BaseSettings):
     user_memory_extraction_model: str = ""
     user_memory_extraction_every_n_turns: int = 4
 
+    # Agent Curated Memory (CTR-0162 / CTR-0163, CTR-0006, PRP-0100 / UDR-0079).
+    # A SECOND built-in file memory `.agent/MEMORY.md` -- the agent's own curated
+    # notebook of durable, reusable, non-sensitive facts about the environment /
+    # project / conventions / tool quirks -- stored as `§`-delimited entries and
+    # rendered at Prompt Assembly slot #2b (after the User Profile). AGENT_MEMORY_ENABLED
+    # is the master toggle (default true, matching USER_PROFILE_ENABLED): it gates the
+    # <agent-memory> block, the inline manage_memory tool, the per-turn like UI/API,
+    # and per-session snapshot capture. false restores pre-PRP-0100 behavior
+    # byte-for-byte. An EMPTY MEMORY.md injects NO block, so a fresh install with the
+    # default-on toggle has an unchanged per-session prompt until a first entry is
+    # curated (UDR-0079 D8). MEMORY_CHAR_LIMIT bounds the serialized memory body
+    # (default 2200); an over-cap add/modify is rejected with guidance to
+    # remove/consolidate. AGENT_MEMORY_CURATION_MODEL picks the background reconcile
+    # model for the like pass (CTR-0163); empty (default) uses the session's model
+    # (mirrors USER_MEMORY_EXTRACTION_MODEL). The file path is fixed (not an env var).
+    agent_memory_enabled: bool = True
+    memory_char_limit: int = 2200
+    agent_memory_curation_model: str = ""
+
+    # Prompt Dump (debug / observability, CTR-0006 / CTR-0009). When
+    # PROMPT_DUMP_ENABLED (default false), each AG-UI run writes the fully assembled
+    # system prompt (Identity + User Profile + Agent Memory + capability guidance)
+    # and the input messages to a timestamped file under PROMPT_DUMP_DIR (default
+    # ".prompts") so operators can inspect the exact prompt state per run. The prompt
+    # CONTENT goes ONLY to the file; logs emit metadata (path, sizes, injection flags)
+    # but never the full prompt body. Best-effort: a write failure logs a WARNING and
+    # never blocks the chat. Default false -> no files written, no behavior change.
+    prompt_dump_enabled: bool = False
+    prompt_dump_dir: str = ".prompts"
+
     # File Upload
     upload_dir: str = ".uploads"
 

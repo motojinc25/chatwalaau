@@ -10,6 +10,7 @@ import {
   Pencil,
   RefreshCw,
   Square,
+  ThumbsUp,
   Trash2,
   User,
   Volume2,
@@ -90,6 +91,14 @@ interface ChatMessageItemProps {
   availableModels?: string[]
   /** Regenerate with a specific model (CTR-0071) */
   onRegenerateWithModel?: (messageId: string, model: string) => void
+  /**
+   * Agent Memory curation (CTR-0165, PRP-0100). When set, a thumbs-up "remember
+   * this turn" action is shown on both the user and assistant message. Toggling
+   * either curates the SAME turn (ChatPanel resolves the pair + turn_key).
+   */
+  onToggleMemoryLike?: (messageIndex: number) => void
+  /** Curation status for this message's turn; undefined = not liked. */
+  memoryLikeStatus?: 'pending' | 'curated' | 'failed'
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -110,6 +119,53 @@ function CopyButton({ text }: { text: string }) {
       title={copied ? 'Copied' : 'Copy message'}
       aria-label="Copy message">
       {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+    </Button>
+  )
+}
+
+// Agent Memory "remember this turn" like (CTR-0165, PRP-0100). Placed in the
+// message tool-icon row on both the user and assistant message; toggling either
+// curates the same turn. Empty thumbs-up = not liked; filled = liked/curated;
+// spinner = the background reconcile pass is running; amber = the pass failed.
+function MemoryLikeButton({
+  messageIndex,
+  status,
+  onToggle,
+}: {
+  messageIndex: number
+  status?: 'pending' | 'curated' | 'failed'
+  onToggle: (messageIndex: number) => void
+}) {
+  const liked = status !== undefined
+  const label =
+    status === 'pending'
+      ? 'Saving to agent memory...'
+      : status === 'failed'
+        ? 'Memory update failed - click to retry'
+        : liked
+          ? 'Remembered - click to remove'
+          : 'Remember this turn in agent memory'
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className={cn(
+        'h-6 w-6',
+        status === 'failed'
+          ? 'text-amber-600/80 hover:text-amber-600 dark:text-amber-500/80'
+          : liked
+            ? 'text-primary hover:text-primary'
+            : 'text-muted-foreground hover:text-foreground',
+      )}
+      onClick={() => onToggle(messageIndex)}
+      title={label}
+      aria-label={label}
+      aria-pressed={liked}>
+      {status === 'pending' ? (
+        <Loader2 className="h-3 w-3 animate-spin" />
+      ) : (
+        <ThumbsUp className={cn('h-3 w-3', liked && status !== 'failed' && 'fill-current')} />
+      )}
     </Button>
   )
 }
@@ -246,6 +302,8 @@ function ChatMessageItemImpl({
   onPaintEdit,
   availableModels,
   onRegenerateWithModel,
+  onToggleMemoryLike,
+  memoryLikeStatus,
 }: ChatMessageItemProps) {
   const isUser = message.role === 'user'
   const hasTextContent = message.content != null && message.content.trim().length > 0
@@ -454,6 +512,9 @@ function ChatMessageItemImpl({
         {!isLoading && !editing && message.content && (
           <div className="mt-0.5 flex gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100">
             <CopyButton text={message.content} />
+            {onToggleMemoryLike && (
+              <MemoryLikeButton messageIndex={messageIndex} status={memoryLikeStatus} onToggle={onToggleMemoryLike} />
+            )}
             {tts && <TTSPlayButton message={message} tts={tts} />}
             {tts && <TTSDownloadButton message={message} messageIndex={messageIndex} tts={tts} />}
             {(isUser ? onEditUser : onEditAssistant) && (

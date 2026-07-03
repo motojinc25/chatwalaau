@@ -56,6 +56,7 @@ from openai import NotFoundError as OpenAINotFoundError
 from pydantic import AliasChoices, BaseModel, Field
 
 from app import providers
+from app.agent.agent_memory import session_agent_memory_snapshot
 from app.agent.approval import (
     ApprovalRecord,
     approval_store,
@@ -63,6 +64,8 @@ from app.agent.approval import (
 )
 from app.agent.approval_iteration import IterationContentAccumulator
 from app.agent.declarative import active_spec
+from app.agent.identity import load_identity
+from app.agent.prompt_dump import dump_prompt
 from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_path
 from app.agent.user_memory import session_user_profile_snapshot
 from app.agui.agent_registry import AgentRegistry
@@ -703,6 +706,7 @@ async def _stream_with_reasoning(
         # capability guidance) so the prompt is Identity -> Memory -> capabilities.
         set_temporary_run(temporary)
         profile_snapshot = None
+        memory_snapshot = None
         if temporary:
             # Opportunistic retention sweep when this temporary thread is new
             # (UDR-0052 D4). Fire-and-forget so the stream is never blocked.
@@ -710,13 +714,90 @@ async def _stream_with_reasoning(
                 schedule_sweep()
         else:
             profile_snapshot = session_user_profile_snapshot(thread_id)
+            # Agent Curated Memory (PRP-0100, CTR-0162, UDR-0079 D6). Capture the
+            # per-session FROZEN <agent-memory> snapshot (once at session start;
+            # reused on reload; None when disabled or the memory is empty) and inject
+            # it at slot #2b, after the User Profile.
+            memory_snapshot = session_agent_memory_snapshot(thread_id)
         extra_instructions = agent_registry.run_instructions(
             effective_model,
             user_profile_block=profile_snapshot,
+            agent_memory_block=memory_snapshot,
             temporary=temporary,
         )
         if extra_instructions:
             run_options["instructions"] = extra_instructions
+
+        # Observe the assembled system prompt -- the Identity (slot #1), the User
+        # Profile (slot #2a), the Agent Memory (slot #2b, PRP-0100/CTR-0162), and the
+        # capability guidance. The effective prompt is the baked Identity plus the
+        # per-run remainder (MAF concatenates run instructions after the baked
+        # Identity). Logs carry METADATA ONLY (sizes / injection flags); the full
+        # prompt CONTENT is written to a per-run file under PROMPT_DUMP_DIR when
+        # PROMPT_DUMP_ENABLED (default off), so it is inspectable without flooding logs.
+        _identity_text = load_identity()
+        _effective_system_prompt = (
+            _identity_text if not extra_instructions else f"{_identity_text}\n\n{extra_instructions}"
+        )
+        logger.info(
+            "System prompt assembled: thread=%s model=%s first_turn=%s temporary=%s "
+            "user_profile=%s agent_memory=%s (chars=%d)",
+            thread_id,
+            effective_model,
+            is_first_turn,
+            temporary,
+            profile_snapshot is not None,
+            memory_snapshot is not None,
+            len(_effective_system_prompt),
+        )
+        if settings.prompt_dump_enabled:
+            # The SPA sends only the NEW message; prior turns live in the session
+            # store and are injected by FileHistoryProvider. To make the dump show
+            # the FULL flowing prompt (past history + the new message), read the
+            # persisted history and prepend it. First turn ("session start") is
+            # judged by whether any prior assistant turn exists; only then is the
+            # (frozen) system prompt written -- later turns dump the flowing
+            # conversation only, since the system prompt is unchanged.
+            _history_msgs: list[dict[str, Any]] = []
+            if not temporary:
+                from app.session.storage import read_session_json
+
+                try:
+                    _sess = read_session_json(thread_id)
+                except (OSError, ValueError):
+                    _sess = None
+                if isinstance(_sess, dict):
+                    _raw = _sess.get("messages")
+                    if isinstance(_raw, list):
+                        _history_msgs = _raw
+            _dump_first_turn = not any(isinstance(m, dict) and m.get("role") == "assistant" for m in _history_msgs)
+            _flowing = [*_history_msgs, *request_body.messages]
+            _dump_path = dump_prompt(
+                thread_id=thread_id,
+                run_id=run_id,
+                model=effective_model,
+                system_prompt=_effective_system_prompt,
+                messages=_flowing,
+                include_system_prompt=_dump_first_turn,
+                meta={
+                    "first_turn": _dump_first_turn,
+                    "temporary": temporary,
+                    "user_profile_injected": profile_snapshot is not None,
+                    "agent_memory_injected": memory_snapshot is not None,
+                    "history_messages": len(_history_msgs),
+                    "new_messages": len(request_body.messages),
+                },
+            )
+            if _dump_path is not None:
+                logger.info(
+                    "Prompt dump written: %s (first_turn=%s, system_prompt_chars=%d, "
+                    "history_messages=%d, new_messages=%d)",
+                    _dump_path,
+                    _dump_first_turn,
+                    len(_effective_system_prompt),
+                    len(_history_msgs),
+                    len(request_body.messages),
+                )
 
         # Set thread_id for image generation tools (CTR-0050, PRP-0027)
         _image_gen_thread_id.set(thread_id)

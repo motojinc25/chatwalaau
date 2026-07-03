@@ -573,7 +573,14 @@ export function useChat(options?: UseChatOptions) {
 
         // Save messages to session after stream completes
         if (assistantContent) {
-          const assistantMsg: Record<string, unknown> = { role: 'assistant', content: assistantContent }
+          // Persist the message ids so identity is STABLE across reload (the
+          // backend stores them as `message_id`; the loader restores them). Keeps
+          // id-keyed state such as the Agent Memory per-turn like (CTR-0165) intact.
+          const assistantMsg: Record<string, unknown> = {
+            role: 'assistant',
+            content: assistantContent,
+            id: assistantId,
+          }
           if (completedReasoning.length > 0) {
             assistantMsg.reasoning = completedReasoning
           }
@@ -586,7 +593,7 @@ export function useChat(options?: UseChatOptions) {
           if (completedUsage) {
             assistantMsg.usage = completedUsage
           }
-          const userMsg: Record<string, unknown> = { role: 'user', content: userContent }
+          const userMsg: Record<string, unknown> = { role: 'user', content: userContent, id: userMessage.id }
           if (dispatchImages && dispatchImages.length > 0) {
             userMsg.images = dispatchImages
           }
@@ -792,7 +799,7 @@ export function useChat(options?: UseChatOptions) {
     // ordering, and usage. Re-saving content alone previously dropped tool_calls
     // (generated images) and attachments, so they vanished on reload.
     const original = current[idx]
-    const assistantMsg: Record<string, unknown> = { role: 'assistant', content: newContent }
+    const assistantMsg: Record<string, unknown> = { role: 'assistant', content: newContent, id: original.id }
     if (original.reasoningBlocks && original.reasoningBlocks.length > 0) {
       assistantMsg.reasoning = original.reasoningBlocks.map((r) => ({ id: r.id, content: r.content }))
     }

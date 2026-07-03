@@ -238,6 +238,14 @@ def detect_prohibited(text: str) -> str | None:
     return None
 
 
+# Shared, reusable name for the authoritative secret/PII filter (CTR-0105 v3,
+# PRP-0100 / UDR-0079 D4). The Agent Curated Memory (CTR-0162) applies the SAME
+# deterministic guard to its writes by importing this, so both the user memory and
+# the agent memory are held to one "never store secrets" rule. Behavior is
+# identical to ``detect_prohibited`` (this is only a clearer public alias).
+screen_sensitive_content = detect_prohibited
+
+
 # ---------------------------------------------------------------------------
 # Backup + write (UDR-0051 D8)
 # ---------------------------------------------------------------------------

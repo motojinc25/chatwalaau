@@ -263,6 +263,18 @@ def _build_tools_and_instructions(
         tools.append(manage_user_memory)
         instructions += USER_MEMORY_INSTRUCTION
 
+    # Agent Curated Memory tool (PRP-0100, CTR-0162, UDR-0079 D7). Registered on
+    # the shared agent at this single chokepoint when AGENT_MEMORY_ENABLED, so the
+    # LLM can save durable environment/project facts mid-conversation. NOT in the
+    # approval require-set (UDR-0079 D11). The <agent-memory> Block itself (slot
+    # #2b) is a per-session frozen snapshot injected per run by the AG-UI endpoint,
+    # not baked here.
+    if settings.agent_memory_enabled:
+        from app.agent.agent_memory import AGENT_MEMORY_INSTRUCTION, manage_memory
+
+        tools.append(manage_memory)
+        instructions += AGENT_MEMORY_INSTRUCTION
+
     # Cron management tool (PRP-0089, CTR-0134, UDR-0067 D7). Registered on the
     # shared agent only when CRON_ENABLED so the LLM can schedule script jobs. It
     # is NOT in the approval require-set; the workspace jail + CODING_ENABLED gate

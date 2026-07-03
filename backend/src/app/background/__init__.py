@@ -118,7 +118,9 @@ async def shutdown(timeout: float = 5.0) -> None:
 # them (avoids a circular-import failure).
 #   - session_title          -> CTR-0109 (PRP-0077)
 #   - user_memory_extract     -> CTR-0117 (PRP-0079, UDR-0051 Phase 2 -- resolves D5)
+#   - memory_curate           -> CTR-0163 (PRP-0100, UDR-0079 -- per-turn like pass)
 from app.background import (  # noqa: E402  (import-time task registration side effect)
+    memory_curate,
     session_title,
     user_memory_extract,
 )

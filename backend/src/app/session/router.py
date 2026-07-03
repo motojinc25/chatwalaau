@@ -495,6 +495,12 @@ class UsageItem(BaseModel):
 
 
 class SaveMessageItem(BaseModel):
+    # The frontend message id (crypto.randomUUID). Persisted as `message_id` so it
+    # survives reload -- the loader (useSession) restores it as the ChatMessage id,
+    # keeping per-message identity STABLE across reloads. Required for any feature
+    # keyed by message id across sessions, e.g. the Agent Memory per-turn like state
+    # (CTR-0165 / CTR-0164 `memory_liked`, keyed by the assistant message id).
+    id: str | None = None
     role: str
     content: str
     reasoning: list[ReasoningItem] | None = None
@@ -529,6 +535,12 @@ def _to_maf_message_dict(msg: SaveMessageItem) -> dict[str, Any]:
         "role": msg.role,
         "contents": contents,
     }
+    # Persist the frontend message id so the ChatMessage id is STABLE across reload
+    # (the loader restores it via `message_id`). Without it every reload minted a new
+    # random id, breaking id-keyed state such as the Agent Memory per-turn like
+    # (CTR-0165 `memory_liked`, keyed by the assistant message id).
+    if msg.id:
+        result["message_id"] = msg.id
     if msg.tool_calls:
         result["tool_calls"] = [tc.model_dump() for tc in msg.tool_calls]
     if msg.activity_log:

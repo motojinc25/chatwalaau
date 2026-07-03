@@ -91,22 +91,29 @@ def load_identity() -> str:
 def build_capability_block(
     capability_instructions: str,
     user_profile_block: str | None = None,
+    agent_memory_block: str | None = None,
 ) -> str:
-    """Assemble the post-Identity prompt blocks (CTR-0104 v2, CTR-0105).
+    """Assemble the post-Identity prompt blocks (CTR-0104 v3, CTR-0105, CTR-0162).
 
     Returns everything that follows the Identity block, in fixed order::
 
-        [slot #2]   Memory Block (User Profile, when ``user_profile_block`` given)
+        [slot #2a]  Memory Block (User Profile,  when ``user_profile_block`` given)
+        [slot #2b]  Memory Block (Agent Memory,  when ``agent_memory_block`` given)
         [slot #3..] capability / tool guidance (``capability_instructions``)
 
     This is used for the per-run prompt remainder when the agent's baked
-    instructions carry only the Identity block (the User Preference Memory path,
-    PRP-0075). MAF concatenates the run-level instructions AFTER the agent-level
-    Identity, so the final prompt is Identity -> Memory -> capability guidance.
+    instructions carry only the Identity block (the memory path, PRP-0075 /
+    PRP-0100). MAF concatenates the run-level instructions AFTER the agent-level
+    Identity, so the final prompt is Identity -> User Profile -> Agent Memory ->
+    capability guidance.
     """
     parts: list[str] = []
     if user_profile_block:
         block = user_profile_block.strip()
+        if block:
+            parts.append(block)
+    if agent_memory_block:
+        block = agent_memory_block.strip()
         if block:
             parts.append(block)
     capability_instructions = capability_instructions.strip()
@@ -118,24 +125,27 @@ def build_capability_block(
 def build_system_prompt(
     capability_instructions: str,
     user_profile_block: str | None = None,
+    agent_memory_block: str | None = None,
 ) -> str:
-    """Assemble the full system prompt with Identity as slot #1 (CTR-0104 v2).
+    """Assemble the full system prompt with Identity as slot #1 (CTR-0104 v3).
 
-    Prompt Assembly order (UDR-0049 D4, UDR-0051 D4)::
+    Prompt Assembly order (UDR-0049 D4, UDR-0051 D4, UDR-0079 D6)::
 
         [slot #1]   Identity (this block, from .agent/IDENTITY.md or default)
-        [slot #2]   Memory Block (User Profile, when ``user_profile_block`` given)
+        [slot #2a]  Memory Block (User Profile, when ``user_profile_block`` given)
+        [slot #2b]  Memory Block (Agent Memory, when ``agent_memory_block`` given)
         [slot #3..] capability / tool guidance (``capability_instructions``)
 
     The per-model web-search fragment is appended by the caller AFTER the
     capability layer, so Identity always remains slot #1 of the final prompt.
 
-    With ``user_profile_block=None`` the output is byte-for-byte identical to the
+    With both memory blocks None the output is byte-for-byte identical to the
     CTR-0104 v1 behavior (Identity + blank line + capability guidance), so the
-    construction-time / DevUI / headless path is unchanged (UDR-0051 D4).
+    construction-time / DevUI / headless path is unchanged (UDR-0051 D4 /
+    UDR-0079 D6).
     """
     identity = load_identity()
-    remainder = build_capability_block(capability_instructions, user_profile_block)
+    remainder = build_capability_block(capability_instructions, user_profile_block, agent_memory_block)
     if not remainder:
         return identity
     return f"{identity}\n\n{remainder}"

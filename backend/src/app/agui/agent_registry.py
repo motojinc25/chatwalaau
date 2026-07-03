@@ -300,21 +300,23 @@ class AgentRegistry:
         model: str | None = None,
         *,
         user_profile_block: str | None = None,
+        agent_memory_block: str | None = None,
         temporary: bool = False,
     ) -> str | None:
-        """Return the per-run instruction remainder, or None (CTR-0105/CTR-0106).
+        """Return the per-run instruction remainder, or None (CTR-0105/CTR-0106/CTR-0162).
 
         For a Temporary Chat run (``temporary=True``) returns None: the agent is
         baked Identity-only, so the effective system prompt is the Identity block
         alone -- no Memory Block and no capability guidance text (UDR-0052 D6).
-        Tools stay registered (the memory tool no-ops via the temporary
+        Tools stay registered (the memory tools no-op via the temporary
         contextvar).
 
-        Otherwise returns the Memory Block (when ``user_profile_block`` is given)
-        followed by the model's capability guidance; merged into
-        ``agent.run(options=...)`` it is appended by MAF AFTER the baked Identity,
-        yielding Identity -> Memory -> capabilities. Returns None only if there is
-        no remainder text at all.
+        Otherwise returns the User Profile Block (slot #2a, when
+        ``user_profile_block`` is given) then the Agent Memory Block (slot #2b, when
+        ``agent_memory_block`` is given) then the model's capability guidance;
+        merged into ``agent.run(options=...)`` it is appended by MAF AFTER the baked
+        Identity, yielding Identity -> User Profile -> Agent Memory -> capabilities.
+        Returns None only if there is no remainder text at all.
         """
         if temporary:
             return None
@@ -322,7 +324,7 @@ class AgentRegistry:
         caps = self._capability_instructions.get(name)
         if caps is None:
             caps = self._capability_instructions.get(self._default_model, "")
-        return build_capability_block(caps, user_profile_block) or None
+        return build_capability_block(caps, user_profile_block, agent_memory_block) or None
 
     @property
     def available_models(self) -> list[str]:
