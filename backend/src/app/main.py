@@ -96,6 +96,7 @@ from app.stt.router import set_stt_provider
 from app.tts.factory import create_tts_provider
 from app.tts.router import router as tts_router
 from app.tts.router import set_tts_provider
+from app.paint.router import router as paint_router
 from app.upload.router import router as upload_router
 
 # Suppress pydantic warnings from agent-framework-ag-ui's Field(validation_alias=...) usage
@@ -285,6 +286,9 @@ app.include_router(templates_router)
 
 # Image upload API (CTR-0022)
 app.include_router(upload_router)
+
+# Paint scene persistence API (CTR-0161, PRP-0099)
+app.include_router(paint_router)
 
 # Mask-based image editing API (CTR-0053, PRP-0028)
 app.include_router(image_edit_router)

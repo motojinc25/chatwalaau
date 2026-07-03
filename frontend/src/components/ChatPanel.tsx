@@ -1,5 +1,5 @@
 import { ImageIcon } from 'lucide-react'
-import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type DragEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BackgroundResponsesToggle } from '@/components/BackgroundResponsesToggle'
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
@@ -19,15 +19,21 @@ import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModa
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { useChat } from '@/hooks/useChat'
 import { useChatScroll } from '@/hooks/useChatScroll'
-import { useImageAttachment } from '@/hooks/useImageAttachment'
+import { type ImageAttachment, useImageAttachment } from '@/hooks/useImageAttachment'
 import { useMessageNavigator } from '@/hooks/useMessageNavigator'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useToolApproval } from '@/hooks/useToolApproval'
 import { useTTS } from '@/hooks/useTTS'
+import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { cn } from '@/lib/utils'
 import type { ChatMessage, ImageRef } from '@/types/chat'
 
 const BG_STORAGE_KEY = 'chatwalaau-bg-enabled'
+
+// Lazy-loaded so the fabric.js bundle is fetched only when the Paint editor is
+// first opened (CTR-0160, UDR-0078 D1). lazyWithReload recovers from a stale
+// chunk hash after a rebuild/redeploy.
+const PaintEditor = lazyWithReload(() => import('@/components/PaintEditor').then((m) => ({ default: m.PaintEditor })))
 
 interface ChatPanelProps {
   compact?: boolean
@@ -185,7 +191,58 @@ export function ChatPanel({
     return () => clearTimeout(timer)
   }, [continuationToken])
 
-  const { attachments, addFiles, removeAttachment, clearAttachments, getImageRefs, isUploading } = useImageAttachment()
+  const { attachments, addFiles, attachPaintImage, removeAttachment, clearAttachments, getImageRefs, isUploading } =
+    useImageAttachment()
+
+  // Paint editor (CTR-0160 / CTR-0161, PRP-0099). State is lifted here so the
+  // Plus-menu entry, the pending-attachment Edit affordance, and the sent-image
+  // (history) re-edit all drive ONE editor instance. `scene` seeds a re-edit;
+  // `replaceId` (set only for a pending attachment) swaps it in place on attach.
+  const [paintState, setPaintState] = useState<{ scene?: unknown; replaceId?: string } | null>(null)
+
+  const handleOpenPaint = useCallback(() => setPaintState({}), [])
+
+  const loadScene = useCallback(
+    async (filename: string | undefined): Promise<unknown> => {
+      if (!threadId || !filename) return undefined
+      try {
+        const res = await fetch(`/api/paint/${threadId}/${encodeURIComponent(filename)}`)
+        return res.ok ? await res.json() : undefined
+      } catch {
+        return undefined
+      }
+    },
+    [threadId],
+  )
+
+  // Re-edit a pending paint attachment (replaces it in place on attach).
+  const handleEditAttachment = useCallback(
+    async (attachment: ImageAttachment) => {
+      const scene = await loadScene(attachment.filename)
+      setPaintState({ scene, replaceId: attachment.id })
+    },
+    [loadScene],
+  )
+
+  // Re-edit a sent (history) paint image. Message history is immutable, so the
+  // result becomes a NEW attachment on the composer (UDR-0078 D6).
+  const handlePaintEditFromHistory = useCallback(
+    async (imageUrl: string) => {
+      const filename = imageUrl.split('/').pop()
+      const scene = await loadScene(filename)
+      setPaintState({ scene })
+    },
+    [loadScene],
+  )
+
+  const handlePaintAttach = useCallback(
+    (blob: Blob, scene: unknown) => {
+      if (!threadId) return
+      void attachPaintImage(blob, scene, threadId, paintState?.replaceId)
+      setPaintState(null)
+    },
+    [threadId, attachPaintImage, paintState],
+  )
 
   const tts = useTTS()
 
@@ -393,6 +450,7 @@ export function ChatPanel({
               onBranch={onBranchFromMessage}
               onSaveAsTemplate={handleSaveAsTemplate}
               onMaskEdit={handleMaskEdit}
+              onPaintEdit={handlePaintEditFromHistory}
               availableModels={availableModels}
               onRegenerateWithModel={regenerateWithModel}
             />
@@ -462,6 +520,8 @@ export function ChatPanel({
             isUploading={isUploading}
             bgEnabled={bgEnabled}
             onOpenTemplates={handleOpenTemplates}
+            onOpenPaint={handleOpenPaint}
+            onEditAttachment={handleEditAttachment}
             onSlashModel={handleSlashModel}
             onSlashHelp={handleSlashHelp}
             onSlashCron={onSlashCron}
@@ -518,6 +578,8 @@ export function ChatPanel({
               isUploading={isUploading}
               bgEnabled={effectiveBgEnabled}
               onOpenTemplates={handleOpenTemplates}
+              onOpenPaint={handleOpenPaint}
+              onEditAttachment={handleEditAttachment}
               onSlashModel={handleSlashModel}
               onSlashHelp={handleSlashHelp}
               onSlashCron={onSlashCron}
@@ -559,6 +621,16 @@ export function ChatPanel({
           imageUrl={maskEditorState.imageUrl}
           onGenerate={handleMaskGenerate}
         />
+      )}
+      {paintState && (
+        <Suspense fallback={null}>
+          <PaintEditor
+            open={!!paintState}
+            onOpenChange={(open) => !open && setPaintState(null)}
+            initialScene={paintState.scene}
+            onAttach={handlePaintAttach}
+          />
+        </Suspense>
       )}
     </div>
   )

@@ -1,2 +1,8 @@
 allowBuilds:
+  canvas: false
   esbuild: true
+
+# fabric's optional node-canvas (server-side rendering) is never needed for the
+# browser bundle (CTR-0160, PRP-0099); only esbuild runs a build script.
+onlyBuiltDependencies:
+  - esbuild

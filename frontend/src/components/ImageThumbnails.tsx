@@ -1,13 +1,15 @@
-import { Loader2, X } from 'lucide-react'
+import { Loader2, Pencil, X } from 'lucide-react'
 import type { ImageAttachment } from '@/hooks/useImageAttachment'
 import { cn } from '@/lib/utils'
 
 interface ImageThumbnailsProps {
   attachments: ImageAttachment[]
   onRemove: (id: string) => void
+  /** Re-edit a paint-origin attachment (CTR-0160/CTR-0161, PRP-0099). */
+  onEdit?: (attachment: ImageAttachment) => void
 }
 
-export function ImageThumbnails({ attachments, onRemove }: ImageThumbnailsProps) {
+export function ImageThumbnails({ attachments, onRemove, onEdit }: ImageThumbnailsProps) {
   if (attachments.length === 0) return null
 
   return (
@@ -24,6 +26,18 @@ export function ImageThumbnails({ attachments, onRemove }: ImageThumbnailsProps)
               <div className="absolute inset-0 flex items-center justify-center bg-background/60">
                 <Loader2 className="h-4 w-4 animate-spin" />
               </div>
+            )}
+            {attachment.isPaint && attachment.status === 'ready' && onEdit && (
+              <button
+                type="button"
+                onClick={() => onEdit(attachment)}
+                className={cn(
+                  'absolute inset-0 flex items-center justify-center bg-foreground/40 text-background',
+                  'opacity-0 transition-opacity group-hover/thumb:opacity-100',
+                )}
+                aria-label={`Edit ${attachment.file.name}`}>
+                <Pencil className="h-4 w-4" />
+              </button>
             )}
           </div>
           <button

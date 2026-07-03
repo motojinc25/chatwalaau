@@ -84,6 +84,8 @@ interface ChatMessageItemProps {
   onBranch?: (messageIndex: number) => void
   onSaveAsTemplate?: (content: string) => void
   onMaskEdit?: (imageUrl: string) => void
+  /** Re-edit a sent paint image in the Paint editor (CTR-0160/CTR-0161, PRP-0099). */
+  onPaintEdit?: (imageUrl: string) => void
   /** Available models for regenerate-with-model dropdown (CTR-0071) */
   availableModels?: string[]
   /** Regenerate with a specific model (CTR-0071) */
@@ -241,6 +243,7 @@ function ChatMessageItemImpl({
   onBranch,
   onSaveAsTemplate,
   onMaskEdit,
+  onPaintEdit,
   availableModels,
   onRegenerateWithModel,
 }: ChatMessageItemProps) {
@@ -359,17 +362,41 @@ function ChatMessageItemImpl({
                     )
                   }
                   const isGenerated = img.uri.includes('/generated_')
+                  // Paint-origin images (CTR-0160/CTR-0161, PRP-0099) carry a
+                  // re-edit affordance; a sent image is immutable, so editing
+                  // opens the scene and produces a NEW composer attachment.
+                  const isPaint = (img.uri.split('/').pop() ?? '').startsWith('paint_')
+                  const imgEl = (
+                    <img
+                      src={img.uri}
+                      alt="Attached"
+                      className={
+                        isGenerated
+                          ? 'max-w-full rounded-lg border border-border/50 shadow-xs transition-shadow hover:shadow-md'
+                          : 'max-h-48 max-w-xs rounded-lg border object-contain'
+                      }
+                    />
+                  )
+                  if (isPaint && onPaintEdit) {
+                    return (
+                      <div key={img.uri} className="group/paint relative inline-block">
+                        <a href={img.uri} target="_blank" rel="noopener noreferrer" className="block">
+                          {imgEl}
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => onPaintEdit(img.uri)}
+                          className="absolute right-1.5 top-1.5 flex h-7 items-center gap-1 rounded-md bg-foreground/70 px-2 text-xs text-background opacity-0 transition-opacity group-hover/paint:opacity-100"
+                          aria-label="Edit paint">
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit
+                        </button>
+                      </div>
+                    )
+                  }
                   return (
                     <a key={img.uri} href={img.uri} target="_blank" rel="noopener noreferrer" className="block">
-                      <img
-                        src={img.uri}
-                        alt="Attached"
-                        className={
-                          isGenerated
-                            ? 'max-w-full rounded-lg border border-border/50 shadow-xs transition-shadow hover:shadow-md'
-                            : 'max-h-48 max-w-xs rounded-lg border object-contain'
-                        }
-                      />
+                      {imgEl}
                     </a>
                   )
                 })}

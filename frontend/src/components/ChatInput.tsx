@@ -1,4 +1,4 @@
-import { File, FileText, Folder, Loader2, Mic, Paperclip, Plus, SendHorizontal, Square } from 'lucide-react'
+import { File, FileText, Folder, Loader2, Mic, Paintbrush, Paperclip, Plus, SendHorizontal, Square } from 'lucide-react'
 import { forwardRef, type KeyboardEvent, useCallback, useImperativeHandle, useRef, useState } from 'react'
 import { ImageThumbnails } from '@/components/ImageThumbnails'
 import { PdfFileCard } from '@/components/PdfFileCard'
@@ -42,6 +42,10 @@ interface ChatInputProps {
   isUploading?: boolean
   bgEnabled?: boolean
   onOpenTemplates?: () => void
+  /** Open the Paint editor from the Plus menu (CTR-0160, PRP-0099). */
+  onOpenPaint?: () => void
+  /** Re-edit a paint-origin attachment thumbnail (CTR-0160/CTR-0161, PRP-0099). */
+  onEditAttachment?: (attachment: ImageAttachment) => void
   /** Slash commands (CTR-0128, PRP-0088). */
   onSlashModel?: (model: string) => boolean
   onSlashHelp?: () => void
@@ -68,6 +72,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     isUploading,
     bgEnabled,
     onOpenTemplates,
+    onOpenPaint,
+    onEditAttachment,
     onSlashModel,
     onSlashHelp,
     onSlashCron,
@@ -483,6 +489,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 <ImageThumbnails
                   attachments={attachments.filter((a) => a.mediaType !== 'application/pdf')}
                   onRemove={onRemoveAttachment}
+                  onEdit={onEditAttachment}
                 />
                 {attachments.filter((a) => a.mediaType === 'application/pdf').length > 0 && (
                   <div className="flex flex-wrap gap-2 px-3 pt-2">
@@ -543,6 +550,12 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                           <File className="mr-2 h-4 w-4" />
                           Attach PDF
                         </DropdownMenuItem>
+                        {onOpenPaint && (
+                          <DropdownMenuItem onClick={onOpenPaint}>
+                            <Paintbrush className="mr-2 h-4 w-4" />
+                            Paint
+                          </DropdownMenuItem>
+                        )}
                         {onOpenTemplates && (
                           <DropdownMenuItem onClick={onOpenTemplates}>
                             <FileText className="mr-2 h-4 w-4" />

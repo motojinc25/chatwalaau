@@ -70,7 +70,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 
 ## Highlights
 
-- **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, Temporary Chat, and **slash commands** (`/help`, `/prompt`, `/skill`, `/model`) with completion and dynamic arguments
+- **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, a built-in **paint canvas** (draw/paste an image, attach, and re-edit), Temporary Chat, and **slash commands** (`/help`, `/prompt`, `/skill`, `/model`) with completion and dynamic arguments
 - **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow, prompt templates, and Agent Skills (enable/disable or hot-reload from disk at runtime)
 - **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, and **OpenAI** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
 - **Knowledge** -- RAG over your PDFs (ChromaDB), ingested by the built-in **Pipeline Jobs** engine: submit/monitor/cancel jobs from a portal, the API, or the agent, with live progress and run history (on by default)
