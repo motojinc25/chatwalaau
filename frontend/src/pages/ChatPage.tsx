@@ -24,6 +24,12 @@ const FileExplorer = lazyWithReload(() =>
   import('@/components/FileExplorer').then((m) => ({ default: m.FileExplorer })),
 )
 
+// Memory Management portal (CTR-0167, PRP-0101). Lazy-loaded because it reuses the
+// heavy monaco editor bundle; opened from the sidebar-footer Brain icon.
+const MemoryManager = lazyWithReload(() =>
+  import('@/components/MemoryManager').then((m) => ({ default: m.MemoryManager })),
+)
+
 export function ChatPage() {
   const navigate = useNavigate()
   const {
@@ -83,6 +89,10 @@ export function ChatPage() {
   // launcher icon and the /files slash command open the same overlay instance.
   const fileExplorerAvailable = useFileExplorerAvailable()
   const [filesOpen, setFilesOpen] = useState(false)
+
+  // Memory Management portal (CTR-0167, PRP-0101). Lifted here so the sidebar-footer
+  // launcher icon opens the modal. Always available (identity always exists).
+  const [memoryOpen, setMemoryOpen] = useState(false)
 
   const handleStreamComplete = useCallback(() => {
     // Temporary chats are never listed and never exposed in the URL (UDR-0052
@@ -156,6 +166,7 @@ export function ChatPage() {
           onOpenPipeline={() => setPipelineOpen(true)}
           webhookAvailable={webhookAvailable}
           onOpenWebhook={() => setWebhookOpen(true)}
+          onOpenMemory={() => setMemoryOpen(true)}
         />
       )}
 
@@ -168,6 +179,12 @@ export function ChatPage() {
       {fileExplorerAvailable && (
         <Suspense fallback={null}>
           <FileExplorer open={filesOpen} onOpenChange={setFilesOpen} />
+        </Suspense>
+      )}
+
+      {memoryOpen && (
+        <Suspense fallback={null}>
+          <MemoryManager open={memoryOpen} onOpenChange={setMemoryOpen} />
         </Suspense>
       )}
 

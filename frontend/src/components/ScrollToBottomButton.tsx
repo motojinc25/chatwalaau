@@ -1,4 +1,4 @@
-import { ChevronDown } from 'lucide-react'
+import { ChevronsDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -24,7 +24,7 @@ export function ScrollToBottomButton({ visible, onClick, className }: ScrollToBo
         visible ? 'opacity-100' : 'pointer-events-none opacity-0',
         className,
       )}>
-      <ChevronDown className="h-4 w-4" />
+      <ChevronsDown className="h-4 w-4" />
     </Button>
   )
 }

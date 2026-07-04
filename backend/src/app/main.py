@@ -284,6 +284,12 @@ from app.memory.router import router as memory_router  # noqa: E402
 
 app.include_router(memory_router)
 
+# Memory Files Editing API (CTR-0166, PRP-0101) -- human-facing editor for the
+# three built-in file memories (.agent/IDENTITY.md / USER.md / MEMORY.md).
+from app.memory.editor import router as memory_editor_router
+
+app.include_router(memory_editor_router)
+
 # Session management API (CTR-0015)
 app.include_router(session_router)
 

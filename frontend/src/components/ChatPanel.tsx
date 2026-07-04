@@ -9,6 +9,7 @@ import { ImageOutputOptions } from '@/components/ImageOutputOptions'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { McpToolManager } from '@/components/McpToolManager'
 import { MessageNavigator } from '@/components/MessageNavigator'
+import { MessageStepButton } from '@/components/MessageStepButton'
 import { ModelOptionsSelector } from '@/components/ModelOptionsSelector'
 import { ModelSelector, type ModelSelectorHandle } from '@/components/ModelSelector'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
@@ -22,6 +23,7 @@ import { useChatScroll } from '@/hooks/useChatScroll'
 import { type ImageAttachment, useImageAttachment } from '@/hooks/useImageAttachment'
 import { useMemoryCuration } from '@/hooks/useMemoryCuration'
 import { useMessageNavigator } from '@/hooks/useMessageNavigator'
+import { useMessageStepNav } from '@/hooks/useMessageStepNav'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useToolApproval } from '@/hooks/useToolApproval'
 import { useTTS } from '@/hooks/useTTS'
@@ -381,6 +383,11 @@ export function ChatPanel({
   // right gutter and the user-turn count inside the hook.
   const messageNav = useMessageNavigator(scrollRef, messages, { enabled: !compact })
 
+  // CTR-0168 Message Step Navigation (PRP-0101 / UDR-0081): per-message prev/next
+  // buttons flanking the ScrollToBottom button, shown whenever the container
+  // overflows (independent of the CTR-0092 near-bottom gate).
+  const stepNav = useMessageStepNav(scrollRef, messages)
+
   // Agent Memory curation (CTR-0165, PRP-0100). The "remember this turn" like on
   // each message toggles the same turn (user + assistant as one set). Resolve a
   // message index to its turn via a messages ref so onToggleMemoryLike stays
@@ -620,11 +627,23 @@ export function ChatPanel({
         // right edge inset by the scrollbar width so the always-visible chat
         // scrollbar is never covered by this floating input overlay (CTR-0092)
         <div ref={inputRef} className="absolute bottom-0 left-0 right-[var(--app-scrollbar-width)] z-20">
-          {/* CTR-0092 ScrollToBottom overlay: anchored above the ChatInput, horizontally centered. */}
-          <div className="pointer-events-none absolute -top-3 left-0 right-0 z-10 flex justify-center">
+          {/* CTR-0092 ScrollToBottom overlay + CTR-0168 per-message step buttons:
+              anchored above the ChatInput, horizontally centered. prev / next flank
+              the Scroll-to-Bottom button and appear whenever the chat overflows. */}
+          <div className="pointer-events-none absolute -top-3 left-0 right-0 z-10 flex items-center justify-center gap-2">
+            {stepNav.isAvailable && (
+              <div className="pointer-events-auto">
+                <MessageStepButton direction="prev" visible={stepNav.canPrev} onClick={stepNav.stepPrev} />
+              </div>
+            )}
             <div className="pointer-events-auto">
               <ScrollToBottomButton visible={showScrollToBottomButton} onClick={scrollToBottom} />
             </div>
+            {stepNav.isAvailable && (
+              <div className="pointer-events-auto">
+                <MessageStepButton direction="next" visible={stepNav.canNext} onClick={stepNav.stepNext} />
+              </div>
+            )}
           </div>
           <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
           <div className="relative bg-background">

@@ -192,6 +192,17 @@ class Settings(BaseSettings):
     memory_char_limit: int = 2200
     agent_memory_curation_model: str = ""
 
+    # Built-in Memory Editor (CTR-0166, CTR-0006, PRP-0101 / UDR-0080 D4). The
+    # human-facing Memory Management portal edits the three fixed `.agent/*.md`
+    # files (IDENTITY / USER / MEMORY). The per-file character cap is enforced on a
+    # save: USER_CHAR_LIMIT (1375) and MEMORY_CHAR_LIMIT (2200) already exist;
+    # IDENTITY_CHAR_LIMIT bounds `.agent/IDENTITY.md` so all three carry the same
+    # "backup + cap" guard. Identity is Prompt Assembly slot #1 injected into every
+    # request, so a generous-but-present cap bounds prompt bloat. The file PATH stays
+    # fixed (not an env var). The operator write skips the agent-facing secret/PII
+    # filter (backup + cap only, UDR-0080 D2).
+    identity_char_limit: int = 4000
+
     # Prompt Dump (debug / observability, CTR-0006 / CTR-0009). When
     # PROMPT_DUMP_ENABLED (default false), each AG-UI run writes the fully assembled
     # system prompt (Identity + User Profile + Agent Memory + capability guidance)

@@ -17,6 +17,7 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import {
   Archive,
+  Brain,
   Check,
   ChevronDown,
   ChevronRight,
@@ -130,6 +131,8 @@ interface SessionSidebarProps {
   onOpenPipeline?: () => void
   webhookAvailable?: boolean
   onOpenWebhook?: () => void
+  /** Memory Management launcher (CTR-0167, PRP-0101): footer icon; always shown. */
+  onOpenMemory?: () => void
 }
 
 // Per-device open/closed state (UDR-0046 D4): the set of explicitly-expanded
@@ -384,6 +387,7 @@ export function SessionSidebar({
   onOpenPipeline,
   webhookAvailable,
   onOpenWebhook,
+  onOpenMemory,
 }: SessionSidebarProps) {
   const sortedSessions = useMemo(() => sortSessions(sessions), [sessions])
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
@@ -970,6 +974,19 @@ export function SessionSidebar({
               aria-label="Cron scheduler"
               title="Cron scheduler">
               <Clock className="h-4 w-4" />
+            </Button>
+          )}
+          {/* Memory Management launcher (CTR-0167, PRP-0101): edit the built-in
+              IDENTITY / USER / MEMORY files. Always shown (identity always exists). */}
+          {onOpenMemory && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-muted-foreground"
+              onClick={() => onOpenMemory()}
+              aria-label="Agent memory"
+              title="Agent memory">
+              <Brain className="h-4 w-4" />
             </Button>
           )}
           <Button
