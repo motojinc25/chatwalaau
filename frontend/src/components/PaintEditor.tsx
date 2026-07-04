@@ -19,7 +19,10 @@ import {
   Download,
   Eye,
   EyeOff,
+  FolderOpen,
+  HardDrive,
   ImagePlus,
+  Loader2,
   Lock,
   Maximize,
   Minus,
@@ -49,6 +52,14 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { WorkspaceImagePicker } from '@/components/WorkspaceImagePicker'
+import { useFileExplorerAvailable } from '@/hooks/useFileExplorerAvailable'
 import { cn } from '@/lib/utils'
 
 type Tool = 'select' | 'draw' | 'rect' | 'ellipse' | 'line' | 'text'
@@ -92,6 +103,14 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
   const stageRef = useRef<HTMLDivElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const fabricRef = useRef<Canvas | null>(null)
+
+  // Image import source (CTR-0160 v2, PRP-0102 / UDR-0078 D10): the "from
+  // workspace" option is offered only when the coding workspace / File Explorer
+  // is available (CTR-0136); otherwise only local device upload is possible.
+  const workspaceAvailable = useFileExplorerAvailable()
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false)
+  // Animated indicator while an imported image is fetched / decoded onto the canvas.
+  const [importing, setImporting] = useState(false)
 
   // Tool/style state mirrored into refs so Fabric event handlers (registered
   // once) always read the live values instead of a stale closure.
@@ -372,14 +391,27 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
   )
 
   const ingestFile = useCallback(
-    (file: File) => {
+    async (file: File) => {
       if (!file.type.startsWith('image/')) return
-      if (file.type === 'image/svg+xml') {
-        file.text().then((t) => void addSvgFromString(t))
-      } else {
-        const reader = new FileReader()
-        reader.onload = () => void addImageFromDataUrl(reader.result as string)
-        reader.readAsDataURL(file)
+      // Show the animated indicator until the image is fetched, decoded, and on
+      // the canvas -- imports (especially from the workspace) may take a moment.
+      setImporting(true)
+      try {
+        if (file.type === 'image/svg+xml') {
+          await addSvgFromString(await file.text())
+        } else {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(reader.result as string)
+            reader.onerror = () => reject(reader.error ?? new Error('read failed'))
+            reader.readAsDataURL(file)
+          })
+          await addImageFromDataUrl(dataUrl)
+        }
+      } catch {
+        // Best-effort import: a failed read/decode simply adds nothing.
+      } finally {
+        setImporting(false)
       }
     },
     [addImageFromDataUrl, addSvgFromString],
@@ -400,7 +432,7 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
           const f = item.getAsFile()
           if (f) {
             e.preventDefault()
-            ingestFile(f)
+            void ingestFile(f)
             return
           }
         }
@@ -480,7 +512,7 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
       setIsDraggingOver(false)
       const img = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith('image/'))
       if (img) {
-        ingestFile(img)
+        void ingestFile(img)
         return
       }
       const text = e.dataTransfer.getData('text/plain')
@@ -781,14 +813,35 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
 
             <span className="mx-2 h-5 w-px bg-zinc-200" />
 
-            <button
-              type="button"
-              title="Import image"
-              aria-label="Import image"
-              onClick={() => fileInputRef.current?.click()}
-              className={iconBtn}>
-              <ImagePlus className="h-4 w-4" />
-            </button>
+            {/* Import image (CTR-0160 v2): when the coding workspace is available,
+                branch between a local device upload and a workspace image; otherwise
+                the button opens the local file picker directly. */}
+            {workspaceAvailable ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button type="button" title="Import image" aria-label="Import image" className={iconBtn}>
+                    <ImagePlus className="h-4 w-4" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuItem onSelect={() => fileInputRef.current?.click()}>
+                    <HardDrive className="mr-2 h-4 w-4" /> From this device
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setWorkspacePickerOpen(true)}>
+                    <FolderOpen className="mr-2 h-4 w-4" /> From workspace
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <button
+                type="button"
+                title="Import image"
+                aria-label="Import image"
+                onClick={() => fileInputRef.current?.click()}
+                className={iconBtn}>
+                <ImagePlus className="h-4 w-4" />
+              </button>
+            )}
             <button type="button" title="Undo" aria-label="Undo" onClick={undo} className={iconBtn}>
               <Undo2 className="h-4 w-4" />
             </button>
@@ -869,7 +922,15 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
           </div>
 
           {/* Body: stage (scrollable, holds the artboard) + layers panel */}
-          <div className="flex min-h-0 flex-1">
+          <div className="relative flex min-h-0 flex-1">
+            {/* Import indicator (CTR-0160 v2): shown until an imported image is decoded onto the canvas. */}
+            {importing && (
+              <div className="absolute inset-0 z-30 flex items-center justify-center bg-zinc-50/70">
+                <div className="flex items-center gap-2 rounded-md bg-white px-4 py-2 text-sm text-zinc-700 shadow-md">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading image...
+                </div>
+              </div>
+            )}
             {/* biome-ignore lint/a11y/noStaticElementInteractions: canvas drop target needs drag events */}
             <div
               ref={stageRef}
@@ -986,12 +1047,23 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml"
         className="hidden"
         onChange={(e) => {
           const f = e.target.files?.[0]
-          if (f) ingestFile(f)
+          if (f) void ingestFile(f)
           e.target.value = ''
+        }}
+      />
+
+      {/* Workspace image picker (CTR-0160 v2 / UDR-0078 D10): browse the coding
+          workspace and load an image via CTR-0136, for upload-restricted sites. */}
+      <WorkspaceImagePicker
+        open={workspacePickerOpen}
+        onOpenChange={setWorkspacePickerOpen}
+        onPick={(file) => {
+          setWorkspacePickerOpen(false)
+          void ingestFile(file)
         }}
       />
 
