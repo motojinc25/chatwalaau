@@ -19,10 +19,12 @@ import {
   Folder as FolderIcon,
   FolderOpen,
   FolderPlus,
+  FolderUp,
   Loader2,
   RefreshCw,
   Save,
   SplitSquareHorizontal,
+  Upload,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -334,6 +336,80 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
   useEffect(() => {
     if (open && !rootLoaded) void reloadDir('')
   }, [open, rootLoaded, reloadDir])
+
+  // ---- Local upload (CTR-0137, PRP-0104, UDR-0083) ----
+  // Two hidden inputs (files / folder) whose target directory is set just before
+  // .click(). The upload rides an XHR so upload.onprogress drives an OVERALL
+  // determinate progress bar across every file in the request.
+  const fileUploadRef = useRef<HTMLInputElement>(null)
+  const folderUploadRef = useRef<HTMLInputElement>(null)
+  const uploadDirRef = useRef<string>('')
+  const [uploadState, setUploadState] = useState<{
+    dir: string
+    loaded: number
+    total: number
+    count: number
+  } | null>(null)
+
+  const doUpload = useCallback(
+    (dir: string, fileList: FileList | null) => {
+      if (!fileList || fileList.length === 0) return
+      const files = Array.from(fileList)
+      const form = new FormData()
+      form.append('dir', dir)
+      for (const f of files) {
+        form.append('files', f)
+        // webkitRelativePath is populated for a folder (webkitdirectory) pick, so
+        // the backend recreates the folder tree; empty for a plain multi-file pick.
+        const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || ''
+        form.append('paths', rel)
+      }
+      const totalBytes = files.reduce((sum, f) => sum + f.size, 0)
+      setUploadState({ dir, loaded: 0, total: totalBytes, count: files.length })
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', '/api/workspace/upload')
+      xhr.withCredentials = true
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          setUploadState((s) => (s ? { ...s, loaded: e.loaded, total: e.total } : s))
+        }
+      }
+      xhr.onload = () => {
+        setUploadState(null)
+        if (xhr.status >= 200 && xhr.status < 300) {
+          loadedRef.current.delete(dir)
+          void reloadDir(dir)
+        } else {
+          let msg = `Upload failed (HTTP ${xhr.status})`
+          try {
+            const detail = JSON.parse(xhr.responseText)?.detail
+            if (typeof detail === 'string') msg = detail
+          } catch {
+            // keep the default message
+          }
+          window.alert(msg)
+        }
+      }
+      xhr.onerror = () => {
+        setUploadState(null)
+        window.alert('Upload failed (network error)')
+      }
+      xhr.send(form)
+    },
+    [reloadDir],
+  )
+
+  const triggerUpload = useCallback((dir: string, kind: 'files' | 'folder') => {
+    uploadDirRef.current = dir
+    const el = kind === 'files' ? fileUploadRef.current : folderUploadRef.current
+    if (el) {
+      el.value = ''
+      el.click()
+    }
+  }, [])
+
+  const uploadPct =
+    uploadState && uploadState.total > 0 ? Math.min(100, Math.round((uploadState.loaded / uploadState.total) * 100)) : 0
 
   // On (re)open, flatten all open tabs into a single group (UDR-0071 D8: layout is
   // ephemeral and reset on reopen; open files are preserved).
@@ -916,6 +992,12 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
                   }}>
                   <FolderPlus className="h-4 w-4" /> New Folder
                 </ContextMenuItem>
+                <ContextMenuItem onSelect={() => triggerUpload(d.id, 'files')}>
+                  <Upload className="h-4 w-4" /> Upload files here
+                </ContextMenuItem>
+                <ContextMenuItem onSelect={() => triggerUpload(d.id, 'folder')}>
+                  <FolderUp className="h-4 w-4" /> Upload folder here
+                </ContextMenuItem>
                 <ContextMenuItem onSelect={() => downloadFolder(d.id)}>
                   <Download className="h-4 w-4" /> Download as ZIP
                 </ContextMenuItem>
@@ -945,7 +1027,7 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
         </ContextMenu>
       )
     },
-    [activeGroupId, groups, openFile, downloadFile, downloadFolder],
+    [activeGroupId, groups, openFile, downloadFile, downloadFolder, triggerUpload],
   )
 
   // ---- Editor group rendering ----
@@ -1036,12 +1118,57 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
                   variant="ghost"
                   size="icon"
                   className="h-6 w-6 text-zinc-500"
+                  title="Upload files"
+                  disabled={uploadState !== null}
+                  onClick={() => triggerUpload('', 'files')}>
+                  <Upload className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 text-zinc-500"
+                  title="Upload folder"
+                  disabled={uploadState !== null}
+                  onClick={() => triggerUpload('', 'folder')}>
+                  <FolderUp className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 text-zinc-500"
                   title="Refresh"
                   disabled={refreshing}
                   onClick={() => void handleRefresh()}>
                   <RefreshCw className={cn('h-3.5 w-3.5', refreshing && 'animate-spin')} />
                 </Button>
               </div>
+              {/* Hidden upload inputs (CTR-0137, PRP-0104). The folder input uses the
+                  non-standard webkitdirectory attribute for whole-folder selection. */}
+              <input
+                ref={fileUploadRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => doUpload(uploadDirRef.current, e.currentTarget.files)}
+              />
+              <input
+                ref={folderUploadRef}
+                type="file"
+                className="hidden"
+                {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+                onChange={(e) => doUpload(uploadDirRef.current, e.currentTarget.files)}
+              />
+              {/* Overall upload progress (PRP-0104): a determinate bar across all files. */}
+              {uploadState && (
+                <div className="flex shrink-0 items-center gap-2 border-b bg-blue-50 px-2 py-1 text-[11px] text-blue-700">
+                  <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                  <span className="shrink-0 whitespace-nowrap">Uploading {uploadState.count}…</span>
+                  <div className="h-1.5 flex-1 overflow-hidden rounded bg-blue-200">
+                    <div className="h-full bg-blue-500 transition-all" style={{ width: `${uploadPct}%` }} />
+                  </div>
+                  <span className="shrink-0 tabular-nums">{uploadPct}%</span>
+                </div>
+              )}
               <div ref={treeRef} className="min-h-0 flex-1 overflow-hidden bg-white">
                 <Tree<FileNode>
                   data={data}

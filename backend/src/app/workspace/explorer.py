@@ -32,7 +32,7 @@ from pathlib import Path
 import shutil
 import zipfile
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -413,6 +413,89 @@ async def delete_entry(path: str) -> dict:
 
     logger.info("File Explorer deleted %s", _rel_of(base, safe))
     return {"path": _rel_of(base, safe), "deleted": True}
+
+
+# ---- Upload (CTR-0136 v3, PRP-0104, UDR-0083) ----
+
+_UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB streamed copy chunk
+
+
+@router.post("/upload", dependencies=[Depends(verify_api_key)], status_code=201)
+async def upload_files(
+    dir: str = Form(""),
+    files: list[UploadFile] = File(...),
+    paths: list[str] = Form(default=[]),
+) -> dict:
+    """Upload one or more local files (and, via ``paths``, whole folders).
+
+    Multipart form:
+      - ``dir``   -- target directory (workspace-relative; "" = root).
+      - ``files`` -- one or more uploaded files.
+      - ``paths`` -- OPTIONAL, parallel to ``files``: each file's relative path
+        (the browser's ``webkitRelativePath`` for a folder upload). When present
+        for a file, it is written to ``dir/<paths[i]>`` (subdirectories created);
+        otherwise the file lands directly in ``dir`` under its base name.
+
+    Every destination resolves THROUGH the CTR-0031 realpath jail (UDR-0069 D2), so
+    a ``..`` in a filename / relative path is rejected with 400. Bounded by
+    FILE_EXPLORER_MAX_UPLOAD_FILES (count) and FILE_EXPLORER_MAX_UPLOAD_BYTES (total
+    bytes, enforced while streaming). Existing files are overwritten (last-write-wins,
+    like PUT /file). Same double gate (FILE_EXPLORER_ENABLED + CODING_ENABLED) and
+    CTR-0083 auth as every other mutating endpoint (UDR-0083 D1/D2).
+    """
+    base = _explorer_base()
+    target_dir = _safe(base, dir)
+    if not Path(target_dir).is_dir():
+        raise HTTPException(status_code=404, detail="Target directory not found")
+
+    max_files = max(1, settings.file_explorer_max_upload_files)
+    if len(files) > max_files:
+        raise HTTPException(status_code=400, detail=f"Too many files in one upload (limit {max_files})")
+
+    max_bytes = settings.file_explorer_max_upload_bytes
+    dir_prefix = dir.strip().strip("/")
+    written: list[dict] = []
+    total = 0
+    for idx, uf in enumerate(files):
+        # A folder upload sends the browser's webkitRelativePath in paths[idx];
+        # a plain multi-file upload sends only the base filename.
+        rel_name = (paths[idx] if idx < len(paths) and paths[idx] else (uf.filename or f"upload_{idx}")).strip()
+        rel_name = rel_name.replace("\\", "/").lstrip("/")
+        if not rel_name:
+            raise HTTPException(status_code=400, detail="An uploaded file has no name")
+        dest_rel = f"{dir_prefix}/{rel_name}" if dir_prefix else rel_name
+        dest = _safe(base, dest_rel)  # jail rejects any traversal
+        p = Path(dest)
+        if p.is_dir():
+            raise HTTPException(status_code=400, detail=f"Upload target '{rel_name}' is an existing directory")
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            size = 0
+            with p.open("wb") as out:
+                while True:
+                    chunk = await uf.read(_UPLOAD_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    size += len(chunk)
+                    if total > max_bytes:
+                        out.close()
+                        p.unlink(missing_ok=True)
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Upload too large (over {max_bytes} bytes total).",
+                        )
+                    out.write(chunk)
+        except HTTPException:
+            raise
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="failed to write uploaded file") from exc
+        finally:
+            await uf.close()
+        written.append({"path": _rel_of(base, dest), "size": size})
+
+    logger.info("File Explorer uploaded %d files (%d bytes) to %s", len(written), total, _rel_of(base, target_dir))
+    return {"dir": _rel_of(base, target_dir), "uploaded": written, "count": len(written), "total_bytes": total}
 
 
 __all__ = ["router"]

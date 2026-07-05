@@ -359,6 +359,14 @@ class Settings(BaseSettings):
     file_explorer_max_download_bytes: int = 104_857_600  # 100 MiB
     # Max number of files included in a folder ZIP; a larger folder is refused (400).
     file_explorer_max_download_entries: int = 5000
+    # Upload path (CTR-0136 v3, PRP-0104, UDR-0083). Bounds a single multipart
+    # POST /api/workspace/upload: FILE_EXPLORER_MAX_UPLOAD_BYTES caps the TOTAL
+    # bytes across every file in the request; FILE_EXPLORER_MAX_UPLOAD_FILES caps
+    # the file count (a folder upload sends one file per descendant). An over-cap
+    # request is refused with a clear 400. Both require FILE_EXPLORER_ENABLED +
+    # CODING_ENABLED like every other write path.
+    file_explorer_max_upload_bytes: int = 104_857_600  # 100 MiB
+    file_explorer_max_upload_files: int = 500
 
     # Agent Skills (CTR-0042, PRP-0024)
     skills_dir: str = ".skills"
