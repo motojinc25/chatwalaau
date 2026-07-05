@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import inspect
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
@@ -159,6 +160,35 @@ class _ApprovalStore:
         record.resolve(approved=approved, source=source)
         return "ok", record
 
+    async def resolve_session_matches(
+        self,
+        *,
+        thread_id: str,
+        tool_name: str,
+        approved: bool,
+        exclude_id: str | None = None,
+    ) -> list[ApprovalRecord]:
+        """Resolve every still-pending record matching (thread_id, tool_name).
+
+        PRP-0103 / UDR-0082 D4: when the operator grants (or denies) a tool
+        "for this session", any OTHER approval records already parked for the
+        same (thread_id, tool_name) are released with the same decision and
+        ``source="session-cache"`` -- so sibling cards already displayed
+        collapse and their rounds are accounted as cached (free) budget.
+
+        ``exclude_id`` skips the just-resolved target record. Returns the list
+        of records this call released (empty when there were no siblings).
+        """
+        released: list[ApprovalRecord] = []
+        async with self._lock:
+            for rid, rec in self._records.items():
+                if rid == exclude_id:
+                    continue
+                if rec.thread_id == thread_id and rec.tool_name == tool_name and rec.resolution is None:
+                    rec.resolve(approved=approved, source="session-cache")
+                    released.append(rec)
+        return released
+
     async def drop(self, record_id: str) -> None:
         """Remove a record from the store (called after the parked waiter releases)."""
         async with self._lock:
@@ -268,6 +298,24 @@ def wrap_with_approval(fn: Callable[..., Any], require_set: frozenset[str]) -> C
         if name in _READ_ONLY_TOOL_NAMES:
             return fn
     elif name not in require_set:
+        return fn
+
+    # The @tool(approval_mode=...) decorator introspects a PLAIN Python
+    # function's signature (inspect.signature). MCP tools and other pre-built
+    # MAF tool objects (MCPStreamableHTTPTool, MCPStdioTool, FunctionTool,
+    # AIFunction, ...) are not plain functions -- inspect.signature() raises
+    # "not a callable object" on them. Without this guard, "always" mode's
+    # "*" wildcard tries to wrap every MCP tool and crashes the whole agent
+    # build at startup. This approval mechanism only gates local Python
+    # function tools; MCP-tool approval is a separate, future concern
+    # (CTR-0099 Versioning, orthogonal to MCP's own sandboxing).
+    if not (inspect.isfunction(fn) or inspect.ismethod(fn)):
+        _logger.warning(
+            "Tool %r (%s) cannot be approval-wrapped (not a plain function); leaving it "
+            "un-gated. MCP / pre-built tools use their own mechanism.",
+            name or type(fn).__name__,
+            type(fn).__name__,
+        )
         return fn
 
     from agent_framework import tool

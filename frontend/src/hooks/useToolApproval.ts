@@ -28,6 +28,10 @@ export interface ToolApprovalRequest {
   arguments: Record<string, unknown>
   expiresAtUnix: number
   cachedDecision: boolean | null
+  /** PRP-0103 / UDR-0082 D3: 1-based interactive-round number (frozen under a session grant). */
+  iteration: number | null
+  /** PRP-0103 / UDR-0082 D3: the configured interactive-round budget (TOOL_APPROVAL_MAX_ITERATIONS). */
+  maxIterations: number | null
 }
 
 export interface ToolApprovalResolution {
@@ -62,6 +66,8 @@ function normalizeRequest(value: Record<string, unknown>): ToolApprovalRequest |
       value.arguments && typeof value.arguments === 'object' ? (value.arguments as Record<string, unknown>) : {},
     expiresAtUnix: typeof value.expires_at_unix === 'number' ? value.expires_at_unix : 0,
     cachedDecision: typeof value.cached_decision === 'boolean' ? value.cached_decision : null,
+    iteration: typeof value.iteration === 'number' ? value.iteration : null,
+    maxIterations: typeof value.max_iterations === 'number' ? value.max_iterations : null,
   }
 }
 

@@ -31,11 +31,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# An approval renderer: given (record_id, thread_id, tool_name, arguments_preview),
-# render the Adaptive Card, park until the user decides, and return True/False.
-ApprovalRenderer = Callable[[str, str, str, dict[str, Any]], Awaitable[bool]]
-
-_MAX_APPROVAL_ITERATIONS = 16
+# An approval renderer: given (record_id, thread_id, tool_name, arguments_preview,
+# iteration, max_iterations), render the Adaptive Card, park until the user
+# decides, and return True/False. The trailing (iteration, max_iterations) are the
+# PRP-0103 / UDR-0082 D3 round counter shown on the card.
+ApprovalRenderer = Callable[[str, str, str, dict[str, Any], int, int], Awaitable[bool]]
 
 
 def _collect_generated_images(content: Any, out: list[str]) -> None:
@@ -96,7 +96,10 @@ async def run_turn(
     Mirrors the AG-UI outer approval loop but accumulates text instead of streaming
     SSE. Honors the per-run instruction remainder and the image-gen contextvar, and
     resolves tool approval through the CTR-0099 store + ``approval_renderer``
-    (UDR-0070 D8). The loop is bounded by ``_MAX_APPROVAL_ITERATIONS``.
+    (UDR-0070 D8). The loop is bounded by the shared two-counter budget
+    (``TOOL_APPROVAL_MAX_ITERATIONS`` interactive rounds +
+    ``TOOL_APPROVAL_ABSOLUTE_MAX_ITERATIONS`` absolute backstop; PRP-0103 /
+    UDR-0082 D2/D5), at parity with the AG-UI endpoint.
     """
     import uuid
 
@@ -110,6 +113,7 @@ async def run_turn(
         _resilient_run,
         _RetryNotice,
     )
+    from app.core.config import settings
     from app.teams.session import persist_turn
 
     thread_id = msg.thread_id
@@ -149,7 +153,12 @@ async def run_turn(
         )
         return final_text
 
-    for _iteration in range(_MAX_APPROVAL_ITERATIONS):
+    # PRP-0103 / UDR-0082 D2/D5: two-counter approval budget, parity with AG-UI.
+    max_iterations = settings.tool_approval_max_iterations
+    absolute_max_iterations = settings.tool_approval_absolute_max_iterations
+    interactive_rounds = 0
+    total_rounds = 0
+    while True:
         # Per-iteration accumulator pairs this iteration's function_call(s) with the
         # approval response(s) for the next agent.run (prevents the re-prompt loop).
         accumulator = IterationContentAccumulator()
@@ -190,7 +199,14 @@ async def run_turn(
 
         # Resolve every paused approval (session-cache grant or rendered card), then
         # build the iter-N+1 input with the proper MAF approval responses.
-        approval_response_contents = await _resolve_pending(pending, thread_id, approval_renderer, approval_store)
+        approval_response_contents, round_sources = await _resolve_pending(
+            pending,
+            thread_id,
+            approval_renderer,
+            approval_store,
+            iteration=interactive_rounds + 1,
+            max_iterations=max_iterations,
+        )
         iter_messages = _build_iteration_messages(accumulator, approval_response_contents, effective_model)
         iteration_messages = [*iteration_messages, *iter_messages]
         # The approval handshake interrupted the iter-N response stream; clear the
@@ -198,8 +214,23 @@ async def run_turn(
         # context (mirrors the AG-UI post-approval reset).
         session.service_session_id = None
 
-    logger.warning("Teams approval loop exceeded for thread %s", thread_id)
-    return _finish()
+        # PRP-0103 / UDR-0082 D2: cached rounds (every approval resolved from the
+        # session grant) are free against the interactive budget; every round
+        # counts toward the absolute backstop.
+        total_rounds += 1
+        round_cached = bool(round_sources) and all(s == "session-cache" for s in round_sources)
+        if not round_cached:
+            interactive_rounds += 1
+        if interactive_rounds > max_iterations or total_rounds > absolute_max_iterations:
+            logger.warning(
+                "Teams approval loop exceeded for thread %s (interactive=%d/%d, total=%d/%d)",
+                thread_id,
+                interactive_rounds,
+                max_iterations,
+                total_rounds,
+                absolute_max_iterations,
+            )
+            return _finish()
 
 
 async def _resolve_pending(
@@ -207,23 +238,44 @@ async def _resolve_pending(
     thread_id: str,
     approval_renderer: ApprovalRenderer | None,
     approval_store: Any,
-) -> list[Any]:
-    """Resolve each paused approval to a MAF function_approval_response (UDR-0070 D8)."""
+    *,
+    iteration: int,
+    max_iterations: int,
+) -> tuple[list[Any], list[str]]:
+    """Resolve each paused approval to a MAF function_approval_response (UDR-0070 D8).
+
+    Returns ``(responses, sources)`` where ``sources`` is the resolution source
+    per record ("session-cache" for a session-grant hit, "user" otherwise) so
+    the caller can classify the round as cached or interactive (PRP-0103 /
+    UDR-0082 D2). A rendered "Allow Session" decision caches the grant and
+    cascades onto any sibling records still pending for the same
+    (thread_id, tool_name), so they resolve as "session-cache" here.
+    """
     responses: list[Any] = []
+    sources: list[str] = []
     for record, request_content in pending:
         cached = await approval_store.lookup_session_cache(thread_id=thread_id, tool_name=record.tool_name)
         if cached is not None:
             approved = cached
+            source = "session-cache"
         elif approval_renderer is not None:
-            approved = await approval_renderer(record.id, thread_id, record.tool_name, record.arguments_preview)
+            approved = await approval_renderer(
+                record.id, thread_id, record.tool_name, record.arguments_preview, iteration, max_iterations
+            )
+            source = "user"
         else:
             # No renderer wired -> Teams must NOT auto-approve (UDR-0070 D8): deny.
             approved = False
-        await approval_store.resolve(record.id, approved=approved, source="user")
+            source = "user"
+        # resolve() is idempotent: if a cascade (UDR-0082 D4) already released
+        # this record as "session-cache", that resolution stands.
+        await approval_store.resolve(record.id, approved=approved, source=source)
+        actual = record.resolution.source if record.resolution else source
+        sources.append(actual)
         # The original request content builds the MAF response MAF matches by id.
         responses.append(request_content.to_function_approval_response(approved=approved))
         await approval_store.drop(record.id)
-    return responses
+    return responses, sources
 
 
 def _build_iteration_messages(

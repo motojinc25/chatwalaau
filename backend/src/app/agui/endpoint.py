@@ -812,7 +812,16 @@ async def _stream_with_reasoning(
         # responses and re-runs the agent. The loop terminates when an
         # iteration finishes without producing any approval request.
         iteration_messages: list[Any] = list(messages)
-        max_approval_iterations = 16
+        # PRP-0103 / UDR-0082 D1/D2: the approval re-run loop is bounded by two
+        # operator-configurable counters. `interactive_rounds` only advances for
+        # a round that required a human decision (source != "session-cache"), so
+        # a blanket "approve for session" grant no longer burns the budget;
+        # `total_rounds` advances for every round and is the runaway backstop.
+        max_approval_iterations = settings.tool_approval_max_iterations
+        absolute_max_iterations = settings.tool_approval_absolute_max_iterations
+        interactive_rounds = 0
+        total_rounds = 0
+        approval_loop_exceeded = False
         logger.info(
             "AG-UI run start: thread=%s model=%s input_msgs=%d",
             thread_id,
@@ -838,7 +847,7 @@ async def _stream_with_reasoning(
                     },
                 )
             )
-        for _iteration in range(max_approval_iterations):
+        while True:
             pending_approvals: list[tuple[ApprovalRecord, Content]] = []
             # PRP-0069 follow-up: capture this iteration's stream content so
             # the next iteration's agent.run input pairs the originating
@@ -1025,6 +1034,14 @@ async def _stream_with_reasoning(
                                     "arguments": preview_args,
                                     "expires_at_unix": record.expires_at,
                                     "cached_decision": cached,
+                                    # PRP-0103 / UDR-0082 D3: the 1-based
+                                    # interactive-round number this card belongs
+                                    # to, and the configured budget. Frozen
+                                    # during cached rounds (interactive_rounds
+                                    # does not advance), so the SPA counter stops
+                                    # while a blanket session grant is active.
+                                    "iteration": interactive_rounds + 1,
+                                    "max_iterations": max_approval_iterations,
                                 },
                             )
                         )
@@ -1166,6 +1183,9 @@ async def _stream_with_reasoning(
                 break
 
             approval_response_contents: list[Content] = []
+            # PRP-0103 / UDR-0082 D2: record each resolution source so the round
+            # can be classified as cached (all "session-cache") or interactive.
+            round_sources: list[str] = []
             for record, request_content in pending_approvals:
                 if record.resolution is None:
                     try:
@@ -1178,6 +1198,7 @@ async def _stream_with_reasoning(
                 resolution = record.resolution
                 approved = bool(resolution and resolution.approved)
                 source = resolution.source if resolution else "timeout"
+                round_sources.append(source)
                 if source == "timeout":
                     logger.warning(
                         "approval timed out after %ds for tool=%s (call_id=%s, thread_id=%s)",
@@ -1244,13 +1265,43 @@ async def _stream_with_reasoning(
             # for every provider -- the same structurally-explicit path the
             # PRP-0069 follow-up established for Anthropic.
             session.service_session_id = None
-        else:
-            # The for-else fires when max_approval_iterations is exhausted
-            # without a `break`. Defensive: emit a RUN_ERROR so the SPA
-            # surfaces the run as failed instead of silently terminating.
+
+            # PRP-0103 / UDR-0082 D2: account this round AFTER it resolved. A
+            # round whose approvals were ALL resolved from the session cache is
+            # free with respect to the human-interactive budget; every round
+            # still counts toward the absolute backstop. Aborting when either
+            # ceiling is crossed preserves the runaway "last stop".
+            total_rounds += 1
+            round_cached = bool(round_sources) and all(s == "session-cache" for s in round_sources)
+            if not round_cached:
+                interactive_rounds += 1
+            if interactive_rounds > max_approval_iterations or total_rounds > absolute_max_iterations:
+                approval_loop_exceeded = True
+                break
+
+        if approval_loop_exceeded:
+            # The budget was exhausted without the agent settling. Defensive:
+            # emit a RUN_ERROR so the SPA surfaces the run as failed instead of
+            # silently terminating.
             run_error = True
-            error_message = f"Tool approval loop exceeded {max_approval_iterations} rounds; aborting run."
-            logger.warning("approval loop exceeded for thread %s", thread_id)
+            if total_rounds > absolute_max_iterations:
+                error_message = (
+                    f"Tool approval loop exceeded the absolute ceiling of "
+                    f"{absolute_max_iterations} rounds; aborting run."
+                )
+            else:
+                error_message = (
+                    f"Tool approval loop exceeded {max_approval_iterations} "
+                    f"interactive rounds; aborting run."
+                )
+            logger.warning(
+                "approval loop exceeded for thread %s (interactive=%d/%d, total=%d/%d)",
+                thread_id,
+                interactive_rounds,
+                max_approval_iterations,
+                total_rounds,
+                absolute_max_iterations,
+            )
 
     except (OpenAINotFoundError, ChatClientException, TypeError) as exc:
         run_error = True

@@ -74,9 +74,19 @@ export function ToolApprovalCard({ request, approve, reject }: ToolApprovalCardP
       <div className="mb-2 flex items-center gap-2 font-medium text-amber-900 dark:text-amber-200">
         <ShieldAlert className="size-4" />
         Tool approval required
-        <span className="ml-auto inline-flex items-center gap-1 text-xs font-normal text-muted-foreground">
-          <Timer className="size-3.5" />
-          {countdown && <>Times out in {countdown}</>}
+        <span className="ml-auto inline-flex items-center gap-2 text-xs font-normal text-muted-foreground">
+          {/* PRP-0103 / UDR-0082 D3: interactive-round counter; freezes while a
+              "approve for session" grant is active so the operator can see that
+              skip mode is no longer consuming the budget. */}
+          {request.iteration != null && request.maxIterations != null && (
+            <span title="Interactive approval round / configured budget">
+              round {request.iteration} / {request.maxIterations}
+            </span>
+          )}
+          <span className="inline-flex items-center gap-1">
+            <Timer className="size-3.5" />
+            {countdown && <>Times out in {countdown}</>}
+          </span>
         </span>
       </div>
       <div className="mb-2 font-mono text-xs">

@@ -634,6 +634,21 @@ class Settings(BaseSettings):
     # carry e.g. a 1 MiB file_write content string. Range 64..65536.
     tool_approval_arg_max_chars: int = 4096
 
+    # Human-interactive approval-round budget (PRP-0103, UDR-0082 D1/D2).
+    # Replaces the previously hardcoded 16-round bound on the AG-UI /
+    # Teams approval re-run loop. Only rounds that required a human
+    # decision (source != "session-cache") count against this budget, so
+    # a blanket "approve for session" grant no longer consumes it. When
+    # exceeded the run aborts with a "Tool approval loop exceeded"
+    # RUN_ERROR. Range 1..1000.
+    tool_approval_max_iterations: int = 33
+
+    # Absolute approval-round backstop (PRP-0103, UDR-0082 D2). Counts
+    # EVERY round (interactive + session-cached) and bounds a runaway
+    # agent that loops on tool calls forever even under a blanket session
+    # grant. MUST be >= TOOL_APPROVAL_MAX_ITERATIONS. Range 1..100000.
+    tool_approval_absolute_max_iterations: int = 200
+
     # ---- Multi-Model helpers (CTR-0069) ----
 
     @property
@@ -1003,6 +1018,25 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         if not (64 <= self.tool_approval_arg_max_chars <= 65536):
             msg = f"TOOL_APPROVAL_ARG_MAX_CHARS must be in 64..65536; got {self.tool_approval_arg_max_chars}"
+            raise ValueError(msg)
+        # PRP-0103 / UDR-0082 D2: the interactive budget bounds human
+        # decisions; the absolute backstop bounds total rounds and MUST
+        # sit at or above it so a runaway loop always has a ceiling.
+        if not (1 <= self.tool_approval_max_iterations <= 1000):
+            msg = f"TOOL_APPROVAL_MAX_ITERATIONS must be in 1..1000; got {self.tool_approval_max_iterations}"
+            raise ValueError(msg)
+        if not (1 <= self.tool_approval_absolute_max_iterations <= 100000):
+            msg = (
+                "TOOL_APPROVAL_ABSOLUTE_MAX_ITERATIONS must be in 1..100000; "
+                f"got {self.tool_approval_absolute_max_iterations}"
+            )
+            raise ValueError(msg)
+        if self.tool_approval_absolute_max_iterations < self.tool_approval_max_iterations:
+            msg = (
+                "TOOL_APPROVAL_ABSOLUTE_MAX_ITERATIONS "
+                f"({self.tool_approval_absolute_max_iterations}) must be >= "
+                f"TOOL_APPROVAL_MAX_ITERATIONS ({self.tool_approval_max_iterations})"
+            )
             raise ValueError(msg)
         return self
 

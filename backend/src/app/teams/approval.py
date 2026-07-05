@@ -39,14 +39,17 @@ def build_approval_card(
     thread_id: str,
     tool_name: str,
     arguments_preview: dict[str, Any],
+    iteration: int | None = None,
+    max_iterations: int | None = None,
 ) -> dict[str, Any]:
     """Build an Adaptive Card for a pending tool-approval request (UDR-0070 D8).
 
     The three Action.Submit buttons carry a hidden ``data`` payload (kind, the
     approval record id, the thread id, the tool name, and the decision) so the
     adapter can resolve the matching store record on submit without any client
-    state. Returns a plain dict; the adapter wraps it as an Adaptive Card
-    attachment for ``ctx.send``.
+    state. When ``iteration`` / ``max_iterations`` are supplied, the card shows
+    the round counter (PRP-0103 / UDR-0082 D3/D5). Returns a plain dict; the
+    adapter wraps it as an Adaptive Card attachment for ``ctx.send``.
     """
     args_text = _format_args(arguments_preview)
     base_data = {
@@ -55,32 +58,44 @@ def build_approval_card(
         "thread_id": thread_id,
         "tool": tool_name,
     }
+    body: list[dict[str, Any]] = [
+        {
+            "type": "TextBlock",
+            "text": "Tool approval required",
+            "weight": "Bolder",
+            "size": "Medium",
+            "wrap": True,
+        },
+        {
+            "type": "TextBlock",
+            "text": f"The agent wants to run **{tool_name}**.",
+            "wrap": True,
+        },
+        {
+            "type": "TextBlock",
+            "text": args_text,
+            "wrap": True,
+            "isSubtle": True,
+            "fontType": "Monospace",
+            "spacing": "Small",
+        },
+    ]
+    if iteration is not None and max_iterations is not None:
+        body.append(
+            {
+                "type": "TextBlock",
+                "text": f"Approval round {iteration} / {max_iterations}",
+                "wrap": True,
+                "isSubtle": True,
+                "size": "Small",
+                "spacing": "Small",
+            }
+        )
     return {
         "type": "AdaptiveCard",
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "version": "1.4",
-        "body": [
-            {
-                "type": "TextBlock",
-                "text": "Tool approval required",
-                "weight": "Bolder",
-                "size": "Medium",
-                "wrap": True,
-            },
-            {
-                "type": "TextBlock",
-                "text": f"The agent wants to run **{tool_name}**.",
-                "wrap": True,
-            },
-            {
-                "type": "TextBlock",
-                "text": args_text,
-                "wrap": True,
-                "isSubtle": True,
-                "fontType": "Monospace",
-                "spacing": "Small",
-            },
-        ],
+        "body": body,
         "actions": [
             {
                 "type": "Action.Submit",
@@ -144,15 +159,25 @@ async def apply_decision(submit: ApprovalSubmit) -> tuple[str, Any]:
     """Map a parsed submit onto the CTR-0099 approval store (UDR-0070 D8).
 
     - ``allow_once``    -> resolve the record approved.
-    - ``allow_session`` -> resolve the record approved AND cache the
+    - ``allow_session`` -> resolve the record approved, cache the
       (thread_id, tool) session grant so the same tool in this Teams thread
-      proceeds without re-prompting (reuses the existing session cache).
+      proceeds without re-prompting (reuses the existing session cache), AND
+      cascade the grant onto any sibling approvals already pending for the
+      same (thread_id, tool) so their cards resolve too (PRP-0103 /
+      UDR-0082 D4/D5).
     - ``deny``          -> resolve the record rejected.
 
     Returns the ``(status, record)`` tuple from ``approval_store.resolve`` so the
     caller can distinguish ok / already-resolved / missing.
     """
     approved = submit.decision in ("allow_once", "allow_session")
+    outcome = await approval_store.resolve(submit.record_id, approved=approved, source="user")
     if submit.decision == "allow_session":
         await approval_store.cache_decision(thread_id=submit.thread_id, tool_name=submit.tool, approved=True)
-    return await approval_store.resolve(submit.record_id, approved=approved, source="user")
+        await approval_store.resolve_session_matches(
+            thread_id=submit.thread_id,
+            tool_name=submit.tool,
+            approved=True,
+            exclude_id=submit.record_id,
+        )
+    return outcome

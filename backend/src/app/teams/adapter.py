@@ -172,8 +172,17 @@ class TeamsAdapter:
         """Run the agent turn and send the chunked reply (background-task body)."""
         from app.teams.agent_run import run_turn
 
-        async def _renderer(record_id: str, thread_id: str, tool_name: str, preview: dict[str, Any]) -> bool:
-            return await self._render_approval(msg.conversation_ref, record_id, thread_id, tool_name, preview)
+        async def _renderer(
+            record_id: str,
+            thread_id: str,
+            tool_name: str,
+            preview: dict[str, Any],
+            iteration: int,
+            max_iterations: int,
+        ) -> bool:
+            return await self._render_approval(
+                msg.conversation_ref, record_id, thread_id, tool_name, preview, iteration, max_iterations
+            )
 
         try:
             text = await run_turn(msg, agent_registry=self._agent_registry, approval_renderer=_renderer)
@@ -205,12 +214,19 @@ class TeamsAdapter:
         thread_id: str,
         tool_name: str,
         preview: dict[str, Any],
+        iteration: int,
+        max_iterations: int,
     ) -> bool:
         """Render an Adaptive Card and park until the user decides (UDR-0070 D8)."""
         from app.agent.approval import approval_store
 
         card = build_approval_card(
-            record_id=record_id, thread_id=thread_id, tool_name=tool_name, arguments_preview=preview
+            record_id=record_id,
+            thread_id=thread_id,
+            tool_name=tool_name,
+            arguments_preview=preview,
+            iteration=iteration,
+            max_iterations=max_iterations,
         )
         await self.send_card(conversation_id, card)
         record = await approval_store.get(record_id)

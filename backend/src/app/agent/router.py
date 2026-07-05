@@ -47,6 +47,9 @@ class ToolApprovalRequest(BaseModel):
 class ToolApprovalResponse(BaseModel):
     id: str
     released: bool
+    # PRP-0103 / UDR-0082 D4: number of sibling pending approvals released by
+    # a remember_for_session cascade (0 when none / not a session grant).
+    cascaded: int = 0
 
 
 @router.post("", status_code=200, dependencies=[Depends(verify_api_key)])
@@ -83,6 +86,7 @@ async def submit_tool_approval(body: ToolApprovalRequest) -> ToolApprovalRespons
         )
 
     assert record is not None
+    cascaded = 0
     if body.remember_for_session:
         # UDR-0043 D8 -- (thread_id, tool_name) only, no argument hash,
         # cleared on session abort / delete / process restart.
@@ -91,17 +95,30 @@ async def submit_tool_approval(body: ToolApprovalRequest) -> ToolApprovalRespons
             tool_name=record.tool_name,
             approved=body.approved,
         )
+        # PRP-0103 / UDR-0082 D4 -- cascade the session grant onto every
+        # other approval already parked for the same (thread_id, tool_name)
+        # so the sibling cards already on screen collapse with the same
+        # decision (source="session-cache"), instead of waiting for the
+        # operator to act on each one.
+        siblings = await approval_store.resolve_session_matches(
+            thread_id=record.thread_id,
+            tool_name=record.tool_name,
+            approved=body.approved,
+            exclude_id=record.id,
+        )
+        cascaded = len(siblings)
 
     _logger.info(
-        "approval %s by user for tool=%s (call_id=%s, thread_id=%s, remember=%s)",
+        "approval %s by user for tool=%s (call_id=%s, thread_id=%s, remember=%s, cascaded=%d)",
         "approved" if body.approved else "rejected",
         record.tool_name,
         record.call_id,
         record.thread_id,
         body.remember_for_session,
+        cascaded,
     )
 
-    return ToolApprovalResponse(id=body.id, released=True)
+    return ToolApprovalResponse(id=body.id, released=True, cascaded=cascaded)
 
 
 __all__ = ["router"]
