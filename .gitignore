@@ -81,3 +81,6 @@ batch-server.log
 
 # Releases
 .releases
+
+# Ontologies
+.ontologies

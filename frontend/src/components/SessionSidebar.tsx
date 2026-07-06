@@ -32,6 +32,7 @@ import {
   Loader2,
   LogOut,
   MoreHorizontal,
+  Network,
   Palette,
   Pencil,
   Pin,
@@ -133,6 +134,9 @@ interface SessionSidebarProps {
   onOpenWebhook?: () => void
   /** Memory Management launcher (CTR-0167, PRP-0101): footer icon; always shown. */
   onOpenMemory?: () => void
+  /** Ontology manager launcher (CTR-0173, PRP-0105): footer icon next to Declarative Agents. */
+  ontologyAvailable?: boolean
+  onOpenOntology?: () => void
 }
 
 // Per-device open/closed state (UDR-0046 D4): the set of explicitly-expanded
@@ -388,6 +392,8 @@ export function SessionSidebar({
   webhookAvailable,
   onOpenWebhook,
   onOpenMemory,
+  ontologyAvailable,
+  onOpenOntology,
 }: SessionSidebarProps) {
   const sortedSessions = useMemo(() => sortSessions(sessions), [sessions])
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
@@ -924,6 +930,19 @@ export function SessionSidebar({
       <div className="flex h-9 shrink-0 items-center justify-between border-t px-3">
         <span className="text-[11px] text-muted-foreground">{auth.version ? `v${auth.version}` : ''}</span>
         <div className="flex items-center gap-1">
+          {/* Ontology manager launcher (CTR-0173, PRP-0105): next to Declarative Agents;
+              shown only when ONTOLOGY_ENABLED (probed via GET /api/ontology/catalog). */}
+          {ontologyAvailable && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-muted-foreground"
+              onClick={() => onOpenOntology?.()}
+              aria-label="Ontology"
+              title="Ontology (concept models)">
+              <Network className="h-4 w-4" />
+            </Button>
+          )}
           {/* Declarative Agent management (CTR-0144, PRP-0094): self-probing icon next to
               the File Explorer icon; always shown when the endpoint is reachable. */}
           <DeclarativeAgentManager />

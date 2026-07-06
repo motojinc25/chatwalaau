@@ -95,6 +95,27 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = ""
 
+    # ---- Microsoft Foundry provider (CTR-0069, CTR-0102, PRP-0106, UDR-0085) ----
+    # Comma-separated Foundry model deployment names routed to the "foundry"
+    # provider (Microsoft Foundry PROJECT endpoint, Entra ID auth). Empty
+    # (default) = Foundry disabled; the runtime behaves exactly as the
+    # pre-PRP-0106 build. v1 scope: REASONING models only -- the option catalog
+    # reuses the azure-openai reasoning-only catalog (UDR-0085 D5). Model ids
+    # must be unique across AZURE_OPENAI_MODELS, ANTHROPIC_MODELS, OPENAI_MODELS
+    # and FOUNDRY_MODELS (validated at startup). The merged selector lists Azure
+    # first, then Anthropic, then OpenAI, then these (UDR-0085 D3).
+    # NOTE: this is the NATIVE Foundry provider; it is unrelated to
+    # ANTHROPIC_FOUNDRY_* (Claude models hosted on Foundry via "anthropic").
+    foundry_models: str = ""
+
+    # Foundry project endpoint (REQUIRED when FOUNDRY_MODELS is set; startup
+    # fail-fast otherwise). Authentication is Entra ID ONLY, reusing the shared
+    # credential lanes: AZURE_CREDENTIAL_MODE (cli / managed-identity /
+    # default) + AZURE_TENANT_ID (UDR-0085 D4). There is no FOUNDRY_API_KEY --
+    # the MAF Foundry connector has no API-key parameter -- and
+    # AZURE_OPENAI_API_KEY does NOT apply to this lane.
+    foundry_project_endpoint: str = ""
+
     # Web Search
     web_search_country: str = "US"
 
@@ -493,6 +514,24 @@ class Settings(BaseSettings):
     # Poll interval while waiting for the transcript artifact (seconds).
     teams_meeting_transcript_poll_seconds: int = 30
 
+    # Ontology Concept Modeling (CTR-0006, CTR-0169..0173, PRP-0105, UDR-0084)
+    # Rule-based concept models as RDF knowledge graphs (Turtle file SSOT +
+    # catalog.json, pyoxigraph read-only SPARQL, NL -> SPARQL via the registry
+    # chokepoint, session-common query_ontology tool). The whole feature is OFF
+    # unless ONTOLOGY_ENABLED (UDR-0084 D12): when false the /api/ontology surface
+    # returns 404, the tool is not registered, and the sidebar icon is hidden.
+    ontology_enabled: bool = False
+    # Folder holding catalog.json + one Turtle file per ontology (created on demand).
+    ontology_dir: str = ".ontologies"
+    # Upload/import and save size cap in bytes (UDR-0084 D10).
+    ontology_max_file_bytes: int = 10_485_760  # 10 MiB
+    # Cap on triples serialized into a query_ontology tool answer (UDR-0084 D9);
+    # truncation is explicitly noticed in the tool result.
+    ontology_tool_max_triples: int = 200
+    # Optional model override for the NL -> SPARQL completion; empty = the default
+    # model via the registry chokepoint (the SESSION_TITLE_MODEL precedent).
+    ontology_nl_model: str = ""
+
     @property
     def msgraph_webhook_allowed_cidr_list(self) -> list[str]:
         """Parse MSGRAPH_WEBHOOK_ALLOWED_CIDRS (empty = no restriction)."""
@@ -675,18 +714,23 @@ class Settings(BaseSettings):
         return [m.strip() for m in self.openai_models.split(",") if m.strip()]
 
     @property
-    def all_model_list(self) -> list[str]:
-        """Merged ordered model list across providers (Azure, then Anthropic, then OpenAI).
+    def foundry_model_list(self) -> list[str]:
+        """Parse FOUNDRY_MODELS into an ordered list of Foundry deployment names (PRP-0106)."""
+        return [m.strip() for m in self.foundry_models.split(",") if m.strip()]
 
-        UDR-0045 D3 / UDR-0073 D3: ordering is Azure-first, then Anthropic, then
-        OpenAI, so the default model is the first Azure model when any is
-        configured (preserving the pre-PRP-0069 default) and falls back to the
-        first Anthropic / OpenAI model otherwise. Model ids are unique across
-        providers (enforced by _validate_anthropic), but a defensive de-dup keeps
-        order.
+    @property
+    def all_model_list(self) -> list[str]:
+        """Merged ordered model list across providers (Azure, Anthropic, OpenAI, Foundry).
+
+        UDR-0045 D3 / UDR-0073 D3 / UDR-0085 D3: ordering is Azure-first, then
+        Anthropic, then OpenAI, then Foundry, so the default model is the first
+        Azure model when any is configured (preserving the pre-PRP-0069 default)
+        and falls back to the first Anthropic / OpenAI / Foundry model otherwise.
+        Model ids are unique across providers (enforced by _validate_anthropic),
+        but a defensive de-dup keeps order.
         """
         merged = list(self.model_list)
-        for m in (*self.anthropic_model_list, *self.openai_model_list):
+        for m in (*self.anthropic_model_list, *self.openai_model_list, *self.foundry_model_list):
             if m not in merged:
                 merged.append(m)
         return merged
@@ -738,11 +782,12 @@ class Settings(BaseSettings):
     def max_context_tokens_map(self) -> dict[str, int]:
         """Return a map of model -> max_context_tokens for all configured models.
 
-        Spans every provider (Azure + Anthropic) so the frontend context-window
-        indicator resolves a limit for any selectable model. Operators add
-        Claude entries to MODEL_MAX_CONTEXT_TOKENS; unlisted models fall back to
-        the default per get_max_context_tokens. Azure-only behavior is unchanged
-        (all_model_list == model_list when ANTHROPIC_MODELS is empty).
+        Spans every provider (Azure, Anthropic, OpenAI, Foundry) so the frontend
+        context-window indicator resolves a limit for any selectable model.
+        Operators add non-Azure entries to MODEL_MAX_CONTEXT_TOKENS; unlisted
+        models fall back to the default per get_max_context_tokens. Azure-only
+        behavior is unchanged (all_model_list == model_list when the other
+        namespaces are empty).
         """
         return {model: self.get_max_context_tokens(model) for model in self.all_model_list}
 
@@ -773,8 +818,8 @@ class Settings(BaseSettings):
             )
         if not self.all_model_list:
             _logger.warning(
-                "No models configured (AZURE_OPENAI_MODELS, ANTHROPIC_MODELS and OPENAI_MODELS "
-                "are all empty); agent creation will be skipped."
+                "No models configured (AZURE_OPENAI_MODELS, ANTHROPIC_MODELS, OPENAI_MODELS "
+                "and FOUNDRY_MODELS are all empty); agent creation will be skipped."
             )
         return self
 
@@ -806,14 +851,15 @@ class Settings(BaseSettings):
             msg = "ANTHROPIC_HOSTING=foundry requires ANTHROPIC_FOUNDRY_RESOURCE or ANTHROPIC_FOUNDRY_BASE_URL."
             raise ValueError(msg)
 
-        # Cross-provider model-id uniqueness across all three namespaces
-        # (UDR-0045 D3 extended by UDR-0073 D2). A collision under any two
-        # providers is a startup error; OpenAI-disabled deployments are
-        # unaffected (openai_model_list is empty).
+        # Cross-provider model-id uniqueness across all four namespaces
+        # (UDR-0045 D3 extended by UDR-0073 D2 and UDR-0085 D2). A collision
+        # under any two providers is a startup error; deployments with a
+        # namespace unset are unaffected (its model list is empty).
         namespaces = (
             ("AZURE_OPENAI_MODELS", self.model_list),
             ("ANTHROPIC_MODELS", self.anthropic_model_list),
             ("OPENAI_MODELS", self.openai_model_list),
+            ("FOUNDRY_MODELS", self.foundry_model_list),
         )
         seen: dict[str, str] = {}
         dupes: set[str] = set()
@@ -825,10 +871,23 @@ class Settings(BaseSettings):
         if dupes:
             msg = (
                 f"Model id(s) {sorted(dupes)} appear under multiple providers; ids must be unique "
-                "across AZURE_OPENAI_MODELS, ANTHROPIC_MODELS and OPENAI_MODELS."
+                "across AZURE_OPENAI_MODELS, ANTHROPIC_MODELS, OPENAI_MODELS and FOUNDRY_MODELS."
             )
             raise ValueError(msg)
 
+        return self
+
+    @model_validator(mode="after")
+    def _validate_foundry(self) -> "Settings":
+        """Validate the Microsoft Foundry provider configuration (PRP-0106, UDR-0085 D2).
+
+        FOUNDRY_MODELS non-empty requires FOUNDRY_PROJECT_ENDPOINT (startup
+        fail-fast, mirroring the ANTHROPIC_HOSTING=foundry resource check).
+        Foundry-disabled deployments (FOUNDRY_MODELS empty) are never affected.
+        """
+        if self.foundry_model_list and not self.foundry_project_endpoint.strip():
+            msg = "FOUNDRY_MODELS requires FOUNDRY_PROJECT_ENDPOINT (Microsoft Foundry project endpoint)."
+            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

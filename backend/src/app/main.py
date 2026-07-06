@@ -88,6 +88,7 @@ from app.image_gen.router import router as image_edit_router
 from app.mcp.lifecycle import activate_mcp, prepare_mcp, shutdown_mcp
 from app.mcp_apps.router import router as mcp_apps_router
 from app.openai_api.router import register_openai_api
+from app.paint.router import router as paint_router
 from app.prompt_templates.router import router as templates_router
 from app.session.router import router as session_router
 from app.stt.factory import create_stt_provider
@@ -96,7 +97,6 @@ from app.stt.router import set_stt_provider
 from app.tts.factory import create_tts_provider
 from app.tts.router import router as tts_router
 from app.tts.router import set_tts_provider
-from app.paint.router import router as paint_router
 from app.upload.router import router as upload_router
 
 # Suppress pydantic warnings from agent-framework-ag-ui's Field(validation_alias=...) usage
@@ -280,7 +280,7 @@ app.include_router(tool_approval_router)
 
 # Memory Curation API (CTR-0164, PRP-0100) -- per-turn "like" trigger for the
 # Agent Curated Memory (CTR-0162).
-from app.memory.router import router as memory_router  # noqa: E402
+from app.memory.router import router as memory_router
 
 app.include_router(memory_router)
 
@@ -416,6 +416,14 @@ from app.pipeline.router import router as pipeline_router
 
 app.include_router(pipeline_router)
 
+# Ontology Management API (CTR-0171, PRP-0105, UDR-0084) -- catalog CRUD, JSON graph
+# projection GET/PUT, RDF import/export, read-only SPARQL, and NL -> SPARQL. The
+# surface returns 404 when ONTOLOGY_ENABLED is false so the SPA can gate its launcher
+# icon by probing the catalog (UDR-0084 D12). Mutations + query POSTs consume CTR-0083.
+from app.ontology.router import router as ontology_router
+
+app.include_router(ontology_router)
+
 # Server -> client notification WebSocket (CTR-0110, PRP-0077). Real-time push
 # channel; first event type is session_title (CTR-0109).
 from app.notifications import register_notifications_endpoint
@@ -546,8 +554,7 @@ if dist_path is not None:
     async def serve_spa(full_path: str):
         """SPA fallback: serve index.html for all non-API routes."""
         resolved = (dist_path / full_path).resolve()
-        if resolved.is_file() and resolved.is_relative_to(dist_path):
-            # A real file other than the SPA shell (e.g. favicon) -- serve as-is.
-            if resolved.name != "index.html":
-                return FileResponse(resolved)
+        # A real file other than the SPA shell (e.g. favicon) -- serve as-is.
+        if resolved.is_file() and resolved.is_relative_to(dist_path) and resolved.name != "index.html":
+            return FileResponse(resolved)
         return FileResponse(dist_path / "index.html", headers=_INDEX_NO_CACHE)

@@ -172,9 +172,7 @@ def build_skill_source() -> DeduplicatingSkillsSource:
     gates against (PRP-0087, UDR-0065 D2/D3).
     """
     skills_path = Path(settings.skills_dir)
-    return DeduplicatingSkillsSource(
-        FileSkillsSource(skills_path, script_runner=_skill_script_runner)
-    )
+    return DeduplicatingSkillsSource(FileSkillsSource(skills_path, script_runner=_skill_script_runner))
 
 
 def create_skills_provider() -> SkillsProvider | None:

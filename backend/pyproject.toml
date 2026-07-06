@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.98.1"
+version = "0.100.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -27,6 +27,11 @@ dependencies = [
     # support (PRP-0069, UDR-0045 D8). Already resolved transitively via
     # agent-framework-core[all]; declared explicitly to guarantee the capability.
     "agent-framework-anthropic>=1.0.0b260521",
+    # Microsoft Foundry base-model provider (PRP-0106, UDR-0085 D1): the stable
+    # FoundryChatClient connector (OpenAI Responses API via a Foundry project
+    # endpoint, Entra ID credential only). Already resolved transitively via the
+    # agent-framework meta package; declared explicitly to guarantee the capability.
+    "agent-framework-foundry>=1.0.0",
     # Declarative agents (PRP-0094, FEAT-0051, UDR-0072): the MAF AgentFactory front
     # end (create_agent_from_yaml / create_agent_from_yaml_path) used to PARSE and
     # VALIDATE declarative agent YAML. The runtime agent is built by ChatWalaʻau
@@ -56,6 +61,12 @@ dependencies = [
     # still IMPORTED only when TEAMS_ENABLED (lazy, UDR-0070 D10); the floor is
     # pinned to the Python-3.12-verified release (UDR-0070 D12).
     "microsoft-teams-apps>=2.0.13",
+    # Ontology Concept Modeling (PRP-0105, FEAT-0058, UDR-0084 D2): embedded RDF
+    # engine (Rust-backed). >= 0.5 ships the RDF 1.2 / SPARQL 1.2 draft features
+    # (rdf-12 / sparql-12) enabled by default in the Python bindings; the former
+    # RDF-star is subsumed as RDF 1.2 triple terms. Imported lazily inside
+    # app.ontology so the feature gate (ONTOLOGY_ENABLED) bounds its blast radius.
+    "pyoxigraph>=0.5",
 ]
 
 [project.optional-dependencies]

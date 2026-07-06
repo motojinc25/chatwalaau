@@ -45,6 +45,13 @@ OPENAI_MODELS=gpt-5.1                 # reasoning models (gpt-5.x / o-series)
 OPENAI_API_KEY=sk-...                 # OPENAI_BASE_URL optional (OpenAI-compatible gateways)
 ```
 
+**Microsoft Foundry** -- models from a Foundry project (gpt-5.x, DeepSeek, ...), Entra ID sign-in
+
+```ini
+FOUNDRY_MODELS=gpt-5.1,deepseek-v4-pro # model deployments in the project
+FOUNDRY_PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
+```
+
 Then start the server:
 
 ```bash
@@ -59,7 +66,8 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 > with `AZURE_CREDENTIAL_MODE`: `cli` (default -- `az login` for local dev),
 > `managed-identity` (Azure App Service / Container Apps / AKS / Functions / VM), or
 > `default` (auto-discovery). Anthropic uses `ANTHROPIC_API_KEY` for `direct`
-> hosting, or Entra ID for `foundry` hosting. See the
+> hosting, or Entra ID for `foundry` hosting. Microsoft Foundry is Entra ID only
+> (it reuses the same credential lanes; no API key exists). See the
 > [Authentication guide](https://www.chatwalaau.com/docs/api-and-cli/authentication).
 
 > Behind a corporate TLS-intercepting proxy? Install with `pip install "chatwalaau[corp]"`
@@ -72,8 +80,9 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 
 - **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, a built-in **paint canvas** (draw, paste, or load an image from your device **or the coding workspace**, attach, and re-edit), Temporary Chat, **message-by-message navigation** (previous/next step buttons that walk the conversation one message at a time), and **slash commands** (`/help`, `/prompt`, `/skill`, `/model`) with completion and dynamic arguments
 - **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow (a per-turn round counter, a configurable round budget, and "approve for this session" that stops counting against the budget and clears the other pending cards of that tool), prompt templates, and Agent Skills (enable/disable or hot-reload from disk at runtime)
-- **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, and **OpenAI** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
+- **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, **OpenAI**, and **Microsoft Foundry** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
 - **Knowledge** -- RAG over your PDFs (ChromaDB), ingested by the built-in **Pipeline Jobs** engine: submit/monitor/cancel jobs from a portal, the API, or the agent, with live progress and run history (on by default)
+- **Ontology** -- design **concept models as RDF knowledge graphs** on a visual node canvas: circular entities (emoji, colors, typed properties with **key attributes**) connect from **any side** with directional, cardinality-labeled relationships, and clicking a node or edge lights up its whole in/out neighborhood; search with **SPARQL or natural language** with on-canvas highlighting, import/export standard RDF with automatic backups, and let the agent **answer from your ontologies in any chat** (opt-in via `ONTOLOGY_ENABLED`)
 - **MCP native** -- connect any MCP server (Claude Desktop-compatible config); enable/disable servers and individual tools at runtime to control token usage, or hot-reload the config (reconnect) without a restart; MCP Apps render interactive UI in chat
 - **Memory** -- a configurable Agent Identity, a self-maintaining User Preference Memory (about you), and an Agent Memory (about the work -- project conventions, tool quirks, operating rules) that the agent curates inline and you can grow by giving any chat turn a thumbs-up to "remember this turn"; a built-in **Memory editor** lets you view and edit all three files (`IDENTITY.md` / `USER.md` / `MEMORY.md`) in a Markdown editor with automatic timestamped backups
 - **Scheduled execution** -- a built-in **Cron Scheduler** runs workspace scripts on a cron expression, an interval, or once after a delay; manage jobs from a portal, the API, or the agent (opt-in via `CRON_ENABLED`)

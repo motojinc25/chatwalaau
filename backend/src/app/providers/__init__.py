@@ -6,10 +6,11 @@ per-model ``default_options``, and the provider-supplied web search tool.
 
 Model -> provider routing comes from the per-provider env namespaces
 (``AZURE_OPENAI_MODELS`` -> azure-openai, ``ANTHROPIC_MODELS`` -> anthropic,
-``OPENAI_MODELS`` -> openai). ``resolve_models()`` is the SSOT for the merged
-ordered list (Azure first, then Anthropic, then OpenAI; UDR-0045 D3 / UDR-0073
-D3). DEMO_MODE never reaches this module -- the registry short-circuits to
-DemoChatClient before dispatch (UDR-0045 D7).
+``OPENAI_MODELS`` -> openai, ``FOUNDRY_MODELS`` -> foundry).
+``resolve_models()`` is the SSOT for the merged ordered list (Azure first,
+then Anthropic, then OpenAI, then Foundry; UDR-0045 D3 / UDR-0073 D3 /
+UDR-0085 D3). DEMO_MODE never reaches this module -- the registry
+short-circuits to DemoChatClient before dispatch (UDR-0045 D7).
 """
 
 from __future__ import annotations
@@ -19,22 +20,24 @@ from typing import Any
 from app.providers.anthropic import AnthropicProvider, anthropic_web_search_tool
 from app.providers.azure_openai import AzureOpenAIProvider, openai_web_search_tool
 from app.providers.base import Provider
+from app.providers.foundry import FoundryProvider
 from app.providers.openai import OpenAIProvider
 
 _AZURE = AzureOpenAIProvider()
 _ANTHROPIC = AnthropicProvider()
 _OPENAI = OpenAIProvider()
+_FOUNDRY = FoundryProvider()
 
-# Ordered for merged-list construction: Azure first, then Anthropic, then OpenAI.
-_ORDERED: tuple[Provider, ...] = (_AZURE, _ANTHROPIC, _OPENAI)
+# Ordered for merged-list construction: Azure, Anthropic, OpenAI, then Foundry.
+_ORDERED: tuple[Provider, ...] = (_AZURE, _ANTHROPIC, _OPENAI, _FOUNDRY)
 PROVIDERS: dict[str, Provider] = {p.name: p for p in _ORDERED}
 
 
 def resolve_models() -> list[tuple[str, str]]:
-    """Return the merged ordered ``(model, provider_name)`` list (UDR-0045 D3 / UDR-0073 D3).
+    """Return the merged ordered ``(model, provider_name)`` list (UDR-0045 D3 / UDR-0073 D3 / UDR-0085 D3).
 
     Azure models first (preserving the pre-PRP-0069 default), then Anthropic,
-    then OpenAI. Ids are unique across providers (enforced by
+    then OpenAI, then Foundry. Ids are unique across providers (enforced by
     Settings._validate_anthropic); a defensive de-dup keeps the first occurrence
     if a duplicate slips through.
     """
@@ -164,7 +167,8 @@ def merge_generation_options(base: dict[str, Any], extra: dict[str, Any]) -> dic
 def background_supported(model: str) -> bool:
     """Whether ``model``'s provider supports background responses (CTR-0045).
 
-    Azure OpenAI -> True, Anthropic -> False. Unknown models resolve via
+    Azure OpenAI / OpenAI -> True, Anthropic -> False, Foundry -> False
+    (verification-gated, UDR-0085 D6). Unknown models resolve via
     ``provider_for`` (defaults to azure-openai). Used by the AG-UI run-option
     guard and the GET /api/model capability map (PRP-0073).
     """

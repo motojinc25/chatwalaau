@@ -150,6 +150,21 @@ def get_token_provider() -> Callable[[], str]:
     return _get_token_provider()
 
 
+def get_credential() -> TokenCredential:
+    """Public mode-selected Entra ID credential (PRP-0106, UDR-0085 D4).
+
+    Returns the process-cached ``TokenCredential`` for the active
+    ``AZURE_CREDENTIAL_MODE`` lane (cli / managed-identity / default,
+    ``AZURE_TENANT_ID`` pin). NOT gated by ``AZURE_OPENAI_API_KEY`` -- callers
+    whose target accepts only an Azure credential object (the Microsoft
+    Foundry provider: ``FoundryChatClient`` has no API-key parameter) use this
+    directly. Existing consumers keep using the API-key-aware accessors.
+    """
+    cred = _get_credential()
+    _log_active_lane(_mode())
+    return cred
+
+
 def get_active_lane() -> str:
     """Return a short name for the active credential lane.
 

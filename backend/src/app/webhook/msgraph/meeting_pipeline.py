@@ -140,8 +140,7 @@ async def run_teams_meeting_job(job: Job, storage: PipelineStore, cancel_event: 
                 job,
                 storage,
                 "resolving_meeting",
-                "Microsoft Graph delegated credentials are not configured "
-                "(GRAPH_TENANT_ID / GRAPH_CLIENT_ID).",
+                "Microsoft Graph delegated credentials are not configured (GRAPH_TENANT_ID / GRAPH_CLIENT_ID).",
             )
             return
         token_ref = str(job.params.get("token_ref", "")).strip()

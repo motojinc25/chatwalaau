@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { WebhookManager } from '@/components/WebhookManager'
 import { useCronAvailable } from '@/hooks/useCronAvailable'
 import { useFileExplorerAvailable } from '@/hooks/useFileExplorerAvailable'
+import { useOntologyAvailable } from '@/hooks/useOntologyAvailable'
 import { usePipelineAvailable } from '@/hooks/usePipelineAvailable'
 import { useSession } from '@/hooks/useSession'
 import { useTemporaryChat } from '@/hooks/useTemporaryChat'
@@ -28,6 +29,12 @@ const FileExplorer = lazyWithReload(() =>
 // heavy monaco editor bundle; opened from the sidebar-footer Brain icon.
 const MemoryManager = lazyWithReload(() =>
   import('@/components/MemoryManager').then((m) => ({ default: m.MemoryManager })),
+)
+
+// Ontology Manager portal (CTR-0173, PRP-0105). Lazy-loaded because it pulls in the
+// React Flow + elkjs + monaco bundles; opened from the sidebar-footer Network icon.
+const OntologyManager = lazyWithReload(() =>
+  import('@/components/OntologyManager').then((m) => ({ default: m.OntologyManager })),
 )
 
 export function ChatPage() {
@@ -93,6 +100,11 @@ export function ChatPage() {
   // Memory Management portal (CTR-0167, PRP-0101). Lifted here so the sidebar-footer
   // launcher icon opens the modal. Always available (identity always exists).
   const [memoryOpen, setMemoryOpen] = useState(false)
+
+  // Ontology Manager portal (CTR-0173, PRP-0105). Lifted here so the sidebar-footer
+  // launcher icon (next to Declarative Agents) opens the same overlay instance.
+  const ontologyAvailable = useOntologyAvailable()
+  const [ontologyOpen, setOntologyOpen] = useState(false)
 
   const handleStreamComplete = useCallback(() => {
     // Temporary chats are never listed and never exposed in the URL (UDR-0052
@@ -167,6 +179,8 @@ export function ChatPage() {
           webhookAvailable={webhookAvailable}
           onOpenWebhook={() => setWebhookOpen(true)}
           onOpenMemory={() => setMemoryOpen(true)}
+          ontologyAvailable={ontologyAvailable}
+          onOpenOntology={() => setOntologyOpen(true)}
         />
       )}
 
@@ -185,6 +199,12 @@ export function ChatPage() {
       {memoryOpen && (
         <Suspense fallback={null}>
           <MemoryManager open={memoryOpen} onOpenChange={setMemoryOpen} />
+        </Suspense>
+      )}
+
+      {ontologyAvailable && ontologyOpen && (
+        <Suspense fallback={null}>
+          <OntologyManager open={ontologyOpen} onOpenChange={setOntologyOpen} />
         </Suspense>
       )}
 

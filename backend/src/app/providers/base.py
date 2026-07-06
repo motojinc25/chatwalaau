@@ -96,9 +96,7 @@ class Provider(Protocol):
         """
         ...
 
-    def build_structured_output(
-        self, model: str, schema: dict[str, Any] | None, mode: str
-    ) -> dict[str, Any]:
+    def build_structured_output(self, model: str, schema: dict[str, Any] | None, mode: str) -> dict[str, Any]:
         """Per-request structured-output run-options fragment (CTR-0102 v5, UDR-0058 D2/D3).
 
         ``mode`` is ``"json_schema"`` (use the explicit ``schema`` verbatim) or

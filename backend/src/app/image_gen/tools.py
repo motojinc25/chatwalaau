@@ -256,7 +256,8 @@ def _edit_image_sync(
 async def generate_image(
     prompt: Annotated[str, Field(description="Detailed description of the image to generate")],
     size: Annotated[
-        str | None, Field(description="Image size: auto, 1024x1024, 1024x1536, or 1536x1024 (omit to use the user's default)")
+        str | None,
+        Field(description="Image size: auto, 1024x1024, 1024x1536, or 1536x1024 (omit to use the user's default)"),
     ] = None,
     quality: Annotated[
         str | None, Field(description="Image quality: auto, low, medium, or high (omit to use the user's default)")
@@ -307,7 +308,10 @@ async def edit_image(
         str, Field(description="Filename of the source image in the session (e.g., photo.jpg, generated_abc123.png)")
     ],
     size: Annotated[
-        str | None, Field(description="Output image size: auto, 1024x1024, 1024x1536, or 1536x1024 (omit to use the user's default)")
+        str | None,
+        Field(
+            description="Output image size: auto, 1024x1024, 1024x1536, or 1536x1024 (omit to use the user's default)"
+        ),
     ] = None,
     quality: Annotated[
         str | None, Field(description="Image quality: auto, low, medium, or high (omit to use the user's default)")

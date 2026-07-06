@@ -89,7 +89,9 @@ def _prune() -> None:
             break
 
 
-async def _drive_flow(flow: _Flow, *, device_code: str, interval: int, expires_in: int, meeting_id: str, join_web_url: str) -> None:
+async def _drive_flow(
+    flow: _Flow, *, device_code: str, interval: int, expires_in: int, meeting_id: str, join_web_url: str
+) -> None:
     """Background task: poll for the delegated token, then enqueue the meeting job."""
     from app.webhook.msgraph import graph_delegated_client, meeting_pipeline
 
@@ -128,7 +130,9 @@ async def dedicated_start(body: StartRequest) -> dict:
     meeting_id = body.meeting_id.strip()
     join_web_url = body.join_web_url.strip()
     if not (meeting_id or join_web_url):
-        raise HTTPException(status_code=400, detail={"error": "missing_meeting", "message": "Provide a meeting id or join URL."})
+        raise HTTPException(
+            status_code=400, detail={"error": "missing_meeting", "message": "Provide a meeting id or join URL."}
+        )
     if meeting_id and meeting_id.replace(" ", "").isdigit():
         raise HTTPException(
             status_code=400,

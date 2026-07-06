@@ -1133,7 +1133,11 @@ async def _stream_with_reasoning(
                         # every provider (incl. demo) so the SPA can label and
                         # persist the selections next to the model name. Anthropic
                         # advertises effort only, so no extra key appears there.
-                        usage_value["reasoning"] = resolved_reasoning
+                        # None = the model advertises no effort axis (e.g. a
+                        # non-OpenAI-family Foundry deployment, UDR-0085 A1);
+                        # omit the key rather than echo null.
+                        if resolved_reasoning is not None:
+                            usage_value["reasoning"] = resolved_reasoning
                         usage_value.update({k: v for k, v in resolved_options.items() if k != "effort"})
                         # Structured output status (PRP-0082, CTR-0009 v14, UDR-0058
                         # D4/D9). Soft, non-blocking: parse the accumulated answer and
@@ -1291,8 +1295,7 @@ async def _stream_with_reasoning(
                 )
             else:
                 error_message = (
-                    f"Tool approval loop exceeded {max_approval_iterations} "
-                    f"interactive rounds; aborting run."
+                    f"Tool approval loop exceeded {max_approval_iterations} interactive rounds; aborting run."
                 )
             logger.warning(
                 "approval loop exceeded for thread %s (interactive=%d/%d, total=%d/%d)",

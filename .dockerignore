@@ -71,6 +71,7 @@ backend/.agent/
 backend/.agents/
 backend/.webhooks/
 backend/.prompts/
+backend/.ontologies/
 backend/batch-server.log
 
 # ---- IDE / OS ----

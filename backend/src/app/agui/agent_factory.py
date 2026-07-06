@@ -306,6 +306,16 @@ def _build_tools_and_instructions(
         tools.append(manage_webhook)
         instructions += WEBHOOK_TOOL_INSTRUCTION
 
+    # Ontology query tool (PRP-0105, CTR-0172, UDR-0084 D9). Registered on the
+    # shared agent only when ONTOLOGY_ENABLED so the LLM can answer questions from
+    # the operator's RDF concept models (catalog + CONSTRUCT-only NL query answering
+    # fenced Turtle). Read-only by construction; NOT in the approval require-set.
+    if settings.ontology_enabled:
+        from app.ontology.tool import ONTOLOGY_TOOL_INSTRUCTION, query_ontology
+
+        tools.append(query_ontology)
+        instructions += ONTOLOGY_TOOL_INSTRUCTION
+
     # Tool approval gating (PRP-0067, CTR-0099, UDR-0043 D1).
     # The agent factory is the single chokepoint where bare Python
     # callables are turned into MAF tool surfaces; this is the right

@@ -45,10 +45,7 @@ _TIMEOUT = 30.0
 # Delegated scopes. Meeting resolution by JoinWebUrl needs OnlineMeetings.Read; transcript
 # content needs OnlineMeetingTranscript.Read.All. ``offline_access`` is deliberately
 # OMITTED so Entra returns NO refresh token (UDR-0077 D3).
-_SCOPES = (
-    "https://graph.microsoft.com/OnlineMeetings.Read "
-    "https://graph.microsoft.com/OnlineMeetingTranscript.Read.All"
-)
+_SCOPES = "https://graph.microsoft.com/OnlineMeetings.Read https://graph.microsoft.com/OnlineMeetingTranscript.Read.All"
 
 _DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
@@ -64,10 +61,7 @@ def is_configured() -> bool:
 
 def _require_configured() -> None:
     if not is_configured():
-        msg = (
-            "Microsoft Graph delegated credentials are not configured "
-            "(GRAPH_TENANT_ID / GRAPH_CLIENT_ID)."
-        )
+        msg = "Microsoft Graph delegated credentials are not configured (GRAPH_TENANT_ID / GRAPH_CLIENT_ID)."
         raise GraphConfigError(msg)
 
 
@@ -128,7 +122,9 @@ async def poll_for_token(device_code: str, *, interval: int, expires_in: int) ->
             resp = await client.post(_authority("token"), data=data)
         if resp.status_code == 200:
             payload = resp.json()
-            logger.info("Acquired Microsoft Graph user-delegated token (device-code, expires in %ss)", payload.get("expires_in"))
+            logger.info(
+                "Acquired Microsoft Graph user-delegated token (device-code, expires in %ss)", payload.get("expires_in")
+            )
             return payload["access_token"]
         body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         err = str(body.get("error", ""))

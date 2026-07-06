@@ -66,9 +66,7 @@ def _structured_run_options(request: ResponsesRequest, agent_registry: AgentRegi
             # tolerate the nested {json_schema: {schema: ...}} variant
             nested = fmt.get("json_schema")
             schema = nested.get("schema") if isinstance(nested, dict) else None
-        return providers.build_structured_output(
-            model, schema if isinstance(schema, dict) else None, "json_schema"
-        )
+        return providers.build_structured_output(model, schema if isinstance(schema, dict) else None, "json_schema")
     if ftype == "json_object":
         return providers.build_structured_output(model, None, "json_object")
     return {}
