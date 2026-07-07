@@ -20,13 +20,26 @@ Script execution (v0.75.x defect fix):
     - Execution is gated by ``CODING_ENABLED`` (the operator's existing opt-in for
       running local code, CTR-0031). When off, the runner declines with a clear,
       non-retryable message instead of raising, so the agent stops flailing.
-    - Each run is approval-gated through the existing Tool Approval flow
-      (FEAT-0028) by setting ``require_script_approval`` unless
-      ``TOOL_APPROVAL_MODE=skip`` -- the SPA shows the same approval card as
-      bash_execute.
     - The subprocess reuses CODING_BASH_TIMEOUT and CODING_MAX_OUTPUT_CHARS for the
       timeout and output cap, runs in the skill's own directory, and decodes output
       as UTF-8 (errors replaced) so non-ASCII script output is Windows-safe.
+
+Approval model (PRP-0108, UDR-0086 D2 -- MAF 1.10):
+  MAF 1.10 registers all three skill tools (``load_skill``, ``read_skill_resource``,
+  ``run_skill_script``) with ``approval_mode="always_require"`` unconditionally; the
+  former ``require_script_approval`` constructor parameter no longer exists. The
+  EXISTING ``TOOL_APPROVAL_MODE`` semantics are preserved by attaching a
+  ``ToolApprovalMiddleware`` (built by ``create_skills_approval_middleware()``) at
+  the agent factory chokepoint: read-only tools are auto-approved before they ever
+  surface, while ``run_skill_script`` keeps flowing through the existing Tool
+  Approval flow (FEAT-0028) unless ``TOOL_APPROVAL_MODE=skip`` auto-approves it too.
+
+Discovery (PRP-0108, UDR-0086 D3 -- MAF 1.10):
+  ``FileSkillsSource`` no longer whitelists ``references/`` / ``assets/`` /
+  ``scripts/`` directories; it depth-scans (default depth 2) with extension
+  filters. The default script filter is ``.py`` ONLY, so we pass an explicit
+  ``script_extensions`` covering every interpreter ``_command_for`` dispatches --
+  otherwise a shipped ``.sh`` / ``.js`` skill script would silently vanish.
 """
 
 import asyncio
@@ -42,6 +55,7 @@ from agent_framework import (
     FileSkillsSource,
     FilteringSkillsSource,
     SkillsProvider,
+    ToolApprovalMiddleware,
 )
 
 from app.core.config import settings
@@ -51,8 +65,13 @@ from app.skills.overrides import get_skills_override_store
 logger = logging.getLogger(__name__)
 
 _SKILL_FILE_NAME = "SKILL.md"
-# Mirror MAF's FileSkillsSource discovery depth (agent_framework MAX_SEARCH_DEPTH).
+# Mirror MAF's FileSkillsSource discovery depth (agent_framework default search_depth).
 _MAX_SEARCH_DEPTH = 2
+
+# Script extensions handed to FileSkillsSource (UDR-0086 D3). MAF 1.10's default
+# is (".py",) only; this list MUST cover every interpreter _command_for()
+# dispatches so a shipped .sh / .js skill script keeps being discovered.
+_SCRIPT_EXTENSIONS = (".py", ".sh", ".bash", ".js", ".mjs", ".cjs")
 
 _DISABLED_MESSAGE = (
     "Skill script execution is disabled in this deployment (CODING_ENABLED is off). "
@@ -172,7 +191,13 @@ def build_skill_source() -> DeduplicatingSkillsSource:
     gates against (PRP-0087, UDR-0065 D2/D3).
     """
     skills_path = Path(settings.skills_dir)
-    return DeduplicatingSkillsSource(FileSkillsSource(skills_path, script_runner=_skill_script_runner))
+    return DeduplicatingSkillsSource(
+        FileSkillsSource(
+            skills_path,
+            script_runner=_skill_script_runner,
+            script_extensions=_SCRIPT_EXTENSIONS,
+        )
+    )
 
 
 def create_skills_provider() -> SkillsProvider | None:
@@ -209,15 +234,17 @@ def create_skills_provider() -> SkillsProvider | None:
     # so the override filter can be injected over the same deduplicated file
     # source. A script runner is supplied so skills that ship scripts (e.g. pptx)
     # actually run instead of raising "requires a runner".
+    #
+    # PRP-0108 / UDR-0086 D2: MAF 1.10 removed ``require_script_approval`` -- the
+    # three skill tools are approval-required unconditionally. The TOOL_APPROVAL_MODE
+    # mapping now lives in the ToolApprovalMiddleware attached by the agent factory
+    # (create_skills_approval_middleware below), not in this constructor.
     disabled = frozenset(get_skills_override_store().disabled_names())
     source = build_skill_source()
     if disabled:
         source = FilteringSkillsSource(source, predicate=lambda s: s.frontmatter.name not in disabled)
 
-    provider = SkillsProvider(
-        source,
-        require_script_approval=settings.tool_approval_mode != "skip",
-    )
+    provider = SkillsProvider(source)
     logger.info(
         "SkillsProvider created (skills_dir=%s, disabled_skills=%d [%s], script_execution=%s, script_approval=%s)",
         skills_path,
@@ -227,3 +254,105 @@ def create_skills_provider() -> SkillsProvider | None:
         settings.tool_approval_mode != "skip",
     )
     return provider
+
+
+class SessionTolerantToolApprovalMiddleware(ToolApprovalMiddleware):
+    """ToolApprovalMiddleware constrained to AUTO-APPROVAL only (UDR-0086 D2).
+
+    Three deviations from the MAF base class, each protecting an existing
+    ChatWalaʻau approval behavior:
+
+    1. Session-tolerant: the base raises ``RuntimeError`` on a session-less run,
+       and DevUI can run its entities session-less (a raw API call without a
+       conversation id). Such runs pass through untouched -- the approval
+       request surfaces to the consumer instead of crashing, the same fail-open
+       shape as an unmatched rule.
+    2. Inbound passthrough: the base EXTRACTS ``function_approval_response``
+       contents from inbound messages and re-injects them PREPENDED before the
+       message list. That inverts ChatWalaʻau's approval-resume replay
+       (``[assistant(function_call), user(approval_response)]`` becomes
+       ``[function_result, assistant(function_call)]`` after function
+       execution), and the OpenAI Responses API rejects a function_call whose
+       output precedes it: ``400 No tool output found for function call ...``
+       (v0.102.0 field defect, first coding-tool approval after the upgrade).
+       Inbound messages are therefore passed through untouched -- the
+       FEAT-0028 replay owns approval responses, not this middleware.
+    3. All-or-nothing, no queueing: the base auto-approves the matching subset
+       of a round and hides all but the first unresolved request in SESSION
+       state. ChatWalaʻau renders PARALLEL approval cards (ToolApprovalList)
+       and builds a fresh ``AgentSession`` per HTTP request, so a queued
+       request would be lost forever -- and hiding an auto-approved request
+       whose function_call already streamed desynchronizes the FEAT-0028
+       accumulator. A round is auto-approved only when EVERY pending request
+       matches a rule; otherwise the round is left completely untouched.
+
+    What remains of the base behavior is exactly the intended scope: matching
+    ``function_approval_request`` contents are auto-approved in-stream (the
+    collected responses re-enter via the base loop) and everything else flows
+    to the existing FEAT-0028 surfaces unchanged.
+    """
+
+    async def process(self, context: Any, call_next: Any) -> None:
+        if getattr(context, "session", None) is None:
+            await call_next()
+            return
+        await super().process(context, call_next)
+
+    def _prepare_inbound_messages(self, messages: Any, state: Any) -> list[Any]:
+        # Deviation 2: never hijack inbound approval responses (see class doc).
+        return list(messages)
+
+    async def _process_outbound_messages(self, messages: Any, state: Any) -> bool:
+        # Deviation 3: ALL-OR-NOTHING auto-approval, and NEVER queue (see class
+        # doc). The round is auto-approved only when EVERY pending request
+        # matches a rule; a MIXED round (e.g. load_skill + file_write in one
+        # model turn) is left completely untouched so every request surfaces to
+        # the operator. Auto-approving just the matching subset would hide a
+        # request whose function_call content ALREADY streamed to the consumer:
+        # the FEAT-0028 accumulator would then replay a bare function_call
+        # while this middleware holds the response in session state -- either a
+        # Responses API 400 (unpaired call) or a double execution on resume.
+        # Standing session rules (``state.rules``) cannot accumulate in
+        # per-request sessions, so only the constructor rules are consulted.
+        approval_requests = [
+            content
+            for message in messages
+            for content in message.contents
+            if content.type == "function_approval_request"
+        ]
+        if not approval_requests:
+            return False
+
+        for request in approval_requests:
+            if not await self._matches_auto_rule(request):
+                return False  # mixed or fully-human round: touch nothing
+
+        for request in approval_requests:
+            state.collected_approval_responses.append(request.to_function_approval_response(approved=True))
+        self._remove_approval_requests(messages, {id(r) for r in approval_requests})
+        return True
+
+
+def create_skills_approval_middleware(*, auto_approve_all: bool) -> ToolApprovalMiddleware:
+    """Build the skills auto-approval middleware (PRP-0108, UDR-0086 D2).
+
+    Maps the EXISTING ``TOOL_APPROVAL_MODE`` semantics onto MAF 1.10's
+    approval-by-default skill tools, preserving v0.101.0 operator-visible
+    behavior byte-for-byte:
+
+    - ``auto_approve_all=False`` (TOOL_APPROVAL_MODE != "skip"): auto-approve
+      only the read-only tools (``load_skill`` / ``read_skill_resource``);
+      ``run_skill_script`` keeps raising the FEAT-0028 approval card.
+    - ``auto_approve_all=True`` (skip mode, or the DevUI agent whose loop has
+      no human-in-the-loop UI per UDR-0043 D5): auto-approve every skill tool.
+
+    The rules are the SkillsProvider-shipped static callbacks, so they stay
+    scoped to this provider's local tools (hosted ``server_label`` calls are
+    never auto-approved) and track upstream tool renames automatically.
+    """
+    rule = (
+        SkillsProvider.all_tools_auto_approval_rule
+        if auto_approve_all
+        else SkillsProvider.read_only_tools_auto_approval_rule
+    )
+    return SessionTolerantToolApprovalMiddleware(auto_approval_rules=[rule])

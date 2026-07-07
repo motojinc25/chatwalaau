@@ -78,8 +78,14 @@ class AgentRegistry:
         context_providers: list[Any],
         instructions: str,
         compaction_strategy: Any | None = None,
+        middleware: list[Any] | None = None,
     ) -> None:
         self._compaction_strategy = compaction_strategy
+        # Agent-level middleware shared by every per-model Agent (PRP-0108,
+        # UDR-0086 D2): currently the skills auto-approval ToolApprovalMiddleware.
+        # Stateless per run (rules are static callbacks), so sharing one list
+        # across models is safe, matching the compaction strategy pattern.
+        self._middleware = list(middleware or [])
         # Serialises runtime rebuilds (PRP-0086, UDR-0064 D5). asyncio.Lock can be
         # constructed without a running event loop on Python 3.12 (it binds lazily),
         # which matters because the registry is created at import time.
@@ -135,15 +141,19 @@ class AgentRegistry:
         tools: list[Any],
         context_providers: list[Any],
         instructions: str,
+        middleware: list[Any] | None = None,
     ) -> None:
         """Rebuild all per-model agents with a new tool set and swap atomically.
 
         PRP-0086 / UDR-0064 D2/D5: builds a brand-new per-model map off to the
         side, then installs it under a single lock. ``get()`` always returns a
         fully-built agent; if the build raises, the prior agents stay installed (no
-        partial swap). The compaction strategy is reused from construction.
+        partial swap). The compaction strategy is reused from construction; the
+        middleware list is refreshed (PRP-0108 -- skills can appear/disappear on
+        a Skills Reload, and the auto-approval middleware must track that).
         """
         async with self._rebuild_lock:
+            self._middleware = list(middleware or [])
             built = self._build(tools, context_providers, instructions)
             self._install(built)
             logger.info(
@@ -191,6 +201,7 @@ class AgentRegistry:
                 context_providers=context_providers,
                 default_options=None,
                 compaction_strategy=self._compaction_strategy,
+                middleware=self._middleware or None,
             )
             agents[model] = agent
             logger.info("Agent created for model: %s (demo=True)", model)
@@ -251,6 +262,7 @@ class AgentRegistry:
                 context_providers=context_providers,
                 default_options=model_options or None,
                 compaction_strategy=self._compaction_strategy,
+                middleware=self._middleware or None,
             )
             agents[model] = agent
             logger.info("Agent created for model: %s (provider=%s)", model, provider_name)

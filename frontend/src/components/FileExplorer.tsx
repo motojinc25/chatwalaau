@@ -428,10 +428,13 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
     wasOpenRef.current = open
   }, [open, newId])
 
-  // Keep activeGroupId pointing at a live group.
+  // Keep activeGroupId pointing at a live group. Only ids that actually exist
+  // in `groups` qualify -- a stale layout leaf must not be re-adopted (defect
+  // fix, v0.102.0: re-pointing at a dead leaf id made the explorer ignore
+  // every subsequent file open until a page reload).
   useEffect(() => {
     if (activeGroupId && !groups[activeGroupId]) {
-      setActiveGroupId(leafGroupIds(layout)[0] ?? null)
+      setActiveGroupId(leafGroupIds(layout).find((id) => !!groups[id]) ?? null)
     }
   }, [groups, layout, activeGroupId])
 
@@ -617,7 +620,13 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
       }
       return next
     })
-    if (emptied) setLayout((prev) => (prev ? (removeLeaf(prev, groupId) ?? prev) : prev))
+    // NOTE: removeLeaf returns null when the LAST leaf is removed -- the layout
+    // must become null (empty state) in that case. Coalescing null back to
+    // `prev` kept a leaf pointing at the deleted group, and openFile's
+    // `setLayout(prev => prev ?? ...)` then never re-attached a new group:
+    // double-clicking tree files silently did nothing until a reload (defect
+    // fix, v0.102.0).
+    if (emptied) setLayout((prev) => (prev ? removeLeaf(prev, groupId) : prev))
   }, [])
 
   const requestCloseTab = useCallback(
@@ -662,7 +671,8 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
       next[toId] = { ...to, tabs: to.tabs.some((t) => t.path === path) ? to.tabs : [...to.tabs, tab], activePath: path }
       return next
     })
-    if (emptied) setLayout((prev) => (prev ? (removeLeaf(prev, fromId) ?? prev) : prev))
+    // Same null-means-empty contract as removeTabsFrom (defect fix, v0.102.0).
+    if (emptied) setLayout((prev) => (prev ? removeLeaf(prev, fromId) : prev))
     setActiveGroupId(toId)
   }, [])
 

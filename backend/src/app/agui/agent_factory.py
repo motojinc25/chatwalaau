@@ -32,7 +32,7 @@ from app.demo import is_demo_mode, resolve_demo_models
 from app.mcp.lifecycle import get_mcp_tools, get_server_tool_names
 from app.mcp.overrides import get_override_store
 from app.session.provider import FileHistoryProvider
-from app.skills.provider import create_skills_provider
+from app.skills.provider import create_skills_approval_middleware, create_skills_provider
 from app.weather.tools import get_coords_by_city, get_current_weather_by_coords, get_weather_next_week
 
 logger = logging.getLogger(__name__)
@@ -96,8 +96,8 @@ def _build_tools_and_instructions(
     include_mcp: bool,
     include_rag: bool,
     apply_approval: bool = True,
-) -> tuple[list[Any], list[Any], str]:
-    """Assemble (tools, context_providers, instructions) from current settings.
+) -> tuple[list[Any], list[Any], str, list[Any]]:
+    """Assemble (tools, context_providers, instructions, middleware) from current settings.
 
     PRP-0046 introduces the ``include_mcp`` / ``include_rag`` flags so
     DevUI can build an agent without the loop-bound MCP tools and
@@ -110,6 +110,12 @@ def _build_tools_and_instructions(
     is wrapped -- used by ``build_devui_agent()`` so the DevUI loop
     (which has no human-in-the-loop UI) keeps the pre-PRP-0067
     behaviour (UDR-0043 D5 DevUI clause).
+
+    PRP-0108 / UDR-0086 D2 adds the fourth return element ``middleware``:
+    when a SkillsProvider is present it carries the skills auto-approval
+    ToolApprovalMiddleware that maps MAF 1.10's approval-by-default skill
+    tools back onto the TOOL_APPROVAL_MODE semantics (read-only tools
+    silent; ``run_skill_script`` gated unless skip / DevUI).
     """
     history_provider = FileHistoryProvider(
         sessions_dir=Path(settings.sessions_dir),
@@ -328,9 +334,21 @@ def _build_tools_and_instructions(
 
     # Context providers (CTR-0043, PRP-0024)
     context_providers: list[Any] = [history_provider]
+    middleware: list[Any] = []
     skills_provider = create_skills_provider()
     if skills_provider:
         context_providers.append(skills_provider)
+        # PRP-0108 / UDR-0086 D2: MAF 1.10 skill tools are approval-required
+        # unconditionally; this middleware restores the TOOL_APPROVAL_MODE
+        # mapping. DevUI (apply_approval=False, no human-in-the-loop UI) and
+        # skip mode auto-approve everything; the default lane auto-approves
+        # only the read-only tools so run_skill_script keeps raising the
+        # FEAT-0028 approval card.
+        middleware.append(
+            create_skills_approval_middleware(
+                auto_approve_all=(not apply_approval) or settings.tool_approval_mode == "skip",
+            )
+        )
 
     # Return the RAW capability instructions (slot #3..). The Identity (slot #1)
     # and -- when enabled -- the per-session Memory Block (slot #2) are assembled
@@ -338,12 +356,12 @@ def _build_tools_and_instructions(
     # capability/memory remainder per run when USER_PROFILE_ENABLED, otherwise it
     # bakes the full Identity+capability prompt (CTR-0104 v2, CTR-0105, UDR-0051
     # D4). build_devui_agent assembles the full prompt directly.
-    return tools, context_providers, instructions
+    return tools, context_providers, instructions, middleware
 
 
 def create_agent_registry() -> AgentRegistry:
     """Create the AgentRegistry with one Agent per configured model (CTR-0070)."""
-    tools, context_providers, instructions = _build_tools_and_instructions(
+    tools, context_providers, instructions, middleware = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
         apply_approval=True,
@@ -354,6 +372,7 @@ def create_agent_registry() -> AgentRegistry:
         context_providers=context_providers,
         instructions=instructions,
         compaction_strategy=compaction_strategy,
+        middleware=middleware,
     )
 
 
@@ -367,7 +386,7 @@ async def rebuild_agent_registry(registry: AgentRegistry) -> None:
     to call repeatedly -- ``_build_tools_and_instructions`` re-initialises only
     cheap, idempotent pieces (RAG init is guarded, CTR-0077).
     """
-    tools, context_providers, instructions = _build_tools_and_instructions(
+    tools, context_providers, instructions, middleware = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
         apply_approval=True,
@@ -376,6 +395,7 @@ async def rebuild_agent_registry(registry: AgentRegistry) -> None:
         tools=tools,
         context_providers=context_providers,
         instructions=instructions,
+        middleware=middleware,
     )
 
 
@@ -411,7 +431,10 @@ def build_devui_agent() -> Agent | None:
     # human-in-the-loop approval UI, so we register the unwrapped tools
     # regardless of TOOL_APPROVAL_MODE. The factory still applies
     # compaction (UDR-0042 D1) -- compaction has no UI dependency.
-    tools, context_providers, instructions = _build_tools_and_instructions(
+    # PRP-0108: apply_approval=False also selects the all-tools skills
+    # auto-approval rule, and the middleware is session-tolerant because
+    # DevUI can run entities without an AgentSession.
+    tools, context_providers, instructions, middleware = _build_tools_and_instructions(
         include_mcp=include_mcp,
         include_rag=include_rag,
         apply_approval=False,
@@ -445,6 +468,7 @@ def build_devui_agent() -> Agent | None:
         context_providers=context_providers,
         default_options=model_options or None,
         compaction_strategy=resolve_compaction_strategy(),
+        middleware=middleware or None,
     )
     logger.info(
         "DevUI agent built (model=%s, include_mcp=%s, include_rag=%s, demo=%s)",

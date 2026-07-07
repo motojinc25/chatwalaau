@@ -27,28 +27,28 @@ Configure **at least one model provider** in `.env`:
 
 ```ini
 AZURE_OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com/
-AZURE_OPENAI_MODELS=gpt-4o            # comma-separated; the first entry is the default
+AZURE_OPENAI_MODELS=gpt-5.5          # comma-separated; the first entry is the default
 AZURE_OPENAI_API_KEY=<your-key>      # or authenticate with Entra ID instead (see below)
 ```
 
 **Anthropic (Claude)** -- standalone or alongside Azure OpenAI
 
 ```ini
-ANTHROPIC_MODELS=claude-sonnet-4-5-20250929
+ANTHROPIC_MODELS=claude-fable-5
 ANTHROPIC_API_KEY=sk-ant-...         # "direct" hosting; Microsoft Foundry hosting is also supported
 ```
 
 **OpenAI** (direct) -- standalone or alongside the others
 
 ```ini
-OPENAI_MODELS=gpt-5.1                 # reasoning models (gpt-5.x / o-series)
-OPENAI_API_KEY=sk-...                 # OPENAI_BASE_URL optional (OpenAI-compatible gateways)
+OPENAI_MODELS=gpt-5.5                # reasoning models (gpt-5.x)
+OPENAI_API_KEY=sk-...                # OPENAI_BASE_URL optional (OpenAI-compatible gateways)
 ```
 
 **Microsoft Foundry** -- models from a Foundry project (gpt-5.x, DeepSeek, ...), Entra ID sign-in
 
 ```ini
-FOUNDRY_MODELS=gpt-5.1,deepseek-v4-pro # model deployments in the project
+FOUNDRY_MODELS=gpt-5.5,deepseek-v4-pro  # model deployments in the project
 FOUNDRY_PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
 ```
 

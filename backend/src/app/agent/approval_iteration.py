@@ -36,6 +36,15 @@ called the gated tool" and starts over (re-globbing, re-reading, re-writing),
 which compounds across iterations and quickly trips Anthropic's per-minute
 rate limit (429 Too Many Requests).
 
+MAF 1.10 deferral (PRP-0108): since agent-framework 1.10, a round that
+contains an approval-gated call DEFERS every other tool call of that round --
+non-gated tools no longer execute inline, their ``function_call`` streams
+bare (no ``function_result``, no approval request), and on resume MAF
+executes only calls carrying an approval response. ``build_iteration_messages``
+therefore synthesizes an APPROVED ``function_approval_response`` for each
+deferred call so it executes exactly once on resume (verified against the
+installed 1.10.0 FunctionInvocationLayer with a recording fake client).
+
 The synthetic assistant preserves Anthropic's ``thinking`` block signature
 (stored on ``TextReasoningContent.protected_data``, round-tripped by the MAF
 connector at serialization time).
@@ -285,20 +294,37 @@ class IterationContentAccumulator:
                 user_contents.append(result)
         user_contents.extend(approval_response_contents)
 
-        # Defensive log: if there is at least one tool_use without a matching
-        # result AND no approval response to substitute for it, the next
-        # Anthropic request would be malformed. This should not happen in
-        # practice (gated tools always produce an approval response, non-gated
-        # ones always produce a function_result) but the log catches drift.
+        # MAF 1.10 deferral handling (PRP-0108 defect fix #3): since 1.10 the
+        # FunctionInvocationLayer DEFERS every other tool call of a round that
+        # contains an approval-gated call -- a non-gated tool no longer executes
+        # inline, its function_call streams bare (no function_result, no
+        # approval request). On resume, MAF executes only the calls that carry
+        # an approval response, so a bare replayed function_call reaches the
+        # provider unpaired and the OpenAI Responses API rejects the request
+        # with "400 No tool output found for function call ...". Synthesize an
+        # APPROVED function_approval_response for each such deferred call: the
+        # tool is non-gated (it never asked for approval), so approving its
+        # deferred execution restores the pre-1.10 semantics -- the tool runs
+        # exactly once, on resume, and MAF emits the paired function_result.
         if assistant_contents and self._function_call_order:
-            pending_call_ids = {
+            pending_call_ids = [
                 call_id
                 for call_id in self._function_call_order
                 if call_id not in self._function_results and call_id not in self._function_call_from_approval
-            }
+            ]
+            for call_id in pending_call_ids:
+                deferred_call = self._resolved_function_call(call_id, strip_server_item_ids=strip_function_call_ids)
+                user_contents.append(
+                    Content.from_function_approval_response(
+                        approved=True,
+                        function_call=deferred_call,
+                        id=call_id,
+                    )
+                )
             if pending_call_ids:
-                logger.warning(
-                    "Outer-loop iteration produced function_call(s) without a function_result or approval response: %s",
+                logger.info(
+                    "Outer-loop iteration deferred non-gated function_call(s) (MAF 1.10 behavior); "
+                    "synthesized approved responses so they execute on resume: %s",
                     sorted(pending_call_ids),
                 )
 

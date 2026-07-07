@@ -52,6 +52,7 @@ Verification status (UDR-0085 D6/D8, PRP-0106 completion notes):
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import re
 from typing import Any
 
@@ -155,6 +156,27 @@ class FoundryProvider(AzureOpenAIProvider):
         # non-OpenAI family), so the provider supplies the same country-scoped
         # shape as azure-openai. The PRP-0082 mixin still strips it whenever a
         # JSON text.format is set.
-        return FoundryChatClient.get_web_search_tool(
-            user_location={"type": "approximate", "country": settings.web_search_country},
+        #
+        # v0.102.0 defect fix (PRP-0108 completion note): the connector factory
+        # returns an azure.ai.projects WebSearchTool whose user_location is a
+        # WebSearchApproximateLocation MODEL OBJECT. MAF 1.10 (#6556) serializes
+        # every tool definition to JSON for the OTel invocation span, and
+        # json.dumps raises "Object of type WebSearchApproximateLocation is not
+        # JSON serializable" -- killing the FIRST turn of every Foundry model.
+        # Deep-convert to plain JSON values: the wire shape is identical (the
+        # azure-openai lane ships the same shape as a plain dict), and
+        # is_web_search_tool() keeps matching via its dict branch.
+        return _to_plain_json(
+            FoundryChatClient.get_web_search_tool(
+                user_location={"type": "approximate", "country": settings.web_search_country},
+            )
         )
+
+
+def _to_plain_json(value: Any) -> Any:
+    """Recursively convert Mapping / sequence SDK models to plain JSON values."""
+    if isinstance(value, Mapping):
+        return {key: _to_plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_plain_json(item) for item in value]
+    return value

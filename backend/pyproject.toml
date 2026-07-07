@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.101.0"
+version = "0.102.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -19,25 +19,28 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "pydantic-settings>=2.9.0",
     "python-dotenv>=1.1.0",
-    "agent-framework>=1.6.0,<2",
-    "agent-framework-ag-ui>=1.0.0b260402",
-    "agent-framework-devui>=1.0.0b260402",
-    # Anthropic (Claude) base-model provider, Direct + Foundry hostings.
-    # Floor pinned to the build that ships AnthropicFoundryClient + base_url
-    # support (PRP-0069, UDR-0045 D8). Already resolved transitively via
+    # Microsoft Agent Framework family: EXACT pins (PRP-0108, UDR-0086 D1).
+    # MAF ships breaking changes inside minor releases (1.8.0 async Skill lookup,
+    # 1.9.0 MCP sampling guardrails, 1.10.0 SkillsProvider approval-by-default);
+    # a version bump is a deliberate, PRP-reviewed act, never a routine refresh.
+    "agent-framework==1.10.0",
+    "agent-framework-ag-ui==1.0.0rc7",
+    "agent-framework-devui==1.0.0b260630",
+    # Anthropic (Claude) base-model provider, Direct + Foundry hostings
+    # (PRP-0069, UDR-0045 D8). Already resolved transitively via
     # agent-framework-core[all]; declared explicitly to guarantee the capability.
-    "agent-framework-anthropic>=1.0.0b260521",
+    "agent-framework-anthropic==1.0.0b260630",
     # Microsoft Foundry base-model provider (PRP-0106, UDR-0085 D1): the stable
     # FoundryChatClient connector (OpenAI Responses API via a Foundry project
     # endpoint, Entra ID credential only). Already resolved transitively via the
     # agent-framework meta package; declared explicitly to guarantee the capability.
-    "agent-framework-foundry>=1.0.0",
+    "agent-framework-foundry==1.10.0",
     # Declarative agents (PRP-0094, FEAT-0051, UDR-0072): the MAF AgentFactory front
     # end (create_agent_from_yaml / create_agent_from_yaml_path) used to PARSE and
     # VALIDATE declarative agent YAML. The runtime agent is built by ChatWalaʻau
     # (UDR-0072 D2), so the package is used for schema validation only; the loader
     # degrades gracefully to its own structural checks if it is unavailable.
-    "agent-framework-declarative>=1.0.0b260402",
+    "agent-framework-declarative==1.0.0rc2",
     "azure-identity>=1.23.0",
     "httpx>=0.28.0",
     "elevenlabs>=2.39.0",
