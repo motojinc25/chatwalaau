@@ -9,10 +9,12 @@ manage sources, receipts, and (for Microsoft Graph) subscriptions:
     GET    /api/webhooks/sources/{source}/receipts        receipt records (newest first)
     GET    /api/webhooks/sources/{source}/receipts/{id}   one receipt (raw + outcome)
     GET    /api/webhooks/msgraph/subscriptions            list subscriptions
-    POST   /api/webhooks/msgraph/subscriptions            subscribe
+    POST   /api/webhooks/msgraph/subscriptions            subscribe (replace? -> 409 on limit)
     POST   /api/webhooks/msgraph/subscriptions/{id}/renew renew
     DELETE /api/webhooks/msgraph/subscriptions/{id}       delete
     POST   /api/webhooks/msgraph/subscriptions/maintain   renew all due
+    GET    /api/webhooks/msgraph/subscriptions/maintenance-schedule       managed job state
+    POST   /api/webhooks/msgraph/subscriptions/maintenance-schedule/sync  re-sync managed job
     GET    /api/webhooks/msgraph/token-health             app-only creds probe
     POST   /api/webhooks/msgraph/validate                 validation-handshake self-test
     POST   /api/webhooks/msgraph/fetch                    manual meeting-pipeline trigger
@@ -59,6 +61,11 @@ class SourceToggle(BaseModel):
 class SubscribeRequest(BaseModel):
     resource: str = Field(default="", description="Graph resource; empty = MSGRAPH_WEBHOOK_RESOURCE.")
     notification_url: str = Field(default="", description="Public URL; empty = MSGRAPH_WEBHOOK_NOTIFICATION_URL.")
+    replace: bool = Field(
+        default=False,
+        description="Delete any existing subscription for this resource first, then create "
+        "(recover from the Graph per-app subscription limit; PRP-0107).",
+    )
 
 
 class FetchRequest(BaseModel):
@@ -148,12 +155,30 @@ async def msgraph_list_subscriptions() -> dict:
 
 @router.post("/msgraph/subscriptions", dependencies=[Depends(verify_api_key)])
 async def msgraph_subscribe(body: SubscribeRequest) -> dict:
-    """Create a Graph subscription."""
+    """Create a Graph subscription (optionally replacing an existing one, PRP-0107).
+
+    When the resource is already at its Graph per-app subscription limit and ``replace`` is
+    false, returns 409 ``{code: "subscription_limit", resource, existing}`` (the live
+    subscription(s) blocking creation) so the portal can offer a delete-and-resubscribe
+    flow (UDR-0075 D14). With ``replace`` true, the matching subscription is deleted first.
+    """
     _require_enabled()
     from app.webhook.msgraph import subscriptions
 
     try:
-        return await subscriptions.subscribe(resource=body.resource, notification_url=body.notification_url)
+        return await subscriptions.subscribe(
+            resource=body.resource, notification_url=body.notification_url, replace=body.replace
+        )
+    except subscriptions.SubscriptionLimitError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": str(exc),
+                "code": "subscription_limit",
+                "resource": exc.resource,
+                "existing": exc.existing,
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
     except Exception as exc:
@@ -167,6 +192,24 @@ async def msgraph_maintain() -> dict:
     from app.webhook.msgraph import subscriptions
 
     return await subscriptions.maintain()
+
+
+@router.get("/msgraph/subscriptions/maintenance-schedule", dependencies=[Depends(verify_api_key)])
+async def msgraph_maintenance_schedule() -> dict:
+    """Report the managed auto-renewal Cron job state (PRP-0107, UDR-0075 D15)."""
+    _require_enabled()
+    from app.webhook.msgraph import subscriptions
+
+    return subscriptions.maintenance_schedule()
+
+
+@router.post("/msgraph/subscriptions/maintenance-schedule/sync", dependencies=[Depends(verify_api_key)])
+async def msgraph_maintenance_schedule_sync() -> dict:
+    """Remove then recreate the managed auto-renewal Cron job (idempotent, PRP-0107)."""
+    _require_enabled()
+    from app.webhook.msgraph import subscriptions
+
+    return subscriptions.resync_maintenance_job()
 
 
 @router.post("/msgraph/subscriptions/{sub_id}/renew", dependencies=[Depends(verify_api_key)])

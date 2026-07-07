@@ -42,6 +42,25 @@ interface Subscription {
   notification_url?: string
 }
 
+interface MaintenanceSchedule {
+  job_id: string
+  exists: boolean
+  cron_enabled: boolean
+  enabled: boolean
+  interval_hours: number | null
+  next_run_at?: string | null
+  last_run_at?: string | null
+  last_status?: string | null
+  subscription_count: number
+}
+
+// The 409 payload returned when a create hits the Graph per-app subscription limit
+// (PRP-0107, UDR-0075 D14). `existing` are the live subscriptions blocking creation.
+interface SubscriptionLimitConflict {
+  resource: string
+  existing: Subscription[]
+}
+
 interface WebhookManagerProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -71,6 +90,13 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
   const [selectedName, setSelectedName] = useState<string | null>(null)
   const [receipts, setReceipts] = useState<Receipt[]>([])
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([])
+  // Live Graph-side subscriptions (may include ones missing from the persisted store,
+  // e.g. after a redeploy or a changed notification URL). Rendered so "No subscriptions"
+  // never hides a subscription that is actually blocking a new subscribe (PRP-0107 D14).
+  const [liveSubs, setLiveSubs] = useState<Subscription[]>([])
+  const [schedule, setSchedule] = useState<MaintenanceSchedule | null>(null)
+  // Set when a subscribe hits the per-app limit (409) and awaits a replace confirmation.
+  const [limitConflict, setLimitConflict] = useState<SubscriptionLimitConflict | null>(null)
   const [health, setHealth] = useState<Record<string, unknown> | null>(null)
   const [fetchOrganizer, setFetchOrganizer] = useState('')
   const [fetchMeeting, setFetchMeeting] = useState('')
@@ -94,6 +120,15 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
 
   const selected = sources.find((s) => s.name === selectedName) ?? null
   const isMsGraph = selected?.name === 'msgraph'
+
+  // Merge persisted + live Graph subscriptions by id. A live subscription absent from the
+  // persisted store is flagged `graphOnly` (e.g. orphaned after a redeploy / URL change);
+  // showing it makes a blocking-but-invisible subscription visible (PRP-0107, UDR-0075 D14).
+  const persistedIds = new Set(subscriptions.map((s) => s.id))
+  const mergedSubs: Array<Subscription & { graphOnly: boolean }> = [
+    ...subscriptions.map((s) => ({ ...s, graphOnly: false })),
+    ...liveSubs.filter((s) => !persistedIds.has(s.id)).map((s) => ({ ...s, graphOnly: true })),
+  ]
 
   const fetchSources = useCallback(async () => {
     setLoading(true)
@@ -126,6 +161,7 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
   const fetchSubscriptions = useCallback(async (name: string) => {
     if (name !== 'msgraph') {
       setSubscriptions([])
+      setLiveSubs([])
       return
     }
     try {
@@ -133,8 +169,24 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
       if (!res.ok) return
       const data = await res.json()
       setSubscriptions((data.subscriptions ?? []) as Subscription[])
+      setLiveSubs((data.live ?? []) as Subscription[])
     } catch {
       setSubscriptions([])
+      setLiveSubs([])
+    }
+  }, [])
+
+  const fetchSchedule = useCallback(async (name: string) => {
+    if (name !== 'msgraph') {
+      setSchedule(null)
+      return
+    }
+    try {
+      const res = await fetch('/api/webhooks/msgraph/subscriptions/maintenance-schedule')
+      if (!res.ok) return
+      setSchedule((await res.json()) as MaintenanceSchedule)
+    } catch {
+      setSchedule(null)
     }
   }, [])
 
@@ -144,10 +196,12 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
       setHealth(null)
       setNotice(null)
       setError(null)
+      setLimitConflict(null)
       void fetchReceipts(name)
       void fetchSubscriptions(name)
+      void fetchSchedule(name)
     },
-    [fetchReceipts, fetchSubscriptions],
+    [fetchReceipts, fetchSubscriptions, fetchSchedule],
   )
 
   // Manual Refresh. The data loads almost instantly, so enforce a minimum spin so the
@@ -159,6 +213,7 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
     if (selectedName) {
       await fetchReceipts(selectedName)
       await fetchSubscriptions(selectedName)
+      await fetchSchedule(selectedName)
     }
     const elapsed = Date.now() - started
     const MIN_SPIN_MS = 1000 // one full animate-spin cycle
@@ -166,7 +221,7 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
       await new Promise((resolve) => setTimeout(resolve, MIN_SPIN_MS - elapsed))
     }
     setRefreshing(false)
-  }, [fetchSources, fetchReceipts, fetchSubscriptions, selectedName])
+  }, [fetchSources, fetchReceipts, fetchSubscriptions, fetchSchedule, selectedName])
 
   useEffect(() => {
     if (open) {
@@ -180,8 +235,9 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
     if (open && selectedName) {
       void fetchReceipts(selectedName)
       void fetchSubscriptions(selectedName)
+      void fetchSchedule(selectedName)
     }
-  }, [open, selectedName, fetchReceipts, fetchSubscriptions])
+  }, [open, selectedName, fetchReceipts, fetchSubscriptions, fetchSchedule])
 
   const toggleEnabled = useCallback(
     async (name: string, enabled: boolean) => {
@@ -230,13 +286,45 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
     [],
   )
 
-  const subscribe = useCallback(async () => {
-    const r = await callGraph('/api/webhooks/msgraph/subscriptions', 'POST', {})
-    if (r) {
-      setNotice('Subscription created.')
-      void fetchSubscriptions('msgraph')
-    }
-  }, [callGraph, fetchSubscriptions])
+  // Subscribe. On the Graph per-app limit (409 subscription_limit) we surface a confirm
+  // dialog and re-issue with replace=true (PRP-0107, UDR-0075 D14). callGraph is not used
+  // here because we must inspect the 409 status + code rather than treat it as an error.
+  const subscribe = useCallback(
+    async (replace = false) => {
+      setBusy(true)
+      setError(null)
+      setNotice(null)
+      try {
+        const res = await fetch('/api/webhooks/msgraph/subscriptions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ replace }),
+        })
+        const data = await res.json().catch(() => null)
+        if (res.status === 409 && data?.detail?.code === 'subscription_limit') {
+          setLimitConflict({
+            resource: (data.detail.resource as string) ?? '',
+            existing: (data.detail.existing ?? []) as Subscription[],
+          })
+          return
+        }
+        if (!res.ok) throw new Error((data?.detail?.error as string) ?? 'Request failed')
+        setNotice(replace ? 'Existing subscription replaced.' : 'Subscription created.')
+        void fetchSubscriptions('msgraph')
+        void fetchSchedule('msgraph')
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Request failed')
+      } finally {
+        setBusy(false)
+      }
+    },
+    [fetchSubscriptions, fetchSchedule],
+  )
+
+  const confirmReplaceSubscription = useCallback(async () => {
+    setLimitConflict(null)
+    await subscribe(true)
+  }, [subscribe])
 
   const maintain = useCallback(async () => {
     const r = (await callGraph('/api/webhooks/msgraph/subscriptions/maintain', 'POST')) as {
@@ -245,8 +333,20 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
     if (r) {
       setNotice(`Maintenance done: renewed ${r.renewed?.length ?? 0}.`)
       void fetchSubscriptions('msgraph')
+      void fetchSchedule('msgraph')
     }
-  }, [callGraph, fetchSubscriptions])
+  }, [callGraph, fetchSubscriptions, fetchSchedule])
+
+  const resyncSchedule = useCallback(async () => {
+    const r = (await callGraph(
+      '/api/webhooks/msgraph/subscriptions/maintenance-schedule/sync',
+      'POST',
+    )) as MaintenanceSchedule | null
+    if (r) {
+      setSchedule(r)
+      setNotice(r.exists ? 'Auto-renewal schedule synced.' : 'Auto-renewal schedule removed (idle).')
+    }
+  }, [callGraph])
 
   const renewSub = useCallback(
     async (id: string) => {
@@ -271,12 +371,13 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
       if (!res.ok) throw new Error('Failed to delete subscription')
       setNotice('Subscription deleted.')
       await fetchSubscriptions('msgraph')
+      await fetchSchedule('msgraph')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete subscription')
     } finally {
       setBusy(false)
     }
-  }, [confirmDeleteSub, fetchSubscriptions])
+  }, [confirmDeleteSub, fetchSubscriptions, fetchSchedule])
 
   const tokenHealth = useCallback(async () => {
     const r = (await callGraph('/api/webhooks/msgraph/token-health', 'GET')) as Record<string, unknown> | null
@@ -473,11 +574,16 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
                     <div className="mb-2 flex flex-wrap items-center gap-2">
                       <span className="text-xs font-semibold text-muted-foreground">Subscriptions</span>
                       <div className="ml-auto flex flex-wrap items-center gap-1">
-                        <Button variant="outline" size="sm" disabled={busy} onClick={() => void subscribe()}>
+                        <Button variant="outline" size="sm" disabled={busy} onClick={() => void subscribe(false)}>
                           <Plus className="mr-1 h-3.5 w-3.5" /> Subscribe
                         </Button>
-                        <Button variant="outline" size="sm" disabled={busy} onClick={() => void maintain()}>
-                          Maintain
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={busy}
+                          onClick={() => void maintain()}
+                          title="Renew all subscriptions due now (manual, one-shot). Automatic renewal runs on the schedule below.">
+                          Renew now
                         </Button>
                         <Button variant="outline" size="sm" disabled={busy} onClick={() => void tokenHealth()}>
                           Token health
@@ -487,17 +593,24 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
                         </Button>
                       </div>
                     </div>
-                    {subscriptions.length === 0 ? (
+                    {mergedSubs.length === 0 ? (
                       <p className="text-[11px] text-muted-foreground">No subscriptions.</p>
                     ) : (
                       <ul className="space-y-1">
-                        {subscriptions.map((sub) => (
+                        {mergedSubs.map((sub) => (
                           <li
                             key={sub.id}
                             className="flex items-center justify-between gap-2 rounded border px-2 py-1 text-[11px]">
                             <span className="min-w-0 flex-1 truncate" title={sub.resource}>
                               {sub.resource || sub.id}
                             </span>
+                            {sub.graphOnly && (
+                              <span
+                                className="shrink-0 rounded bg-amber-500/15 px-1 text-[9px] uppercase text-amber-600 dark:text-amber-500"
+                                title="Present on Microsoft Graph but not in the local store (e.g. orphaned after a redeploy or a changed notification URL).">
+                                Graph only
+                              </span>
+                            )}
                             <span className="shrink-0 text-muted-foreground">exp {fmt(sub.expiration)}</span>
                             <Button
                               variant="ghost"
@@ -521,6 +634,37 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
                         ))}
                       </ul>
                     )}
+
+                    {/* Auto-renewal schedule (managed Cron job; PRP-0107, UDR-0075 D15).
+                        Distinct from the manual "Renew now" above: this is the recurring
+                        job that renews subscriptions before they expire while CRON is on. */}
+                    <div className="mt-3 flex flex-col gap-1.5 border-t pt-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-semibold text-muted-foreground">Auto-renewal schedule</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {schedule?.exists
+                            ? `Every ${schedule.interval_hours ?? '?'}h${
+                                schedule.next_run_at ? ` - next ${fmt(schedule.next_run_at)}` : ''
+                              }`
+                            : 'Not scheduled'}
+                        </span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="ml-auto"
+                          disabled={busy}
+                          onClick={() => void resyncSchedule()}
+                          title="Remove the existing managed renewal job (if any) and recreate it for the current subscriptions.">
+                          {schedule?.exists ? 'Re-sync' : 'Create'}
+                        </Button>
+                      </div>
+                      {schedule && !schedule.cron_enabled && (
+                        <p className="text-[11px] text-amber-600 dark:text-amber-500">
+                          CRON_ENABLED is off: subscriptions are NOT auto-renewed and will expire. Enable CRON, or renew
+                          manually with "Renew now".
+                        </p>
+                      )}
+                    </div>
 
                     {/* Manual fetch (run the meeting pipeline on demand). App-only access is
                         organizer-scoped, so the meeting organizer is required. */}
@@ -670,11 +814,41 @@ export function WebhookManager({ open, onOpenChange }: WebhookManagerProps) {
             )}
           </div>
 
-          {(busy || confirmDeleteSub) && (
+          {(busy || confirmDeleteSub || limitConflict) && (
             <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/80">
               {busy ? (
                 <div className="flex items-center gap-2 text-sm">
                   <Loader2 className="h-5 w-5 animate-spin" /> Applying...
+                </div>
+              ) : limitConflict ? (
+                <div className="w-[420px] rounded-lg border bg-background p-4 shadow-lg">
+                  <p className="text-sm font-medium">A subscription already exists</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Microsoft Graph already has {limitConflict.existing.length || 1} subscription
+                    {limitConflict.existing.length === 1 ? '' : '(s)'} for this resource and enforces a per-app limit,
+                    so a new one cannot be created. Delete the existing subscription and re-subscribe?
+                  </p>
+                  {limitConflict.existing.length > 0 && (
+                    <ul className="mt-2 max-h-24 space-y-1 overflow-auto">
+                      {limitConflict.existing.map((s) => (
+                        <li key={s.id} className="truncate rounded border px-2 py-1 text-[11px]" title={s.id}>
+                          {s.resource || s.id}
+                          <span className="ml-1 text-muted-foreground">exp {fmt(s.expiration)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="mt-2 break-all text-[11px] text-muted-foreground">
+                    Only subscriptions for this exact resource are removed.
+                  </p>
+                  <div className="mt-3 flex justify-end gap-2">
+                    <Button variant="outline" size="sm" onClick={() => setLimitConflict(null)}>
+                      Cancel
+                    </Button>
+                    <Button variant="destructive" size="sm" onClick={() => void confirmReplaceSubscription()}>
+                      <RefreshCw className="mr-1 h-3.5 w-3.5" /> Delete and re-subscribe
+                    </Button>
+                  </div>
                 </div>
               ) : (
                 <div className="w-[360px] rounded-lg border bg-background p-4 shadow-lg">
