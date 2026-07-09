@@ -389,11 +389,14 @@ async def import_session(file: UploadFile) -> dict[str, Any]:
     """Import a chat from a ZIP bundle as a brand-new session (CTR-0015 v1.15).
 
     The bundle is untrusted input (UDR-0062 D5): size / entry caps, zip-slip
-    rejection, an entry allowlist, manifest + session schema validation, and
-    per-upload media-type checks all run before anything is written. A NEW
-    thread id is always allocated (non-destructive, UDR-0062 D3) and the chat
-    is de-personalized (UDR-0062 D4). Must be registered before /{thread_id}
-    so "import" is never captured as a path parameter.
+    rejection, an entry allowlist, and manifest + session schema validation all
+    run before anything is written. Structural / security violations raise a 400
+    with a human-readable ``detail``; per-upload issues are non-fatal -- an
+    unsupported / oversized / malformed attachment is skipped and reported in the
+    response ``warnings`` list rather than failing the whole import (CTR-0015
+    v1.16). A NEW thread id is always allocated (non-destructive, UDR-0062 D3)
+    and the chat is de-personalized (UDR-0062 D4). Must be registered before
+    /{thread_id} so "import" is never captured as a path parameter.
     """
     zip_bytes = await file.read()
     try:

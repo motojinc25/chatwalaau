@@ -7,6 +7,7 @@ import {
   FOLDER_COLORS,
   type FolderColor,
   type ImageRef,
+  type ImportResult,
   type ReasoningBlock,
   type SessionFolder,
   type SessionSummary,
@@ -664,21 +665,31 @@ export function useSession() {
   // bundle; the server validates it and creates a NEW session. On success the
   // list refreshes and we switch to the imported chat.
   const importSession = useCallback(
-    async (file: File): Promise<boolean> => {
+    async (file: File): Promise<ImportResult> => {
       setIsImporting(true)
       try {
         const form = new FormData()
         form.append('file', file)
         const res = await fetch('/api/sessions/import', { method: 'POST', body: form })
-        if (!res.ok) return false
+        if (!res.ok) {
+          // Surface the server's reason (CTR-0016 v5); previously swallowed.
+          let error = `Import failed (HTTP ${res.status}).`
+          try {
+            const body = (await res.json()) as { detail?: unknown }
+            if (typeof body?.detail === 'string' && body.detail) error = body.detail
+          } catch {
+            // non-JSON error body -> keep the generic message
+          }
+          return { ok: false, error }
+        }
         const summary = (await res.json()) as SessionSummary
         await refreshSessions()
         if (summary && typeof summary.thread_id === 'string') {
           await switchSession(summary.thread_id)
         }
-        return true
+        return { ok: true, warnings: Array.isArray(summary?.warnings) ? summary.warnings : [] }
       } catch {
-        return false
+        return { ok: false, error: 'Import failed (network error).' }
       } finally {
         setIsImporting(false)
       }

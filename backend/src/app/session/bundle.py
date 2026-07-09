@@ -11,12 +11,19 @@ portable across ChatWalaʻau instances:
 Export (`build_export_bundle`) reads an existing session and archives it with
 its whole upload directory. Import (`import_bundle`) treats the archive as
 UNTRUSTED input (UDR-0062 D5): it enforces size / entry caps, rejects zip-slip,
-allowlists the entry set, validates the manifest and session schema and each
-upload's media type, and only then -- validate-then-commit -- allocates a NEW
-thread id (UDR-0062 D3), rehouses the uploads, rewrites in-message upload
-references to the new id, strips per-session personalization (UDR-0062 D4), and
-persists an ordinary `.sessions/` record. Any failure raises
-``BundleValidationError`` (mapped to HTTP 4xx) and leaves nothing behind.
+allowlists the entry set, validates the manifest and session schema, and only
+then -- validate-then-commit -- allocates a NEW thread id (UDR-0062 D3), rehouses
+the uploads, rewrites in-message upload references to the new id, strips
+per-session personalization (UDR-0062 D4), and persists an ordinary
+`.sessions/` record. Structural / security violations (bad zip, zip-slip,
+zip-bomb, unknown manifest format_version, malformed session schema, oversize
+bundle) raise ``BundleValidationError`` (mapped to HTTP 400) and leave nothing
+behind. Individual uploads are classified per-entry (CTR-0015 v1.17): allowed
+media and the recognized paint scene sidecar (CTR-0161) are carried, while an
+unsupported / oversized / malformed upload is SKIPPED (never written) and
+reported in the returned ``warnings`` list so the chat still imports and the
+operator is told what was dropped -- a bundle from a newer / differently-laid-out
+instance no longer aborts the whole import.
 
 Uses only the Python stdlib ``zipfile`` -- no new dependency.
 """
@@ -58,6 +65,16 @@ UPLOADS_PREFIX = "uploads/"
 # compressed-upload cap SESSION_IMPORT_MAX_BYTES (UDR-0062 D5).
 MAX_BUNDLE_ENTRIES = 2_000
 MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024  # 256 MiB total expanded size
+
+# Paint scene sidecar (CTR-0161): the editable Fabric.js scene JSON co-located
+# with a painted image (`paint_<uuid>.paint.json`, paired 1:1 with
+# `paint_<uuid>.png`). Export archives the whole upload dir, so a paint-origin
+# chat carries this companion; import recognizes it as a first-class,
+# non-media companion and carries it verbatim so the attachment stays
+# re-editable after import. Kept in sync with app.paint.router.MAX_SCENE_SIZE_BYTES
+# (a local constant avoids a session -> paint import edge).
+PAINT_SIDECAR_SUFFIX = ".paint.json"
+MAX_SIDECAR_BYTES = 25 * 1024 * 1024
 
 # Per-session metadata fields removed on import so an imported chat lands as an
 # ordinary, unfiled, de-personalized new session (UDR-0062 D4).
@@ -170,13 +187,23 @@ def import_bundle(zip_bytes: bytes) -> dict[str, Any]:
         session_data = _read_json_entry(archive, SESSION_NAME)
         _validate_session_schema(session_data)
 
-        # Validate every upload's media type / size BEFORE writing anything.
+        # Classify every upload BEFORE writing anything. Allowed media and the
+        # recognized paint sidecar are carried; any other / oversized / malformed
+        # upload is SKIPPED (never written) with an operator-facing warning so the
+        # chat still imports (UDR-0062 D5 refinement: skip-with-warning for unknown
+        # uploads instead of failing the whole bundle). Structural / security
+        # violations (bad zip, zip-slip, zip-bomb, bad manifest / session schema,
+        # oversize bundle) still hard-fail above.
         validated_uploads: list[tuple[str, bytes]] = []
+        warnings: list[str] = []
         for name in upload_entries:
             payload = archive.read(name)
             basename = name[len(UPLOADS_PREFIX) :]
-            _validate_upload_entry(basename, payload)
-            validated_uploads.append((basename, payload))
+            carry, warning = _classify_upload_entry(basename, payload)
+            if warning is not None:
+                warnings.append(warning)
+            if carry:
+                validated_uploads.append((basename, payload))
 
     # ---- All validation passed; commit (UDR-0062 D3/D4). -----------------
     old_thread_id = str(manifest.get("source_thread_id") or "")
@@ -196,7 +223,13 @@ def import_bundle(zip_bytes: bytes) -> dict[str, Any]:
         shutil.rmtree(upload_root, ignore_errors=True)
         raise BundleValidationError("Failed to persist imported session") from exc
 
-    logger.info("Imported session %s -> %s (%d uploads)", old_thread_id or "?", new_thread_id, len(validated_uploads))
+    logger.info(
+        "Imported session %s -> %s (%d uploads, %d skipped)",
+        old_thread_id or "?",
+        new_thread_id,
+        len(validated_uploads),
+        len(warnings),
+    )
     return {
         "thread_id": new_thread_id,
         "title": new_data.get("title", ""),
@@ -208,6 +241,9 @@ def import_bundle(zip_bytes: bytes) -> dict[str, Any]:
         "folder_id": None,
         "source": new_data.get("source", "ag-ui"),
         "auto_title_pending": False,
+        # Non-fatal notices about entries that were carried with a caveat or
+        # skipped (CTR-0015 v1.17). Empty on a clean import.
+        "warnings": warnings,
     }
 
 
@@ -293,16 +329,51 @@ def _validate_session_schema(data: Any) -> None:
             raise BundleValidationError("Malformed message contents in session data")
 
 
-def _validate_upload_entry(basename: str, payload: bytes) -> None:
-    """Validate an upload's media type and size against the CTR-0022 policy."""
+def _classify_upload_entry(basename: str, payload: bytes) -> tuple[bool, str | None]:
+    """Decide whether to carry an upload entry into the imported session.
+
+    Returns ``(carry, warning)``. Allowed image / PDF media (CTR-0022) and a
+    recognized, well-formed paint scene sidecar (CTR-0161) are carried verbatim
+    (``carry=True, warning=None``). Any other, oversized, or malformed entry is
+    SKIPPED (``carry=False``) with a human-readable ``warning`` so the chat still
+    imports and the operator is told what was dropped -- a bundle produced by a
+    newer / differently-laid-out instance no longer fails the whole import
+    (UDR-0062 D5 refinement). Skipping never writes the entry, so the fail-closed
+    "no untrusted content persisted" posture is preserved.
+    """
     if not basename or basename.startswith("."):
-        raise BundleValidationError(f"Invalid upload filename: {basename}")
+        return False, f"Skipped an attachment with an unsafe name: {basename!r}."
+
+    # Paint scene sidecar (CTR-0161): validate as well-formed JSON + size cap and
+    # carry it so a paint-origin attachment stays re-editable after import.
+    if basename.endswith(PAINT_SIDECAR_SUFFIX):
+        if len(payload) > MAX_SIDECAR_BYTES:
+            return False, (
+                f"Skipped an oversized paint scene '{basename}'; the image still "
+                "imports but may no longer be re-editable."
+            )
+        try:
+            json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False, (
+                f"Skipped a malformed paint scene '{basename}'; the image still "
+                "imports but may no longer be re-editable."
+            )
+        return True, None
+
     content_type = guess_upload_content_type(Path(basename))
     if content_type not in ALLOWED_MEDIA_TYPES:
-        raise BundleValidationError(f"Unsupported upload type in bundle: {basename}")
+        return False, (
+            f"Skipped an unsupported attachment '{basename}' ({content_type}); "
+            "it may not display correctly in the imported chat."
+        )
     max_size = max_upload_size_bytes(content_type)
     if max_size is not None and len(payload) > max_size:
-        raise BundleValidationError(f"Upload too large in bundle: {basename}")
+        return False, (
+            f"Skipped an oversized attachment '{basename}'; it may not display "
+            "correctly in the imported chat."
+        )
+    return True, None
 
 
 def _build_imported_session(session_data: dict[str, Any], old_thread_id: str, new_thread_id: str) -> dict[str, Any]:

@@ -120,4 +120,23 @@ export interface SessionSummary {
    * the CTR-0110 `session_title` WebSocket push or on the next list refresh.
    */
   auto_title_pending?: boolean
+  /**
+   * Non-fatal import notices (CTR-0015 v1.17). Present on an imported session
+   * summary when some attachment was carried with a caveat or skipped; empty
+   * on a clean import.
+   */
+  warnings?: string[]
+}
+
+/**
+ * Result of a chat bundle import (CTR-0015 v1.17 / CTR-0016 v5). On failure
+ * `error` holds the server's human-readable reason so the UI can surface it
+ * (previously the failure was swallowed silently). On success `warnings` lists
+ * any attachment that was skipped or carried with a caveat -- the import still
+ * completed, but the operator is told it may not be perfectly faithful.
+ */
+export interface ImportResult {
+  ok: boolean
+  error?: string
+  warnings?: string[]
 }
