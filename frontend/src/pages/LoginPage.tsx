@@ -8,8 +8,13 @@
  *
  * Already-authenticated visitors are redirected away from /login to
  * avoid an empty login form when no action is needed.
+ *
+ * Password-field usability (v0.102.2, CTR-0096 v2): a Show/Hide password
+ * toggle temporarily reveals the typed value, and a Caps Lock hint warns when
+ * the lock is active so a mistyped password is easier to spot before submit.
  */
 
+import { Eye, EyeOff } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
@@ -24,8 +29,54 @@ export function LoginPage() {
   const auth = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [capsLockOn, setCapsLockOn] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
+  // Caps Lock hint. Detection is GLOBAL for the whole login page (document-level
+  // listeners, not gated on which field is focused) because the initial focus is
+  // the username field, so a Caps Lock press before touching the password field
+  // must still register. A FocusEvent cannot report the modifier state, so we
+  // rely on key + pointer events.
+  //
+  // The Caps Lock key itself is the hard case, especially on the Surface Type
+  // Cover: its OWN keydown reports the PRE-toggle modifier state, and its keyup
+  // is often swallowed by the OS Caps Lock indicator, so reading
+  // getModifierState on that key never flips the hint. So we handle it two ways
+  // that agree with each other: on its non-repeat keydown we TOGGLE our flag
+  // (this is the only signal that survives on Surface), and if a keyup DOES
+  // arrive we overwrite with the authoritative getModifierState (standard
+  // keyboards). EVERY OTHER key/pointer event re-syncs to getModifierState, so a
+  // drifted flag self-corrects on the very next keystroke or click.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'CapsLock' || event.code === 'CapsLock') {
+        if (event.type === 'keyup' && typeof event.getModifierState === 'function') {
+          setCapsLockOn(event.getModifierState('CapsLock'))
+        } else if (event.type === 'keydown' && !event.repeat) {
+          setCapsLockOn((prev) => !prev)
+        }
+        return
+      }
+      if (typeof event.getModifierState === 'function') {
+        setCapsLockOn(event.getModifierState('CapsLock'))
+      }
+    }
+    const onPointer = (event: PointerEvent) => {
+      if (typeof event.getModifierState === 'function') {
+        setCapsLockOn(event.getModifierState('CapsLock'))
+      }
+    }
+    document.addEventListener('keydown', onKey, true)
+    document.addEventListener('keyup', onKey, true)
+    document.addEventListener('pointerdown', onPointer, true)
+    return () => {
+      document.removeEventListener('keydown', onKey, true)
+      document.removeEventListener('keyup', onKey, true)
+      document.removeEventListener('pointerdown', onPointer, true)
+    }
+  }, [])
 
   const redirectTarget = searchParams.get('redirect') || DEFAULT_REDIRECT
 
@@ -118,15 +169,34 @@ export function LoginPage() {
             <label htmlFor="login-password" className="text-sm font-medium">
               Password
             </label>
-            <Input
-              id="login-password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={submitting}
-              required
-            />
+            <div className="relative">
+              <Input
+                id="login-password"
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="current-password"
+                className="pr-10"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={submitting}
+                aria-describedby={capsLockOn ? 'login-capslock' : undefined}
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                disabled={submitting}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                aria-pressed={showPassword}
+                title={showPassword ? 'Hide password' : 'Show password'}
+                className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50">
+                {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+            {capsLockOn && (
+              <p id="login-capslock" className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-500" role="alert">
+                Caps Lock is on.
+              </p>
+            )}
           </div>
           {errorMessage !== null && (
             <p className="text-sm text-destructive" role="alert">
