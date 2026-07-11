@@ -1,14 +1,24 @@
 /**
- * Web SPA authentication hook (CTR-0096, PRP-0057).
+ * Web SPA authentication hook (CTR-0096 v2, PRP-0057, PRP-0110).
  *
  * Wraps the CTR-0094 endpoints (GET /api/auth/status, POST /api/auth/login,
  * POST /api/auth/logout) and exposes a small React state shape. State is
  * NEVER persisted to localStorage / sessionStorage; full reload re-fetches
  * /api/auth/status. The session cookie is HttpOnly and managed by the
  * browser -- JavaScript cannot read it (by design).
+ *
+ * PRP-0110 / UDR-0088 D1+D2: subscribes to the AUTH_REQUIRED signal raised by
+ * the 401 fetch interceptor and exposes `reauthRequired` so a modal dialog can
+ * re-authenticate over the preserved application state. A mid-session 401 does
+ * NOT flip `authenticated` -- flipping it would make AuthGuard unmount the
+ * protected subtree through <Navigate>, destroying exactly the state we are
+ * trying to keep. `hasEverAuthenticated` latches the boot-vs-mid-session
+ * distinction for AuthGuard; an explicit logout resets it so the guard resumes
+ * its normal redirect.
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { subscribeAuthRequired } from '@/lib/auth-fetch'
 
 export type AuthMode = 'open' | 'api-key-only' | 'login-required'
 
@@ -26,6 +36,14 @@ export interface AuthState {
   /** PRP-0068 / CTR-0094 v5: running backend app version. null when the backend omits it. */
   version: string | null
   loading: boolean
+  /**
+   * PRP-0110 / UDR-0088 D2: true once this page lifetime has observed an
+   * authenticated session. AuthGuard redirects to /login only while false, so a
+   * mid-session auth loss raises the dialog instead of unmounting the app.
+   */
+  hasEverAuthenticated: boolean
+  /** PRP-0110 / UDR-0088 D1: a 401 was intercepted; render ReauthDialog. */
+  reauthRequired: boolean
 }
 
 export type LoginResult = { ok: true } | { ok: false; reason: 'invalid-credentials' | 'disabled' | 'network' }
@@ -35,6 +53,9 @@ export interface AuthActions {
   logout: () => Promise<void>
   refresh: () => Promise<void>
 }
+
+/** The username to prefill in ReauthDialog: the last one we saw authenticated. */
+export type ReauthUsername = string | null
 
 interface StatusPayload {
   mode: AuthMode
@@ -71,6 +92,8 @@ export function useAuth(): AuthState & AuthActions {
     toolApprovalMode: 'auto',
     version: null,
     loading: true,
+    hasEverAuthenticated: false,
+    reauthRequired: false,
   })
 
   const refresh = useCallback(async () => {
@@ -79,7 +102,8 @@ export function useAuth(): AuthState & AuthActions {
       // Network error -- best-effort: treat as open so the user is not
       // trapped on /login when the backend is unreachable. The 401
       // interceptor still catches subsequent failures.
-      setState({
+      setState((prev) => ({
+        ...prev,
         mode: 'open',
         authenticated: true,
         username: null,
@@ -87,13 +111,16 @@ export function useAuth(): AuthState & AuthActions {
         toolApprovalMode: 'auto',
         version: null,
         loading: false,
-      })
+      }))
       return
     }
-    setState({
+    setState((prev) => ({
+      ...prev,
       mode: payload.mode,
       authenticated: payload.authenticated,
-      username: payload.username,
+      // /api/auth/status omits the username when the session is gone. Retain the
+      // last known one so ReauthDialog can prefill it (PRP-0110).
+      username: payload.authenticated ? payload.username : (payload.username ?? prev.username),
       demoMode: payload.demo_mode === true,
       toolApprovalMode:
         payload.tool_approval_mode === 'skip' || payload.tool_approval_mode === 'always'
@@ -101,7 +128,10 @@ export function useAuth(): AuthState & AuthActions {
           : 'auto',
       version: payload.version && payload.version.length > 0 ? payload.version : null,
       loading: false,
-    })
+      // Latch (UDR-0088 D2) and clear the dialog once the session is live again.
+      hasEverAuthenticated: prev.hasEverAuthenticated || payload.authenticated,
+      reauthRequired: payload.authenticated ? false : prev.reauthRequired,
+    }))
   }, [])
 
   const login = useCallback(
@@ -141,12 +171,27 @@ export function useAuth(): AuthState & AuthActions {
       toolApprovalMode: prev.toolApprovalMode,
       version: prev.version,
       loading: false,
+      // An explicit sign-out returns the SPA to a boot-like state, so AuthGuard
+      // resumes its normal /login redirect rather than raising the dialog.
+      hasEverAuthenticated: false,
+      reauthRequired: false,
     }))
   }, [])
 
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  // PRP-0110 / UDR-0088 D1: a 401 raises the dialog. `authenticated` is left
+  // untouched on purpose -- flipping it would unmount the protected subtree via
+  // AuthGuard's <Navigate> and destroy the state the dialog exists to preserve.
+  useEffect(
+    () =>
+      subscribeAuthRequired(() => {
+        setState((prev) => (prev.reauthRequired ? prev : { ...prev, reauthRequired: true }))
+      }),
+    [],
+  )
 
   return { ...state, login, logout, refresh }
 }

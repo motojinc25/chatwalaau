@@ -32,7 +32,12 @@ interface Suggestion {
 }
 
 interface ChatInputProps {
-  onSend: (message: string, images?: ImageRef[]) => void
+  /**
+   * Send the composed message. Resolves to `false` when the send failed BEFORE the
+   * AG-UI stream committed, which tells the composer to restore the text
+   * (CTR-0004 v2, PRP-0110). Any other outcome is treated as committed.
+   */
+  onSend: (message: string, images?: ImageRef[]) => Promise<boolean>
   onStop: () => void
   isLoading: boolean
   attachments?: ImageAttachment[]
@@ -363,10 +368,21 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       }
     }
     const images = getImageRefs?.()
-    onSend(value, images && images.length > 0 ? images : undefined)
+    // PRP-0110 / CTR-0004 v2 / UDR-0088 D3: the composer clears optimistically so
+    // the send feels instant, but the text is held until the send COMMITS (the
+    // AG-UI stream emitted its first event). On a pre-commit failure -- the server
+    // is down, restarting, or the session expired -- we hand the text back instead
+    // of destroying it. The restore is conditional on the textarea still being
+    // empty, so anything the user typed while the request was in flight wins.
+    const pending = value
     setValue('')
     closeMenu()
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
+
+    const committed = await onSend(pending, images && images.length > 0 ? images : undefined)
+    if (committed === false && textareaRef.current?.value === '') {
+      setValueAndResize(pending, pending.length)
+    }
   }
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {

@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Bot,
   Check,
   ChevronDown,
@@ -77,6 +78,8 @@ interface ChatMessageItemProps {
   isLoading?: boolean
   tts?: TTSControls
   onEditUser?: (messageId: string, newContent: string) => void
+  /** Re-send a user turn whose send failed before committing (CTR-0004 v2, PRP-0110). */
+  onRetryTurn?: (messageId: string) => void
   onEditAssistant?: (messageId: string, newContent: string) => void
   onRegenerateAssistant?: (messageId: string) => void
   onDelete?: (messageId: string) => void
@@ -293,6 +296,7 @@ function ChatMessageItemImpl({
   isLoading,
   tts,
   onEditUser,
+  onRetryTurn,
   onEditAssistant,
   onRegenerateAssistant,
   onDelete,
@@ -461,6 +465,28 @@ function ChatMessageItemImpl({
               </div>
             )}
             <CollapsibleUserText content={message.content} />
+            {/*
+              Pre-commit send failure (CTR-0004 v2, PRP-0110 / UDR-0088 D3). The turn
+              never reached the agent, so it is safe to re-send: nothing was persisted
+              and nothing can double-execute (UDR-0088 D6). The text also went back
+              into the composer, so the user can copy it or retry from here.
+            */}
+            {message.failed && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-600">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>Could not reach the server. This message was not sent.</span>
+                {onRetryTurn && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => onRetryTurn(message.id)}>
+                    <RefreshCw className="mr-1 h-3 w-3" />
+                    Retry
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           <>

@@ -172,6 +172,7 @@ export function ChatPanel({
     messages,
     isLoading,
     sendMessage,
+    retryTurn,
     stopGeneration,
     editUserMessage,
     regenerateAssistantMessage,
@@ -195,6 +196,13 @@ export function ChatPanel({
     // v0.77.1: transient upstream 5xx auto-retry status (CTR-0009). Shown as a
     // brief amber banner so the user knows the run is being resent, not stalled.
     onNotice: useCallback((message: string) => setNotification({ type: 'info', message }), []),
+    // PRP-0110 / UDR-0088 D7: a send succeeded after a pre-commit failure -- the
+    // server is back. Reassure the user through the existing notification surface;
+    // there is no proactive liveness monitor (UDR-0088 D5).
+    onConnectionRecovered: useCallback(
+      () => setNotification({ type: 'success', message: 'Connection recovered' }),
+      [],
+    ),
   })
 
   // Auto-resume from continuation_token (page reload or sidebar switch).
@@ -453,16 +461,29 @@ export function ChatPanel({
   }, [messages])
 
   const handleSend = useCallback(
-    (content: string, images?: ImageRef[]) => {
-      sendMessage(content, images)
+    async (content: string, images?: ImageRef[]) => {
+      // Kick off the send, then clear/scroll immediately -- the commit flag is
+      // awaited afterwards so ChatInput can restore the text on a pre-commit
+      // failure (CTR-0004 v2, PRP-0110).
+      const pending = sendMessage(content, images)
       clearAttachments()
       // PRP-0058 UX-2: user-send is the strongest "follow output" intent.
       // Force-resume autoscroll so the new user message + assistant stream
       // re-anchor at the bottom even if the operator had previously
       // scrolled up to read earlier text (autoscrollRef was false).
       scrollToBottom()
+      return await pending
     },
     [sendMessage, clearAttachments, scrollToBottom],
+  )
+
+  // PRP-0110 / UDR-0088 D3: re-send a user turn that failed before committing.
+  const handleRetryTurn = useCallback(
+    (messageId: string) => {
+      void retryTurn(messageId)
+      scrollToBottom()
+    },
+    [retryTurn, scrollToBottom],
   )
 
   const handleAddFiles = useCallback(
@@ -534,6 +555,7 @@ export function ChatPanel({
                 isLoading={isLoading && i === messages.length - 1}
                 tts={tts}
                 onEditUser={editUserMessage}
+                onRetryTurn={handleRetryTurn}
                 onEditAssistant={editAssistantMessage}
                 onRegenerateAssistant={regenerateAssistantMessage}
                 onDelete={deleteMessage}

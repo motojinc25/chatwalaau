@@ -599,6 +599,13 @@ class Settings(BaseSettings):
     # "lax" still blocks cross-site POST cookies (the main CSRF vector). "none" enables
     # cross-site embedding but REQUIRES a Secure cookie (forced on automatically).
     auth_cookie_samesite: str = "lax"
+    # PRP-0110 / UDR-0089: persist session token DIGESTS (sha256, never the raw
+    # token) so a process restart no longer signs every browser out. Only active
+    # when the web auth lane exists (AUTH_USERNAME set). Set false to restore the
+    # pre-PRP-0110 in-memory-only behavior byte-for-byte. Deleting the store file
+    # logs everyone out; rotating AUTH_PASSWORD_HASH does the same (UDR-0089 D5).
+    auth_session_persist: bool = True
+    auth_session_store_path: str = ".auth/session_tokens.json"
 
     # DevUI (CTR-0024, PRP-0016, PRP-0046)
     devui_enabled: bool = False

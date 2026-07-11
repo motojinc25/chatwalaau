@@ -30,6 +30,10 @@ __pycache__/
 # Sessions
 .sessions/
 
+# Session token digest store (CTR-0095 v2, PRP-0110). Holds sha256 digests, never
+# raw tokens -- but it is still an authentication artifact and must never be committed.
+.auth/
+
 # Uploads
 .uploads/
 
@@ -75,6 +79,9 @@ model_offerings.jsonc
 
 # Dumped prompts
 .prompts/
+
+# Persist session
+.auth/
 
 # Batch server log (stdio MCP cannot use stdout)
 batch-server.log

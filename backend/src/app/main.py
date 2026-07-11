@@ -113,6 +113,14 @@ _app_version = get_app_version()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Application lifespan: startup and shutdown hooks."""
+    # Session token store rehydrate (PRP-0110, CTR-0095 v2, UDR-0089 D4). Building
+    # the singleton loads the digest projection from disk when the web auth lane is
+    # enabled and AUTH_SESSION_PERSIST is true, so a restart no longer signs users
+    # out. No-op (and nothing read) otherwise.
+    if settings.web_auth_enabled:
+        from app.auth.session_store import get_session_store
+
+        get_session_store()
     # Startup: activate MCP servers (CTR-0061, PRP-0031)
     # prepare_mcp() was already called at module level before create_agent()
     await activate_mcp()
@@ -160,6 +168,13 @@ async def lifespan(_app: FastAPI):
 
         await initialize_webhook()
     yield
+    # Shutdown: flush pending session-token TTL slides (PRP-0110, CTR-0095 v2,
+    # UDR-0089 D3). create/revoke already flushed synchronously; this persists the
+    # slides accumulated by lookup() so a clean restart keeps the sliding expiry.
+    if settings.web_auth_enabled:
+        from app.auth.session_store import get_session_store
+
+        await get_session_store().flush_if_dirty()
     # Shutdown: stop the cron scheduler (cancel loop + drain in-flight runs).
     if settings.cron_enabled:
         from app.cron.engine import stop_scheduler

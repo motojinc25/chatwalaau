@@ -72,6 +72,13 @@ export interface ChatMessage {
    * JSON Schema-constrained and is rendered as a JSON code block instead of Markdown.
    */
   structured?: boolean
+  /**
+   * PRP-0110 / CTR-0004 v2. Set on a USER message whose send failed before the
+   * AG-UI stream committed (server down / restarting). The turn never reached the
+   * agent and was never persisted, so it renders with an inline error and a Retry
+   * affordance. Ephemeral: never written to the session file.
+   */
+  failed?: boolean
 }
 
 export interface PromptTemplate {

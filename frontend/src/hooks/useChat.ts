@@ -71,6 +71,13 @@ interface UseChatOptions {
    * 5xx. Shown to the user as a brief notice; not persisted.
    */
   onNotice?: (message: string) => void
+  /**
+   * PRP-0110 / UDR-0088 D7: fired once when a send succeeds after a previous send
+   * failed before committing -- i.e. the server came back. Rendered as a transient
+   * "connection recovered" notice. There is NO proactive liveness monitor: the
+   * signal is the user-initiated request itself (UDR-0088 D5).
+   */
+  onConnectionRecovered?: () => void
 }
 
 /**
@@ -94,6 +101,11 @@ export function useChat(options?: UseChatOptions) {
   const temporaryRef = useRef(options?.temporary ?? false)
   const onCustomEventRef = useRef(options?.onCustomEvent)
   const onNoticeRef = useRef(options?.onNotice)
+  const onConnectionRecoveredRef = useRef(options?.onConnectionRecovered)
+
+  useEffect(() => {
+    onConnectionRecoveredRef.current = options?.onConnectionRecovered
+  }, [options?.onConnectionRecovered])
 
   useEffect(() => {
     if (options?.threadId) {
@@ -171,7 +183,10 @@ export function useChat(options?: UseChatOptions) {
         // or null to abort the send with an error.
         prepare?: () => Promise<{ images?: ImageRef[] } | null>
       },
-    ): Promise<boolean> => {
+      // `committed` is true once the AG-UI stream emitted its first event (the turn
+      // is live server-side); `success` is the pre-PRP-0110 stream-completed flag.
+      // Only `committed` decides whether the composer keeps or restores the text.
+    ): Promise<{ committed: boolean; success: boolean }> => {
       const userMessage: ChatMessage = {
         id: crypto.randomUUID(),
         role: 'user',
@@ -187,6 +202,12 @@ export function useChat(options?: UseChatOptions) {
         content: '',
         createdAt: new Date().toISOString(),
       }
+
+      // PRP-0110 / UDR-0088 D3: the send is COMMITTED once the AG-UI SSE stream
+      // has emitted its first event. Before that the turn is not durable
+      // server-side, so a failure must hand the text back to the composer
+      // instead of leaving it destroyed.
+      let committed = false
 
       if (options?.skipUserMessage) {
         setMessages([...currentMessages, assistantMessage])
@@ -336,6 +357,8 @@ export function useChat(options?: UseChatOptions) {
 
             try {
               const event = JSON.parse(data) as AguiEvent
+              // First event observed -> the turn is live server-side (UDR-0088 D3).
+              committed = true
 
               switch (eventType || event.type) {
                 case 'TEXT_MESSAGE_CONTENT': {
@@ -609,12 +632,29 @@ export function useChat(options?: UseChatOptions) {
             .catch(() => {})
         }
       } catch (error) {
-        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          // The user pressed Stop. Treat as committed so the composer does not
+          // resurrect a message the user deliberately cancelled (UDR-0088 D3).
+          committed = true
+        } else {
           streamSuccess = false
           const errorContent = error instanceof Error ? error.message : 'An unexpected error occurred'
-          setMessages((prev) =>
-            prev.map((msg) => (msg.id === assistantId ? { ...msg, content: `Error: ${errorContent}` } : msg)),
-          )
+          if (!committed && !options?.skipUserMessage) {
+            // Pre-commit failure (server down / restarting / 401 before the first
+            // event). The turn never reached the agent, so drop the empty assistant
+            // placeholder and flag the USER turn instead: it carries the text, an
+            // inline error, and a Retry affordance (CTR-0004 v2, UDR-0088 D3).
+            // ChatInput restores the same text into the composer.
+            setMessages((prev) =>
+              prev
+                .filter((msg) => msg.id !== assistantId)
+                .map((msg) => (msg.id === userMessage.id ? { ...msg, failed: true } : msg)),
+            )
+          } else {
+            setMessages((prev) =>
+              prev.map((msg) => (msg.id === assistantId ? { ...msg, content: `Error: ${errorContent}` } : msg)),
+            )
+          }
         }
       } finally {
         // Close any reasoning blocks still in 'thinking' state (defensive:
@@ -646,7 +686,7 @@ export function useChat(options?: UseChatOptions) {
         }
       }
 
-      return streamSuccess
+      return { committed, success: streamSuccess }
     },
     [],
   )
@@ -656,14 +696,60 @@ export function useChat(options?: UseChatOptions) {
     messagesRef.current = messages
   }, [messages])
 
+  /**
+   * PRP-0110 / UDR-0088 D3+D7: true while the last send failed before it
+   * committed, so a subsequent success can announce "connection recovered".
+   */
+  const hadPrecommitFailureRef = useRef(false)
+
   const sendMessage = useCallback(
     async (
       content: string,
       images?: ImageRef[],
       opts?: { prepare?: () => Promise<{ images?: ImageRef[] } | null> },
-    ) => {
-      if (!content.trim() && (!images || images.length === 0) && !opts?.prepare) return
-      await streamResponse(content.trim(), messagesRef.current, { images, prepare: opts?.prepare })
+    ): Promise<boolean> => {
+      // Nothing to send -> report "committed" so the composer does not try to
+      // restore an empty string.
+      if (!content.trim() && (!images || images.length === 0) && !opts?.prepare) return true
+      const { committed } = await streamResponse(content.trim(), messagesRef.current, {
+        images,
+        prepare: opts?.prepare,
+      })
+      if (!committed) {
+        hadPrecommitFailureRef.current = true
+      } else if (hadPrecommitFailureRef.current) {
+        hadPrecommitFailureRef.current = false
+        onConnectionRecoveredRef.current?.()
+      }
+      return committed
+    },
+    [streamResponse],
+  )
+
+  /**
+   * Re-send a user turn that failed before it committed (CTR-0004 v2). The turn
+   * was never persisted server-side, so we simply drop the failed bubble and
+   * stream it again -- no truncate call, no replay of a request the server may
+   * have already accepted (UDR-0088 D6).
+   */
+  const retryTurn = useCallback(
+    async (messageId: string) => {
+      const current = messagesRef.current
+      const idx = current.findIndex((m) => m.id === messageId)
+      if (idx === -1) return
+      const failed = current[idx]
+      if (failed.role !== 'user' || !failed.failed) return
+      const truncated = current.slice(0, idx)
+      setMessages(truncated)
+      const { committed } = await streamResponse(failed.content, truncated, {
+        images: failed.images,
+      })
+      if (!committed) {
+        hadPrecommitFailureRef.current = true
+      } else if (hadPrecommitFailureRef.current) {
+        hadPrecommitFailureRef.current = false
+        onConnectionRecoveredRef.current?.()
+      }
     },
     [streamResponse],
   )
@@ -841,7 +927,13 @@ export function useChat(options?: UseChatOptions) {
   // Token clearing and result notification are handled in streamResponse's finally block
   const resumeFromToken = useCallback(
     async (token: Record<string, unknown>): Promise<boolean> => {
-      return streamResponse('', messagesRef.current, { skipUserMessage: true, resumeToken: token })
+      // Callers use this to distinguish "background response resumed" from
+      // "expired", i.e. whether the STREAM completed -- not whether it committed.
+      const { success } = await streamResponse('', messagesRef.current, {
+        skipUserMessage: true,
+        resumeToken: token,
+      })
+      return success
     },
     [streamResponse],
   )
@@ -858,6 +950,7 @@ export function useChat(options?: UseChatOptions) {
     messages,
     isLoading,
     sendMessage,
+    retryTurn,
     stopGeneration,
     clearMessages,
     editUserMessage,
