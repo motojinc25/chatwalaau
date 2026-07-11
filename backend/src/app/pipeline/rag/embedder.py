@@ -38,19 +38,35 @@ def _create_client() -> AzureOpenAI:
     UDR-0034). AZURE_OPENAI_API_KEY set -> api_key= shape; unset ->
     AzureCliCredential() via azure_ad_token_provider.
 
+    Model Offering Catalog lane (PRP-0109, UDR-0087 D7): when an ``embeddings``
+    offering is present, its endpoint / api_version / api_key override the
+    dedicated env config (a base_url offering builds a plain OpenAI client
+    instead of AzureOpenAI). None -> the existing AZURE_OPENAI_ENDPOINT path
+    byte-for-byte.
+
     Callers should normally prefer :func:`_get_client` to reuse the
     module-level singleton; this function stays public for tests that
     need to assert construction behavior.
     """
-    endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+    from app import models_catalog
+
+    config = models_catalog.embedding_config()
+    if config is not None and config.base_url:
+        from openai import OpenAI
+
+        return OpenAI(api_key=config.api_key or os.environ.get("OPENAI_API_KEY", ""), base_url=config.base_url)
+
+    endpoint = (config.endpoint if config is not None and config.endpoint else os.environ.get("AZURE_OPENAI_ENDPOINT", "")) or ""
     if not endpoint:
         msg = "AZURE_OPENAI_ENDPOINT must be set for RAG embedding"
         raise ValueError(msg)
 
+    api_version = (config.api_version if config is not None and config.api_version else "2024-10-21")
+    cred_kwargs = {"api_key": config.api_key} if (config is not None and config.api_key) else get_azure_openai_kwargs()
     return AzureOpenAI(
         azure_endpoint=endpoint,
-        api_version="2024-10-21",
-        **get_azure_openai_kwargs(),
+        api_version=api_version,
+        **cred_kwargs,
     )
 
 
@@ -113,7 +129,17 @@ def embed_texts(
         logger.info("Embedded %d texts via DemoEmbedder (1536-dim hash)", len(embeddings))
         return embeddings
 
-    deployment = model or os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-small")
+    if model is not None:
+        deployment = model
+    else:
+        from app import models_catalog
+
+        config = models_catalog.embedding_config()
+        deployment = (
+            config.deployment
+            if config is not None
+            else os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-small")
+        )
     azure_client = client if client is not None else _get_client()
 
     response = azure_client.embeddings.create(

@@ -12,6 +12,7 @@ from typing import Any
 
 from agent_framework_openai import OpenAIChatClient
 
+from app import models_catalog
 from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
 from app.providers.structured import (
@@ -101,10 +102,23 @@ class AzureOpenAIProvider:
         # explicit (anthropic) lane.
         # Wrapped in the structured-output subclass so the hosted web_search tool is
         # dropped when a JSON `text.format` is set (PRP-0082); inert otherwise.
+        #
+        # Catalog lane (PRP-0109, UDR-0087): when the model is a catalog offering,
+        # `model` is the offering id, so the connector `model=` uses the offering's
+        # model_ref (real deployment name), the endpoint may be per-offering, and
+        # an offering-referenced API key wins over the shared credential lane.
+        # Legacy lane (offering is None): byte-for-byte the prior behavior.
+        offering = models_catalog.offering_for(model)
+        model_ref = offering.model_ref if offering is not None else model
+        endpoint = (offering.endpoint if offering is not None and offering.endpoint else settings.azure_openai_endpoint) or None
+        if offering is not None and offering.api_key_env:
+            cred_kwargs: dict[str, Any] = {"api_key": offering.api_key() or ""}
+        else:
+            cred_kwargs = get_chat_client_credential_kwargs()
         return _structured_openai_client_class()(
-            model=model,
-            azure_endpoint=settings.azure_openai_endpoint or None,
-            **get_chat_client_credential_kwargs(),
+            model=model_ref,
+            azure_endpoint=endpoint,
+            **cred_kwargs,
         )
 
     def model_options_catalog(self, model: str) -> dict[str, Any]:
@@ -113,6 +127,10 @@ class AzureOpenAIProvider:
         # temperature / top_p / top_k: they are not part of a reasoning model's
         # request (reasoning-only policy, UDR-0047 D3 / UDR-0057 D3). Fixed,
         # backend-owned allowed lists + defaults; the operator picks per message.
+        # A catalog `family: bare` override advertises no options (PRP-0109,
+        # UDR-0087 D6) so a non-reasoning gateway model renders no control.
+        if models_catalog.offering_family(model) == "bare":
+            return {"options": []}
         return {
             "options": [
                 {
@@ -132,10 +150,17 @@ class AzureOpenAIProvider:
 
     def reasoning_catalog(self, model: str) -> dict[str, Any]:
         # Derived effort-axis view of model_options_catalog (back-compat for the
-        # GET /api/model reasoning_options map, CTR-0069 v4).
+        # GET /api/model reasoning_options map, CTR-0069 v4). A catalog
+        # `family: bare` override advertises no effort axis (PRP-0109, UDR-0087 D6).
+        if models_catalog.offering_family(model) == "bare":
+            return {"allowed": [], "default": None}
         return {"allowed": list(OPENAI_EFFORT_LEVELS), "default": OPENAI_EFFORT_DEFAULT}
 
     def build_model_options(self, model: str, selected: dict[str, Any] | None = None) -> dict[str, Any]:
+        # A catalog `family: bare` override builds a BARE request -- no reasoning,
+        # no verbosity -- for a non-reasoning gateway model (PRP-0109, UDR-0087 D6).
+        if models_catalog.offering_family(model) == "bare":
+            return {}
         # Reasoning-only policy: always send reasoning.effort (UDR-0047 D3).
         # Requested effort wins when allowed; otherwise the catalog default.
         selected = selected or {}

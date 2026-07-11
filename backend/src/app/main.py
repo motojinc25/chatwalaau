@@ -475,8 +475,11 @@ async def get_model_info():
     return {
         "models": agent_registry.available_models,
         "default_model": agent_registry.default_model,
-        "max_context_tokens": settings.get_max_context_tokens(),
-        "max_context_tokens_map": settings.max_context_tokens_map,
+        # Context-window limits are catalog-aware (CTR-0069, PRP-0109): an
+        # offering's declared context_window wins; otherwise MODEL_MAX_CONTEXT_TOKENS
+        # applies (byte-for-byte on the legacy lane).
+        "max_context_tokens": providers.get_max_context_tokens(),
+        "max_context_tokens_map": providers.max_context_tokens_map(agent_registry.available_models),
         # Per-model generation option catalog for the model-options panel
         # (CTR-0069 v4 / CTR-0102 v4, PRP-0081): model -> {options: [descriptor]}.
         # Covers reasoning effort plus, for gpt-5.x, text verbosity.

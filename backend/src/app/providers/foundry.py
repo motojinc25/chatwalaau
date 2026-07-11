@@ -58,6 +58,7 @@ from typing import Any
 
 from agent_framework_foundry import FoundryChatClient
 
+from app import models_catalog
 from app.azure_credential import get_credential
 from app.core.config import settings
 from app.providers.azure_openai import AzureOpenAIProvider, _StructuredOutputMixin
@@ -73,6 +74,22 @@ _OPENAI_REASONING_NAME = re.compile(r"^(gpt-5|o\d)", re.IGNORECASE)
 def is_openai_reasoning_deployment(model: str) -> bool:
     """True when ``model`` names an OpenAI reasoning-family deployment."""
     return bool(_OPENAI_REASONING_NAME.match(model.strip()))
+
+
+def _effective_family(model: str) -> str:
+    """Resolve the option-catalog family for a Foundry model (UDR-0085 A1 + UDR-0087 D6).
+
+    A catalog offering's declared ``family`` (PRP-0109) wins -- so a non-standard
+    Foundry deployment name (e.g. ``my-deepseek-deployment``) can declare
+    ``family: bare`` instead of relying on the name-prefix heuristic. When no
+    override is given (legacy lane or offering without a family), fall back to the
+    UDR-0085 A1 deployment-name heuristic: OpenAI reasoning family -> the
+    azure-openai catalog; every other family -> bare.
+    """
+    override = models_catalog.offering_family(model)
+    if override:
+        return override
+    return "openai-reasoning" if is_openai_reasoning_deployment(model) else "bare"
 
 
 _structured_client_cls: type | None = None
@@ -119,9 +136,18 @@ class FoundryProvider(AzureOpenAIProvider):
         # connector has no api_key parameter; AZURE_OPENAI_API_KEY never
         # applies here. Prompt caching is pass-through exactly as the azure
         # lane (automatic service-side, no request rewrite; UDR-0056 D4).
+        #
+        # Catalog lane (PRP-0109, UDR-0087): `model` is the offering id, so the
+        # connector `model=` uses the offering's model_ref (real deployment) and
+        # the project endpoint may be per-offering. Entra-only stays enforced --
+        # api_key_env is ignored for Foundry (UDR-0085 D4). Legacy lane
+        # (offering is None): byte-for-byte the prior behavior.
+        offering = models_catalog.offering_for(model)
+        model_ref = offering.model_ref if offering is not None else model
+        endpoint = (offering.endpoint if offering is not None and offering.endpoint else settings.foundry_project_endpoint) or None
         return _structured_foundry_client_class()(
-            project_endpoint=settings.foundry_project_endpoint or None,
-            model=model,
+            project_endpoint=endpoint,
+            model=model_ref,
             credential=get_credential(),
         )
 
@@ -129,8 +155,8 @@ class FoundryProvider(AzureOpenAIProvider):
         # OpenAI reasoning family -> the inherited azure-openai catalog (effort
         # + verbosity). Any other family -> EMPTY catalog: the UI renders no
         # generation control (UDR-0057 D2) and resolve_options() yields {}
-        # (UDR-0085 A1).
-        if is_openai_reasoning_deployment(model):
+        # (UDR-0085 A1, generalized by the catalog family override, UDR-0087 D6).
+        if _effective_family(model) == "openai-reasoning":
             return super().model_options_catalog(model)
         return {"options": []}
 
@@ -138,7 +164,7 @@ class FoundryProvider(AzureOpenAIProvider):
         # Derived effort-axis back-compat view (CTR-0069). A family with no
         # effort axis advertises an empty allowed list and a None default; the
         # AG-UI endpoint omits the usage `reasoning` echo for None (UDR-0085 A1).
-        if is_openai_reasoning_deployment(model):
+        if _effective_family(model) == "openai-reasoning":
             return super().reasoning_catalog(model)
         return {"allowed": [], "default": None}
 
@@ -146,7 +172,7 @@ class FoundryProvider(AzureOpenAIProvider):
         # BARE request for non-OpenAI families: no reasoning.effort /
         # reasoning.summary / text.verbosity -- each was rejected with HTTP 400
         # unsupported_parameter on the verified DeepSeek deployment (UDR-0085 A1).
-        if is_openai_reasoning_deployment(model):
+        if _effective_family(model) == "openai-reasoning":
             return super().build_model_options(model, selected)
         return {}
 

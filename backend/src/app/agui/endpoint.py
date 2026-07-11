@@ -1124,7 +1124,10 @@ async def _stream_with_reasoning(
                         usage_details = getattr(content, "usage_details", None) or {}
                         usage_value = dict(usage_details)
                         model_name = selected_model or agent_registry.default_model
-                        usage_value["max_context_tokens"] = settings.get_max_context_tokens(model_name)
+                        # Catalog-aware context window (CTR-0069, PRP-0109): an
+                        # offering's declared context_window wins; legacy lane is
+                        # byte-for-byte via settings.get_max_context_tokens.
+                        usage_value["max_context_tokens"] = providers.get_max_context_tokens(model_name)
                         usage_value["model"] = model_name
                         # Per-message generation options (PRP-0071 / PRP-0081,
                         # CTR-0030). The effort keeps its back-compat field name

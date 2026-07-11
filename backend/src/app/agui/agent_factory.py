@@ -22,7 +22,7 @@ from typing import Any
 
 from agent_framework import Agent
 
-from app import providers
+from app import models_catalog, providers
 from app.agent.approval import resolve_require_set, wrap_with_approval
 from app.agent.compaction import resolve_compaction_strategy
 from app.agent.identity import build_system_prompt
@@ -189,7 +189,11 @@ def _build_tools_and_instructions(
     # Conditionally register image generation tools (CTR-0050, PRP-0027).
     # PRP-0066 / UDR-0041: also enabled in demo mode (no deployment name
     # is required because the tools route to DemoImageProvider).
-    if settings.image_deployment_name or is_demo_mode():
+    # PRP-0109 / UDR-0087 D7: a catalog `image` offering also enables the tools
+    # (in place of IMAGE_DEPLOYMENT_NAME); the tools resolve the deployment from
+    # the offering via app.image_gen.tools._image_deployment.
+    _image_offering = models_catalog.image_config()
+    if settings.image_deployment_name or _image_offering is not None or is_demo_mode():
         from app.image_gen.tools import edit_image, generate_image
 
         tools.extend([generate_image, edit_image])
@@ -201,7 +205,7 @@ def _build_tools_and_instructions(
         )
         logger.info(
             "Image generation tools enabled (deployment=%s, demo=%s)",
-            settings.image_deployment_name or "<demo>",
+            (_image_offering.deployment if _image_offering is not None else settings.image_deployment_name) or "<demo>",
             is_demo_mode(),
         )
 
@@ -420,9 +424,20 @@ def build_devui_agent() -> Agent | None:
         models = resolve_demo_models()
         model = models[0]
     else:
-        if not settings.all_model_list:
-            return None
-        model = settings.default_model
+        # Catalog-aware (PRP-0109): on the catalog lane the default model is the
+        # catalog's default offering; on the legacy lane the "no models" gate and
+        # the default stay on settings.all_model_list / settings.default_model
+        # (byte-for-byte the pre-PRP-0109 behavior).
+        catalog = models_catalog.active_catalog()
+        if catalog is not None:
+            default = catalog.default_offering()
+            if default is None:
+                return None
+            model = default.id
+        else:
+            if not settings.all_model_list:
+                return None
+            model = settings.default_model
 
     include_mcp = not settings.devui_disable_mcp
     include_rag = not settings.devui_disable_rag

@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app import models_catalog
 from app.core.config import settings
 from app.providers.azure_openai import AzureOpenAIProvider, _structured_openai_client_class
 
@@ -66,9 +67,19 @@ class OpenAIProvider(AzureOpenAIProvider):
         # (UDR-0073 D1/D4). Wrapped in the same structured-output subclass as the
         # azure lane so the hosted web_search tool is dropped when a JSON
         # text.format is set (PRP-0082); inert otherwise.
+        #
+        # Catalog lane (PRP-0109, UDR-0087): a per-offering base_url points this
+        # same connector at a distinct OpenAI-compatible gateway, and a
+        # per-offering api_key_env supplies its key -- so two gateways coexist
+        # (the exact case the single OPENAI_BASE_URL could not express). Legacy
+        # lane (offering is None): byte-for-byte the prior behavior.
+        offering = models_catalog.offering_for(model)
+        model_ref = offering.model_ref if offering is not None else model
+        base_url = (offering.base_url if offering is not None and offering.base_url else settings.openai_base_url) or None
+        api_key = (offering.api_key() if offering is not None and offering.api_key_env else settings.openai_api_key) or None
         _log_lane("direct")
         return _structured_openai_client_class()(
-            model=model,
-            api_key=settings.openai_api_key or None,
-            base_url=settings.openai_base_url or None,
+            model=model_ref,
+            api_key=api_key,
+            base_url=base_url,
         )

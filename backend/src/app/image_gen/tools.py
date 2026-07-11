@@ -31,6 +31,7 @@ import uuid
 from openai import AzureOpenAI
 from pydantic import Field
 
+from app import models_catalog
 from app.azure_credential import get_azure_openai_kwargs
 from app.core.config import settings
 
@@ -71,15 +72,36 @@ def _get_client() -> AzureOpenAI:
     Credential resolution centralised in app.azure_credential (PRP-0058,
     UDR-0034). AZURE_OPENAI_API_KEY set -> api_key= shape; unset ->
     AzureCliCredential() via azure_ad_token_provider.
+
+    Model Offering Catalog lane (PRP-0109, UDR-0087 D7): an ``image`` offering
+    overrides the endpoint / api_version / api_key (a base_url offering builds a
+    plain OpenAI client). None -> the existing AZURE_OPENAI_ENDPOINT path
+    byte-for-byte. Image generation stays on the dedicated Images API
+    (UDR-0045 D7).
     """
     global _client
     if _client is None:
-        _client = AzureOpenAI(
-            azure_endpoint=settings.azure_openai_endpoint,
-            api_version=settings.image_api_version,
-            **get_azure_openai_kwargs(),
-        )
+        config = models_catalog.image_config()
+        if config is not None and config.base_url:
+            from openai import OpenAI
+
+            _client = OpenAI(api_key=config.api_key or settings.openai_api_key or "", base_url=config.base_url)
+        else:
+            endpoint = config.endpoint if (config is not None and config.endpoint) else settings.azure_openai_endpoint
+            api_version = config.api_version if (config is not None and config.api_version) else settings.image_api_version
+            cred_kwargs = {"api_key": config.api_key} if (config is not None and config.api_key) else get_azure_openai_kwargs()
+            _client = AzureOpenAI(
+                azure_endpoint=endpoint,
+                api_version=api_version,
+                **cred_kwargs,
+            )
     return _client
+
+
+def _image_deployment() -> str:
+    """Resolve the image deployment name, catalog-aware (PRP-0109, UDR-0087 D7)."""
+    config = models_catalog.image_config()
+    return config.deployment if config is not None else settings.image_deployment_name
 
 
 def _resolve_image_params(
@@ -145,7 +167,7 @@ def _generate_image_sync(
 
     try:
         result = client.images.generate(
-            model=settings.image_deployment_name,
+            model=_image_deployment(),
             prompt=prompt,
             n=n,
             **params,
@@ -215,7 +237,7 @@ def _edit_image_sync(
     try:
         with image_path.open("rb") as f:
             result = client.images.edit(
-                model=settings.image_deployment_name,
+                model=_image_deployment(),
                 image=f,
                 prompt=prompt,
                 n=n,

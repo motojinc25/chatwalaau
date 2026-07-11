@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app import models_catalog
+from app.core.config import settings
 from app.providers.anthropic import AnthropicProvider, anthropic_web_search_tool
 from app.providers.azure_openai import AzureOpenAIProvider, openai_web_search_tool
 from app.providers.base import Provider
@@ -34,13 +36,23 @@ PROVIDERS: dict[str, Provider] = {p.name: p for p in _ORDERED}
 
 
 def resolve_models() -> list[tuple[str, str]]:
-    """Return the merged ordered ``(model, provider_name)`` list (UDR-0045 D3 / UDR-0073 D3 / UDR-0085 D3).
+    """Return the merged ordered ``(model, provider_name)`` list.
 
-    Azure models first (preserving the pre-PRP-0069 default), then Anthropic,
-    then OpenAI, then Foundry. Ids are unique across providers (enforced by
-    Settings._validate_anthropic); a defensive de-dup keeps the first occurrence
-    if a duplicate slips through.
+    Two lanes (PRP-0109, UDR-0087):
+
+    - CATALOG lane (``model_offerings.jsonc`` present): the chat offerings, with
+      the default hoisted first (UDR-0087 D3); ``model`` is the offering id and
+      ``provider_name`` its declared provider. The legacy env namespaces are
+      ignored (D11).
+    - LEGACY lane (no catalog / DEMO_MODE): the merged per-namespace list --
+      Azure models first (preserving the pre-PRP-0069 default), then Anthropic,
+      then OpenAI, then Foundry (UDR-0045 D3 / UDR-0073 D3 / UDR-0085 D3). Ids
+      are unique across providers (enforced by Settings._validate_anthropic); a
+      defensive de-dup keeps the first occurrence if a duplicate slips through.
     """
+    catalog = models_catalog.active_catalog()
+    if catalog is not None:
+        return [(o.id, o.provider) for o in catalog.chat_offerings()]
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for provider in _ORDERED:
@@ -53,7 +65,17 @@ def resolve_models() -> list[tuple[str, str]]:
 
 
 def provider_for(model: str) -> Provider:
-    """Return the Provider that owns ``model`` (defaults to azure-openai)."""
+    """Return the Provider that owns ``model`` (defaults to azure-openai).
+
+    On the catalog lane the provider comes from the offering (PRP-0109); on the
+    legacy lane it comes from the env namespace that lists the model.
+    """
+    catalog = models_catalog.active_catalog()
+    if catalog is not None:
+        offering = catalog.get(model)
+        if offering is not None:
+            return PROVIDERS.get(offering.provider, _AZURE)
+        return _AZURE
     for candidate, name in resolve_models():
         if candidate == model:
             return PROVIDERS[name]
@@ -180,6 +202,33 @@ def background_supported_map(models: list[str]) -> dict[str, bool]:
     return {model: background_supported(model) for model in models}
 
 
+def get_max_context_tokens(model: str | None = None) -> int:
+    """Resolve max context tokens for ``model``, catalog-aware (CTR-0069, PRP-0109).
+
+    On the catalog lane an offering's declared ``context_window`` wins; otherwise
+    (and on the legacy lane) the ``MODEL_MAX_CONTEXT_TOKENS`` env config applies
+    via ``settings.get_max_context_tokens`` (byte-for-byte on the legacy lane).
+    ``model=None`` resolves to the catalog default offering when a catalog is
+    active, else the legacy default model.
+    """
+    catalog = models_catalog.active_catalog()
+    if catalog is not None:
+        resolved = model
+        if resolved is None:
+            default = catalog.default_offering()
+            resolved = default.id if default is not None else None
+        offering = catalog.get(resolved)
+        if offering is not None and offering.context_window is not None:
+            return offering.context_window
+        return settings.get_max_context_tokens(resolved)
+    return settings.get_max_context_tokens(model)
+
+
+def max_context_tokens_map(models: list[str]) -> dict[str, int]:
+    """model -> max_context_tokens for the GET /api/model selector (CTR-0069, PRP-0109)."""
+    return {model: get_max_context_tokens(model) for model in models}
+
+
 __all__ = [
     "PROVIDERS",
     "Provider",
@@ -189,6 +238,8 @@ __all__ = [
     "build_chat_client",
     "build_model_options",
     "build_structured_output",
+    "get_max_context_tokens",
+    "max_context_tokens_map",
     "merge_generation_options",
     "model_options_catalog",
     "model_options_map",

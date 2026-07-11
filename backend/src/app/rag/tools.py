@@ -44,6 +44,7 @@ def init_rag_search(chroma_dir: str, collection_name: str, top_k: int) -> None:
     new SQLite-backed client to the same directory. The cheap config values
     (collection / top_k) are still refreshed.
     """
+    from app import models_catalog
     from app.demo import is_demo_mode
 
     global _chroma_client, _openai_client, _embedding_model, _default_collection, _default_top_k
@@ -52,19 +53,37 @@ def init_rag_search(chroma_dir: str, collection_name: str, top_k: int) -> None:
     if _chroma_client is not None:
         return
     _chroma_client = chromadb.PersistentClient(path=chroma_dir)
-    _embedding_model = os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-small")
+
+    # Model Offering Catalog lane (PRP-0109, UDR-0087 D7): an ``embeddings``
+    # offering overrides the dedicated EMBEDDING_DEPLOYMENT_NAME / endpoint;
+    # None -> the existing env path (byte-for-byte). The query embedder must use
+    # the SAME model as ingest to keep vector dimensions consistent.
+    config = models_catalog.embedding_config()
+    _embedding_model = (
+        config.deployment if config is not None else os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-small")
+    )
 
     # PRP-0066: skip Azure client construction in demo mode -- DemoEmbedder
     # has no client dependency. Avoids needless credential resolution and
     # network probes on a demo host with no Azure OpenAI endpoint set.
     if not is_demo_mode():
-        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
-        if endpoint:
-            _openai_client = AzureOpenAI(
-                azure_endpoint=endpoint,
-                api_version="2024-10-21",
-                **get_azure_openai_kwargs(),
+        if config is not None and config.base_url:
+            from openai import OpenAI
+
+            _openai_client = OpenAI(
+                api_key=config.api_key or os.environ.get("OPENAI_API_KEY", ""),
+                base_url=config.base_url,
             )
+        else:
+            endpoint = (config.endpoint if config is not None and config.endpoint else os.environ.get("AZURE_OPENAI_ENDPOINT", "")) or ""
+            if endpoint:
+                api_version = config.api_version if (config is not None and config.api_version) else "2024-10-21"
+                cred_kwargs = {"api_key": config.api_key} if (config is not None and config.api_key) else get_azure_openai_kwargs()
+                _openai_client = AzureOpenAI(
+                    azure_endpoint=endpoint,
+                    api_version=api_version,
+                    **cred_kwargs,
+                )
 
     logger.info(
         "RAG search initialized (chroma_dir=%s, collection=%s, top_k=%d, embedding=%s, demo=%s)",

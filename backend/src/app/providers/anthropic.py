@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app import models_catalog
 from app.core.config import settings
 from app.providers.structured import effective_schema, forced_tool_use_fragment, strip_web_search
 
@@ -252,13 +253,29 @@ class AnthropicProvider:
         return settings.anthropic_model_list
 
     def build_chat_client(self, model: str) -> Any:
-        if settings.anthropic_hosting == "foundry":
+        # Catalog lane (PRP-0109, UDR-0087): `model` is the offering id, so the
+        # connector `model=` uses the offering's model_ref, the HOSTING is
+        # per-offering (direct Claude and Foundry-hosted Claude can coexist in one
+        # deployment -- the global ANTHROPIC_HOSTING could not express that), and
+        # base_url / api_key_env may be per-offering. Legacy lane (offering is
+        # None): every value falls back to settings, byte-for-byte the prior
+        # behavior.
+        offering = models_catalog.offering_for(model)
+        model_ref = offering.model_ref if offering is not None else model
+        hosting = offering.hosting if (offering is not None and offering.hosting) else settings.anthropic_hosting
+        offering_api_key = offering.api_key() if (offering is not None and offering.api_key_env) else None
+        offering_base_url = offering.base_url if offering is not None else None
+
+        if hosting == "foundry":
             from agent_framework.anthropic import AnthropicFoundryClient
 
-            kwargs: dict[str, Any] = {"model": model}
+            kwargs: dict[str, Any] = {"model": model_ref}
             # Endpoint: base_url (full URL) and resource (subdomain) are mutually
-            # exclusive in the SDK; base_url wins when both are set.
-            if settings.anthropic_foundry_base_url:
+            # exclusive in the SDK; base_url wins when both are set. A per-offering
+            # base_url wins over the settings endpoint.
+            if offering_base_url:
+                kwargs["base_url"] = offering_base_url
+            elif settings.anthropic_foundry_base_url:
                 kwargs["base_url"] = settings.anthropic_foundry_base_url
             elif settings.anthropic_foundry_resource:
                 kwargs["resource"] = settings.anthropic_foundry_resource
@@ -269,8 +286,9 @@ class AnthropicProvider:
             # cognitiveservices scope (UDR-0045 D4 + UDR-0034). Passing a token
             # provider as ANTHROPIC_FOUNDRY_API_KEY would be sent as the api-key
             # header and rejected with HTTP 401.
-            if settings.anthropic_foundry_api_key:
-                kwargs["api_key"] = settings.anthropic_foundry_api_key
+            api_key = offering_api_key or settings.anthropic_foundry_api_key
+            if api_key:
+                kwargs["api_key"] = api_key
                 _log_lane("foundry/api-key")
             else:
                 from app.azure_credential import get_active_lane, get_token_provider
@@ -287,11 +305,13 @@ class AnthropicProvider:
 
         from agent_framework.anthropic import AnthropicClient
 
-        kwargs = {"model": model}
-        if settings.anthropic_api_key:
-            kwargs["api_key"] = settings.anthropic_api_key
-        if settings.anthropic_base_url:
-            kwargs["base_url"] = settings.anthropic_base_url
+        kwargs = {"model": model_ref}
+        api_key = offering_api_key or settings.anthropic_api_key
+        if api_key:
+            kwargs["api_key"] = api_key
+        base_url = offering_base_url or settings.anthropic_base_url
+        if base_url:
+            kwargs["base_url"] = base_url
         _log_lane("direct")
         return _caching_client_class(AnthropicClient)(**kwargs)
 

@@ -41,8 +41,24 @@ class Settings(BaseSettings):
     # and UDR-0034 decision log for the full four-way matrix.
     azure_credential_mode: str = "cli"
 
+    # ---- Model Offering Catalog (CTR-0174, PRP-0109, UDR-0087) ----
+    # Path to the operator-owned model offering catalog (JSONC). When the file
+    # exists it is the SINGLE SOURCE OF TRUTH for model routing: each offering
+    # self-describes provider / model_ref / endpoint / hosting / auth reference /
+    # operations, and the legacy AZURE_OPENAI_MODELS / ANTHROPIC_MODELS /
+    # OPENAI_MODELS / FOUNDRY_MODELS namespaces below are IGNORED for routing
+    # (one startup warning enumerates them). When the file is ABSENT (the
+    # default, since the file is not shipped) the legacy namespaces apply
+    # byte-for-byte. Set to empty to force the legacy lane even if a file exists.
+    # DEMO_MODE always uses the legacy lane (the catalog is never consulted).
+    # Secrets are never written in the file -- an offering references an env var
+    # by NAME (api_key_env) or uses the shared Entra ID lanes (UDR-0087 D4).
+    model_offerings_file: str = "model_offerings.jsonc"
+
     # Multi-Model Configuration (CTR-0069, PRP-0035)
-    # Comma-separated deployment names. First entry is the default model.
+    # DEPRECATED by the Model Offering Catalog (PRP-0109); still fully functional
+    # until a future hard-break PRP removes it. Comma-separated deployment names.
+    # First entry is the default model.
     azure_openai_models: str = ""
 
     # Backward compatibility: old single-model variable (removed in PRP-0035).
@@ -816,7 +832,11 @@ class Settings(BaseSettings):
                 "Please migrate to AZURE_OPENAI_MODELS=%s in your .env file.",
                 self.azure_openai_models,
             )
-        if not self.all_model_list:
+        # On the Model Offering Catalog lane (PRP-0109) the legacy namespaces are
+        # intentionally empty and routing comes from model_offerings.jsonc, so
+        # suppress the "no models" warning when a catalog file is configured. The
+        # catalog's own required-chat validation (UDR-0087 D3) fails fast at load.
+        if not self.all_model_list and not (self.model_offerings_file or "").strip():
             _logger.warning(
                 "No models configured (AZURE_OPENAI_MODELS, ANTHROPIC_MODELS, OPENAI_MODELS "
                 "and FOUNDRY_MODELS are all empty); agent creation will be skipped."
