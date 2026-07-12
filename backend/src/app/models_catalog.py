@@ -198,8 +198,7 @@ def _interpolate(value: str, offering_id: str, field_name: str) -> str:
         resolved = os.environ.get(name)
         if resolved is None:
             raise CatalogError(
-                f"offering '{offering_id}': {field_name} references undefined "
-                f"environment variable ${{{name}}}"
+                f"offering '{offering_id}': {field_name} references undefined environment variable ${{{name}}}"
             )
         return resolved
 
@@ -232,8 +231,7 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
     provider = _require_str(entry, "provider", offering_id)
     if provider not in VALID_PROVIDERS:
         raise CatalogError(
-            f"offering '{offering_id}': unknown provider {provider!r} "
-            f"(expected one of {sorted(VALID_PROVIDERS)})"
+            f"offering '{offering_id}': unknown provider {provider!r} (expected one of {sorted(VALID_PROVIDERS)})"
         )
 
     model_ref = _require_str(entry, "model_ref", offering_id)
@@ -262,12 +260,12 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
 
     family = entry.get("family")
     if family is not None and family not in VALID_FAMILIES:
-        raise CatalogError(
-            f"offering '{offering_id}': family must be one of {sorted(VALID_FAMILIES)}, got {family!r}"
-        )
+        raise CatalogError(f"offering '{offering_id}': family must be one of {sorted(VALID_FAMILIES)}, got {family!r}")
 
     context_window = entry.get("context_window")
-    if context_window is not None and (not isinstance(context_window, int) or isinstance(context_window, bool) or context_window <= 0):
+    if context_window is not None and (
+        not isinstance(context_window, int) or isinstance(context_window, bool) or context_window <= 0
+    ):
         raise CatalogError(f"offering '{offering_id}': 'context_window' must be a positive integer")
 
     default = entry.get("default", False)
@@ -317,7 +315,11 @@ def _parse_auth_profiles(data: dict[str, Any]) -> dict[str, str]:
         raise CatalogError("'auth_profiles' must be an object")
     profiles: dict[str, str] = {}
     for name, spec in raw.items():
-        if not isinstance(spec, dict) or not isinstance(spec.get("api_key_env"), str) or not spec["api_key_env"].strip():
+        if (
+            not isinstance(spec, dict)
+            or not isinstance(spec.get("api_key_env"), str)
+            or not spec["api_key_env"].strip()
+        ):
             raise CatalogError(f"auth_profile '{name}': must be an object with a non-empty string 'api_key_env'")
         for secret_key in _INLINE_SECRET_KEYS:
             if secret_key in spec:
@@ -353,9 +355,7 @@ def parse_catalog(data: Any) -> Catalog:
         raise CatalogError("at least one 'chat' offering is required")
     defaults = [o for o in chat if o.default]
     if len(defaults) > 1:
-        raise CatalogError(
-            f"at most one chat offering may set default: true (got {[o.id for o in defaults]})"
-        )
+        raise CatalogError(f"at most one chat offering may set default: true (got {[o.id for o in defaults]})")
 
     # At most one embeddings / image offering (D7).
     if len([o for o in offerings if o.is_embeddings]) > 1:
@@ -437,10 +437,20 @@ def active_catalog() -> Catalog | None:
     return catalog
 
 
-def reset_for_tests() -> None:
-    """Discard the cached active catalog so the next call re-resolves it."""
+def reset_active() -> None:
+    """Discard the cached active catalog so the next resolve re-reads the file.
+
+    The public reload hook (PRP-0111 / UDR-0090 D2): the management API (CTR-0175)
+    and any hot-reload path call this BEFORE rebuilding the AgentRegistry, so a
+    freshly written ``model_offerings.jsonc`` takes effect without a restart.
+    """
     global _active
     _active = _UNSET
+
+
+def reset_for_tests() -> None:
+    """Discard the cached active catalog so the next call re-resolves it."""
+    reset_active()
 
 
 # ---- Convenience accessors used by app.providers / CTR-0069 surfaces ------
@@ -523,3 +533,207 @@ def image_config() -> ResolvedModelConfig | None:
     if catalog is None:
         return None
     return _resolved(catalog.image_offering())
+
+
+# ---- Write side + management snapshot (CTR-0174 write path, PRP-0111 / UDR-0090)
+
+
+# Canonical key order for a serialized offering (readability; UDR-0090 D3).
+_OFFERING_KEY_ORDER = (
+    "id",
+    "provider",
+    "model_ref",
+    "operations",
+    "hosting",
+    "family",
+    "endpoint",
+    "base_url",
+    "api_version",
+    "context_window",
+    "default",
+    "api_key_env",
+    "auth_profile",
+    "metadata",
+)
+
+
+def catalog_path() -> Path | None:
+    """Public accessor for the resolved catalog path (or None when unset).
+
+    Used by the management API (CTR-0175) to snapshot the file for rollback on a
+    failed hot reload (UDR-0090 D2). None means ``MODEL_OFFERINGS_FILE`` is empty.
+    """
+    return _catalog_path()
+
+
+def read_raw_catalog(path: Path | None = None) -> dict[str, Any] | None:
+    """Return the on-disk catalog as a RAW dict (no ``${VAR}`` interpolation), or None.
+
+    Unlike :func:`active_catalog` / :func:`load_catalog`, this does NOT interpolate
+    ``${VAR}`` placeholders or flatten ``auth_profile`` references -- it returns the
+    operator-authored structure verbatim so the management API (CTR-0175) and the
+    CLI (CTR-0082) can edit and re-emit it (UDR-0090 D3). Returns None when no file
+    is present (legacy lane). Raises :class:`CatalogError` on unreadable / non-JSON
+    content so callers can surface a clear message.
+    """
+    if path is None:
+        path = _catalog_path()
+    if path is None or not path.is_file():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CatalogError(f"failed to read model offerings catalog {path}: {exc}") from exc
+    try:
+        data = json.loads(_strip_jsonc_comments(raw))
+    except json.JSONDecodeError as exc:
+        raise CatalogError(f"model offerings catalog {path} is not valid JSON/JSONC: {exc}") from exc
+    if not isinstance(data, dict):
+        raise CatalogError("model offerings catalog must be a JSON object")
+    return data
+
+
+def referenced_env_names(data: dict[str, Any]) -> list[str]:
+    """Collect every environment-variable NAME a RAW catalog references (ordered, unique).
+
+    Includes ``api_key_env`` on each offering, the ``api_key_env`` of each
+    ``auth_profiles`` entry, and any ``${VAR}`` inside ``endpoint`` / ``base_url``.
+    NAMES only -- values are never read here (UDR-0090 D4).
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: Any) -> None:
+        if isinstance(name, str) and name.strip() and name not in seen:
+            seen.add(name)
+            names.append(name)
+
+    profiles = data.get("auth_profiles")
+    if isinstance(profiles, dict):
+        for spec in profiles.values():
+            if isinstance(spec, dict):
+                add(spec.get("api_key_env"))
+
+    offerings = data.get("offerings")
+    if isinstance(offerings, list):
+        for entry in offerings:
+            if not isinstance(entry, dict):
+                continue
+            add(entry.get("api_key_env"))
+            for fld in ("endpoint", "base_url"):
+                val = entry.get(fld)
+                if isinstance(val, str):
+                    for match in _VAR_RE.finditer(val):
+                        add(match.group(1))
+    return names
+
+
+def detect_env(names: list[str]) -> dict[str, bool]:
+    """Map each env-var NAME to whether it is set (non-empty) in the environment.
+
+    Booleans ONLY -- secret values are never returned (UDR-0090 D4). Drives the
+    GUI "detected / not-set" indicator (CTR-0176).
+    """
+    return {name: bool((os.environ.get(name) or "").strip()) for name in names}
+
+
+def _normalize_offering(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return an offering dict in canonical key order, dropping None / empty values."""
+    out: dict[str, Any] = {}
+    for key in _OFFERING_KEY_ORDER:
+        if key not in entry:
+            continue
+        val = entry[key]
+        if val is None:
+            continue
+        if key == "metadata" and isinstance(val, dict) and not val:
+            continue
+        out[key] = val
+    # Preserve any unknown-but-present keys (forward-compat) after the known ones.
+    for key, val in entry.items():
+        if key not in out and val is not None:
+            out[key] = val
+    return out
+
+
+def serialize_catalog(data: dict[str, Any]) -> str:
+    """Serialize a RAW catalog dict to formatted JSON (JSONC-valid; UDR-0090 D3).
+
+    Comments and hand-authored formatting are NOT preserved: the writer emits
+    clean, deterministic JSON with a stable key order. The result is valid JSONC
+    (a strict-JSON subset) and round-trips through :func:`read_raw_catalog`.
+    """
+    out: dict[str, Any] = {}
+    profiles = data.get("auth_profiles")
+    if isinstance(profiles, dict) and profiles:
+        out["auth_profiles"] = profiles
+    offerings = data.get("offerings")
+    out["offerings"] = (
+        [_normalize_offering(o) for o in offerings if isinstance(o, dict)] if isinstance(offerings, list) else []
+    )
+    return json.dumps(out, indent=2, ensure_ascii=False) + "\n"
+
+
+def write_catalog(data: dict[str, Any], path: Path | None = None) -> Path:
+    """Validate + atomically write a RAW catalog dict (UDR-0090 D2 / D3 / D8).
+
+    Validation parity with the load path: :func:`parse_catalog` enforces every
+    CTR-0174 invariant (raising :class:`CatalogError`) BEFORE any bytes are
+    written. The write is atomic (temp file + ``os.replace``) so a crash mid-write
+    cannot leave a truncated ``model_offerings.jsonc``. This does NOT reset the
+    active cache or rebuild agents -- callers do that (the API rebuilds; the
+    offline CLI does not). Returns the path written.
+    """
+    if path is None:
+        path = _catalog_path()
+    if path is None:
+        raise CatalogError("MODEL_OFFERINGS_FILE is unset; set it to a path to enable catalog management")
+    parse_catalog(data)  # validate (raises CatalogError) -- validation parity (D8)
+    serialized = serialize_catalog(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(serialized, encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def catalog_status() -> dict[str, Any]:
+    """Non-raising snapshot for the management API (CTR-0175 GET).
+
+    Returns the RAW on-disk catalog (or an empty shell), whether the catalog lane
+    is in effect, DEMO_MODE, a best-effort validity check, the resolved path, and
+    ``env_status`` booleans for every referenced variable NAME. Never raises and
+    never returns secret values (UDR-0090 D4).
+    """
+    demo = bool(settings.demo_mode)
+    path = _catalog_path()
+    present = path is not None and path.is_file()
+    data: dict[str, Any] = {"offerings": [], "auth_profiles": {}}
+    valid = True
+    errors: list[str] = []
+    if present:
+        try:
+            raw = read_raw_catalog(path)
+            if raw is not None:
+                data = raw
+        except CatalogError as exc:
+            valid = False
+            errors.append(str(exc))
+        else:
+            try:
+                parse_catalog(data)
+            except CatalogError as exc:
+                valid = False
+                errors.append(str(exc))
+    names = referenced_env_names(data) if present else []
+    return {
+        "active": bool(present and not demo),
+        "demo_mode": demo,
+        "present": bool(present),
+        "path": str(path) if path is not None else None,
+        "valid": valid,
+        "errors": errors,
+        "auth_profiles": data.get("auth_profiles", {}) if isinstance(data.get("auth_profiles"), dict) else {},
+        "offerings": data.get("offerings", []) if isinstance(data.get("offerings"), list) else [],
+        "env_status": detect_env(names),
+    }

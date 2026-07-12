@@ -395,6 +395,14 @@ from app.agent.declarative.router import register_declarative_agents
 register_declarative_agents(app, agent_registry=agent_registry)
 log_active_agent()
 
+# Model Offering Catalog Management API (CTR-0175, PRP-0111, UDR-0090) -- read/write
+# the model_offerings.jsonc catalog (FEAT-0059 / CTR-0174) at runtime. PUT / reload
+# rewrite the file (structured JSON, comments dropped) and rebuild the registry
+# atomically (CTR-0070), so a change takes effect without a restart (UDR-0090 D2).
+from app.model_offerings import register_model_offerings
+
+register_model_offerings(app, agent_registry=agent_registry)
+
 # Slash Commands API (CTR-0126, PRP-0088) -- read-only merged command inventory
 # of built-ins plus prompt-template-derived and skill-derived commands. Dispatch
 # is client-side per UDR-0066 D1, so no agent_registry is needed.

@@ -18,8 +18,14 @@ ChatWalaʻau is a **full-stack AI agent runtime** that runs entirely on localhos
 
 ```bash
 pip install chatwalaau
-chatwalaau init        # writes a .env for you to edit
+chatwalaau init        # writes a .env for you to edit (and can set up your first model)
 ```
+
+> **Setting up models:** `chatwalaau init` offers a guided first-model step, or run
+> `chatwalaau models add` any time to author `model_offerings.jsonc`. You can also manage
+> models from the in-app **Model Settings** screen (changes apply without a restart). The
+> per-provider `.env` variables below remain fully supported. See the
+> [model configuration docs](https://chatwalaau.com/docs/features/models-and-reasoning).
 
 Configure **at least one model provider** in `.env`:
 
@@ -80,7 +86,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 
 - **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, a built-in **paint canvas** (draw, paste, or load an image from your device **or the coding workspace**, attach, and re-edit), Temporary Chat, **message-by-message navigation** (previous/next step buttons that walk the conversation one message at a time), and **slash commands** (`/help`, `/prompt`, `/skill`, `/model`) with completion and dynamic arguments
 - **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow (a per-turn round counter, a configurable round budget, and "approve for this session" that stops counting against the budget and clears the other pending cards of that tool), prompt templates, and Agent Skills (enable/disable or hot-reload from disk at runtime)
-- **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, **OpenAI**, and **Microsoft Foundry** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent)
+- **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, **OpenAI**, and **Microsoft Foundry** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent); **compose the served models** (multi-provider and gateway offerings) from the CLI (`chatwalaau models add`) or a new in-app **Model Settings** screen that applies changes live without a restart
 - **Knowledge** -- RAG over your PDFs (ChromaDB), ingested by the built-in **Pipeline Jobs** engine: submit/monitor/cancel jobs from a portal, the API, or the agent, with live progress and run history (on by default)
 - **Ontology** -- design **concept models as RDF knowledge graphs** on a visual node canvas: circular entities (emoji, colors, typed properties with **key attributes**) connect from **any side** with directional, cardinality-labeled relationships, and clicking a node or edge lights up its whole in/out neighborhood; search with **SPARQL or natural language** with on-canvas highlighting, import/export standard RDF with automatic backups, and let the agent **answer from your ontologies in any chat** (opt-in via `ONTOLOGY_ENABLED`)
 - **MCP native** -- connect any MCP server (Claude Desktop-compatible config); enable/disable servers and individual tools at runtime to control token usage, or hot-reload the config (reconnect) without a restart; MCP Apps render interactive UI in chat

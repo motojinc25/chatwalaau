@@ -57,6 +57,7 @@ import {
 } from 'react'
 import { AboutDialog } from '@/components/AboutDialog'
 import { DeclarativeAgentManager } from '@/components/DeclarativeAgentManager'
+import { ModelSettingsManager } from '@/components/ModelSettingsManager'
 import { PermissionsDisabledBanner } from '@/components/PermissionsDisabledBanner'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
 import {
@@ -939,9 +940,9 @@ export function SessionSidebar({
         </section>
       </div>
 
-      {/* App info footer (CTR-0101, FEAT-0029): version label + Cron launcher + About */}
-      <div className="flex h-9 shrink-0 items-center justify-between border-t px-3">
-        <span className="text-[11px] text-muted-foreground">{auth.version ? `v${auth.version}` : ''}</span>
+      {/* App info footer (CTR-0101, FEAT-0029): tool launchers + About. The version
+          label was removed here (CTR-0176); it stays visible via the About dialog. */}
+      <div className="flex h-9 shrink-0 items-center justify-end border-t px-3">
         <div className="flex items-center gap-1">
           {/* Ontology manager launcher (CTR-0173, PRP-0105): next to Declarative Agents;
               shown only when ONTOLOGY_ENABLED (probed via GET /api/ontology/catalog). */}
@@ -1021,12 +1022,16 @@ export function SessionSidebar({
               <Brain className="h-4 w-4" />
             </Button>
           )}
+          {/* Model Settings (CTR-0176, PRP-0111): self-probing icon next to About;
+              shown when GET /api/model-offerings is reachable. */}
+          <ModelSettingsManager />
           <Button
             variant="ghost"
             size="icon"
             className="h-6 w-6 text-muted-foreground"
             onClick={() => setAboutOpen(true)}
-            aria-label="About ChatWalaʻau">
+            aria-label="About ChatWalaʻau"
+            title="About ChatWalaʻau">
             <Info className="h-4 w-4" />
           </Button>
         </div>

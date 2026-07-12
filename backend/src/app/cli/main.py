@@ -146,6 +146,14 @@ def _run_init(args: argparse.Namespace) -> None:
     print("  2. Run: az login")
     print("  3. Run: chatwalaau")
 
+    # Optional first-model setup (PRP-0111 / UDR-0090 D5): offer to author the
+    # first Model Offering Catalog entry now. Skipped with --no-model or when
+    # there is no TTY; the standalone `chatwalaau models add` works any time.
+    if not args.no_model:
+        from app.cli.models import offer_first_model_setup
+
+        offer_first_model_setup()
+
 
 def _add_client_options(parser: argparse.ArgumentParser) -> None:
     """Add global client options shared by all client subcommands."""
@@ -237,6 +245,9 @@ def main() -> None:
     init_parser = subparsers.add_parser("init", help="Initialize .env configuration from template")
     init_parser.add_argument("--output", "-o", default=".env", help="Output file path (default: .env)")
     init_parser.add_argument("--force", "-f", action="store_true", help="Overwrite existing file")
+    init_parser.add_argument(
+        "--no-model", action="store_true", help="Skip the optional first-model setup step"
+    )
 
     # hash-password subcommand (CTR-0093, PRP-0057)
     from app.cli.hash_password import register_hash_password_parser
