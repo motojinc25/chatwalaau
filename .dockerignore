@@ -75,6 +75,13 @@ backend/.ontologies/
 backend/.auth/
 backend/batch-server.log
 
+# Operator-owned Model Offering Catalog (CTR-0174): runtime state that belongs on
+# persistent storage via MODEL_OFFERINGS_FILE, NEVER baked into the image. A baked
+# copy would otherwise be served whenever MODEL_OFFERINGS_FILE is unset/relative
+# (CWD = /app/backend), hijacking the operator's configured path.
+backend/model_offerings.jsonc
+backend/model_offerings.jsonc.*.tmp
+
 # ---- IDE / OS ----
 .vscode/
 .idea/

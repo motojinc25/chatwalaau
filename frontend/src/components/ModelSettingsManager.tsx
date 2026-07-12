@@ -82,9 +82,15 @@ const AUTH_HELP =
 const FAMILY_HELP =
   "Reasoning / option catalog override. 'openai-reasoning' exposes reasoning-effort options; 'anthropic-adaptive' exposes adaptive thinking; 'bare' exposes no extra options. Leave as Auto to infer from the provider/model."
 const HOSTING_HELP = "Anthropic only. 'direct' = Anthropic API; 'foundry' = served through Azure AI Foundry."
-// The placeholder token is split so the literal is shown to operators without tripping
-// biome's noTemplateCurlyInString (this is plain UI copy, not a template literal).
-const ENDPOINT_HELP = `endpoint = Azure / Foundry resource URL. base_url = OpenAI-compatible gateway URL. Either may contain $${'{VAR}'} placeholders resolved from the server environment.`
+// The literal placeholder token is assembled from two quoted pieces so that the
+// sequence `${` never appears in any single string -- neither in the source (which
+// would trip biome's noTemplateCurlyInString) NOR in the minified output. A prior
+// template-literal trick got constant-folded by the bundler into a real template
+// literal `${VAR}`, which threw "VAR is not defined" at runtime. Quoted-string
+// concatenation folds to an inert double-quoted string instead.
+const ENDPOINT_HELP =
+  'endpoint = Azure / Foundry resource URL. base_url = OpenAI-compatible gateway URL. Either may contain $' +
+  '{VAR} placeholders resolved from the server environment.'
 const PROVIDER_HELP = 'The API surface this model is served through.'
 
 let keySeq = 0
