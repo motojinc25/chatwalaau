@@ -40,15 +40,18 @@ def resolve_models() -> list[tuple[str, str]]:
 
     Two lanes (PRP-0109, UDR-0087):
 
-    - CATALOG lane (``model_offerings.jsonc`` present): the chat offerings, with
-      the default hoisted first (UDR-0087 D3); ``model`` is the offering id and
-      ``provider_name`` its declared provider. The legacy env namespaces are
-      ignored (D11).
+    - CATALOG lane (``model_offerings.jsonc`` present): the chat offerings in the
+      AUTHORED FILE ORDER (UDR-0093 D1 -- the default is NOT hoisted); ``model`` is
+      the offering id and ``provider_name`` its declared provider. The legacy env
+      namespaces are ignored (D11).
     - LEGACY lane (no catalog / DEMO_MODE): the merged per-namespace list --
       Azure models first (preserving the pre-PRP-0069 default), then Anthropic,
       then OpenAI, then Foundry (UDR-0045 D3 / UDR-0073 D3 / UDR-0085 D3). Ids
       are unique across providers (enforced by Settings._validate_anthropic); a
       defensive de-dup keeps the first occurrence if a duplicate slips through.
+
+    This list is PRESENTATION ORDER. It no longer encodes the default model -- ask
+    :func:`resolve_default_model` for that.
     """
     catalog = models_catalog.active_catalog()
     if catalog is not None:
@@ -62,6 +65,27 @@ def resolve_models() -> list[tuple[str, str]]:
             seen.add(model)
             out.append((model, provider.name))
     return out
+
+
+def resolve_default_model() -> str:
+    """Return the model that is PRESELECTED, independent of display order.
+
+    UDR-0093 D2. Before PRP-0112 the registry took ``resolve_models()[0]``, which
+    was correct only because :meth:`Catalog.chat_offerings` hoisted the ``default``
+    offering to index 0. Now that presentation order is the operator's (UDR-0093
+    D1), position no longer implies default, and reading it positionally would
+    silently promote whichever model happens to be listed first -- a wrong-model bug
+    with no type error and no exception. So the catalog lane asks the catalog.
+
+    The LEGACY lane (no catalog file) has no ``default`` flag, so "the first model
+    of the merged namespace order" remains its definition of default, unchanged.
+    """
+    catalog = models_catalog.active_catalog()
+    if catalog is not None:
+        default = catalog.default_offering()
+        return default.id if default is not None else ""
+    models = resolve_models()
+    return models[0][0] if models else ""
 
 
 def provider_for(model: str) -> Provider:

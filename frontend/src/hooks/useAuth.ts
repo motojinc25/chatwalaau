@@ -44,6 +44,12 @@ export interface AuthState {
   hasEverAuthenticated: boolean
   /** PRP-0110 / UDR-0088 D1: a 401 was intercepted; render ReauthDialog. */
   reauthRequired: boolean
+  /**
+   * PRP-0112 / UDR-0092 D1: the last `GET /api/auth/status` could not reach the
+   * server (network error, not an HTTP status). Distinct from every auth state --
+   * "we could not reach the server" is NOT "the server says you are fine".
+   */
+  backendUnreachable: boolean
 }
 
 export type LoginResult = { ok: true } | { ok: false; reason: 'invalid-credentials' | 'disabled' | 'network' }
@@ -94,28 +100,36 @@ export function useAuth(): AuthState & AuthActions {
     loading: true,
     hasEverAuthenticated: false,
     reauthRequired: false,
+    backendUnreachable: false,
   })
 
   const refresh = useCallback(async () => {
     const payload = await fetchStatus()
     if (payload === null) {
-      // Network error -- best-effort: treat as open so the user is not
-      // trapped on /login when the backend is unreachable. The 401
-      // interceptor still catches subsequent failures.
+      // PRP-0112 / UDR-0092 D1: an unreachable backend MUST NOT be reported as an
+      // authenticated session.
+      //
+      // This branch used to synthesize `mode: 'open', authenticated: true` -- a
+      // well-intentioned lie (it kept users off /login when the backend was down)
+      // that made AuthGuard render the full chat UI against a dead server. The user
+      // then saw an empty session list, no model selector, no settings icon, and
+      // sends that silently failed, with nothing anywhere naming the real cause.
+      //
+      // The honest state is `backendUnreachable`. BootGate (CTR-0096 v3) holds the
+      // app behind a readiness indicator while this is true at boot, so the /login
+      // trap the old fallback guarded against is now unreachable by construction:
+      // an unreachable backend never gets as far as AuthGuard.
       setState((prev) => ({
         ...prev,
-        mode: 'open',
-        authenticated: true,
-        username: null,
-        demoMode: false,
-        toolApprovalMode: 'auto',
-        version: null,
+        backendUnreachable: true,
         loading: false,
       }))
       return
     }
     setState((prev) => ({
       ...prev,
+      // The server answered, so whatever we thought before, it is reachable now.
+      backendUnreachable: false,
       mode: payload.mode,
       authenticated: payload.authenticated,
       // /api/auth/status omits the username when the session is gone. Retain the
@@ -175,6 +189,8 @@ export function useAuth(): AuthState & AuthActions {
       // resumes its normal /login redirect rather than raising the dialog.
       hasEverAuthenticated: false,
       reauthRequired: false,
+      // A successful logout proves the backend answered.
+      backendUnreachable: false,
     }))
   }, [])
 

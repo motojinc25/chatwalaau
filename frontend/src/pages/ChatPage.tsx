@@ -68,6 +68,11 @@ export function ChatPage() {
     archiveSession,
     pinSession,
     refreshSessions,
+    // Session list pagination (PRP-0112 Part 4, CTR-0016 v6).
+    loadMoreSessions,
+    loadFolderSessions,
+    isLoadingMoreSessions,
+    hasMoreSessions,
   } = useSession()
 
   // Temporary Chat (CTR-0107, PRP-0076). When active, the panel runs against a
@@ -170,6 +175,10 @@ export function ChatPage() {
           onPin={pinSession}
           onCreate={handleCreate}
           onClose={() => setSidebarOpen(false)}
+          hasMoreSessions={hasMoreSessions}
+          isLoadingMoreSessions={isLoadingMoreSessions}
+          onLoadMoreSessions={loadMoreSessions}
+          onLoadFolderSessions={loadFolderSessions}
           cronAvailable={cronAvailable}
           onOpenCron={() => setCronOpen(true)}
           fileExplorerAvailable={fileExplorerAvailable}

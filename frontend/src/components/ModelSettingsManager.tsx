@@ -1,4 +1,32 @@
-import { CircleCheck, Loader2, Plus, RefreshCw, SlidersHorizontal, Trash2, TriangleAlert } from 'lucide-react'
+import {
+  closestCenter,
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import {
+  ChevronDown,
+  ChevronRight,
+  CircleCheck,
+  GripVertical,
+  Loader2,
+  Plus,
+  RefreshCw,
+  SlidersHorizontal,
+  Trash2,
+  TriangleAlert,
+} from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { Button } from '@/components/ui/button'
@@ -53,6 +81,17 @@ interface CatalogStatus {
   errors: string[]
   offerings: Offering[]
   env_status: Record<string, boolean>
+  /**
+   * Named auth references, as authored (UDR-0093 D4).
+   *
+   * This editor does not EDIT auth_profiles -- but it must still round-trip them.
+   * Before PRP-0112 the save sent only `{ offerings }`, and because the server
+   * defaults `auth_profiles` to `{}` and omits an empty block when serializing, a
+   * GUI save silently ERASED a hand-authored `auth_profiles` map -- after which any
+   * offering referencing it via `auth_profile:` failed validation on the next load.
+   * A full-document PUT surface MUST round-trip every field it does not edit.
+   */
+  auth_profiles?: Record<string, string>
 }
 
 /** Offering carrying a stable client-only key for React list rendering. */
@@ -196,6 +235,8 @@ interface OfferingCardProps {
   readOnly: boolean
   isChat: boolean
   envStatus: Record<string, boolean>
+  expanded: boolean
+  onToggleExpand: (key: string) => void
   onChange: (index: number, patch: Partial<Offering>) => void
   onRemove: (index: number) => void
   onSetDefault: (index: number) => void
@@ -207,6 +248,8 @@ function OfferingCard({
   readOnly,
   isChat,
   envStatus,
+  expanded,
+  onToggleExpand,
   onChange,
   onRemove,
   onSetDefault,
@@ -214,6 +257,16 @@ function OfferingCard({
   const ops = opsOf(offering)
   const isAnthropic = offering.provider === 'anthropic'
   const envNames = offeringEnvNames(offering)
+
+  // Drag-to-reorder (UDR-0093 D5). The array order IS the presentation order the
+  // chat model selector renders, so dragging a card here is what puts a model where
+  // the operator wants it. Reuses @dnd-kit, already a dependency (folder reordering,
+  // UDR-0046 D3) -- no new package.
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: offering._key,
+    disabled: readOnly,
+  })
+  const style = { transform: CSS.Transform.toString(transform), transition }
 
   const toggleOp = (op: Operation, checked: boolean) => {
     const set = new Set(ops)
@@ -224,11 +277,46 @@ function OfferingCard({
   }
 
   return (
-    <div data-offering-key={offering._key} className="rounded-md border bg-card p-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+    <div
+      ref={setNodeRef}
+      style={style}
+      data-offering-key={offering._key}
+      className={cn('rounded-md border bg-card p-3', isDragging && 'z-10 opacity-80')}>
+      <div className={cn('flex items-center justify-between gap-2', expanded && 'mb-2')}>
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          {!readOnly && (
+            /* @dnd-kit `attributes` injects role/aria at runtime, which Biome cannot see statically. */
+            /* biome-ignore lint/a11y/useAriaPropsSupportedByRole: role is supplied at runtime by @dnd-kit `attributes` */
+            <span
+              aria-label="Reorder offering"
+              className="flex h-6 w-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground/60 hover:text-foreground active:cursor-grabbing"
+              {...attributes}
+              {...listeners}>
+              <GripVertical className="h-3.5 w-3.5" />
+            </span>
+          )}
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 items-center gap-2 text-left"
+            aria-expanded={expanded}
+            onClick={() => onToggleExpand(offering._key)}>
+            {expanded ? (
+              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            )}
+            <span className="truncate font-mono text-[11px] text-muted-foreground">{offering.id || '(unnamed)'}</span>
+            {!expanded && (
+              <span className="truncate text-[11px] text-muted-foreground/70">
+                {offering.provider}
+                {offering.model_ref ? ` - ${offering.model_ref}` : ''}
+              </span>
+            )}
+          </button>
           {isChat && (
-            <label className="flex items-center gap-1.5 text-[11px] font-medium" title="Use as the default chat model">
+            <label
+              className="flex shrink-0 items-center gap-1.5 text-[11px] font-medium"
+              title="Use as the default chat model (does NOT affect its position in the list)">
               <input
                 type="radio"
                 name="default-chat"
@@ -239,7 +327,6 @@ function OfferingCard({
               Default
             </label>
           )}
-          <span className="font-mono text-[11px] text-muted-foreground">{offering.id || '(unnamed)'}</span>
         </div>
         {!readOnly && (
           <Button
@@ -254,144 +341,146 @@ function OfferingCard({
         )}
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <Field label="ID" hint="Unique identifier for this offering; shown in the model selector.">
-          <Input
-            className="h-8 text-xs"
-            value={offering.id}
-            disabled={readOnly}
-            placeholder="e.g. gpt-4o"
-            onChange={(e) => onChange(index, { id: e.target.value })}
-          />
-        </Field>
+      {expanded && (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <Field label="ID" hint="Unique identifier for this offering; shown in the model selector.">
+            <Input
+              className="h-8 text-xs"
+              value={offering.id}
+              disabled={readOnly}
+              placeholder="e.g. gpt-4o"
+              onChange={(e) => onChange(index, { id: e.target.value })}
+            />
+          </Field>
 
-        <Field label="Provider" hint={PROVIDER_HELP}>
-          <select
-            className={CONTROL_CLASS}
-            value={offering.provider}
-            disabled={readOnly}
-            onChange={(e) => onChange(index, { provider: e.target.value as Provider })}>
-            {PROVIDERS.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </select>
-        </Field>
+          <Field label="Provider" hint={PROVIDER_HELP}>
+            <select
+              className={CONTROL_CLASS}
+              value={offering.provider}
+              disabled={readOnly}
+              onChange={(e) => onChange(index, { provider: e.target.value as Provider })}>
+              {PROVIDERS.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </Field>
 
-        <Field label="Model ref" hint="The provider-specific model / deployment name.">
-          <Input
-            className="h-8 text-xs"
-            value={offering.model_ref}
-            disabled={readOnly}
-            placeholder="e.g. gpt-4o or claude-sonnet-4"
-            onChange={(e) => onChange(index, { model_ref: e.target.value })}
-          />
-        </Field>
+          <Field label="Model ref" hint="The provider-specific model / deployment name.">
+            <Input
+              className="h-8 text-xs"
+              value={offering.model_ref}
+              disabled={readOnly}
+              placeholder="e.g. gpt-4o or claude-sonnet-4"
+              onChange={(e) => onChange(index, { model_ref: e.target.value })}
+            />
+          </Field>
 
-        <Field label="Family" hint={FAMILY_HELP}>
-          <select
-            className={CONTROL_CLASS}
-            value={offering.family ?? ''}
-            disabled={readOnly}
-            onChange={(e) => onChange(index, { family: (e.target.value || undefined) as Family | undefined })}>
-            <option value="">Auto</option>
-            {FAMILIES.map((f) => (
-              <option key={f} value={f}>
-                {f}
-              </option>
-            ))}
-          </select>
-        </Field>
+          <Field label="Family" hint={FAMILY_HELP}>
+            <select
+              className={CONTROL_CLASS}
+              value={offering.family ?? ''}
+              disabled={readOnly}
+              onChange={(e) => onChange(index, { family: (e.target.value || undefined) as Family | undefined })}>
+              <option value="">Auto</option>
+              {FAMILIES.map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+          </Field>
 
-        <Field label="Hosting" hint={HOSTING_HELP}>
-          <select
-            className={CONTROL_CLASS}
-            value={offering.hosting ?? ''}
-            disabled={readOnly || !isAnthropic}
-            title={isAnthropic ? undefined : 'Hosting applies to the anthropic provider only'}
-            onChange={(e) => onChange(index, { hosting: (e.target.value || undefined) as Hosting | undefined })}>
-            <option value="">{isAnthropic ? '(default)' : 'anthropic only'}</option>
-            {HOSTINGS.map((h) => (
-              <option key={h} value={h}>
-                {h}
-              </option>
-            ))}
-          </select>
-        </Field>
+          <Field label="Hosting" hint={HOSTING_HELP}>
+            <select
+              className={CONTROL_CLASS}
+              value={offering.hosting ?? ''}
+              disabled={readOnly || !isAnthropic}
+              title={isAnthropic ? undefined : 'Hosting applies to the anthropic provider only'}
+              onChange={(e) => onChange(index, { hosting: (e.target.value || undefined) as Hosting | undefined })}>
+              <option value="">{isAnthropic ? '(default)' : 'anthropic only'}</option>
+              {HOSTINGS.map((h) => (
+                <option key={h} value={h}>
+                  {h}
+                </option>
+              ))}
+            </select>
+          </Field>
 
-        <Field label="Context window" hint="Positive integer token budget (optional).">
-          <Input
-            type="number"
-            min={1}
-            className="h-8 text-xs"
-            value={offering.context_window ?? ''}
-            disabled={readOnly}
-            placeholder="e.g. 128000"
-            onChange={(e) =>
-              onChange(index, { context_window: e.target.value ? Number.parseInt(e.target.value, 10) : undefined })
-            }
-          />
-        </Field>
+          <Field label="Context window" hint="Positive integer token budget (optional).">
+            <Input
+              type="number"
+              min={1}
+              className="h-8 text-xs"
+              value={offering.context_window ?? ''}
+              disabled={readOnly}
+              placeholder="e.g. 128000"
+              onChange={(e) =>
+                onChange(index, { context_window: e.target.value ? Number.parseInt(e.target.value, 10) : undefined })
+              }
+            />
+          </Field>
 
-        <Field label="Endpoint" hint={ENDPOINT_HELP}>
-          <Input
-            className="h-8 text-xs"
-            value={offering.endpoint ?? ''}
-            disabled={readOnly}
-            placeholder="Azure / Foundry resource URL"
-            onChange={(e) => onChange(index, { endpoint: e.target.value })}
-          />
-        </Field>
+          <Field label="Endpoint" hint={ENDPOINT_HELP}>
+            <Input
+              className="h-8 text-xs"
+              value={offering.endpoint ?? ''}
+              disabled={readOnly}
+              placeholder="Azure / Foundry resource URL"
+              onChange={(e) => onChange(index, { endpoint: e.target.value })}
+            />
+          </Field>
 
-        <Field label="Base URL" hint={ENDPOINT_HELP}>
-          <Input
-            className="h-8 text-xs"
-            value={offering.base_url ?? ''}
-            disabled={readOnly}
-            placeholder="OpenAI-compatible gateway URL"
-            onChange={(e) => onChange(index, { base_url: e.target.value })}
-          />
-        </Field>
+          <Field label="Base URL" hint={ENDPOINT_HELP}>
+            <Input
+              className="h-8 text-xs"
+              value={offering.base_url ?? ''}
+              disabled={readOnly}
+              placeholder="OpenAI-compatible gateway URL"
+              onChange={(e) => onChange(index, { base_url: e.target.value })}
+            />
+          </Field>
 
-        <Field label="API version" hint="Azure API version (optional).">
-          <Input
-            className="h-8 text-xs"
-            value={offering.api_version ?? ''}
-            disabled={readOnly}
-            placeholder="e.g. 2024-10-21"
-            onChange={(e) => onChange(index, { api_version: e.target.value })}
-          />
-        </Field>
+          <Field label="API version" hint="Azure API version (optional).">
+            <Input
+              className="h-8 text-xs"
+              value={offering.api_version ?? ''}
+              disabled={readOnly}
+              placeholder="e.g. 2024-10-21"
+              onChange={(e) => onChange(index, { api_version: e.target.value })}
+            />
+          </Field>
 
-        <Field label="API key env" hint={AUTH_HELP}>
-          <Input
-            className="h-8 text-xs"
-            value={offering.api_key_env ?? ''}
-            disabled={readOnly}
-            placeholder="ENV VAR NAME (never the value)"
-            onChange={(e) => onChange(index, { api_key_env: e.target.value })}
-          />
-        </Field>
+          <Field label="API key env" hint={AUTH_HELP}>
+            <Input
+              className="h-8 text-xs"
+              value={offering.api_key_env ?? ''}
+              disabled={readOnly}
+              placeholder="ENV VAR NAME (never the value)"
+              onChange={(e) => onChange(index, { api_key_env: e.target.value })}
+            />
+          </Field>
 
-        <Field label="Operations" hint="Which capabilities this offering serves.">
-          <div className="flex h-8 items-center gap-3">
-            {ALL_OPERATIONS.map((op) => (
-              <label key={op} className="flex items-center gap-1 text-[11px]">
-                <input
-                  type="checkbox"
-                  checked={ops.includes(op)}
-                  disabled={readOnly}
-                  onChange={(e) => toggleOp(op, e.target.checked)}
-                />
-                {op}
-              </label>
-            ))}
-          </div>
-        </Field>
-      </div>
+          <Field label="Operations" hint="Which capabilities this offering serves.">
+            <div className="flex h-8 items-center gap-3">
+              {ALL_OPERATIONS.map((op) => (
+                <label key={op} className="flex items-center gap-1 text-[11px]">
+                  <input
+                    type="checkbox"
+                    checked={ops.includes(op)}
+                    disabled={readOnly}
+                    onChange={(e) => toggleOp(op, e.target.checked)}
+                  />
+                  {op}
+                </label>
+              ))}
+            </div>
+          </Field>
+        </div>
+      )}
 
-      {envNames.length > 0 && (
+      {expanded && envNames.length > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
           <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Env</span>
           {envNames.map((name) => (
@@ -412,7 +501,13 @@ export function ModelSettingsManager() {
   const [saveError, setSaveError] = useState<string | null>(null)
   const [status, setStatus] = useState<CatalogStatus | null>(null)
   const [offerings, setOfferings] = useState<EditableOffering[]>([])
+  // Not edited here, only preserved across a save (UDR-0093 D4).
+  const [authProfiles, setAuthProfiles] = useState<Record<string, string>>({})
   const [baseline, setBaseline] = useState('[]')
+  // Which offering cards are expanded for editing. Collapsed by default (UDR-0093
+  // D6): dragging full-height editor cards to reorder them is unusable, and the
+  // operator asked for the order to be quick to set.
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [demoBlocked, setDemoBlocked] = useState(false)
   const [search, setSearch] = useState('')
   const [selectedItem, setSelectedItem] = useState<string>(SETTINGS_ITEMS[0].id)
@@ -426,6 +521,9 @@ export function ModelSettingsManager() {
     setDemoBlocked(data.demo_mode === true)
     const editable = (data.offerings ?? []).map((o) => ({ ...o, operations: opsOf(o), _key: nextKey() }))
     setOfferings(editable)
+    // Preserve the auth_profiles block verbatim so the next save sends it back
+    // (UDR-0093 D4). We never render or edit it -- we just refuse to destroy it.
+    setAuthProfiles(data.auth_profiles ?? {})
     setBaseline(JSON.stringify(toWireOfferings(editable)))
   }, [])
 
@@ -517,6 +615,46 @@ export function ModelSettingsManager() {
     setOfferings((prev) => prev.filter((_, i) => i !== index))
   }, [])
 
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+
+  const toggleExpanded = useCallback((key: string) => {
+    setExpandedKeys((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
+
+  /**
+   * Reorder within one operation section, mapping back onto the global array.
+   *
+   * The catalog is ONE `offerings[]` array; the Chat / Embeddings / Image sections
+   * are just a view of it derived from each offering's `operations`. So a drag
+   * inside a section must permute only the array slots that section occupies,
+   * leaving every other section's slots exactly where they were.
+   */
+  const handleOfferingDragEnd = useCallback((op: Operation, event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    setOfferings((prev) => {
+      const slots = prev.map((o, i) => ({ o, i })).filter(({ o }) => primaryOp(o) === op)
+      const items = slots.map(({ o }) => o)
+      const from = items.findIndex((o) => o._key === active.id)
+      const to = items.findIndex((o) => o._key === over.id)
+      if (from < 0 || to < 0 || from === to) return prev
+      const moved = arrayMove(items, from, to)
+      const next = [...prev]
+      slots.forEach(({ i }, k) => {
+        next[i] = moved[k]
+      })
+      return next
+    })
+  }, [])
+
   const setDefaultOffering = useCallback((index: number) => {
     setOfferings((prev) => prev.map((o, i) => (opsOf(o).includes('chat') ? { ...o, default: i === index } : o)))
   }, [])
@@ -535,6 +673,9 @@ export function ModelSettingsManager() {
       }
       return [...prev, fresh]
     })
+    // A fresh offering is blank, so it MUST open expanded -- cards are collapsed by
+    // default (UDR-0093 D6), and a collapsed blank card would be unfillable.
+    setExpandedKeys((prev) => new Set(prev).add(key))
     setScrollKey(key) // auto-scroll to the new card (#2)
   }, [])
 
@@ -622,7 +763,12 @@ export function ModelSettingsManager() {
       const res = await fetch('/api/model-offerings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ offerings: toWireOfferings(offerings) }),
+        // auth_profiles is echoed back unchanged (UDR-0093 D4). Omitting it here is
+        // what used to erase a hand-authored block.
+        body: JSON.stringify({
+          offerings: toWireOfferings(offerings),
+          ...(Object.keys(authProfiles).length > 0 ? { auth_profiles: authProfiles } : {}),
+        }),
       })
       if (res.ok) {
         adopt((await res.json()) as CatalogStatus)
@@ -642,7 +788,7 @@ export function ModelSettingsManager() {
     } finally {
       setBusy(false)
     }
-  }, [offerings, adopt])
+  }, [offerings, authProfiles, adopt])
 
   const filteredItems = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -799,7 +945,11 @@ export function ModelSettingsManager() {
 
                     <p className="rounded-md bg-muted/50 p-2 text-[11px] text-muted-foreground">{AUTH_HELP}</p>
 
-                    {/* Offering composer, grouped by operation */}
+                    {/* Offering composer, grouped by operation. Within a group the
+                        cards are drag-reorderable, and that order IS what the chat
+                        model selector renders (UDR-0093 D1/D5). Dragging is scoped to
+                        one section: a card's section is derived from its `operations`,
+                        so a cross-section drag would be meaningless. */}
                     {SECTIONS.map((section) => {
                       const items = offerings.map((o, i) => ({ o, i })).filter(({ o }) => primaryOp(o) === section.op)
                       return (
@@ -808,22 +958,41 @@ export function ModelSettingsManager() {
                             <h4 className="text-sm font-semibold">{section.title}</h4>
                             <span className="text-[11px] text-muted-foreground">{section.hint}</span>
                           </div>
+                          {section.op === 'chat' && items.length > 1 && (
+                            <p className="text-[11px] text-muted-foreground">
+                              Drag to set the order models appear in the chat selector. The default model is
+                              preselected, not moved to the top.
+                            </p>
+                          )}
                           {items.length === 0 && (
                             <p className="text-[11px] text-muted-foreground">No {section.op} offerings.</p>
                           )}
-                          {items.map(({ o, i }) => (
-                            <OfferingCard
-                              key={o._key}
-                              offering={o}
-                              index={i}
-                              readOnly={readOnly}
-                              isChat={opsOf(o).includes('chat')}
-                              envStatus={envStatus}
-                              onChange={updateOffering}
-                              onRemove={removeOffering}
-                              onSetDefault={setDefaultOffering}
-                            />
-                          ))}
+                          <DndContext
+                            sensors={sensors}
+                            collisionDetection={closestCenter}
+                            onDragEnd={(event) => handleOfferingDragEnd(section.op, event)}>
+                            <SortableContext
+                              items={items.map(({ o }) => o._key)}
+                              strategy={verticalListSortingStrategy}>
+                              <div className="space-y-2">
+                                {items.map(({ o, i }) => (
+                                  <OfferingCard
+                                    key={o._key}
+                                    offering={o}
+                                    index={i}
+                                    readOnly={readOnly}
+                                    isChat={opsOf(o).includes('chat')}
+                                    envStatus={envStatus}
+                                    expanded={expandedKeys.has(o._key)}
+                                    onToggleExpand={toggleExpanded}
+                                    onChange={updateOffering}
+                                    onRemove={removeOffering}
+                                    onSetDefault={setDefaultOffering}
+                                  />
+                                ))}
+                              </div>
+                            </SortableContext>
+                          </DndContext>
                           {!readOnly && (
                             <Button
                               variant="outline"

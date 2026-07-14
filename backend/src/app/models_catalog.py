@@ -137,20 +137,34 @@ class Catalog:
         return list(self._offerings)
 
     def chat_offerings(self) -> list[Offering]:
-        """Chat offerings with the default hoisted first (UDR-0087 D3).
+        """Chat offerings in the AUTHORED FILE ORDER (UDR-0093 D1).
 
-        The registry treats the first entry as the default model (CTR-0069),
-        so hoisting the chosen default here makes ``resolve_models()`` and
-        ``GET /api/model`` agree without a separate default channel.
+        The array order is the SSOT for presentation order: it is what the Model
+        Settings screen (CTR-0176) lets the operator drag, and it is what the chat
+        model selector (CTR-0071) renders.
+
+        Until PRP-0112 this method hoisted the ``default`` offering to index 0
+        (UDR-0087 D3, now superseded). That made position 1 permanently owned by
+        the ``default`` flag, so an operator whose most-used model was not their
+        default could never place it first -- and a drag-to-reorder feature would
+        have looked broken. ``default`` now means ONLY "which model is preselected"
+        and MUST NOT influence position.
+
+        NOTE for anyone touching this: ``AgentRegistry`` used to derive its default
+        as ``configured[0]``, which was correct only BECAUSE of the hoist. It now
+        asks ``default_offering()`` explicitly (UDR-0093 D2). Re-introducing a hoist
+        here, or reverting the registry to positional derivation, silently changes
+        which model answers.
         """
-        chat = [o for o in self._offerings if o.is_chat]
-        default = self.default_offering()
-        if default is None:
-            return chat
-        return [default, *[o for o in chat if o.id != default.id]]
+        return [o for o in self._offerings if o.is_chat]
 
     def default_offering(self) -> Offering | None:
-        """The explicit ``default: true`` chat offering, else the first chat one."""
+        """The explicit ``default: true`` chat offering, else the first chat one.
+
+        The fallback (first chat offering in file order) is UDR-0087's original
+        decision and is NOT superseded: it answers WHICH model is default, not
+        where it is displayed.
+        """
         chat = [o for o in self._offerings if o.is_chat]
         if not chat:
             return None

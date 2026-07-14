@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from app.auth import verify_api_key
 from app.core.config import settings
+from app.session import index_store
 from app.session.bundle import BundleValidationError, build_export_bundle, import_bundle
 from app.session.storage import (
     DEFAULT_FOLDER_COLOR,
@@ -27,6 +28,8 @@ from app.session.storage import (
     FOLDER_NAME_MAX_LENGTH,
     create_folder_record,
     ensure_session_defaults,
+    iter_session_files,
+    list_folder_ids,
     read_folder_index,
     read_session_json,
     reorder_folders,
@@ -76,27 +79,8 @@ def _archived_dir() -> Path:
     return Path(".archived")
 
 
-def _read_session_metadata(path: Path) -> dict[str, Any] | None:
-    """Read session file and return metadata (without full messages)."""
-    try:
-        data = ensure_session_defaults(json.loads(path.read_text(encoding="utf-8")))
-        return {
-            "thread_id": data.get("thread_id", path.stem),
-            "title": data.get("title", ""),
-            "created_at": data.get("created_at", ""),
-            "updated_at": data.get("updated_at", ""),
-            "message_count": data.get("message_count", 0),
-            "image_count": data.get("image_count", 0),
-            "pinned_at": data.get("pinned_at"),
-            "folder_id": data.get("folder_id"),
-            "source": data.get("source", "ag-ui"),
-            # Auto Session Title pending state (PRP-0077, CTR-0109): drives the
-            # sidebar spinner until the background title task finalizes.
-            "auto_title_pending": bool(data.get("auto_title_pending", False)),
-        }
-    except (json.JSONDecodeError, OSError):
-        logger.warning("Failed to read session file: %s", path)
-        return None
+# The metadata projection moved to app.session.index_store (CTR-0014 v2), which
+# owns both the parse and the mtime-reconciled cache in front of it.
 
 
 class InitSessionRequest(BaseModel):
@@ -278,9 +262,8 @@ async def delete_folder(folder_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Folder not found")
 
     for base_dir in (_sessions_dir(), _archived_dir()):
-        if not base_dir.is_dir():
-            continue
-        for file in base_dir.glob("*.json"):
+        # iter_session_files excludes the metadata index (UDR-0091 D6).
+        for file in iter_session_files(base_dir):
             try:
                 data = ensure_session_defaults(json.loads(file.read_text(encoding="utf-8")))
             except (json.JSONDecodeError, OSError) as e:
@@ -303,21 +286,71 @@ async def delete_folder(folder_id: str) -> dict[str, Any]:
     return {"status": "deleted", "folder_id": folder_id}
 
 
+#: ``folder_id`` value selecting the sessions that belong to NO folder. A bare
+#: ``folder_id=`` cannot express this (it is indistinguishable from "not supplied"),
+#: hence an explicit sentinel.
+ROOT_FOLDER_SENTINEL = "__root__"
+
+
+def sort_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order sessions: pinned first (newest pin first), then by updated_at desc.
+
+    This order is a CONTRACT (CTR-0015, UDR-0091 D1), not an implementation detail.
+    It used to be applied client-side, which only worked because the client held
+    every session; a paginated client cannot sort a page it does not have, so the
+    responsibility moved to the server -- the only participant that sees them all.
+    """
+    pinned = sorted(
+        (s for s in sessions if s.get("pinned_at")),
+        key=lambda s: s.get("pinned_at") or "",
+        reverse=True,
+    )
+    unpinned = sorted(
+        (s for s in sessions if not s.get("pinned_at")),
+        key=lambda s: s.get("updated_at") or "",
+        reverse=True,
+    )
+    return [*pinned, *unpinned]
+
+
 @router.get("")
-async def list_sessions() -> list[dict[str, Any]]:
-    """List all sessions sorted by updated_at descending."""
-    sessions_path = _sessions_dir()
-    if not sessions_path.is_dir():
-        return []
+async def list_sessions(
+    response: Response,
+    limit: int | None = None,
+    offset: int = 0,
+    folder_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """List sessions, pinned first then newest first (UDR-0091 D1).
 
-    sessions = []
-    for file in sessions_path.glob("*.json"):
-        meta = _read_session_metadata(file)
-        if meta:
-            sessions.append(meta)
+    ``limit`` / ``offset`` / ``folder_id`` are all OPTIONAL and ADDITIVE (UDR-0091
+    D3): with none supplied this returns every session as a bare JSON array, byte
+    -for-byte the pre-PRP-0112 shape, so the CLI (CTR-0082) and any operator script
+    keep working. The response stays a bare array -- the total count travels in the
+    ``X-Total-Count`` header rather than in an envelope that would break every
+    existing consumer.
 
-    sessions.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
-    return sessions
+    ``folder_id=__root__`` selects the sessions that belong to no folder (the
+    sidebar's paginated "Chats" section); ``folder_id=<id>`` selects one folder's
+    sessions, which are fetched complete and never paginated (UDR-0091 D4).
+    """
+    sessions = await index_store.list_session_metadata()
+
+    if folder_id == ROOT_FOLDER_SENTINEL:
+        known = list_folder_ids()
+        sessions = [s for s in sessions if not s.get("folder_id") or s.get("folder_id") not in known]
+    elif folder_id is not None:
+        sessions = [s for s in sessions if s.get("folder_id") == folder_id]
+
+    sessions = sort_sessions(sessions)
+
+    # Total BEFORE slicing, so the client knows whether more pages exist.
+    response.headers["X-Total-Count"] = str(len(sessions))
+
+    if limit is None:
+        return sessions
+
+    start = max(0, offset)
+    return sessions[start : start + max(0, limit)]
 
 
 @router.get("/search")
@@ -327,14 +360,16 @@ async def search_sessions(q: str = "") -> list[dict[str, Any]]:
     Returns matching sessions with a snippet of the first matching content.
     Must be registered before /{thread_id} to avoid path parameter capture.
     """
-    sessions_path = _sessions_dir()
-    if not sessions_path.is_dir() or not q.strip():
+    if not q.strip():
         return []
 
     lower_q = q.strip().lower()
     results: list[dict[str, Any]] = []
 
-    for file in sessions_path.glob("*.json"):
+    # Search stays a full scan (UDR-0091 D7): it must read message bodies by
+    # definition, so the metadata index cannot serve it. It only needs the shared
+    # iterator so the index file itself is not searched as if it were a chat.
+    for file in iter_session_files(_sessions_dir()):
         try:
             data = ensure_session_defaults(json.loads(file.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, OSError):

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { formatSessionDateTime } from '@/lib/datetime'
 import type { SessionSummary } from '@/types/chat'
 
 interface SearchResult extends SessionSummary {
@@ -30,19 +31,6 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
       {text.slice(idx + query.length)}
     </>
   )
-}
-
-function formatDateTime(iso: string): string {
-  if (!iso) return ''
-  const date = new Date(iso)
-  return date.toLocaleString(undefined, {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
 }
 
 export function SessionSearchDialog({ sessions, open, onOpenChange, onSelect }: SessionSearchDialogProps) {
@@ -149,7 +137,7 @@ export function SessionSearchDialog({ sessions, open, onOpenChange, onSelect }: 
                     <HighlightedText text={session.title || 'New session'} query={query} />
                   </span>
                   <span className="ml-2 flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                    {formatDateTime(session.updated_at)}
+                    {formatSessionDateTime(session.updated_at)}
                     {session.message_count > 0 && ` · ${session.message_count} msgs`}
                     {session.image_count > 0 && ` · ${session.image_count} imgs`}
                     {session.source === 'openai-api' && (

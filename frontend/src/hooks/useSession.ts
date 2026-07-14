@@ -17,6 +17,16 @@ import {
 
 const STORAGE_KEY = 'chatwalaau-thread-id'
 
+// Session list pagination (CTR-0015, PRP-0112 Part 4 / UDR-0091 D3+D13).
+// A frontend constant on purpose: no operator decision depends on the page size,
+// so it is deliberately NOT an environment variable.
+const SESSION_PAGE_SIZE = 30
+
+// Selects the sessions that belong to no folder. A bare empty `folder_id=` cannot
+// express this (indistinguishable from "not supplied"), hence the sentinel; it
+// matches ROOT_FOLDER_SENTINEL in app/session/router.py.
+const ROOT_FOLDER = '__root__'
+
 // PRP-0055 follow-up: keep the sidebar open after a session pick on
 // desktop viewports. On narrow viewports the sidebar is an overlay
 // covering most of the chat area, so auto-close is still the right
@@ -184,22 +194,119 @@ export function useSession() {
   const [wsConnected, setWsConnected] = useState(false)
   const abortRef = useRef<(() => void) | null>(null)
   const switchedRef = useRef(false)
+  // Session list pagination state (PRP-0112 Part 4). Counts live in refs because
+  // the loaders read them without wanting to be re-created on every change.
+  const rootLoadedCountRef = useRef(0)
+  const loadingMoreRef = useRef(false)
+  const loadedFolderIdsRef = useRef<Set<string>>(new Set())
+  const [rootTotal, setRootTotal] = useState(0)
+  const [isLoadingMoreSessions, setIsLoadingMoreSessions] = useState(false)
 
   // Persist threadId to localStorage and sync URL
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, threadId)
   }, [threadId])
 
+  // ---- Session list loading (CTR-0015 / CTR-0016 v6, PRP-0112 Part 4) --------
+  //
+  // The list is now loaded INCREMENTALLY (UDR-0091 D3). `sessions` holds the
+  // union of what has actually been loaded: the root ("Chats") pages fetched so
+  // far, plus the sessions of every folder the user has expanded (UDR-0091 D4 --
+  // a folder is fetched complete, never paginated, because a half-loaded folder
+  // would silently misrepresent its contents).
+  //
+  // The server returns each list ALREADY SORTED (pinned first, then updated_at
+  // desc -- UDR-0091 D1). Nothing here re-sorts: a client holding one page cannot
+  // produce a globally correct order, which is exactly why the responsibility
+  // moved to the server.
+
+  /** Replace/merge a freshly fetched slice into the union, keyed by thread_id. */
+  const mergeSessions = useCallback((incoming: SessionSummary[], replaceScope?: (s: SessionSummary) => boolean) => {
+    setSessions((prev) => {
+      const kept = replaceScope ? prev.filter((s) => !replaceScope(s)) : prev
+      const byId = new Map(kept.map((s) => [s.thread_id, s]))
+      for (const s of incoming) byId.set(s.thread_id, s)
+      return [...byId.values()]
+    })
+  }, [])
+
+  const fetchSessionPage = useCallback(async (params: { limit?: number; offset?: number; folderId?: string }) => {
+    const qs = new URLSearchParams()
+    if (params.limit !== undefined) qs.set('limit', String(params.limit))
+    if (params.offset !== undefined) qs.set('offset', String(params.offset))
+    if (params.folderId !== undefined) qs.set('folder_id', params.folderId)
+    const query = qs.toString()
+    const res = await fetch(`/api/sessions${query ? `?${query}` : ''}`)
+    if (!res.ok) return null
+    const items = normalizeSessionSummaries(await res.json())
+    // Total count rides in a header so the response body stays a bare array
+    // (UDR-0091 D3) and no existing consumer breaks.
+    const totalRaw = res.headers.get('X-Total-Count')
+    const total = totalRaw === null ? items.length : Number.parseInt(totalRaw, 10)
+    return { items, total: Number.isNaN(total) ? items.length : total }
+  }, [])
+
+  /**
+   * Reload the root ("Chats") list from the top.
+   *
+   * Refetches as many root sessions as are currently loaded (never fewer than one
+   * page), so a refresh triggered by a rename / pin / delete does not yank a user
+   * who has scrolled deep back up to page one.
+   */
   const refreshSessions = useCallback(async () => {
     try {
-      const res = await fetch('/api/sessions')
-      if (res.ok) {
-        setSessions(normalizeSessionSummaries(await res.json()))
-      }
+      const loadedRoot = rootLoadedCountRef.current
+      const limit = Math.max(SESSION_PAGE_SIZE, loadedRoot)
+      const page = await fetchSessionPage({ limit, offset: 0, folderId: ROOT_FOLDER })
+      if (!page) return
+      rootLoadedCountRef.current = page.items.length
+      setRootTotal(page.total)
+      // Replace the whole root scope; folder-scoped entries are left untouched.
+      mergeSessions(page.items, (s) => !s.folder_id)
     } catch {
       // ignore fetch errors
     }
-  }, [])
+  }, [fetchSessionPage, mergeSessions])
+
+  /** Append the next page of root chats (infinite scroll). */
+  const loadMoreSessions = useCallback(async () => {
+    if (loadingMoreRef.current) return
+    loadingMoreRef.current = true
+    setIsLoadingMoreSessions(true)
+    try {
+      const page = await fetchSessionPage({
+        limit: SESSION_PAGE_SIZE,
+        offset: rootLoadedCountRef.current,
+        folderId: ROOT_FOLDER,
+      })
+      if (page) {
+        rootLoadedCountRef.current += page.items.length
+        setRootTotal(page.total)
+        mergeSessions(page.items)
+      }
+    } catch {
+      // ignore fetch errors
+    } finally {
+      loadingMoreRef.current = false
+      setIsLoadingMoreSessions(false)
+    }
+  }, [fetchSessionPage, mergeSessions])
+
+  /** Fetch one folder's sessions COMPLETE (UDR-0091 D4); called when it expands. */
+  const loadFolderSessions = useCallback(
+    async (folderId: string) => {
+      if (loadedFolderIdsRef.current.has(folderId)) return
+      loadedFolderIdsRef.current.add(folderId)
+      try {
+        const page = await fetchSessionPage({ folderId })
+        if (page) mergeSessions(page.items, (s) => s.folder_id === folderId)
+        else loadedFolderIdsRef.current.delete(folderId)
+      } catch {
+        loadedFolderIdsRef.current.delete(folderId)
+      }
+    },
+    [fetchSessionPage, mergeSessions],
+  )
 
   const refreshFolders = useCallback(async () => {
     try {
@@ -728,5 +835,11 @@ export function useSession() {
     refreshSessions,
     refreshFolders,
     registerAbort,
+    // Session list pagination (PRP-0112 Part 4, CTR-0016 v6).
+    loadMoreSessions,
+    loadFolderSessions,
+    isLoadingMoreSessions,
+    /** More root chats exist on the server than are currently loaded. */
+    hasMoreSessions: sessions.filter((s) => !s.folder_id).length < rootTotal,
   }
 }

@@ -231,7 +231,14 @@ class AgentRegistry:
         spec = active_spec()
         resolved = providers.resolve_models()
         configured = [model for model, _ in resolved]
-        default = configured[0] if configured else ""
+        # UDR-0093 D2: the default is asked for EXPLICITLY, never inferred from
+        # position. `configured[0]` was correct only while Catalog.chat_offerings()
+        # hoisted the default to index 0 (UDR-0087 D3, superseded by PRP-0112);
+        # presentation order is now the operator's, so reading it positionally would
+        # silently promote whichever model they happened to drag to the top.
+        default = providers.resolve_default_model()
+        if default not in configured:
+            default = configured[0] if configured else ""
         if spec.model_filter:
             preferred = next((m for m in spec.model_filter if m in configured), None)
             if preferred:

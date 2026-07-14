@@ -57,6 +57,26 @@ def session_path(thread_id: str) -> Path:
     return sessions_dir() / f"{thread_id}.json"
 
 
+# The session metadata index (CTR-0014 v2, UDR-0091 D2) lives INSIDE the session
+# directory, so a naive ``glob("*.json")`` would pick it up and try to parse it as
+# a chat. UDR-0091 D6 requires every scan of the session directory to exclude it by
+# exact name -- hence the single shared iterator below, which is the only sanctioned
+# way to enumerate session files.
+SESSION_INDEX_FILENAME = "index.json"
+
+
+def iter_session_files(base_dir: Path) -> list[Path]:
+    """Enumerate the session JSON files in ``base_dir``.
+
+    Excludes the metadata index (UDR-0091 D6). Every caller that scans a session
+    directory MUST go through this helper; a bare ``glob("*.json")`` would surface
+    the index as a broken chat.
+    """
+    if not base_dir.is_dir():
+        return []
+    return [path for path in base_dir.glob("*.json") if path.name != SESSION_INDEX_FILENAME]
+
+
 def folders_dir() -> Path:
     """Return the folder registry directory under the session root."""
     return sessions_dir() / "folders"

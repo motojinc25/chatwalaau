@@ -28,9 +28,11 @@ import {
   FolderPlus,
   FolderTree,
   GripVertical,
+  Image as ImageIcon,
   Info,
   Loader2,
   LogOut,
+  MessageSquare,
   MoreHorizontal,
   Network,
   Palette,
@@ -48,6 +50,7 @@ import {
 import {
   type ChangeEvent,
   type KeyboardEvent,
+  memo,
   type ReactNode,
   useCallback,
   useEffect,
@@ -90,6 +93,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { useAuth } from '@/hooks/useAuth'
+import { formatSessionDateTime } from '@/lib/datetime'
 import { cn } from '@/lib/utils'
 import {
   DEFAULT_FOLDER_COLOR,
@@ -123,6 +127,17 @@ interface SessionSidebarProps {
   onPin: (threadId: string, pinned: boolean) => void
   onCreate: () => void
   onClose: () => void
+  /**
+   * Session list pagination (CTR-0016 v6, PRP-0112 Part 4 / UDR-0091 D3+D4).
+   * `sessions` holds only what has been LOADED: the root pages fetched so far plus
+   * the sessions of every expanded folder. It arrives already sorted by the server
+   * (pinned first, then newest) and MUST NOT be re-sorted here.
+   */
+  hasMoreSessions: boolean
+  isLoadingMoreSessions: boolean
+  onLoadMoreSessions: () => void
+  /** Fetch a folder's sessions COMPLETE when it is expanded (never paginated). */
+  onLoadFolderSessions: (folderId: string) => void
   /** Cron scheduler launcher (CTR-0135, PRP-0089): footer icon next to App Info. */
   cronAvailable?: boolean
   onOpenCron?: () => void
@@ -144,6 +159,30 @@ interface SessionSidebarProps {
 // Per-device open/closed state (UDR-0046 D4): the set of explicitly-expanded
 // folder ids is stored here; unknown / new folders default collapsed.
 const FOLDER_EXPANDED_STORAGE_KEY = 'chatwalaau:folders-expanded'
+
+// Section-level collapse (CTR-0016 v5, UDR-0091 D8). This is a DIFFERENT LAYER
+// from FOLDER_EXPANDED_STORAGE_KEY above: that one records *which folders are
+// open*, this one records *whether the Folders / Chats sections themselves are
+// open*. Overloading one key for both would make "collapse the Folders section"
+// and "close every folder" the same stored fact, which they are not -- hence the
+// separate key. Absent value => both sections expanded (the pre-PRP-0112 look).
+const SECTION_COLLAPSED_STORAGE_KEY = 'chatwalaau:sidebar-sections'
+
+type SidebarSection = 'folders' | 'chats'
+
+function loadCollapsedSections(): Set<SidebarSection> {
+  try {
+    const raw = localStorage.getItem(SECTION_COLLAPSED_STORAGE_KEY)
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.filter((s): s is SidebarSection => s === 'folders' || s === 'chats'))
+    }
+  } catch {
+    // Corrupt value -> fall back to the default (both expanded).
+  }
+  return new Set()
+}
 
 // Palette token -> theme-controlled classes (UDR-0046 D2). Written as literal
 // strings so the Tailwind scanner includes them. `neutral` is the uncolored
@@ -174,35 +213,297 @@ function loadExpandedFolderIds(): Set<string> {
   return new Set()
 }
 
-function formatDateTime(iso: string): string {
-  if (!iso) return ''
-  const date = new Date(iso)
-  return date.toLocaleString(undefined, {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
+// NOTE: there is deliberately NO client-side sort here any more (UDR-0091 D1).
+// The server returns sessions already ordered -- pinned first, then updated_at
+// descending -- because a paginated client only holds a page and cannot produce a
+// globally correct order from it (a pinned but old chat would sit on page 4 and
+// never reach the top). Re-sorting here would silently reintroduce that bug.
+
+/**
+ * The meta line: timestamp + message/image counts (CTR-0016 v5, UDR-0091 D10).
+ *
+ * The counts render as ICONS, not the words "msgs" / "imgs", and they live inside
+ * the SAME <p> as the timestamp. The row height with counts MUST equal the row
+ * height without them -- so no wrapper, no badge, no extra line. Each pair carries
+ * an accessible name because the word it replaced is gone.
+ */
+function SessionMeta({ session }: { session: SessionSummary }) {
+  return (
+    <>
+      <span className="truncate">{formatSessionDateTime(session.updated_at)}</span>
+      {session.message_count > 0 && (
+        <span className="flex shrink-0 items-center gap-0.5" title={`${session.message_count} messages`}>
+          <MessageSquare className="h-3 w-3" aria-hidden="true" />
+          {session.message_count}
+          {/* The word the icon replaced still reaches a screen reader, so the count
+              is never announced as a bare number (UDR-0091 D10). */}
+          <span className="sr-only">messages</span>
+        </span>
+      )}
+      {session.image_count > 0 && (
+        <span className="flex shrink-0 items-center gap-0.5" title={`${session.image_count} images`}>
+          <ImageIcon className="h-3 w-3" aria-hidden="true" />
+          {session.image_count}
+          <span className="sr-only">images</span>
+        </span>
+      )}
+    </>
+  )
 }
 
-function sortSessions(sessions: SessionSummary[]): SessionSummary[] {
-  const pinned = sessions
-    .filter((s) => s.pinned_at)
-    .sort((a, b) => ((a.pinned_at ?? '') < (b.pinned_at ?? '') ? -1 : 1))
-  const unpinned = sessions.filter((s) => !s.pinned_at).sort((a, b) => (a.updated_at > b.updated_at ? -1 : 1))
-  return [...pinned, ...unpinned]
+/**
+ * The rename editor, handed ONLY to the row currently being renamed.
+ *
+ * This is the crux of the memoization (UDR-0091 D5). `renameValue` changes on
+ * every keystroke, so if it -- or any callback closing over it -- were passed to
+ * every row, React.memo would compare unequal props on all N rows and re-render
+ * the whole list per character (the pre-PRP-0112 behavior: `renderSessionRow`'s
+ * useCallback dep array contained `renameValue`). By confining the churning props
+ * to a single object given to exactly one row, every other row sees `rename ===
+ * undefined` on both renders and bails out.
+ */
+interface RenameEditor {
+  value: string
+  inputRef: React.RefObject<HTMLInputElement | null>
+  onChange: (value: string) => void
+  onKeyDown: (event: KeyboardEvent<HTMLInputElement>) => void
+  onCommit: () => void
 }
 
-function getSessionMeta(session: SessionSummary): string {
-  return [
-    formatDateTime(session.updated_at),
-    session.message_count > 0 ? `${session.message_count} msgs` : '',
-    session.image_count > 0 ? `${session.image_count} imgs` : '',
-  ]
-    .filter(Boolean)
-    .join(' · ')
+interface SessionRowProps {
+  session: SessionSummary
+  nested: boolean
+  isActive: boolean
+  isMoving: boolean
+  folders: SessionFolder[]
+  /** Present only while THIS row is being renamed (see RenameEditor). */
+  rename?: RenameEditor
+  onSwitch: (threadId: string) => void
+  onPin: (threadId: string, pinned: boolean) => void
+  onArchive: (threadId: string) => void
+  onExport: (threadId: string) => void
+  onMoveToFolder: (threadId: string, folderId: string | null) => Promise<boolean>
+  onStartRename: (session: SessionSummary) => void
+  onRequestDelete: (session: SessionSummary) => void
+  onDragStart: (threadId: string) => void
+  onDragEnd: () => void
+}
+
+const SessionRow = memo(function SessionRow({
+  session,
+  nested,
+  isActive,
+  isMoving,
+  folders,
+  rename,
+  onSwitch,
+  onPin,
+  onArchive,
+  onExport,
+  onMoveToFolder,
+  onStartRename,
+  onRequestDelete,
+  onDragStart,
+  onDragEnd,
+}: SessionRowProps) {
+  const isRenaming = rename !== undefined
+  const availableFolders = folders.filter((folder) => folder.id !== session.folder_id)
+
+  return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop requires drag events on the row container
+    <div
+      className={cn(
+        // PRP-0055 follow-up: transparent baseline left-border on every row keeps
+        // layout stable; the active row swaps it to primary for a clear affordance,
+        // combined with the stronger bg-accent fill.
+        // PRP-0112 (UDR-0091 D9): py-2.5 -> py-1 and leading-tight on both text lines
+        // takes the row from ~57px to ~41px (measured in a real browser; py-1.5 left
+        // it at 45.5px, over the 42px budget). The row stays TWO lines -- the density
+        // is bought from padding, never by dropping the timestamp.
+        'group flex w-full items-start gap-2 border-b border-l-2 border-l-transparent border-border/30 px-3 py-1 transition-colors hover:bg-muted/50',
+        nested && 'border-b-0 bg-background/50 pl-9',
+        isActive && 'border-l-primary bg-accent hover:bg-accent',
+      )}
+      draggable={!isRenaming}
+      onDragStart={(event) => {
+        if (isRenaming) {
+          event.preventDefault()
+          return
+        }
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData('text/plain', session.thread_id)
+        onDragStart(session.thread_id)
+      }}
+      onDragEnd={onDragEnd}>
+      <button
+        type="button"
+        className="min-w-0 flex-1 cursor-pointer text-left"
+        onClick={() => !isRenaming && onSwitch(session.thread_id)}>
+        {rename ? (
+          <Input
+            ref={rename.inputRef}
+            type="text"
+            value={rename.value}
+            onChange={(e) => rename.onChange(e.target.value)}
+            onKeyDown={rename.onKeyDown}
+            onBlur={rename.onCommit}
+            className="h-8"
+          />
+        ) : (
+          <>
+            <p className="flex items-center gap-1 truncate text-sm leading-tight">
+              {session.pinned_at && <Pin className="h-3 w-3 shrink-0 text-muted-foreground" />}
+              <span className="truncate">{session.title || 'New session'}</span>
+              {/* Auto Session Title in progress (PRP-0077, CTR-0109): a small
+                  spinner until the background title task finalizes (cleared by
+                  the CTR-0110 push). */}
+              {session.auto_title_pending && (
+                <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
+              )}
+              {isMoving && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
+            </p>
+            <p className="flex items-center gap-1.5 text-xs leading-tight text-muted-foreground">
+              <SessionMeta session={session} />
+              {session.source === 'openai-api' && (
+                <span className="inline-block shrink-0 rounded bg-blue-100 px-1 py-0.5 text-[10px] font-medium leading-none text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                  API
+                </span>
+              )}
+              {session.source === 'teams' && (
+                <span className="inline-block shrink-0 rounded bg-indigo-100 px-1 py-0.5 text-[10px] font-medium leading-none text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300">
+                  Teams
+                </span>
+              )}
+            </p>
+          </>
+        )}
+      </button>
+      {!isRenaming && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            {/* h-6 w-6 is kept deliberately: the row got shorter (UDR-0091 D9) but the
+                menu must retain its 24px hit target. */}
+            {/* biome-ignore lint/a11y/useSemanticElements: nested interactive, span is intentional */}
+            <span
+              role="button"
+              tabIndex={-1}
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              aria-label="Session options">
+              <MoreHorizontal className="h-3 w-3" />
+            </span>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuItem onClick={() => onPin(session.thread_id, !session.pinned_at)}>
+              {session.pinned_at ? (
+                <>
+                  <PinOff className="mr-2 h-3.5 w-3.5" />
+                  Unpin
+                </>
+              ) : (
+                <>
+                  <Pin className="mr-2 h-3.5 w-3.5" />
+                  Pin
+                </>
+              )}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onStartRename(session)}>
+              <Pencil className="mr-2 h-3.5 w-3.5" />
+              Rename
+            </DropdownMenuItem>
+            {folders.length > 0 ? (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <FolderPlus className="mr-2 h-3.5 w-3.5" />
+                  Move to folder
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="w-44">
+                  {availableFolders.length > 0 ? (
+                    availableFolders.map((folder) => (
+                      <DropdownMenuItem
+                        key={folder.id}
+                        disabled={isMoving}
+                        onClick={() => void onMoveToFolder(session.thread_id, folder.id)}>
+                        <Folder
+                          className={cn(
+                            'mr-2 h-3.5 w-3.5',
+                            (FOLDER_COLOR_CLASSES[folder.color] ?? FOLDER_COLOR_CLASSES[DEFAULT_FOLDER_COLOR]).icon,
+                          )}
+                        />
+                        {folder.name}
+                      </DropdownMenuItem>
+                    ))
+                  ) : (
+                    <DropdownMenuItem disabled>No other folders</DropdownMenuItem>
+                  )}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            ) : (
+              <DropdownMenuItem disabled>
+                <FolderPlus className="mr-2 h-3.5 w-3.5" />
+                No folders yet
+              </DropdownMenuItem>
+            )}
+            {session.folder_id && (
+              <DropdownMenuItem disabled={isMoving} onClick={() => void onMoveToFolder(session.thread_id, null)}>
+                <FolderOpen className="mr-2 h-3.5 w-3.5" />
+                Remove from folder
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem onClick={() => onArchive(session.thread_id)}>
+              <Archive className="mr-2 h-3.5 w-3.5" />
+              Archive
+            </DropdownMenuItem>
+            {/* Session Export (PRP-0084, CTR-0016 v4): download this chat as
+                a self-contained ZIP bundle (session JSON + its uploads). */}
+            <DropdownMenuItem onClick={() => onExport(session.thread_id)}>
+              <Download className="mr-2 h-3.5 w-3.5" />
+              Export
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-destructive focus:text-destructive"
+              onClick={() => onRequestDelete(session)}>
+              <Trash2 className="mr-2 h-3.5 w-3.5" />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+    </div>
+  )
+})
+
+/** Collapsible section header for the Folders / Chats sections (UDR-0091 D8). */
+function SectionHeader({
+  icon,
+  label,
+  collapsed,
+  onToggle,
+  children,
+}: {
+  icon: ReactNode
+  label: string
+  collapsed: boolean
+  onToggle: () => void
+  children?: ReactNode
+}) {
+  return (
+    <div className="flex items-center justify-between px-3 pb-1">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        className="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground transition-colors hover:text-foreground">
+        {collapsed ? (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+        ) : (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+        )}
+        {icon}
+        {label}
+      </button>
+      {children}
+    </div>
+  )
 }
 
 interface PaletteSwatchesProps {
@@ -385,6 +686,10 @@ export function SessionSidebar({
   onPin,
   onCreate,
   onClose,
+  hasMoreSessions,
+  isLoadingMoreSessions,
+  onLoadMoreSessions,
+  onLoadFolderSessions,
   cronAvailable,
   onOpenCron,
   fileExplorerAvailable,
@@ -397,7 +702,6 @@ export function SessionSidebar({
   ontologyAvailable,
   onOpenOntology,
 }: SessionSidebarProps) {
-  const sortedSessions = useMemo(() => sortSessions(sessions), [sessions])
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
   const [deleteFolderTarget, setDeleteFolderTarget] = useState<SessionFolder | null>(null)
   const [colorTarget, setColorTarget] = useState<SessionFolder | null>(null)
@@ -411,8 +715,16 @@ export function SessionSidebar({
   // UDR-0046 D4: default collapsed. We track the explicitly-EXPANDED set, so a
   // new / unknown folder defaults collapsed without an extra write.
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(loadExpandedFolderIds)
+  // Section-level collapse (UDR-0091 D8): a SEPARATE layer from the per-folder set
+  // above, under its own storage key. We track the explicitly-COLLAPSED sections so
+  // an absent preference means "both expanded" -- the pre-PRP-0112 look.
+  const [collapsedSections, setCollapsedSections] = useState<Set<SidebarSection>>(loadCollapsedSections)
   const [draggedSessionId, setDraggedSessionId] = useState<string | null>(null)
   const [dropFolderId, setDropFolderId] = useState<string | null>(null)
+  // Infinite-scroll sentinel for the Chats section (UDR-0091 D3/D5). Pagination
+  // bounds the DOM to what the user actually scrolled to, so no virtualization
+  // dependency is needed (UDR-0050's deferral upheld).
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null)
   const renameRef = useRef<HTMLInputElement>(null)
   const folderNameRef = useRef<HTMLInputElement>(null)
   // Session Import file picker (PRP-0084, CTR-0016 v4).
@@ -457,9 +769,12 @@ export function SessionSidebar({
   }, [auth])
 
   const folderMap = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders])
+  // No sort here (UDR-0091 D1): `sessions` arrives from the server already ordered
+  // pinned-first then newest-first. Re-sorting a partially-loaded list would be
+  // wrong anyway -- a pinned but old chat may not be on the loaded page.
   const rootSessions = useMemo(
-    () => sortedSessions.filter((session) => !session.folder_id || !folderMap.has(session.folder_id)),
-    [folderMap, sortedSessions],
+    () => sessions.filter((session) => !session.folder_id || !folderMap.has(session.folder_id)),
+    [folderMap, sessions],
   )
   // Folders keep their persisted manual order (UDR-0046 D1/D6); `folders`
   // already arrives sorted by `order` ascending from CTR-0015.
@@ -467,9 +782,9 @@ export function SessionSidebar({
     () =>
       folders.map((folder) => ({
         folder,
-        sessions: sortedSessions.filter((session) => session.folder_id === folder.id),
+        sessions: sessions.filter((session) => session.folder_id === folder.id),
       })),
-    [folders, sortedSessions],
+    [folders, sessions],
   )
   const deleteFolderSessionCount = useMemo(
     () => folderGroups.find((group) => group.folder.id === deleteFolderTarget?.id)?.sessions.length ?? 0,
@@ -498,6 +813,48 @@ export function SessionSidebar({
       // ignore storage failures (private mode / quota)
     }
   }, [expandedFolderIds])
+
+  // Persist the collapsed SECTION set under its own key (UDR-0091 D8).
+  useEffect(() => {
+    try {
+      localStorage.setItem(SECTION_COLLAPSED_STORAGE_KEY, JSON.stringify([...collapsedSections]))
+    } catch {
+      // ignore storage failures (private mode / quota)
+    }
+  }, [collapsedSections])
+
+  // An expanded folder is fetched COMPLETE (UDR-0091 D4). Runs for folders already
+  // expanded from a previous session too, since the set is restored from
+  // localStorage; onLoadFolderSessions de-dupes so repeats are free.
+  useEffect(() => {
+    for (const folderId of expandedFolderIds) {
+      if (folderMap.has(folderId)) onLoadFolderSessions(folderId)
+    }
+  }, [expandedFolderIds, folderMap, onLoadFolderSessions])
+
+  // Infinite scroll for the Chats section (UDR-0091 D3): append the next page when
+  // the sentinel below the last row scrolls into view.
+  useEffect(() => {
+    const node = loadMoreSentinelRef.current
+    if (!node || !hasMoreSessions || collapsedSections.has('chats')) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) onLoadMoreSessions()
+      },
+      { rootMargin: '120px' },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [hasMoreSessions, collapsedSections, onLoadMoreSessions])
+
+  const toggleSection = useCallback((section: SidebarSection) => {
+    setCollapsedSections((prev) => {
+      const next = new Set(prev)
+      if (next.has(section)) next.delete(section)
+      else next.add(section)
+      return next
+    })
+  }, [])
 
   // Auto-expand the active session's folder so the current chat is always visible.
   useEffect(() => {
@@ -625,176 +982,44 @@ export function SessionSidebar({
     [draggedSessionId, onMoveToFolder],
   )
 
-  const renderSessionRow = useCallback(
-    (session: SessionSummary, nested = false) => {
-      const isActive = session.thread_id === currentThreadId
-      const isRenaming = renamingId === session.thread_id
-      const availableFolders = folders.filter((folder) => folder.id !== session.folder_id)
+  // The churning rename state is bundled here and handed to exactly ONE row, so
+  // every other row's props stay referentially equal across a keystroke and
+  // React.memo bails them out (UDR-0091 D5).
+  const renameEditor = useMemo<RenameEditor>(
+    () => ({
+      value: renameValue,
+      inputRef: renameRef,
+      onChange: setRenameValue,
+      onKeyDown: handleRenameKeyDown,
+      onCommit: commitRename,
+    }),
+    [renameValue, handleRenameKeyDown, commitRename],
+  )
 
-      return (
-        // biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop requires drag events on the row container
-        <div
-          key={session.thread_id}
-          className={cn(
-            // PRP-0055 follow-up: transparent baseline left-border on every row
-            // keeps layout stable; the active row swaps it to primary for a clear
-            // affordance, combined with the stronger bg-accent fill.
-            'group flex w-full items-start gap-2 border-b border-l-2 border-l-transparent border-border/30 px-3 py-2.5 transition-colors hover:bg-muted/50',
-            nested && 'border-b-0 bg-background/50 pl-9',
-            isActive && 'border-l-primary bg-accent hover:bg-accent',
-          )}
-          draggable={!isRenaming}
-          onDragStart={(event) => {
-            if (isRenaming) {
-              event.preventDefault()
-              return
-            }
-            event.dataTransfer.effectAllowed = 'move'
-            event.dataTransfer.setData('text/plain', session.thread_id)
-            handleSessionDragStart(session.thread_id)
-          }}
-          onDragEnd={handleSessionDragEnd}>
-          <button
-            type="button"
-            className="min-w-0 flex-1 cursor-pointer text-left"
-            onClick={() => !isRenaming && onSwitch(session.thread_id)}>
-            {isRenaming ? (
-              <Input
-                ref={renameRef}
-                type="text"
-                value={renameValue}
-                onChange={(e) => setRenameValue(e.target.value)}
-                onKeyDown={handleRenameKeyDown}
-                onBlur={commitRename}
-                className="h-8"
-              />
-            ) : (
-              <>
-                <p className="flex items-center gap-1 truncate text-sm">
-                  {session.pinned_at && <Pin className="h-3 w-3 shrink-0 text-muted-foreground" />}
-                  <span className="truncate">{session.title || 'New session'}</span>
-                  {/* Auto Session Title in progress (PRP-0077, CTR-0109): a small
-                      spinner until the background title task finalizes (cleared by
-                      the CTR-0110 push). */}
-                  {session.auto_title_pending && (
-                    <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
-                  )}
-                  {movingSessionId === session.thread_id && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
-                </p>
-                <p className="flex items-center gap-1 text-xs text-muted-foreground">
-                  <span className="truncate">{getSessionMeta(session)}</span>
-                  {session.source === 'openai-api' && (
-                    <span className="inline-block shrink-0 rounded bg-blue-100 px-1 py-0.5 text-[10px] font-medium leading-none text-blue-700 dark:bg-blue-900 dark:text-blue-300">
-                      API
-                    </span>
-                  )}
-                  {session.source === 'teams' && (
-                    <span className="inline-block shrink-0 rounded bg-indigo-100 px-1 py-0.5 text-[10px] font-medium leading-none text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300">
-                      Teams
-                    </span>
-                  )}
-                </p>
-              </>
-            )}
-          </button>
-          {!isRenaming && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                {/* biome-ignore lint/a11y/useSemanticElements: nested interactive, span is intentional */}
-                <span
-                  role="button"
-                  tabIndex={-1}
-                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                  aria-label="Session options">
-                  <MoreHorizontal className="h-3 w-3" />
-                </span>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-44">
-                <DropdownMenuItem onClick={() => onPin(session.thread_id, !session.pinned_at)}>
-                  {session.pinned_at ? (
-                    <>
-                      <PinOff className="mr-2 h-3.5 w-3.5" />
-                      Unpin
-                    </>
-                  ) : (
-                    <>
-                      <Pin className="mr-2 h-3.5 w-3.5" />
-                      Pin
-                    </>
-                  )}
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => startRename(session)}>
-                  <Pencil className="mr-2 h-3.5 w-3.5" />
-                  Rename
-                </DropdownMenuItem>
-                {folders.length > 0 ? (
-                  <DropdownMenuSub>
-                    <DropdownMenuSubTrigger>
-                      <FolderPlus className="mr-2 h-3.5 w-3.5" />
-                      Move to folder
-                    </DropdownMenuSubTrigger>
-                    <DropdownMenuSubContent className="w-44">
-                      {availableFolders.length > 0 ? (
-                        availableFolders.map((folder) => (
-                          <DropdownMenuItem
-                            key={folder.id}
-                            disabled={movingSessionId === session.thread_id}
-                            onClick={() => void onMoveToFolder(session.thread_id, folder.id)}>
-                            <Folder
-                              className={cn(
-                                'mr-2 h-3.5 w-3.5',
-                                (FOLDER_COLOR_CLASSES[folder.color] ?? FOLDER_COLOR_CLASSES[DEFAULT_FOLDER_COLOR]).icon,
-                              )}
-                            />
-                            {folder.name}
-                          </DropdownMenuItem>
-                        ))
-                      ) : (
-                        <DropdownMenuItem disabled>No other folders</DropdownMenuItem>
-                      )}
-                    </DropdownMenuSubContent>
-                  </DropdownMenuSub>
-                ) : (
-                  <DropdownMenuItem disabled>
-                    <FolderPlus className="mr-2 h-3.5 w-3.5" />
-                    No folders yet
-                  </DropdownMenuItem>
-                )}
-                {session.folder_id && (
-                  <DropdownMenuItem
-                    disabled={movingSessionId === session.thread_id}
-                    onClick={() => void onMoveToFolder(session.thread_id, null)}>
-                    <FolderOpen className="mr-2 h-3.5 w-3.5" />
-                    Remove from folder
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem onClick={() => onArchive(session.thread_id)}>
-                  <Archive className="mr-2 h-3.5 w-3.5" />
-                  Archive
-                </DropdownMenuItem>
-                {/* Session Export (PRP-0084, CTR-0016 v4): download this chat as
-                    a self-contained ZIP bundle (session JSON + its uploads). */}
-                <DropdownMenuItem onClick={() => onExport(session.thread_id)}>
-                  <Download className="mr-2 h-3.5 w-3.5" />
-                  Export
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  className="text-destructive focus:text-destructive"
-                  onClick={() => setDeleteTarget(session)}>
-                  <Trash2 className="mr-2 h-3.5 w-3.5" />
-                  Delete
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-        </div>
-      )
-    },
+  const renderSessionRow = useCallback(
+    (session: SessionSummary, nested = false) => (
+      <SessionRow
+        key={session.thread_id}
+        session={session}
+        nested={nested}
+        isActive={session.thread_id === currentThreadId}
+        isMoving={movingSessionId === session.thread_id}
+        folders={folders}
+        rename={renamingId === session.thread_id ? renameEditor : undefined}
+        onSwitch={onSwitch}
+        onPin={onPin}
+        onArchive={onArchive}
+        onExport={onExport}
+        onMoveToFolder={onMoveToFolder}
+        onStartRename={startRename}
+        onRequestDelete={setDeleteTarget}
+        onDragStart={handleSessionDragStart}
+        onDragEnd={handleSessionDragEnd}
+      />
+    ),
     [
-      commitRename,
       currentThreadId,
       folders,
-      handleRenameKeyDown,
       handleSessionDragEnd,
       handleSessionDragStart,
       movingSessionId,
@@ -803,7 +1028,7 @@ export function SessionSidebar({
       onMoveToFolder,
       onPin,
       onSwitch,
-      renameValue,
+      renameEditor,
       renamingId,
       startRename,
     ],
@@ -860,11 +1085,11 @@ export function SessionSidebar({
 
       <div className="flex-1 overflow-y-auto">
         <section className="border-b border-border/50 py-2">
-          <div className="flex items-center justify-between px-3 pb-1">
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-              <FolderOpen className="h-3.5 w-3.5" />
-              Folders
-            </div>
+          <SectionHeader
+            icon={<FolderOpen className="h-3.5 w-3.5" />}
+            label="Folders"
+            collapsed={collapsedSections.has('folders')}
+            onToggle={() => toggleSection('folders')}>
             <Button
               variant="ghost"
               size="icon"
@@ -874,41 +1099,47 @@ export function SessionSidebar({
               disabled={creatingFolder}>
               {creatingFolder ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderPlus className="h-4 w-4" />}
             </Button>
-          </div>
-          {folderGroups.length === 0 && <div className="px-3 py-2 text-xs text-muted-foreground">No folders yet</div>}
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleFolderDragEnd}>
-            <SortableContext
-              items={folderGroups.map((group) => group.folder.id)}
-              strategy={verticalListSortingStrategy}>
-              {folderGroups.map(({ folder, sessions: groupedSessions }) => (
-                <FolderGroup
-                  key={folder.id}
-                  folder={folder}
-                  groupedSessions={groupedSessions}
-                  isCollapsed={!expandedFolderIds.has(folder.id)}
-                  isDropTarget={dropFolderId === folder.id}
-                  deletingFolderId={deletingFolderId}
-                  updatingFolderId={updatingFolderId}
-                  draggedSessionId={draggedSessionId}
-                  onToggle={toggleFolder}
-                  onDragOverFolder={handleDragOverFolder}
-                  onDragLeaveFolder={handleDragLeaveFolder}
-                  onDropSession={handleDropSession}
-                  onOpenColor={setColorTarget}
-                  onDeleteFolder={setDeleteFolderTarget}
-                  renderSessionRow={renderSessionRow}
-                />
-              ))}
-            </SortableContext>
-          </DndContext>
+          </SectionHeader>
+          {!collapsedSections.has('folders') && (
+            <>
+              {folderGroups.length === 0 && (
+                <div className="px-3 py-2 text-xs text-muted-foreground">No folders yet</div>
+              )}
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleFolderDragEnd}>
+                <SortableContext
+                  items={folderGroups.map((group) => group.folder.id)}
+                  strategy={verticalListSortingStrategy}>
+                  {folderGroups.map(({ folder, sessions: groupedSessions }) => (
+                    <FolderGroup
+                      key={folder.id}
+                      folder={folder}
+                      groupedSessions={groupedSessions}
+                      isCollapsed={!expandedFolderIds.has(folder.id)}
+                      isDropTarget={dropFolderId === folder.id}
+                      deletingFolderId={deletingFolderId}
+                      updatingFolderId={updatingFolderId}
+                      draggedSessionId={draggedSessionId}
+                      onToggle={toggleFolder}
+                      onDragOverFolder={handleDragOverFolder}
+                      onDragLeaveFolder={handleDragLeaveFolder}
+                      onDropSession={handleDropSession}
+                      onOpenColor={setColorTarget}
+                      onDeleteFolder={setDeleteFolderTarget}
+                      renderSessionRow={renderSessionRow}
+                    />
+                  ))}
+                </SortableContext>
+              </DndContext>
+            </>
+          )}
         </section>
 
         <section className="py-2">
-          <div className="flex items-center justify-between px-3 pb-1">
-            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-              <Plus className="h-3.5 w-3.5" />
-              Chats
-            </div>
+          <SectionHeader
+            icon={<Plus className="h-3.5 w-3.5" />}
+            label="Chats"
+            collapsed={collapsedSections.has('chats')}
+            onToggle={() => toggleSection('chats')}>
             {/* Session Import (PRP-0084, CTR-0016 v4): upload a ZIP bundle as a
                 new chat. The animated indicator shows until import completes,
                 after which useSession refreshes the list and selects it. */}
@@ -929,13 +1160,24 @@ export function SessionSidebar({
               className="hidden"
               onChange={handleImportChange}
             />
-          </div>
-          {rootSessions.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-muted-foreground">
-              {folderGroups.length > 0 ? 'No root chats' : 'No sessions yet'}
-            </div>
-          ) : (
-            rootSessions.map((session) => renderSessionRow(session))
+          </SectionHeader>
+          {!collapsedSections.has('chats') && (
+            <>
+              {rootSessions.length === 0 ? (
+                <div className="px-3 py-2 text-xs text-muted-foreground">
+                  {folderGroups.length > 0 ? 'No root chats' : 'No sessions yet'}
+                </div>
+              ) : (
+                rootSessions.map((session) => renderSessionRow(session))
+              )}
+              {/* Infinite-scroll sentinel (UDR-0091 D3): entering the viewport
+                  appends the next page. Rendered only while more chats remain. */}
+              {hasMoreSessions && (
+                <div ref={loadMoreSentinelRef} className="flex items-center justify-center py-2">
+                  {isLoadingMoreSessions && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+                </div>
+              )}
+            </>
           )}
         </section>
       </div>

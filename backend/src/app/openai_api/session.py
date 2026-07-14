@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any
 import uuid
 
-from app.session.storage import ensure_session_defaults, read_session_json, sessions_dir, write_session_json
+from app.session.storage import (
+    ensure_session_defaults,
+    iter_session_files,
+    read_session_json,
+    sessions_dir,
+    write_session_json,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +58,9 @@ def resolve_thread_id(previous_response_id: str) -> str | None:
         if previous_response_id in chain or session.get("thread_id") == previous_response_id:
             return previous_response_id
 
-    # Search all sessions for response_chain containing this id
-    sessions_path = _sessions_dir()
-    if not sessions_path.is_dir():
-        return None
-
-    for file in sessions_path.glob("*.json"):
+    # Search all sessions for response_chain containing this id.
+    # iter_session_files excludes the metadata index (UDR-0091 D6).
+    for file in iter_session_files(_sessions_dir()):
         try:
             data = json.loads(file.read_text(encoding="utf-8"))
             if previous_response_id in data.get("response_chain", []):
