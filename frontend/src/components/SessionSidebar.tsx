@@ -92,6 +92,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
 import { useAuth } from '@/hooks/useAuth'
 import { formatSessionDateTime } from '@/lib/datetime'
 import { cn } from '@/lib/utils'
@@ -220,7 +221,29 @@ function loadExpandedFolderIds(): Set<string> {
 // never reach the top). Re-sorting here would silently reintroduce that bug.
 
 /**
- * The meta line: timestamp + message/image counts (CTR-0016 v5, UDR-0091 D10).
+ * Placeholder rows shown while the next page of chats is being fetched
+ * (CTR-0016 v7, v0.106.1).
+ *
+ * A skeleton rather than a spinner: it reserves the exact space the incoming rows
+ * will occupy and shows their SHAPE, so the list does not jump when the page lands
+ * and the user can see that *chats* are loading -- not merely that something is.
+ * The count matches the page size the sentinel is about to request.
+ */
+function SessionRowSkeleton() {
+  return (
+    <div
+      className="flex w-full items-start gap-2 border-b border-l-2 border-l-transparent border-border/30 px-3 py-1"
+      aria-hidden="true">
+      <div className="min-w-0 flex-1 space-y-1.5 py-0.5">
+        <Skeleton className="h-3 w-[70%]" />
+        <Skeleton className="h-2.5 w-[45%]" />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The meta line: timestamp + message/image counts (CTR-0016 v5/v7, UDR-0091 D10+D14).
  *
  * The counts render as ICONS, not the words "msgs" / "imgs", and they live inside
  * the SAME <p> as the timestamp. The row height with counts MUST equal the row
@@ -362,8 +385,51 @@ const SessionRow = memo(function SessionRow({
               )}
               {isMoving && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
             </p>
+            {/*
+              The meta line is REVEALED ON HOVER (CTR-0016 v7, UDR-0091 D14, v0.106.1).
+              The dense two-line row read as cluttered, so at rest a row shows only its
+              title.
+
+              Two constraints shape this:
+
+              1. NO LAYOUT SHIFT. The line is faded with `opacity`, never unmounted and
+                 never `hidden` -- its box keeps its height, so the row is a constant
+                 41.5px whether hovered or not. If it collapsed, hovering would grow the
+                 row, push the rows below it, and move the cursor onto a different row --
+                 a jitter loop.
+
+              2. NO MEDIA-QUERY "TOUCH ESCAPE". v0.106.1 first shipped a hover-media escape
+                 (an arbitrary variant on the CSS `hover: none` feature) so that a touch
+                 device -- where hovering cannot happen -- would still show the timestamp. It
+                 was WRONG, and it broke the feature on ordinary desktops: a TOUCHSCREEN
+                 LAPTOP reports `hover: none`, because its PRIMARY pointer is the screen,
+                 even though a mouse is attached and hovering works perfectly. Measured in
+                 Chromium, a desktop-sized window with a touchscreen reports `none` for BOTH
+                 the `hover` and the `any-hover` feature, so neither can tell a phone apart
+                 from a laptop with a touchscreen. The escape therefore pinned the line
+                 permanently visible on exactly the machines this app runs on. Both variants
+                 are removed: the reveal is hover-only, unconditionally.
+
+                 (Do not re-add one. Beyond being wrong, Tailwind scans this file as plain
+                 text and would generate the utility from the prose alone.)
+
+                 What keeps this acceptable on a genuinely touch-only device: the line is
+                 only FADED, never removed, so it stays in the accessibility tree and its
+                 `title` tooltips (D10) remain; and recency -- the reason D9 wanted the
+                 timestamp visible -- is already encoded positionally by the newest-first
+                 ordering of D1, so scanning for a recent chat means reading the ORDER, not
+                 the timestamps.
+
+              The ACTIVE row also keeps it visible: you should not have to hover the chat
+              you already have open to see when it was last touched.
+
+              ONLY THE DETAIL FADES. The `API` / `Teams` origin badges stay at full opacity
+              and lead the line. They are a CLASSIFICATION -- "this conversation did not come
+              from the web UI" -- not a detail you go looking for, so hiding them until hover
+              would cost the scan value they exist for. The timestamp and the counts are the
+              details; those are what the operator asked to quieten.
+            */}
             <p className="flex items-center gap-1.5 text-xs leading-tight text-muted-foreground">
-              <SessionMeta session={session} />
               {session.source === 'openai-api' && (
                 <span className="inline-block shrink-0 rounded bg-blue-100 px-1 py-0.5 text-[10px] font-medium leading-none text-blue-700 dark:bg-blue-900 dark:text-blue-300">
                   API
@@ -374,6 +440,14 @@ const SessionRow = memo(function SessionRow({
                   Teams
                 </span>
               )}
+              <span
+                className={cn(
+                  'flex min-w-0 items-center gap-1.5 transition-opacity duration-150',
+                  'opacity-0 group-hover:opacity-100',
+                  isActive && 'opacity-100',
+                )}>
+                <SessionMeta session={session} />
+              </span>
             </p>
           </>
         )}
@@ -1170,11 +1244,25 @@ export function SessionSidebar({
               ) : (
                 rootSessions.map((session) => renderSessionRow(session))
               )}
-              {/* Infinite-scroll sentinel (UDR-0091 D3): entering the viewport
-                  appends the next page. Rendered only while more chats remain. */}
+              {/* Infinite-scroll sentinel (UDR-0091 D3): entering the viewport appends
+                  the next page. Rendered only while more chats remain.
+
+                  While the page is in flight we show SKELETON ROWS rather than a spinner
+                  (CTR-0016 v7, v0.106.1): they occupy the space the incoming rows will
+                  take and show their shape, so the list does not jump when the page lands
+                  and it is obvious that *chats* are loading. The sentinel keeps a small
+                  idle height so it can still be observed before the fetch starts. */}
               {hasMoreSessions && (
-                <div ref={loadMoreSentinelRef} className="flex items-center justify-center py-2">
-                  {isLoadingMoreSessions && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+                <div ref={loadMoreSentinelRef}>
+                  {isLoadingMoreSessions ? (
+                    <>
+                      <SessionRowSkeleton />
+                      <SessionRowSkeleton />
+                      <SessionRowSkeleton />
+                    </>
+                  ) : (
+                    <div className="h-8" />
+                  )}
                 </div>
               )}
             </>
