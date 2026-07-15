@@ -66,6 +66,8 @@ function normalizeFolder(input: unknown): SessionFolder | null {
     order: typeof candidate.order === 'number' ? candidate.order : 0,
     created_at: typeof candidate.created_at === 'string' ? candidate.created_at : '',
     updated_at: typeof candidate.updated_at === 'string' ? candidate.updated_at : '',
+    // Server-supplied (v0.106.2). Absent on an older backend -> 0, i.e. the pre-fix look.
+    session_count: typeof candidate.session_count === 'number' ? candidate.session_count : 0,
   }
 }
 
@@ -599,6 +601,9 @@ export function useSession() {
         order: Number.MAX_SAFE_INTEGER,
         created_at: now,
         updated_at: now,
+        // A folder is empty the instant it is created; the refresh below replaces this
+        // record with the server's, which recomputes the count.
+        session_count: 0,
       }
 
       setIsCreatingFolder(true)

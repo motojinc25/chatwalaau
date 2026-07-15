@@ -690,8 +690,13 @@ function FolderGroup({
           )}
           <Folder className={cn('h-3.5 w-3.5 shrink-0', colorClasses.icon)} />
           <span className="truncate text-sm font-medium">{folder.name}</span>
+          {/* The count comes from the SERVER (folder.session_count), not from the loaded
+              sessions. Since PRP-0112 a folder's chats are fetched only when it is expanded
+              (UDR-0091 D4), so `groupedSessions.length` counts only what happens to be
+              loaded -- which is ZERO for every collapsed folder. That was the v0.106.1 bug:
+              every folder read "0" until you clicked it. */}
           <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-            {groupedSessions.length}
+            {folder.session_count}
           </span>
         </button>
         <DropdownMenu>
@@ -728,6 +733,13 @@ function FolderGroup({
         <div className="pb-1">
           {groupedSessions.length > 0 ? (
             groupedSessions.map((session) => renderSessionRow(session, true))
+          ) : folder.session_count > 0 ? (
+            // Expanded, and the server says it HAS chats -- so the fetch is still in
+            // flight (UDR-0091 D4 loads a folder lazily). Show skeletons, not the
+            // "empty folder" message, which would be a lie for a moment.
+            Array.from({ length: Math.min(folder.session_count, 3) }, (_, i) => (
+              <SessionRowSkeleton key={`skeleton-${folder.id}-${i}`} />
+            ))
           ) : (
             <div className="px-9 py-2 text-xs text-muted-foreground">Drop chats here or use the menu</div>
           )}
@@ -860,9 +872,13 @@ export function SessionSidebar({
       })),
     [folders, sessions],
   )
+  // The delete-folder confirmation tells the operator how many chats the action touches,
+  // so it MUST use the server's count. Deriving it from the loaded sessions (as it did
+  // before v0.106.2) made a collapsed folder report "0 sessions inside it" no matter how
+  // many it actually held -- a destructive action under-reporting its own blast radius.
   const deleteFolderSessionCount = useMemo(
-    () => folderGroups.find((group) => group.folder.id === deleteFolderTarget?.id)?.sessions.length ?? 0,
-    [deleteFolderTarget?.id, folderGroups],
+    () => folders.find((folder) => folder.id === deleteFolderTarget?.id)?.session_count ?? 0,
+    [deleteFolderTarget?.id, folders],
   )
 
   // Keep the color modal's preview in sync with the live folder record.

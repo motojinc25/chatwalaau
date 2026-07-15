@@ -184,9 +184,31 @@ def _write_session_or_500(thread_id: str, data: dict[str, Any]) -> None:
 
 @router.get("/folders")
 async def list_folders() -> list[dict[str, Any]]:
-    """List all folder records sorted by manual order ascending (CTR-0015 v1.12)."""
+    """List folder records, sorted by manual order ascending (CTR-0015 v1.12).
+
+    Each record carries an additive ``session_count`` (PRP-0112 / v0.106.2): how many
+    chats the folder holds, ACROSS THE WHOLE STORE.
+
+    The SPA cannot compute this itself any more. Since PRP-0112 a folder's sessions are
+    fetched only when it is expanded (UDR-0091 D4), so a client-side
+    ``sessions.filter(s => s.folder_id === folder.id)`` counts only what happens to be
+    loaded -- zero for every collapsed folder. The count therefore has to come from the
+    server, which is the only participant that sees every session.
+
+    It is cheap: the CTR-0014 v2 metadata index already carries ``folder_id`` for every
+    session, so this is a pass over cached metadata and opens no session file.
+    """
     folders = _read_folder_records()
     folders.sort(key=lambda folder: folder.get("order", 0))
+
+    counts: dict[str, int] = {}
+    for meta in await index_store.list_session_metadata():
+        folder_id = meta.get("folder_id")
+        if folder_id:
+            counts[folder_id] = counts.get(folder_id, 0) + 1
+
+    for folder in folders:
+        folder["session_count"] = counts.get(folder["id"], 0)
     return folders
 
 

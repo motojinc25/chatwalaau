@@ -109,6 +109,14 @@ export interface SessionFolder {
   order: number
   created_at: string
   updated_at: string
+  /**
+   * How many chats the folder holds, across the WHOLE store (CTR-0015, v0.106.2).
+   *
+   * Server-supplied on purpose. Since PRP-0112 a folder's sessions are fetched only when
+   * it is expanded (UDR-0091 D4), so counting them client-side from the loaded `sessions`
+   * yields 0 for every collapsed folder -- which is exactly the bug this field fixes.
+   */
+  session_count: number
 }
 
 export interface SessionSummary {
