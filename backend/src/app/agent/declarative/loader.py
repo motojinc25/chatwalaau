@@ -113,7 +113,8 @@ def _annotate_model_warnings(spec: DeclarativeAgentSpec) -> DeclarativeAgentSpec
     if missing:
         spec.warnings.append(
             f"model id(s) {missing} are not configured; the agent will use the default "
-            "model. Add them to AZURE_OPENAI_MODELS / ANTHROPIC_MODELS to make them the default."
+            "model. Add them as offerings in model_offerings.jsonc (or via `chatwalaau "
+            "models add` / the Model Settings screen) to make them selectable."
         )
     return spec
 

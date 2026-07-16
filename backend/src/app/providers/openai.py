@@ -10,11 +10,12 @@ For v1 the supported scope is REASONING models only (e.g. gpt-5.x / o-series),
 whose generation-option catalog, reasoning-effort handling, hosted web search,
 structured output, and background support are IDENTICAL to the ``azure-openai``
 provider (UDR-0073 D5). The provider therefore subclasses ``AzureOpenAIProvider``
-and overrides only what differs -- ``name``, ``models()``, and
-``build_chat_client()`` (the API-key credential lane) -- inheriting the catalog,
-options, web search, structured output, and ``supports_background`` unchanged
-(UDR-0073 D7). This guarantees zero behavioral drift from ``azure-openai`` for
-the reasoning lane while keeping the Azure provider byte-for-byte.
+and overrides only what differs -- ``name`` and ``build_chat_client()`` (the
+API-key credential lane; the model set comes from the catalog, PRP-0113) --
+inheriting the catalog, options, web search, structured output, and
+``supports_background`` unchanged (UDR-0073 D7). This guarantees zero behavioral
+drift from ``azure-openai`` for the reasoning lane while keeping the Azure
+provider byte-for-byte.
 
 Non-reasoning models (gpt-4o / gpt-4.1 with temperature / top_p, the
 ``number``-kind descriptor reserved by UDR-0057 D3) are OUT OF SCOPE for v1 and
@@ -27,7 +28,6 @@ import logging
 from typing import Any
 
 from app import models_catalog
-from app.core.config import settings
 from app.providers.azure_openai import AzureOpenAIProvider, _structured_openai_client_class
 
 logger = logging.getLogger(__name__)
@@ -58,9 +58,6 @@ class OpenAIProvider(AzureOpenAIProvider):
     # from AzureOpenAIProvider (True); restated here for clarity (UDR-0073 D6).
     supports_background = True
 
-    def models(self) -> list[str]:
-        return settings.openai_model_list
-
     def build_chat_client(self, model: str) -> Any:
         # Direct OpenAI lane: api_key (+ optional base_url for OpenAI-compatible
         # gateways), NO azure_endpoint -> the connector targets api.openai.com
@@ -68,15 +65,14 @@ class OpenAIProvider(AzureOpenAIProvider):
         # azure lane so the hosted web_search tool is dropped when a JSON
         # text.format is set (PRP-0082); inert otherwise.
         #
-        # Catalog lane (PRP-0109, UDR-0087): a per-offering base_url points this
-        # same connector at a distinct OpenAI-compatible gateway, and a
-        # per-offering api_key_env supplies its key -- so two gateways coexist
-        # (the exact case the single OPENAI_BASE_URL could not express). Legacy
-        # lane (offering is None): byte-for-byte the prior behavior.
+        # Catalog routing (PRP-0113, UDR-0094): the offering's base_url points this
+        # same connector at a distinct OpenAI-compatible gateway and its api_key_env
+        # supplies the key -- so two gateways coexist. Both come from the offering
+        # (no settings fallback; UDR-0094 D2).
         offering = models_catalog.offering_for(model)
         model_ref = offering.model_ref if offering is not None else model
-        base_url = (offering.base_url if offering is not None and offering.base_url else settings.openai_base_url) or None
-        api_key = (offering.api_key() if offering is not None and offering.api_key_env else settings.openai_api_key) or None
+        base_url = (offering.base_url if offering is not None else None) or None
+        api_key = (offering.api_key() if offering is not None else None) or None
         _log_lane("direct")
         return _structured_openai_client_class()(
             model=model_ref,

@@ -21,42 +21,44 @@ pip install chatwalaau
 chatwalaau init        # writes a .env for you to edit (and can set up your first model)
 ```
 
-> **Setting up models:** `chatwalaau init` offers a guided first-model step, or run
-> `chatwalaau models add` any time to author `model_offerings.jsonc`. You can also manage
-> models from the in-app **Model Settings** screen (changes apply without a restart). The
-> per-provider `.env` variables below remain fully supported. See the
+> **Setting up models (v0.107.0+):** models are configured **exclusively** through the
+> Model Offering Catalog (`model_offerings.jsonc`). Run `chatwalaau init` for a guided
+> first-model step, `chatwalaau models add` any time to author the file, or use the in-app
+> **Model Settings** screen (changes apply without a restart). The legacy per-provider model
+> environment variables (`AZURE_OPENAI_MODELS`, `ANTHROPIC_MODELS`, `OPENAI_MODELS`,
+> `FOUNDRY_MODELS`, `MODEL_MAX_CONTEXT_TOKENS`, `ANTHROPIC_HOSTING`, ...) have been
+> **removed**. See the
 > [model configuration docs](https://chatwalaau.com/docs/features/models-and-reasoning).
 
-Configure **at least one model provider** in `.env`:
-
-**Azure OpenAI**
+Set your Azure endpoint / credentials in `.env` (shared with image, RAG, and speech):
 
 ```ini
 AZURE_OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com/
-AZURE_OPENAI_MODELS=gpt-5.5          # comma-separated; the first entry is the default
 AZURE_OPENAI_API_KEY=<your-key>      # or authenticate with Entra ID instead (see below)
+# ANTHROPIC_API_KEY / OPENAI_API_KEY as needed -- referenced by NAME from the catalog
 ```
 
-**Anthropic (Claude)** -- standalone or alongside Azure OpenAI
+Then author **at least one chat model** in `model_offerings.jsonc` (or run
+`chatwalaau models add`). Example spanning several providers:
 
-```ini
-ANTHROPIC_MODELS=claude-fable-5
-ANTHROPIC_API_KEY=sk-ant-...         # "direct" hosting; Microsoft Foundry hosting is also supported
+```jsonc
+{
+  "offerings": [
+    { "id": "gpt-5.5", "provider": "azure-openai", "model_ref": "gpt-5.5",
+      "endpoint": "${AZURE_OPENAI_ENDPOINT}", "default": true, "context_window": 1050000 },
+    { "id": "claude-fable-5", "provider": "anthropic", "hosting": "direct",
+      "model_ref": "claude-fable-5", "api_key_env": "ANTHROPIC_API_KEY" },
+    { "id": "gpt-5.1", "provider": "openai", "model_ref": "gpt-5.1", "api_key_env": "OPENAI_API_KEY" },
+    { "id": "deepseek-v4-pro", "provider": "foundry", "model_ref": "deepseek-v4-pro",
+      "endpoint": "https://<resource>.services.ai.azure.com/api/projects/<project>" }
+  ]
+}
 ```
 
-**OpenAI** (direct) -- standalone or alongside the others
-
-```ini
-OPENAI_MODELS=gpt-5.5                # reasoning models (gpt-5.x)
-OPENAI_API_KEY=sk-...                # OPENAI_BASE_URL optional (OpenAI-compatible gateways)
-```
-
-**Microsoft Foundry** -- models from a Foundry project (gpt-5.x, DeepSeek, ...), Entra ID sign-in
-
-```ini
-FOUNDRY_MODELS=gpt-5.5,deepseek-v4-pro  # model deployments in the project
-FOUNDRY_PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
-```
+Each offering self-describes its provider, `model_ref` (the connector's real
+model/deployment name), optional `endpoint` / `base_url` / `hosting` / `context_window`,
+and references any API key by env-var NAME via `api_key_env` (secrets stay in `.env`). An
+azure-openai offering may omit `endpoint`/`api_key_env` to reuse the shared Azure lanes above.
 
 Then start the server:
 
@@ -86,7 +88,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 
 - **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, a built-in **paint canvas** (draw, paste, or load an image from your device **or the coding workspace**, attach, and re-edit), Temporary Chat, **message-by-message navigation** (previous/next step buttons that walk the conversation one message at a time), **slash commands** (`/help`, `/prompt`, `/skill`, `/model`) with completion and dynamic arguments, and a **compact chat sidebar** that collapses by section and loads hundreds of conversations as you scroll
 - **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow (a per-turn round counter, a configurable round budget, and "approve for this session" that stops counting against the budget and clears the other pending cards of that tool), prompt templates, and Agent Skills (enable/disable or hot-reload from disk at runtime)
-- **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, **OpenAI**, and **Microsoft Foundry** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent); **compose the served models** (multi-provider and gateway offerings) from the CLI (`chatwalaau models add`) or the in-app **Model Settings** screen -- **drag to set the order they appear in the selector**, and changes apply live without a restart
+- **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, **OpenAI**, and **Microsoft Foundry** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent); as of **v0.107.0** models are configured **exclusively** through the **Model Offering Catalog** (`model_offerings.jsonc`) -- **compose the served models** (multi-provider and gateway offerings) from the CLI (`chatwalaau models add`) or the in-app **Model Settings** screen, **drag to set the order they appear in the selector**, and changes apply live without a restart (the legacy per-provider `*_MODELS` env vars have been removed)
 - **Knowledge** -- RAG over your PDFs (ChromaDB), ingested by the built-in **Pipeline Jobs** engine: submit/monitor/cancel jobs from a portal, the API, or the agent, with live progress and run history (on by default)
 - **Ontology** -- design **concept models as RDF knowledge graphs** on a visual node canvas: circular entities (emoji, colors, typed properties with **key attributes**) connect from **any side** with directional, cardinality-labeled relationships, and clicking a node or edge lights up its whole in/out neighborhood; search with **SPARQL or natural language** with on-canvas highlighting, import/export standard RDF with automatic backups, and let the agent **answer from your ontologies in any chat** (opt-in via `ONTOLOGY_ENABLED`)
 - **MCP native** -- connect any MCP server (Claude Desktop-compatible config); enable/disable servers and individual tools at runtime to control token usage, or hot-reload the config (reconnect) without a restart; MCP Apps render interactive UI in chat

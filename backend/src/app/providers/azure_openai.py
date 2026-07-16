@@ -88,9 +88,6 @@ class AzureOpenAIProvider:
     # Azure OpenAI Responses API supports background runs + resume (CTR-0045).
     supports_background = True
 
-    def models(self) -> list[str]:
-        return settings.model_list
-
     def build_chat_client(self, model: str) -> Any:
         # Prompt caching (PRP-0080, FEAT-0038 / UDR-0056 D4): Azure/OpenAI prompt
         # caching is AUTOMATIC for prefixes >= 1024 tokens, so this provider needs
@@ -103,11 +100,12 @@ class AzureOpenAIProvider:
         # Wrapped in the structured-output subclass so the hosted web_search tool is
         # dropped when a JSON `text.format` is set (PRP-0082); inert otherwise.
         #
-        # Catalog lane (PRP-0109, UDR-0087): when the model is a catalog offering,
-        # `model` is the offering id, so the connector `model=` uses the offering's
-        # model_ref (real deployment name), the endpoint may be per-offering, and
-        # an offering-referenced API key wins over the shared credential lane.
-        # Legacy lane (offering is None): byte-for-byte the prior behavior.
+        # Catalog routing (PRP-0113, UDR-0094): `model` is the offering id, so the
+        # connector `model=` uses the offering's model_ref (real deployment name).
+        # The endpoint may be per-offering; when omitted it falls back to the SHARED
+        # Azure substrate `AZURE_OPENAI_ENDPOINT` (UDR-0094 D6, retained), and an
+        # offering-referenced API key wins over the shared credential lane. A model
+        # not in the catalog (defensive) resolves to model_ref=model + shared lane.
         offering = models_catalog.offering_for(model)
         model_ref = offering.model_ref if offering is not None else model
         endpoint = (offering.endpoint if offering is not None and offering.endpoint else settings.azure_openai_endpoint) or None

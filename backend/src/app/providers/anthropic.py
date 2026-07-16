@@ -1,20 +1,21 @@
 """Anthropic (Claude) base-model provider (CTR-0102, PRP-0069, UDR-0045).
 
-Wraps the first-party MAF connectors behind the Provider seam:
+Wraps the first-party MAF connectors behind the Provider seam. Per-offering
+hosting (PRP-0113 / UDR-0094): a Claude offering declares ``hosting`` (defaults
+to ``direct``), so direct Claude and Foundry-hosted Claude coexist in one
+deployment.
 
-- Direct  (ANTHROPIC_HOSTING=direct)  -> ``AnthropicClient`` against the
-  Anthropic public API, authenticated by ``ANTHROPIC_API_KEY``
-  (+ optional ``ANTHROPIC_BASE_URL``).
-- Foundry (ANTHROPIC_HOSTING=foundry) -> ``AnthropicFoundryClient`` against
-  Anthropic on Azure AI Foundry. Endpoint: ``ANTHROPIC_FOUNDRY_RESOURCE`` (the
-  resource name / subdomain, expanded to
-  ``https://<resource>.services.ai.azure.com/anthropic/``) OR the full
-  ``ANTHROPIC_FOUNDRY_BASE_URL``. Auth (mutually exclusive in the SDK): the
-  ``api-key`` header from ``ANTHROPIC_FOUNDRY_API_KEY`` when set, otherwise an
-  Entra ID ``Authorization: Bearer`` token from the mode-selected Azure
-  credential (cli / managed-identity / default, AZURE_CREDENTIAL_MODE) via
-  ``app.azure_credential.get_token_provider()`` (PRP-0071 follow-up; UDR-0045
-  D4 amends the D8 API-key-only deferral).
+- Direct  (offering ``hosting: direct``)  -> ``AnthropicClient`` against the
+  Anthropic public API, authenticated by the offering's ``api_key_env`` key
+  (+ optional per-offering ``base_url``).
+- Foundry (offering ``hosting: foundry``) -> ``AnthropicFoundryClient`` against
+  Anthropic on Azure AI Foundry. Endpoint: the offering's ``base_url`` (the full
+  Anthropic-compatible URL; the resource-subdomain shorthand is dropped,
+  UDR-0094 D7). Auth (mutually exclusive in the SDK): the ``api-key`` header
+  from the offering's ``api_key_env`` when set, otherwise an Entra ID
+  ``Authorization: Bearer`` token from the mode-selected SHARED Azure credential
+  (cli / managed-identity / default, AZURE_CREDENTIAL_MODE -- retained per
+  UDR-0094 D6) via ``app.azure_credential.get_token_provider()``.
 
 Both clients are MAF ``BaseChatClient`` subclasses, so the Agent layer treats
 them exactly like ``OpenAIChatClient`` (UDR-0045 D1/D9). Connector imports are
@@ -249,20 +250,18 @@ class AnthropicProvider:
     # background runs are an OpenAI Responses API feature (CTR-0045).
     supports_background = False
 
-    def models(self) -> list[str]:
-        return settings.anthropic_model_list
-
     def build_chat_client(self, model: str) -> Any:
-        # Catalog lane (PRP-0109, UDR-0087): `model` is the offering id, so the
+        # Catalog routing (PRP-0113, UDR-0094): `model` is the offering id, so the
         # connector `model=` uses the offering's model_ref, the HOSTING is
         # per-offering (direct Claude and Foundry-hosted Claude can coexist in one
-        # deployment -- the global ANTHROPIC_HOSTING could not express that), and
-        # base_url / api_key_env may be per-offering. Legacy lane (offering is
-        # None): every value falls back to settings, byte-for-byte the prior
-        # behavior.
+        # deployment -- the removed global ANTHROPIC_HOSTING could not express
+        # that), and base_url / api_key_env come from the offering (no settings
+        # fallback; UDR-0094 D2). Hosting defaults to "direct" when the offering
+        # omits it. The Foundry Entra ID lane still reuses the SHARED Azure
+        # credential (UDR-0094 D6, retained).
         offering = models_catalog.offering_for(model)
         model_ref = offering.model_ref if offering is not None else model
-        hosting = offering.hosting if (offering is not None and offering.hosting) else settings.anthropic_hosting
+        hosting = (offering.hosting if (offering is not None and offering.hosting) else "direct")
         offering_api_key = offering.api_key() if (offering is not None and offering.api_key_env) else None
         offering_base_url = offering.base_url if offering is not None else None
 
@@ -270,23 +269,18 @@ class AnthropicProvider:
             from agent_framework.anthropic import AnthropicFoundryClient
 
             kwargs: dict[str, Any] = {"model": model_ref}
-            # Endpoint: base_url (full URL) and resource (subdomain) are mutually
-            # exclusive in the SDK; base_url wins when both are set. A per-offering
-            # base_url wins over the settings endpoint.
+            # Endpoint: the offering's base_url is the full Anthropic-on-Foundry URL
+            # (the resource subdomain shorthand is dropped, UDR-0094 D7).
             if offering_base_url:
                 kwargs["base_url"] = offering_base_url
-            elif settings.anthropic_foundry_base_url:
-                kwargs["base_url"] = settings.anthropic_foundry_base_url
-            elif settings.anthropic_foundry_resource:
-                kwargs["resource"] = settings.anthropic_foundry_resource
             # Auth: api-key XOR Entra ID (mutually exclusive in the SDK). The
-            # API key wins when set; otherwise authenticate with Entra ID via the
-            # mode-selected Azure credential (cli / managed-identity / default,
-            # AZURE_CREDENTIAL_MODE) as a bearer-token provider on the
-            # cognitiveservices scope (UDR-0045 D4 + UDR-0034). Passing a token
-            # provider as ANTHROPIC_FOUNDRY_API_KEY would be sent as the api-key
-            # header and rejected with HTTP 401.
-            api_key = offering_api_key or settings.anthropic_foundry_api_key
+            # offering-referenced API key wins when set; otherwise authenticate with
+            # Entra ID via the mode-selected SHARED Azure credential (cli /
+            # managed-identity / default, AZURE_CREDENTIAL_MODE) as a bearer-token
+            # provider on the cognitiveservices scope (UDR-0045 D4 + UDR-0034 +
+            # UDR-0094 D6). Passing a token provider as an api-key would be rejected
+            # with HTTP 401.
+            api_key = offering_api_key
             if api_key:
                 kwargs["api_key"] = api_key
                 _log_lane("foundry/api-key")
@@ -306,10 +300,10 @@ class AnthropicProvider:
         from agent_framework.anthropic import AnthropicClient
 
         kwargs = {"model": model_ref}
-        api_key = offering_api_key or settings.anthropic_api_key
+        api_key = offering_api_key
         if api_key:
             kwargs["api_key"] = api_key
-        base_url = offering_base_url or settings.anthropic_base_url
+        base_url = offering_base_url
         if base_url:
             kwargs["base_url"] = base_url
         _log_lane("direct")

@@ -231,6 +231,22 @@ class AgentRegistry:
         spec = active_spec()
         resolved = providers.resolve_models()
         configured = [model for model, _ in resolved]
+        # Catalog-only routing (PRP-0113, UDR-0094 D1): a non-demo deployment with no
+        # chat offering boots with an EMPTY registry and a WARNING rather than crashing.
+        # The server MUST stay up so the in-app Model Settings screen (which the server
+        # itself serves) stays reachable to author a catalog -- a startup crash would be
+        # a chicken-and-egg lockout. The actionable error is DEFERRED to the moment a
+        # chat model is actually requested (see `get()`); the catalog then applies via
+        # rebuild() without a restart.
+        if not configured:
+            logger.warning(
+                "No chat models are configured. Model routing comes exclusively from the "
+                "Model Offering Catalog (model_offerings.jsonc). The server is running, but "
+                "CHAT IS UNAVAILABLE until you author at least one 'chat' offering with "
+                "`chatwalaau models add` or the in-app Model Settings screen (applies without "
+                "a restart). (DEMO_MODE=true runs without a catalog.)"
+            )
+            return {}, {}, [], ""
         # UDR-0093 D2: the default is asked for EXPLICITLY, never inferred from
         # position. `configured[0]` was correct only while Catalog.chat_offerings()
         # hoisted the default to index 0 (UDR-0087 D3, superseded by PRP-0112);
@@ -276,7 +292,19 @@ class AgentRegistry:
         return agents, caps, configured, default
 
     def get(self, model: str | None = None) -> Agent:
-        """Get Agent for specified model. Falls back to default if None or unknown."""
+        """Get Agent for specified model. Falls back to default if None or unknown.
+
+        When no chat model is configured (empty registry -- PRP-0113 / UDR-0094 D1),
+        raises with an actionable message: the server booted with a warning, and the
+        guidance is surfaced here, at the moment a model is actually requested.
+        """
+        if not self._agents:
+            raise ValueError(
+                "No chat model is configured. Model routing comes exclusively from the "
+                "Model Offering Catalog (model_offerings.jsonc). Author at least one 'chat' "
+                "offering with `chatwalaau models add` or the in-app Model Settings screen "
+                "(applies without a restart). (DEMO_MODE=true runs without a catalog.)"
+            )
         name = model or self._default_model
         agent = self._agents.get(name)
         if agent is None:

@@ -126,9 +126,6 @@ class FoundryProvider(AzureOpenAIProvider):
     # after the resume E2E is additive.
     supports_background = False
 
-    def models(self) -> list[str]:
-        return settings.foundry_model_list
-
     def build_chat_client(self, model: str) -> Any:
         # Foundry project lane (UDR-0085 D1/D4): project endpoint + the
         # mode-selected Entra ID credential from app.azure_credential (the
@@ -137,14 +134,14 @@ class FoundryProvider(AzureOpenAIProvider):
         # applies here. Prompt caching is pass-through exactly as the azure
         # lane (automatic service-side, no request rewrite; UDR-0056 D4).
         #
-        # Catalog lane (PRP-0109, UDR-0087): `model` is the offering id, so the
+        # Catalog routing (PRP-0113, UDR-0094): `model` is the offering id, so the
         # connector `model=` uses the offering's model_ref (real deployment) and
-        # the project endpoint may be per-offering. Entra-only stays enforced --
-        # api_key_env is ignored for Foundry (UDR-0085 D4). Legacy lane
-        # (offering is None): byte-for-byte the prior behavior.
+        # the project endpoint comes from the offering (no settings fallback;
+        # UDR-0094 D2). Entra-only stays enforced -- api_key_env is ignored for
+        # Foundry (UDR-0085 D4) -- reusing the SHARED Azure credential (UDR-0094 D6).
         offering = models_catalog.offering_for(model)
         model_ref = offering.model_ref if offering is not None else model
-        endpoint = (offering.endpoint if offering is not None and offering.endpoint else settings.foundry_project_endpoint) or None
+        endpoint = (offering.endpoint if offering is not None and offering.endpoint else None) or None
         return _structured_foundry_client_class()(
             project_endpoint=endpoint,
             model=model_ref,

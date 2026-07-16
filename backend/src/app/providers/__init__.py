@@ -1,16 +1,19 @@
 """Base-model provider registry and dispatch (CTR-0102, PRP-0069, UDR-0045).
 
 Single seam behind ``app.agui.agent_registry._build_chat_client``. Given a
-model id, dispatch to the owning provider to build the MAF ChatClient, the
-per-model ``default_options``, and the provider-supplied web search tool.
+model id (a catalog offering id), dispatch to the owning provider to build the
+MAF ChatClient, the per-model ``default_options``, and the provider-supplied
+web search tool.
 
-Model -> provider routing comes from the per-provider env namespaces
-(``AZURE_OPENAI_MODELS`` -> azure-openai, ``ANTHROPIC_MODELS`` -> anthropic,
-``OPENAI_MODELS`` -> openai, ``FOUNDRY_MODELS`` -> foundry).
-``resolve_models()`` is the SSOT for the merged ordered list (Azure first,
-then Anthropic, then OpenAI, then Foundry; UDR-0045 D3 / UDR-0073 D3 /
-UDR-0085 D3). DEMO_MODE never reaches this module -- the registry
-short-circuits to DemoChatClient before dispatch (UDR-0045 D7).
+Model -> provider routing comes SOLELY from the Model Offering Catalog
+(``model_offerings.jsonc``; PRP-0113 / UDR-0094 D1). The legacy per-provider
+env namespaces (``AZURE_OPENAI_MODELS`` / ``ANTHROPIC_MODELS`` /
+``OPENAI_MODELS`` / ``FOUNDRY_MODELS``) have been REMOVED -- there is no
+env-namespace routing lane. ``resolve_models()`` returns the catalog's chat
+offerings in authored file order (UDR-0093 D1) and is empty for a non-demo
+deployment with no catalog (the agent registry fail-fasts, UDR-0094 D1).
+DEMO_MODE never reaches this module -- the registry short-circuits to
+DemoChatClient before dispatch (UDR-0045 D7).
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from app import models_catalog
-from app.core.config import settings
+from app.models_catalog import DEFAULT_CONTEXT_WINDOW
 from app.providers.anthropic import AnthropicProvider, anthropic_web_search_tool
 from app.providers.azure_openai import AzureOpenAIProvider, openai_web_search_tool
 from app.providers.base import Provider
@@ -36,73 +39,51 @@ PROVIDERS: dict[str, Provider] = {p.name: p for p in _ORDERED}
 
 
 def resolve_models() -> list[tuple[str, str]]:
-    """Return the merged ordered ``(model, provider_name)`` list.
+    """Return the ordered ``(model, provider_name)`` list from the catalog.
 
-    Two lanes (PRP-0109, UDR-0087):
+    Chat routing comes SOLELY from the Model Offering Catalog (PRP-0113 /
+    UDR-0094 D1): the chat offerings in AUTHORED FILE ORDER (UDR-0093 D1 -- the
+    default is NOT hoisted); ``model`` is the offering id and ``provider_name``
+    its declared provider. Returns ``[]`` for a non-demo deployment with no
+    catalog -- the agent registry surfaces that as a fail-fast (UDR-0094 D1).
 
-    - CATALOG lane (``model_offerings.jsonc`` present): the chat offerings in the
-      AUTHORED FILE ORDER (UDR-0093 D1 -- the default is NOT hoisted); ``model`` is
-      the offering id and ``provider_name`` its declared provider. The legacy env
-      namespaces are ignored (D11).
-    - LEGACY lane (no catalog / DEMO_MODE): the merged per-namespace list --
-      Azure models first (preserving the pre-PRP-0069 default), then Anthropic,
-      then OpenAI, then Foundry (UDR-0045 D3 / UDR-0073 D3 / UDR-0085 D3). Ids
-      are unique across providers (enforced by Settings._validate_anthropic); a
-      defensive de-dup keeps the first occurrence if a duplicate slips through.
-
-    This list is PRESENTATION ORDER. It no longer encodes the default model -- ask
+    This list is PRESENTATION ORDER. It does not encode the default model -- ask
     :func:`resolve_default_model` for that.
     """
     catalog = models_catalog.active_catalog()
     if catalog is not None:
         return [(o.id, o.provider) for o in catalog.chat_offerings()]
-    out: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for provider in _ORDERED:
-        for model in provider.models():
-            if model in seen:
-                continue
-            seen.add(model)
-            out.append((model, provider.name))
-    return out
+    return []
 
 
 def resolve_default_model() -> str:
     """Return the model that is PRESELECTED, independent of display order.
 
-    UDR-0093 D2. Before PRP-0112 the registry took ``resolve_models()[0]``, which
-    was correct only because :meth:`Catalog.chat_offerings` hoisted the ``default``
-    offering to index 0. Now that presentation order is the operator's (UDR-0093
-    D1), position no longer implies default, and reading it positionally would
-    silently promote whichever model happens to be listed first -- a wrong-model bug
-    with no type error and no exception. So the catalog lane asks the catalog.
-
-    The LEGACY lane (no catalog file) has no ``default`` flag, so "the first model
-    of the merged namespace order" remains its definition of default, unchanged.
+    UDR-0093 D2. Presentation order is the operator's (UDR-0093 D1), so position
+    no longer implies default and reading it positionally would silently promote
+    whichever model happens to be listed first. The default is asked of the
+    catalog explicitly. Returns ``""`` for a non-demo deployment with no catalog
+    (UDR-0094 D1).
     """
     catalog = models_catalog.active_catalog()
     if catalog is not None:
         default = catalog.default_offering()
         return default.id if default is not None else ""
-    models = resolve_models()
-    return models[0][0] if models else ""
+    return ""
 
 
 def provider_for(model: str) -> Provider:
     """Return the Provider that owns ``model`` (defaults to azure-openai).
 
-    On the catalog lane the provider comes from the offering (PRP-0109); on the
-    legacy lane it comes from the env namespace that lists the model.
+    The provider comes from the model's catalog offering (PRP-0113 / UDR-0094).
+    An unknown model (no active catalog, or an id not in the catalog) defaults to
+    azure-openai so read-only capability lookups never raise.
     """
     catalog = models_catalog.active_catalog()
     if catalog is not None:
         offering = catalog.get(model)
         if offering is not None:
             return PROVIDERS.get(offering.provider, _AZURE)
-        return _AZURE
-    for candidate, name in resolve_models():
-        if candidate == model:
-            return PROVIDERS[name]
     return _AZURE
 
 
@@ -227,13 +208,13 @@ def background_supported_map(models: list[str]) -> dict[str, bool]:
 
 
 def get_max_context_tokens(model: str | None = None) -> int:
-    """Resolve max context tokens for ``model``, catalog-aware (CTR-0069, PRP-0109).
+    """Resolve max context tokens for ``model`` from the catalog (CTR-0069, PRP-0113).
 
-    On the catalog lane an offering's declared ``context_window`` wins; otherwise
-    (and on the legacy lane) the ``MODEL_MAX_CONTEXT_TOKENS`` env config applies
-    via ``settings.get_max_context_tokens`` (byte-for-byte on the legacy lane).
-    ``model=None`` resolves to the catalog default offering when a catalog is
-    active, else the legacy default model.
+    An offering's declared ``context_window`` wins; when unset it defaults to the
+    single backend constant ``DEFAULT_CONTEXT_WINDOW`` (UDR-0094 D5, replacing the
+    removed ``MODEL_MAX_CONTEXT_TOKENS`` env config). ``model=None`` resolves to
+    the catalog default offering. Returns the default constant when no catalog is
+    active (non-demo no-catalog is a fail-fast elsewhere; this stays non-raising).
     """
     catalog = models_catalog.active_catalog()
     if catalog is not None:
@@ -244,8 +225,7 @@ def get_max_context_tokens(model: str | None = None) -> int:
         offering = catalog.get(resolved)
         if offering is not None and offering.context_window is not None:
             return offering.context_window
-        return settings.get_max_context_tokens(resolved)
-    return settings.get_max_context_tokens(model)
+    return DEFAULT_CONTEXT_WINDOW
 
 
 def max_context_tokens_map(models: list[str]) -> dict[str, int]:

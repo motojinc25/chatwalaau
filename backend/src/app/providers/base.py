@@ -1,9 +1,10 @@
 """Base-model provider Protocol (CTR-0102, PRP-0069, UDR-0045).
 
 A Provider owns everything that differs between base-model providers:
-the model list it serves, how to construct the MAF ``ChatClient`` for a
-model (including ``(provider x hosting)`` credential / endpoint
-resolution), the per-model GENERATION OPTION CATALOG (the set of knobs the
+how to construct the MAF ``ChatClient`` for a model (including
+``(provider x hosting)`` credential / endpoint resolution, resolved from the
+model's catalog offering; PRP-0113 / UDR-0094), the per-model GENERATION
+OPTION CATALOG (the set of knobs the
 model accepts: reasoning effort plus, where supported, verbosity; PRP-0081 /
 UDR-0057), the per-model generation ``default_options`` resolved from a
 selection, and the provider-supplied hosted web search tool (when any).
@@ -31,10 +32,6 @@ class Provider(Protocol):
     # run-option guard (CTR-0045), and surfaced in the UI to disable the
     # Background toggle for non-supporting models (PRP-0073).
     supports_background: bool
-
-    def models(self) -> list[str]:
-        """Ordered model ids this provider serves (from its env namespace)."""
-        ...
 
     def build_chat_client(self, model: str) -> Any:
         """Construct the MAF ChatClient for ``model`` (credential owned here)."""

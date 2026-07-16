@@ -424,20 +424,12 @@ def build_devui_agent() -> Agent | None:
         models = resolve_demo_models()
         model = models[0]
     else:
-        # Catalog-aware (PRP-0109): on the catalog lane the default model is the
-        # catalog's default offering; on the legacy lane the "no models" gate and
-        # the default stay on settings.all_model_list / settings.default_model
-        # (byte-for-byte the pre-PRP-0109 behavior).
-        catalog = models_catalog.active_catalog()
-        if catalog is not None:
-            default = catalog.default_offering()
-            if default is None:
-                return None
-            model = default.id
-        else:
-            if not settings.all_model_list:
-                return None
-            model = settings.default_model
+        # Catalog-only (PRP-0113, UDR-0094): the default model is the catalog's
+        # default offering. No catalog (non-demo) -> no DevUI agent (the caller
+        # falls back to the registry, which fail-fasts at build time).
+        model = providers.resolve_default_model()
+        if not model:
+            return None
 
     include_mcp = not settings.devui_disable_mcp
     include_rag = not settings.devui_disable_rag

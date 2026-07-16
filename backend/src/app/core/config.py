@@ -55,36 +55,21 @@ class Settings(BaseSettings):
     # by NAME (api_key_env) or uses the shared Entra ID lanes (UDR-0087 D4).
     model_offerings_file: str = "model_offerings.jsonc"
 
-    # Multi-Model Configuration (CTR-0069, PRP-0035)
-    # DEPRECATED by the Model Offering Catalog (PRP-0109); still fully functional
-    # until a future hard-break PRP removes it. Comma-separated deployment names.
-    # First entry is the default model.
-    azure_openai_models: str = ""
-
-    # Backward compatibility: old single-model variable (removed in PRP-0035).
-    # If AZURE_OPENAI_MODELS is empty, this value is used as fallback.
-    azure_openai_responses_deployment_name: str = ""
-
-    # ---- Anthropic provider (CTR-0069 v2, CTR-0102, PRP-0069, UDR-0045) ----
-    # Comma-separated Claude model ids routed to the "anthropic" provider.
-    # Empty (default) = Anthropic disabled; the runtime behaves exactly as the
-    # pre-PRP-0069 Azure-OpenAI-only build. Model ids must be unique across
-    # AZURE_OPENAI_MODELS and ANTHROPIC_MODELS (validated at startup).
-    anthropic_models: str = ""
-
-    # Anthropic hosting: "direct" (Anthropic public API, default) or "foundry"
-    # (Anthropic on Azure AI Foundry). Single global selector (UDR-0045 D3/G).
-    anthropic_hosting: str = "direct"
-
-    # Direct hosting auth (ANTHROPIC_HOSTING=direct).
-    anthropic_api_key: str = ""
-    anthropic_base_url: str = ""
-
-    # Foundry hosting auth (ANTHROPIC_HOSTING=foundry). Provide RESOURCE
-    # (subdomain before .services.ai.azure.com) or a full BASE_URL.
-    anthropic_foundry_api_key: str = ""
-    anthropic_foundry_resource: str = ""
-    anthropic_foundry_base_url: str = ""
+    # ---- Model routing: Model Offering Catalog ONLY (PRP-0113, UDR-0094) ----
+    # PRP-0113 / UDR-0094 retired the legacy env-namespace model ROUTING lane.
+    # The per-provider model lists (AZURE_OPENAI_MODELS / ANTHROPIC_MODELS /
+    # OPENAI_MODELS / FOUNDRY_MODELS), the ancient single-model fallback
+    # (AZURE_OPENAI_RESPONSES_DEPLOYMENT_NAME), the global ANTHROPIC_HOSTING
+    # switch, MODEL_MAX_CONTEXT_TOKENS, and the per-provider CHAT endpoint /
+    # base_url / api-key fields (ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL /
+    # ANTHROPIC_FOUNDRY_* / OPENAI_BASE_URL / FOUNDRY_PROJECT_ENDPOINT) were
+    # REMOVED. Chat-model routing now comes SOLELY from model_offerings.jsonc,
+    # where each offering self-describes provider / model_ref / endpoint /
+    # base_url / hosting / context_window and references any api-key env var by
+    # NAME (api_key_env). The Azure credential / endpoint substrate
+    # (AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_CREDENTIAL_MODE,
+    # AZURE_TENANT_ID) is RETAINED, shared with image / RAG / STT / TTS and used
+    # as the azure-openai offering fallback (UDR-0094 D6).
 
     # Anthropic generation. Anthropic requires max_tokens on every request as a
     # cap on thinking + text output COMBINED (CTR-0006, UDR-0047 D5). Because
@@ -94,43 +79,10 @@ class Settings(BaseSettings):
     # tier). Default 8192 = the low-effort tier.
     anthropic_max_tokens: int = 8192
 
-    # ---- OpenAI provider (CTR-0069, CTR-0102, PRP-0095, UDR-0073) ----
-    # Comma-separated OpenAI model ids routed to the "openai" provider (direct
-    # OpenAI public API, API-key auth). Empty (default) = OpenAI disabled; the
-    # runtime behaves exactly as the pre-PRP-0095 build. v1 scope: REASONING
-    # models only (e.g. gpt-5.x / o-series) -- the option catalog reuses the
-    # azure-openai reasoning-only catalog (UDR-0073 D5). Model ids must be unique
-    # across AZURE_OPENAI_MODELS, ANTHROPIC_MODELS and OPENAI_MODELS (validated
-    # at startup). The merged selector lists Azure first, then Anthropic, then
-    # these (UDR-0073 D3).
-    openai_models: str = ""
-
-    # Direct hosting auth. OPENAI_BASE_URL is an optional endpoint override for
-    # OpenAI-compatible gateways; no Entra ID / managed-identity lane exists for
-    # the public OpenAI API (UDR-0073 D4).
+    # OpenAI API key (OPENAI_API_KEY). RETAINED (UDR-0094 D6): consumed by image
+    # generation (app.image_gen) and the RAG embedder plain-OpenAI path; also a
+    # valid value for a chat offering's api_key_env reference.
     openai_api_key: str = ""
-    openai_base_url: str = ""
-
-    # ---- Microsoft Foundry provider (CTR-0069, CTR-0102, PRP-0106, UDR-0085) ----
-    # Comma-separated Foundry model deployment names routed to the "foundry"
-    # provider (Microsoft Foundry PROJECT endpoint, Entra ID auth). Empty
-    # (default) = Foundry disabled; the runtime behaves exactly as the
-    # pre-PRP-0106 build. v1 scope: REASONING models only -- the option catalog
-    # reuses the azure-openai reasoning-only catalog (UDR-0085 D5). Model ids
-    # must be unique across AZURE_OPENAI_MODELS, ANTHROPIC_MODELS, OPENAI_MODELS
-    # and FOUNDRY_MODELS (validated at startup). The merged selector lists Azure
-    # first, then Anthropic, then OpenAI, then these (UDR-0085 D3).
-    # NOTE: this is the NATIVE Foundry provider; it is unrelated to
-    # ANTHROPIC_FOUNDRY_* (Claude models hosted on Foundry via "anthropic").
-    foundry_models: str = ""
-
-    # Foundry project endpoint (REQUIRED when FOUNDRY_MODELS is set; startup
-    # fail-fast otherwise). Authentication is Entra ID ONLY, reusing the shared
-    # credential lanes: AZURE_CREDENTIAL_MODE (cli / managed-identity /
-    # default) + AZURE_TENANT_ID (UDR-0085 D4). There is no FOUNDRY_API_KEY --
-    # the MAF Foundry connector has no API-key parameter -- and
-    # AZURE_OPENAI_API_KEY does NOT apply to this lane.
-    foundry_project_endpoint: str = ""
 
     # Web Search
     web_search_country: str = "US"
@@ -308,14 +260,9 @@ class Settings(BaseSettings):
     # before `input_audio_buffer.append`. Allowed values: 16000, 24000.
     whisper_realtime_audio_rate: int = 24000
 
-    # Model Context Window (CTR-0069, PRP-0035)
-    # Per-model format: "gpt-4o:128000,o3:200000,gpt-4.1-mini:1047576"
-    # Single integer fallback: "128000" (applies to all models)
-    # | Model                    | max_context_tokens |
-    # | gpt-4o / gpt-4o-mini    | 128000             |
-    # | gpt-4.1 / gpt-4.1-mini  | 1047576            |
-    # | o3 / o4-mini             | 200000             |
-    model_max_context_tokens: str = "128000"
+    # Model context window: removed (PRP-0113, UDR-0094 D5). The per-model
+    # context limit is now an offering's `context_window` in model_offerings.jsonc,
+    # defaulting to app.models_catalog.DEFAULT_CONTEXT_WINDOW (128000) when unset.
 
     # Text-to-Speech (CTR-0039, PRP-0022)
     elevenlabs_api_key: str = ""
@@ -719,100 +666,11 @@ class Settings(BaseSettings):
     # grant. MUST be >= TOOL_APPROVAL_MAX_ITERATIONS. Range 1..100000.
     tool_approval_absolute_max_iterations: int = 200
 
-    # ---- Multi-Model helpers (CTR-0069) ----
-
-    @property
-    def model_list(self) -> list[str]:
-        """Parse AZURE_OPENAI_MODELS into an ordered list of deployment names."""
-        return [m.strip() for m in self.azure_openai_models.split(",") if m.strip()]
-
-    @property
-    def anthropic_model_list(self) -> list[str]:
-        """Parse ANTHROPIC_MODELS into an ordered list of Claude model ids."""
-        return [m.strip() for m in self.anthropic_models.split(",") if m.strip()]
-
-    @property
-    def openai_model_list(self) -> list[str]:
-        """Parse OPENAI_MODELS into an ordered list of OpenAI model ids (PRP-0095)."""
-        return [m.strip() for m in self.openai_models.split(",") if m.strip()]
-
-    @property
-    def foundry_model_list(self) -> list[str]:
-        """Parse FOUNDRY_MODELS into an ordered list of Foundry deployment names (PRP-0106)."""
-        return [m.strip() for m in self.foundry_models.split(",") if m.strip()]
-
-    @property
-    def all_model_list(self) -> list[str]:
-        """Merged ordered model list across providers (Azure, Anthropic, OpenAI, Foundry).
-
-        UDR-0045 D3 / UDR-0073 D3 / UDR-0085 D3: ordering is Azure-first, then
-        Anthropic, then OpenAI, then Foundry, so the default model is the first
-        Azure model when any is configured (preserving the pre-PRP-0069 default)
-        and falls back to the first Anthropic / OpenAI / Foundry model otherwise.
-        Model ids are unique across providers (enforced by _validate_anthropic),
-        but a defensive de-dup keeps order.
-        """
-        merged = list(self.model_list)
-        for m in (*self.anthropic_model_list, *self.openai_model_list, *self.foundry_model_list):
-            if m not in merged:
-                merged.append(m)
-        return merged
-
-    @property
-    def default_model(self) -> str:
-        """First model in the merged provider-aware list is the default."""
-        models = self.all_model_list
-        if not models:
-            return ""
-        return models[0]
-
-    def get_max_context_tokens(self, model: str | None = None) -> int:
-        """Resolve max context tokens for a specific model.
-
-        Supports two formats:
-        - Per-model: "gpt-4o:128000,o3:200000"
-        - Single integer: "128000" (applies to all models)
-        """
-        raw = self.model_max_context_tokens.strip()
-        if ":" not in raw:
-            # Single integer fallback
-            try:
-                return int(raw)
-            except ValueError:
-                return 128000
-        # Per-model format
-        pairs: dict[str, str] = {}
-        for entry in raw.split(","):
-            entry = entry.strip()
-            if ":" in entry:
-                name, value = entry.split(":", 1)
-                pairs[name.strip()] = value.strip()
-        target = model or self.default_model
-        if target in pairs:
-            try:
-                return int(pairs[target])
-            except ValueError:
-                pass
-        # Fallback: default model's value, or 128000
-        if self.default_model in pairs:
-            try:
-                return int(pairs[self.default_model])
-            except ValueError:
-                pass
-        return 128000
-
-    @property
-    def max_context_tokens_map(self) -> dict[str, int]:
-        """Return a map of model -> max_context_tokens for all configured models.
-
-        Spans every provider (Azure, Anthropic, OpenAI, Foundry) so the frontend
-        context-window indicator resolves a limit for any selectable model.
-        Operators add non-Azure entries to MODEL_MAX_CONTEXT_TOKENS; unlisted
-        models fall back to the default per get_max_context_tokens. Azure-only
-        behavior is unchanged (all_model_list == model_list when the other
-        namespaces are empty).
-        """
-        return {model: self.get_max_context_tokens(model) for model in self.all_model_list}
+    # ---- Multi-Model helpers ----
+    # PRP-0113 / UDR-0094 removed the legacy env-namespace model-list accessors
+    # and the context-window accessors along with the routing lane. Model routing,
+    # default selection, and per-model context windows now come from the Model
+    # Offering Catalog through the app.providers module and app.models_catalog.
 
     # ---- Demo Mode helpers (CTR-0006 v22, PRP-0066, UDR-0041) ----
 
@@ -828,94 +686,12 @@ class Settings(BaseSettings):
         return max(0, min(500, self.demo_latency_ms))
 
     # ---- Validators ----
-
-    @model_validator(mode="after")
-    def _validate_models(self) -> "Settings":
-        # Backward compatibility: migrate old single-model variable (PRP-0035)
-        if not self.azure_openai_models and self.azure_openai_responses_deployment_name:
-            self.azure_openai_models = self.azure_openai_responses_deployment_name
-            _logger.warning(
-                "AZURE_OPENAI_RESPONSES_DEPLOYMENT_NAME is deprecated. "
-                "Please migrate to AZURE_OPENAI_MODELS=%s in your .env file.",
-                self.azure_openai_models,
-            )
-        # On the Model Offering Catalog lane (PRP-0109) the legacy namespaces are
-        # intentionally empty and routing comes from model_offerings.jsonc, so
-        # suppress the "no models" warning when a catalog file is configured. The
-        # catalog's own required-chat validation (UDR-0087 D3) fails fast at load.
-        if not self.all_model_list and not (self.model_offerings_file or "").strip():
-            _logger.warning(
-                "No models configured (AZURE_OPENAI_MODELS, ANTHROPIC_MODELS, OPENAI_MODELS "
-                "and FOUNDRY_MODELS are all empty); agent creation will be skipped."
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _validate_anthropic(self) -> "Settings":
-        """Validate the Anthropic provider configuration (PRP-0069, UDR-0045).
-
-        - ANTHROPIC_HOSTING must be one of {direct, foundry} (normalised).
-        - Foundry hosting requires a resource or a base_url.
-        - Model ids must be unique across providers (UDR-0045 D3).
-        Validation only fires for the configured surface, so Azure-only
-        deployments (ANTHROPIC_MODELS empty) are never affected.
-        Reasoning effort (PRP-0071, UDR-0047): Anthropic uses adaptive thinking
-        + output_config.effort; ANTHROPIC_THINKING_BUDGET is removed, so there is
-        no budget-vs-max_tokens check. The effort default is a fixed,
-        backend-owned per-provider constant (no env var).
-        """
-        hosting = (self.anthropic_hosting or "").strip().lower()
-        allowed = {"direct", "foundry"}
-        if hosting and hosting not in allowed:
-            raise ValueError(f"ANTHROPIC_HOSTING must be one of {sorted(allowed)}, got {hosting!r}")
-        self.anthropic_hosting = hosting or "direct"
-
-        if (
-            self.anthropic_model_list
-            and self.anthropic_hosting == "foundry"
-            and not (self.anthropic_foundry_resource.strip() or self.anthropic_foundry_base_url.strip())
-        ):
-            msg = "ANTHROPIC_HOSTING=foundry requires ANTHROPIC_FOUNDRY_RESOURCE or ANTHROPIC_FOUNDRY_BASE_URL."
-            raise ValueError(msg)
-
-        # Cross-provider model-id uniqueness across all four namespaces
-        # (UDR-0045 D3 extended by UDR-0073 D2 and UDR-0085 D2). A collision
-        # under any two providers is a startup error; deployments with a
-        # namespace unset are unaffected (its model list is empty).
-        namespaces = (
-            ("AZURE_OPENAI_MODELS", self.model_list),
-            ("ANTHROPIC_MODELS", self.anthropic_model_list),
-            ("OPENAI_MODELS", self.openai_model_list),
-            ("FOUNDRY_MODELS", self.foundry_model_list),
-        )
-        seen: dict[str, str] = {}
-        dupes: set[str] = set()
-        for ns_name, ids in namespaces:
-            for mid in ids:
-                if mid in seen and seen[mid] != ns_name:
-                    dupes.add(mid)
-                seen[mid] = ns_name
-        if dupes:
-            msg = (
-                f"Model id(s) {sorted(dupes)} appear under multiple providers; ids must be unique "
-                "across AZURE_OPENAI_MODELS, ANTHROPIC_MODELS, OPENAI_MODELS and FOUNDRY_MODELS."
-            )
-            raise ValueError(msg)
-
-        return self
-
-    @model_validator(mode="after")
-    def _validate_foundry(self) -> "Settings":
-        """Validate the Microsoft Foundry provider configuration (PRP-0106, UDR-0085 D2).
-
-        FOUNDRY_MODELS non-empty requires FOUNDRY_PROJECT_ENDPOINT (startup
-        fail-fast, mirroring the ANTHROPIC_HOSTING=foundry resource check).
-        Foundry-disabled deployments (FOUNDRY_MODELS empty) are never affected.
-        """
-        if self.foundry_model_list and not self.foundry_project_endpoint.strip():
-            msg = "FOUNDRY_MODELS requires FOUNDRY_PROJECT_ENDPOINT (Microsoft Foundry project endpoint)."
-            raise ValueError(msg)
-        return self
+    # PRP-0113 / UDR-0094: the model-routing validators (_validate_models /
+    # _validate_anthropic / _validate_foundry) were REMOVED with the legacy
+    # env-namespace lane. Model routing is validated by the Model Offering
+    # Catalog loader (app.models_catalog.parse_catalog: >=1 chat offering, unique
+    # ids, known provider, per-offering hosting) at load, and a non-demo runtime
+    # with no chat offering fail-fasts at agent build (app.agui.agent_registry).
 
     @model_validator(mode="after")
     def _validate_credential_mode(self) -> "Settings":

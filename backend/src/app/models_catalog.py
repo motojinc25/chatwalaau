@@ -9,18 +9,25 @@ operations, an option-catalog ``family`` override, a ``context_window``, and a
 expressed as SEVERAL offerings sharing an ``endpoint`` / ``base_url`` -- no new
 provider class is needed (UDR-0087 D5).
 
-Two lanes (UDR-0087 D1):
+Chat-model routing (PRP-0113, UDR-0094 D1): the catalog is the SOLE routing
+source for a non-demo deployment. The legacy per-provider ``*_MODELS`` env
+namespaces have been REMOVED -- there is no env-namespace fallback lane. A
+non-demo runtime with no chat offering does NOT crash: the server boots with an
+empty agent registry and a WARNING (``app.agui.agent_registry``) and surfaces the
+actionable error only when a chat model is actually requested. ``active_catalog()``
+itself returns ``None`` (no file present) without raising so read-only callers
+stay safe.
 
 - File PRESENT  -> the CATALOG lane. The offerings are the single source of
-  truth for model routing; the legacy ``*_MODELS`` env namespaces are IGNORED
-  for routing (one startup WARNING enumerates them, D11).
-- File ABSENT   -> the LEGACY lane. ``active_catalog()`` returns ``None`` and
-  every consumer (``app.providers``, CTR-0069 surfaces, the RAG embedder, the
-  Images API) uses its existing env configuration byte-for-byte.
+  truth for model routing.
+- File ABSENT (non-demo) -> ``active_catalog()`` returns ``None``; there is no
+  chat model, the agent registry boots empty with a warning, and chat errors with
+  guidance on use (UDR-0094 D1). The optional embeddings / image offering lanes
+  (CTR-0075 / CTR-0049) simply stay on their retained env configuration.
 
-DEMO_MODE always takes the legacy lane here: ``active_catalog()`` returns
-``None`` when ``DEMO_MODE=true`` so the demo short-circuit in the agent
-registry (UDR-0041 / UDR-0045 D7) is unaffected and the catalog is never
+DEMO_MODE is orthogonal (UDR-0094 D3): ``active_catalog()`` returns ``None``
+when ``DEMO_MODE=true`` so the demo short-circuit in the agent registry
+(UDR-0041 / UDR-0045 D7) routes through ``DEMO_MODELS`` and the catalog is never
 consulted for a demo deployment (UDR-0087 D10).
 
 Secrets are NEVER written in the file: an offering references an environment
@@ -57,15 +64,18 @@ VALID_OPERATIONS = frozenset({"chat", "embeddings", "image"})
 VALID_FAMILIES = frozenset({"openai-reasoning", "anthropic-adaptive", "bare"})
 VALID_HOSTINGS = frozenset({"direct", "foundry"})
 
+# Default per-model context window used when an offering does not declare its own
+# ``context_window`` (PRP-0113, UDR-0094 D5). This replaces the removed
+# ``MODEL_MAX_CONTEXT_TOKENS`` env config and matches the prior
+# ``settings.get_max_context_tokens`` fallback so an offering without an explicit
+# window keeps the same 128000-token limit it had on the retired legacy lane.
+DEFAULT_CONTEXT_WINDOW = 128000
+
 # Keys that would embed a raw secret in the catalog file; rejected at load so
 # an operator is steered to api_key_env / auth_profiles (UDR-0087 D4).
 _INLINE_SECRET_KEYS = ("api_key", "apiKey", "apikey")
 
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-
-# The legacy env namespaces ignored (with a warning) when a catalog is active
-# (UDR-0087 D11). Kept here so the message stays in one place.
-_LEGACY_NAMESPACES = ("AZURE_OPENAI_MODELS", "ANTHROPIC_MODELS", "OPENAI_MODELS", "FOUNDRY_MODELS")
 
 
 class CatalogError(ValueError):
@@ -400,32 +410,37 @@ _active: Any = _UNSET
 
 
 def active_catalog() -> Catalog | None:
-    """Return the active :class:`Catalog`, or None for the legacy lane.
+    """Return the active :class:`Catalog`, or None when no catalog is present.
 
     Returns None when DEMO_MODE is on (the catalog is ignored for a demo
-    deployment, UDR-0087 D10) or when no catalog file is present (the legacy
-    env-namespace lane, D1). Resolved once and cached; the first time a catalog
-    is found to be active while a legacy ``*_MODELS`` namespace is also set, one
-    WARNING enumerates the ignored keys (D11).
+    deployment, UDR-0087 D10) or when no catalog file is present. A non-demo
+    deployment with no catalog file has NO chat model: the agent registry boots
+    empty with a warning and chat errors with guidance on use (PRP-0113,
+    UDR-0094 D1); this function does not raise so read-only callers stay safe.
+    Resolved once and cached.
     """
     global _active
     if _active is not _UNSET:
         return _active
 
     if settings.demo_mode:
-        # DEMO_MODE always uses the legacy lane (the catalog is ignored, D10).
+        # DEMO_MODE is orthogonal: routing comes from DEMO_MODELS and the catalog
+        # is never consulted (UDR-0087 D10 / UDR-0094 D3).
         logger.info("Model routing source: DEMO_MODE (in-process demo models; catalog ignored)")
         _active = None
         return None
 
     path = _catalog_path()
     if path is None or not path.is_file():
-        # Legacy lane: routing comes from the per-provider .env namespaces.
+        # No catalog present. Non-demo: there is no chat model; the agent registry
+        # boots empty with a warning and chat errors with guidance on use
+        # (UDR-0094 D1). The optional embeddings / image offering lanes stay on
+        # their retained env configuration.
         configured = (settings.model_offerings_file or "").strip()
         detail = f"MODEL_OFFERINGS_FILE={configured} not found" if configured else "MODEL_OFFERINGS_FILE unset"
-        logger.info(
-            "Model routing source: .env namespaces (AZURE_OPENAI_MODELS / ANTHROPIC_MODELS / "
-            "OPENAI_MODELS / FOUNDRY_MODELS) -- no Model Offering Catalog (%s)",
+        logger.warning(
+            "No Model Offering Catalog present (%s); no chat model is configured. "
+            "Author one with `chatwalaau models add` or the Model Settings screen.",
             detail,
         )
         _active = None
@@ -439,14 +454,6 @@ def active_catalog() -> Catalog | None:
         len(catalog.all()),
         catalog.default_offering().id if catalog.default_offering() else "(none)",
     )
-    ignored = [ns for ns in _LEGACY_NAMESPACES if (os.environ.get(ns) or "").strip()]
-    if ignored:
-        logger.warning(
-            "Model Offering Catalog active (%s); the legacy model namespaces %s are IGNORED "
-            "for routing. Remove them from .env or delete the catalog file to use them.",
-            path.name,
-            ", ".join(ignored),
-        )
     _active = catalog
     return catalog
 
