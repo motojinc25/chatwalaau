@@ -71,6 +71,27 @@ VALID_HOSTINGS = frozenset({"direct", "foundry"})
 # window keeps the same 128000-token limit it had on the retired legacy lane.
 DEFAULT_CONTEXT_WINDOW = 128000
 
+# Default Azure API versions for the non-chat offerings when the offering omits
+# ``api_version`` (PRP-0114, UDR-0095 D5). These replace the removed
+# ``IMAGE_API_VERSION`` Settings field and the hardcoded RAG embedder literal,
+# mirroring the ``DEFAULT_CONTEXT_WINDOW`` pattern above so a minimal offering
+# keeps the same verified-working versions it had on the retired env lane.
+DEFAULT_IMAGE_API_VERSION = "2025-04-01-preview"
+DEFAULT_EMBEDDING_API_VERSION = "2024-10-21"
+
+# Allowed values for the image offering's optional ``image_defaults`` block
+# (PRP-0114, UDR-0095 D3). These mirror the enums of the removed IMAGE_* Settings
+# fields; ``compression`` is a 0-100 integer (jpeg/webp only) and is validated
+# separately. Values are the operator DEFAULTS -- the per-session
+# ``state.image_options`` and an explicit LLM tool argument still override them.
+_IMAGE_DEFAULT_ENUMS: dict[str, frozenset[str]] = {
+    "size": frozenset({"auto", "1024x1024", "1024x1536", "1536x1024"}),
+    "quality": frozenset({"auto", "low", "medium", "high"}),
+    "format": frozenset({"png", "jpeg", "webp"}),
+    "background": frozenset({"auto", "transparent", "opaque"}),
+}
+_IMAGE_DEFAULT_KEYS = frozenset({*_IMAGE_DEFAULT_ENUMS, "compression"})
+
 # Keys that would embed a raw secret in the catalog file; rejected at load so
 # an operator is steered to api_key_env / auth_profiles (UDR-0087 D4).
 _INLINE_SECRET_KEYS = ("api_key", "apiKey", "apikey")
@@ -110,6 +131,10 @@ class Offering:
     context_window: int | None = None
     default: bool = False
     api_key_env: str | None = None
+    # Optional image output-behavior defaults (PRP-0114, UDR-0095 D3). Valid ONLY
+    # on an image offering; None on every other offering. Keys are a subset of
+    # {size, quality, format, background, compression}.
+    image_defaults: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -236,6 +261,45 @@ def _require_str(entry: dict[str, Any], key: str, offering_id: str) -> str:
     return val.strip()
 
 
+def _parse_image_defaults(raw: Any, offering_id: str, operations: list[str]) -> dict[str, Any] | None:
+    """Validate an offering's optional ``image_defaults`` block (PRP-0114, UDR-0095 D3).
+
+    Returns a normalized dict (only the provided keys), or None when absent.
+    Raises :class:`CatalogError` when the block is present on a non-image offering,
+    contains an unknown key, or carries an out-of-enum / out-of-range value.
+    """
+    if raw is None:
+        return None
+    if "image" not in operations:
+        raise CatalogError(
+            f"offering '{offering_id}': 'image_defaults' is only valid on an image offering "
+            "(add \"image\" to 'operations')"
+        )
+    if not isinstance(raw, dict):
+        raise CatalogError(f"offering '{offering_id}': 'image_defaults' must be an object")
+    out: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key not in _IMAGE_DEFAULT_KEYS:
+            raise CatalogError(
+                f"offering '{offering_id}': unknown image_defaults key {key!r} "
+                f"(expected one of {sorted(_IMAGE_DEFAULT_KEYS)})"
+            )
+        if value is None:
+            continue
+        if key == "compression":
+            if isinstance(value, bool) or not isinstance(value, int) or not (0 <= value <= 100):
+                raise CatalogError(f"offering '{offering_id}': image_defaults.compression must be an integer 0-100")
+            out[key] = value
+            continue
+        allowed = _IMAGE_DEFAULT_ENUMS[key]
+        if not isinstance(value, str) or value not in allowed:
+            raise CatalogError(
+                f"offering '{offering_id}': image_defaults.{key} must be one of {sorted(allowed)}, got {value!r}"
+            )
+        out[key] = value
+    return out or None
+
+
 def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Offering:
     if not isinstance(entry, dict):
         raise CatalogError(f"offering #{index}: entry must be an object")
@@ -316,6 +380,8 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
         base_url = _interpolate(str(base_url), offering_id, "base_url")
     api_version = entry.get("api_version")
 
+    image_defaults = _parse_image_defaults(entry.get("image_defaults"), offering_id, operations)
+
     return Offering(
         id=offering_id,
         provider=provider,
@@ -329,6 +395,7 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
         context_window=context_window,
         default=default,
         api_key_env=(api_key_env or None),
+        image_defaults=image_defaults,
         metadata=entry.get("metadata", {}) if isinstance(entry.get("metadata"), dict) else {},
     )
 
@@ -531,11 +598,14 @@ def _resolved(offering: Offering | None) -> ResolvedModelConfig | None:
 
 
 def embedding_config() -> ResolvedModelConfig | None:
-    """Resolved config for the single embeddings offering, or None (legacy).
+    """Resolved config for the single embeddings offering, or None.
 
-    Consumed by the RAG embedder (CTR-0075) in place of its dedicated env
-    configuration when an ``embeddings`` offering is present (UDR-0087 D7);
-    None -> the existing EMBEDDING_DEPLOYMENT_NAME / AZURE_OPENAI_ENDPOINT path.
+    Consumed by the RAG embedder (CTR-0075) as the SOLE source of the embedding
+    model identity for a non-demo deployment (PRP-0114, UDR-0095 D1). None means no
+    catalog / no embeddings offering: the consumer then degrades gracefully (RAG
+    unavailable) except under DEMO_MODE, where DemoEmbedder is used regardless
+    (UDR-0095 D4). ``api_version`` defaults to ``DEFAULT_EMBEDDING_API_VERSION`` and
+    ``endpoint`` to the shared ``AZURE_OPENAI_ENDPOINT`` when the offering omits them.
     """
     catalog = active_catalog()
     if catalog is None:
@@ -544,16 +614,40 @@ def embedding_config() -> ResolvedModelConfig | None:
 
 
 def image_config() -> ResolvedModelConfig | None:
-    """Resolved config for the single image offering, or None (legacy).
+    """Resolved config for the single image offering, or None.
 
-    Consumed by image generation (CTR-0049) in place of IMAGE_DEPLOYMENT_NAME /
-    AZURE_OPENAI_ENDPOINT when an ``image`` offering is present (UDR-0087 D7).
-    Image generation stays on the dedicated Images API (UDR-0045 D7 preserved).
+    Consumed by image generation (CTR-0049) as the SOLE source of the image model
+    identity for a non-demo deployment (PRP-0114, UDR-0095 D1). None means no
+    catalog / no image offering: the tools are then not registered (graceful) and
+    the mask-edit endpoint (CTR-0053) refuses -- except under DEMO_MODE, which uses
+    the demo image tools regardless (UDR-0095 D4). ``api_version`` defaults to
+    ``DEFAULT_IMAGE_API_VERSION`` and ``endpoint`` to the shared
+    ``AZURE_OPENAI_ENDPOINT`` when the offering omits them. Image generation stays on
+    the dedicated Azure Images API (UDR-0045 D7 preserved).
     """
     catalog = active_catalog()
     if catalog is None:
         return None
     return _resolved(catalog.image_offering())
+
+
+def image_output_defaults() -> dict[str, Any]:
+    """The image offering's ``image_defaults`` block, or ``{}`` (PRP-0114, UDR-0095 D3).
+
+    Consumed by image generation (CTR-0049) as the operator DEFAULT tier for the
+    output-behavior options (size / quality / format / compression / background),
+    replacing the removed CTR-0006 ``IMAGE_*`` settings. Returns an empty dict when
+    there is no catalog, no image offering, or the offering declares no defaults;
+    the per-session ``state.image_options`` and an explicit LLM tool argument still
+    override these (precedence in app.image_gen.tools._resolve_option).
+    """
+    catalog = active_catalog()
+    if catalog is None:
+        return {}
+    offering = catalog.image_offering()
+    if offering is None or not offering.image_defaults:
+        return {}
+    return dict(offering.image_defaults)
 
 
 # ---- Write side + management snapshot (CTR-0174 write path, PRP-0111 / UDR-0090)
@@ -574,6 +668,7 @@ _OFFERING_KEY_ORDER = (
     "default",
     "api_key_env",
     "auth_profile",
+    "image_defaults",
     "metadata",
 )
 
@@ -667,7 +762,7 @@ def _normalize_offering(entry: dict[str, Any]) -> dict[str, Any]:
         val = entry[key]
         if val is None:
             continue
-        if key == "metadata" and isinstance(val, dict) and not val:
+        if key in ("metadata", "image_defaults") and isinstance(val, dict) and not val:
             continue
         out[key] = val
     # Preserve any unknown-but-present keys (forward-compat) after the known ones.

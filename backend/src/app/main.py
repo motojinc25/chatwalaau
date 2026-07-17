@@ -110,9 +110,53 @@ warnings.filterwarnings("ignore", category=UserWarning, module=r"pydantic\._inte
 _app_version = get_app_version()
 
 
+def _warn_unconfigured_model_offerings() -> None:
+    """Startup advisory for image / embedding features left unconfigured (PRP-0114).
+
+    UDR-0095 D2: image generation and RAG embeddings are now configured SOLELY by a
+    catalog `image` / `embeddings` offering (non-demo). A missing offering degrades
+    gracefully (the feature is simply off), but when a dependent feature is otherwise
+    enabled -- CHROMA_DIR is set, or a now-ignored IMAGE_DEPLOYMENT_NAME /
+    EMBEDDING_DEPLOYMENT_NAME is still in the environment -- we emit a WARNING so the
+    unconfigured state is operator-visible with the fix. DEMO_MODE is orthogonal and
+    never warned (UDR-0095 D4).
+    """
+    import logging as _logging
+    import os as _os
+
+    _logger = _logging.getLogger(__name__)
+
+    if is_demo_mode():
+        return
+    from app import models_catalog
+
+    if models_catalog.active_catalog() is None:
+        return  # no catalog at all -> chat routing already warned (PRP-0113); stay quiet here
+    if models_catalog.image_config() is None and (_os.environ.get("IMAGE_DEPLOYMENT_NAME") or "").strip():
+        _logger.warning(
+            "IMAGE_DEPLOYMENT_NAME is set but no longer read (PRP-0114). Image generation is "
+            'disabled until you add an offering with operations: ["image"] to '
+            "model_offerings.jsonc (chatwalaau models add / Model Settings)."
+        )
+    if models_catalog.embedding_config() is None:
+        leftover_embed = (_os.environ.get("EMBEDDING_DEPLOYMENT_NAME") or "").strip()
+        if settings.chroma_dir or leftover_embed:
+            _logger.warning(
+                "RAG is enabled (CHROMA_DIR set) but no embeddings offering is configured "
+                "(PRP-0114). rag_search and rag-ingest are unavailable until you add an offering "
+                'with operations: ["embeddings"] to model_offerings.jsonc '
+                "(chatwalaau models add / Model Settings)."
+                if settings.chroma_dir
+                else "EMBEDDING_DEPLOYMENT_NAME is set but no longer read (PRP-0114). Add an "
+                'offering with operations: ["embeddings"] to model_offerings.jsonc.'
+            )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Application lifespan: startup and shutdown hooks."""
+    # Model Offering Catalog advisory for image / embedding (PRP-0114, UDR-0095 D2).
+    _warn_unconfigured_model_offerings()
     # Session token store rehydrate (PRP-0110, CTR-0095 v2, UDR-0089 D4). Building
     # the singleton loads the digest projection from disk when the web auth lane is
     # enabled and AUTH_SESSION_PERSIST is true, so a restart no longer signs users

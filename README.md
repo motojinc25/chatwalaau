@@ -21,13 +21,15 @@ pip install chatwalaau
 chatwalaau init        # writes a .env for you to edit (and can set up your first model)
 ```
 
-> **Setting up models (v0.107.0+):** models are configured **exclusively** through the
+> **Setting up models (v0.107.0+):** chat models are configured **exclusively** through the
 > Model Offering Catalog (`model_offerings.jsonc`). Run `chatwalaau init` for a guided
 > first-model step, `chatwalaau models add` any time to author the file, or use the in-app
 > **Model Settings** screen (changes apply without a restart). The legacy per-provider model
 > environment variables (`AZURE_OPENAI_MODELS`, `ANTHROPIC_MODELS`, `OPENAI_MODELS`,
 > `FOUNDRY_MODELS`, `MODEL_MAX_CONTEXT_TOKENS`, `ANTHROPIC_HOSTING`, ...) have been
-> **removed**. See the
+> **removed**. As of **v0.108.0**, image generation and RAG embeddings are configured the same
+> way -- add an offering with `operations: ["image"]` or `["embeddings"]` (the former
+> `IMAGE_DEPLOYMENT_NAME` / `EMBEDDING_DEPLOYMENT_NAME` / `IMAGE_*` variables are removed). See the
 > [model configuration docs](https://chatwalaau.com/docs/features/models-and-reasoning).
 
 Set your Azure endpoint / credentials in `.env` (shared with image, RAG, and speech):
@@ -88,7 +90,7 @@ Open: [http://localhost:8000/chat](http://localhost:8000/chat)
 
 - **Modern chat UI** -- Markdown, code, math (KaTeX), Mermaid, reasoning blocks, web search with citations, voice in/out, image analysis, a built-in **paint canvas** (draw, paste, or load an image from your device **or the coding workspace**, attach, and re-edit), Temporary Chat, **message-by-message navigation** (previous/next step buttons that walk the conversation one message at a time), **slash commands** (`/help`, `/prompt`, `/skill`, `/model`) with completion and dynamic arguments, and a **compact chat sidebar** that collapses by section and loads hundreds of conversations as you scroll
 - **Agent tools** -- image generation + mask editor, weather, coding tools with an approval workflow (a per-turn round counter, a configurable round budget, and "approve for this session" that stops counting against the budget and clears the other pending cards of that tool), prompt templates, and Agent Skills (enable/disable or hot-reload from disk at runtime)
-- **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, **OpenAI**, and **Microsoft Foundry** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent); as of **v0.107.0** models are configured **exclusively** through the **Model Offering Catalog** (`model_offerings.jsonc`) -- **compose the served models** (multi-provider and gateway offerings) from the CLI (`chatwalaau models add`) or the in-app **Model Settings** screen, **drag to set the order they appear in the selector**, and changes apply live without a restart (the legacy per-provider `*_MODELS` env vars have been removed)
+- **Models** -- switch between **Azure OpenAI**, **Anthropic (Claude)**, **OpenAI**, and **Microsoft Foundry** mid-conversation, with per-message generation options (reasoning effort and, on gpt-5.x, verbosity), **structured output** (constrain the answer to JSON / a JSON Schema), and provider-agnostic **prompt caching** that cuts input-token cost on long/coding turns (on by default, output-transparent); as of **v0.107.0** models are configured **exclusively** through the **Model Offering Catalog** (`model_offerings.jsonc`) -- **compose the served models** (multi-provider and gateway offerings) from the CLI (`chatwalaau models add`) or the in-app **Model Settings** screen, **drag to set the order they appear in the selector**, and changes apply live without a restart (the legacy per-provider `*_MODELS` env vars have been removed); as of **v0.108.0** the **image generation** and **RAG embedding** models are configured the same way -- add an offering with `operations: ["image"]` (with optional `image_defaults`) or `["embeddings"]`, and the former `IMAGE_DEPLOYMENT_NAME` / `EMBEDDING_DEPLOYMENT_NAME` / `IMAGE_*` env vars are removed
 - **Knowledge** -- RAG over your PDFs (ChromaDB), ingested by the built-in **Pipeline Jobs** engine: submit/monitor/cancel jobs from a portal, the API, or the agent, with live progress and run history (on by default)
 - **Ontology** -- design **concept models as RDF knowledge graphs** on a visual node canvas: circular entities (emoji, colors, typed properties with **key attributes**) connect from **any side** with directional, cardinality-labeled relationships, and clicking a node or edge lights up its whole in/out neighborhood; search with **SPARQL or natural language** with on-canvas highlighting, import/export standard RDF with automatic backups, and let the agent **answer from your ontologies in any chat** (opt-in via `ONTOLOGY_ENABLED`)
 - **MCP native** -- connect any MCP server (Claude Desktop-compatible config); enable/disable servers and individual tools at runtime to control token usage, or hot-reload the config (reconnect) without a restart; MCP Apps render interactive UI in chat

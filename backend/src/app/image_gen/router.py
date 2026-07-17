@@ -11,9 +11,9 @@ import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
+from app import models_catalog
 from app.auth import verify_api_key
-from app.core.config import settings
-from app.image_gen.tools import _get_client, _save_image
+from app.image_gen.tools import _get_client, _image_deployment, _save_image
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def _edit_with_mask_sync(
     client = _get_client()
 
     result = client.images.edit(
-        model=settings.image_deployment_name,
+        model=_image_deployment(),
         image=("image.png", image_bytes, "image/png"),
         prompt=prompt,
         size=size,
@@ -84,10 +84,18 @@ async def edit_image_with_mask(
     """
     from app.demo import is_demo_mode
 
-    # In demo mode we skip the IMAGE_DEPLOYMENT_NAME requirement; the
-    # operator typically does not configure it on the demo host.
-    if not is_demo_mode() and not settings.image_deployment_name:
-        raise HTTPException(status_code=503, detail="Image generation not configured (IMAGE_DEPLOYMENT_NAME)")
+    # PRP-0114 / UDR-0095 D1/D2: image generation is configured SOLELY by a catalog
+    # ``image`` offering (non-demo). Absent -> refuse with an actionable message
+    # (graceful; DEMO_MODE uses the demo image lane and skips this check, D4).
+    if not is_demo_mode() and models_catalog.image_config() is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Image generation is not configured. Add an offering with "
+                'operations: ["image"] to model_offerings.jsonc '
+                "(author via `chatwalaau models add` or the Model Settings screen)."
+            ),
+        )
 
     image_bytes = await image.read()
     if not image_bytes:

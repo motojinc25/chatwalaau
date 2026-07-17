@@ -31,6 +31,13 @@ EMBEDDING_BATCH_SIZE = 100
 _client: AzureOpenAI | None = None
 
 
+_NO_EMBEDDINGS_OFFERING_MSG = (
+    "RAG embeddings require an 'embeddings' offering in model_offerings.jsonc. "
+    'Add an offering with operations: ["embeddings"] (author via '
+    "`chatwalaau models add` or the Model Settings screen)."
+)
+
+
 def _create_client() -> AzureOpenAI:
     """Create a new Azure OpenAI client for RAG embedding.
 
@@ -38,11 +45,14 @@ def _create_client() -> AzureOpenAI:
     UDR-0034). AZURE_OPENAI_API_KEY set -> api_key= shape; unset ->
     AzureCliCredential() via azure_ad_token_provider.
 
-    Model Offering Catalog lane (PRP-0109, UDR-0087 D7): when an ``embeddings``
-    offering is present, its endpoint / api_version / api_key override the
-    dedicated env config (a base_url offering builds a plain OpenAI client
-    instead of AzureOpenAI). None -> the existing AZURE_OPENAI_ENDPOINT path
-    byte-for-byte.
+    Model Offering Catalog (PRP-0114, UDR-0095 D1): the single ``embeddings``
+    offering is the SOLE source of the embedding model identity (non-demo). It
+    supplies deployment / endpoint / api_version / api_key; a base_url offering
+    builds a plain OpenAI client. No offering (non-demo) -> raise an actionable
+    error (this function is never reached under DEMO_MODE, which routes to
+    DemoEmbedder, UDR-0095 D4). The offering may omit ``endpoint`` (falls back to
+    the shared AZURE_OPENAI_ENDPOINT) and ``api_version`` (falls back to
+    DEFAULT_EMBEDDING_API_VERSION).
 
     Callers should normally prefer :func:`_get_client` to reuse the
     module-level singleton; this function stays public for tests that
@@ -51,18 +61,21 @@ def _create_client() -> AzureOpenAI:
     from app import models_catalog
 
     config = models_catalog.embedding_config()
-    if config is not None and config.base_url:
+    if config is None:
+        raise ValueError(_NO_EMBEDDINGS_OFFERING_MSG)
+
+    if config.base_url:
         from openai import OpenAI
 
         return OpenAI(api_key=config.api_key or os.environ.get("OPENAI_API_KEY", ""), base_url=config.base_url)
 
-    endpoint = (config.endpoint if config is not None and config.endpoint else os.environ.get("AZURE_OPENAI_ENDPOINT", "")) or ""
+    endpoint = config.endpoint or os.environ.get("AZURE_OPENAI_ENDPOINT", "")
     if not endpoint:
-        msg = "AZURE_OPENAI_ENDPOINT must be set for RAG embedding"
+        msg = "AZURE_OPENAI_ENDPOINT must be set for RAG embedding (or set 'endpoint' on the embeddings offering)"
         raise ValueError(msg)
 
-    api_version = (config.api_version if config is not None and config.api_version else "2024-10-21")
-    cred_kwargs = {"api_key": config.api_key} if (config is not None and config.api_key) else get_azure_openai_kwargs()
+    api_version = config.api_version or models_catalog.DEFAULT_EMBEDDING_API_VERSION
+    cred_kwargs = {"api_key": config.api_key} if config.api_key else get_azure_openai_kwargs()
     return AzureOpenAI(
         azure_endpoint=endpoint,
         api_version=api_version,
@@ -108,7 +121,8 @@ def embed_texts(
 
     Args:
         texts: Texts to embed.
-        model: Deployment name (default: EMBEDDING_DEPLOYMENT_NAME env var).
+        model: Deployment name. When None, resolved from the catalog embeddings
+            offering (PRP-0114, UDR-0095 D1).
         client: Optional Azure OpenAI client. When None, reuses the
             module-level singleton created by :func:`_get_client`.
 
@@ -135,11 +149,9 @@ def embed_texts(
         from app import models_catalog
 
         config = models_catalog.embedding_config()
-        deployment = (
-            config.deployment
-            if config is not None
-            else os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-small")
-        )
+        if config is None:
+            raise ValueError(_NO_EMBEDDINGS_OFFERING_MSG)
+        deployment = config.deployment
     azure_client = client if client is not None else _get_client()
 
     response = azure_client.embeddings.create(
@@ -176,7 +188,13 @@ def embed_texts_batched(
     if not texts:
         return []
 
-    azure_client = client if client is not None else _get_client()
+    # PRP-0114 / UDR-0095 D4: under DEMO_MODE do NOT construct an Azure client (it
+    # would require an embeddings offering that a demo host never authors); each
+    # batch routes to DemoEmbedder inside embed_texts. Non-demo builds the client
+    # once and reuses it across batches (PRP-0047).
+    azure_client = client
+    if azure_client is None and not _is_demo_mode_env():
+        azure_client = _get_client()
 
     all_embeddings: list[list[float]] = []
     for i in range(0, len(texts), batch_size):

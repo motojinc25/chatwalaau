@@ -8,8 +8,8 @@ pattern as Weather tools (CTR-0027) for MAF AI Function registration.
 
 Query embedding uses Azure OpenAI Embedding API (same model as ingest)
 to ensure dimension consistency. ChromaDB's default embedding function
-(all-MiniLM-L6-v2, 384d) is NOT used; we embed explicitly with the
-configured EMBEDDING_DEPLOYMENT_NAME (default: text-embedding-3-small, 1536d).
+(all-MiniLM-L6-v2, 384d) is NOT used; we embed explicitly with the model
+declared by the catalog embeddings offering (PRP-0114, UDR-0095 D1).
 """
 
 from __future__ import annotations
@@ -54,20 +54,17 @@ def init_rag_search(chroma_dir: str, collection_name: str, top_k: int) -> None:
         return
     _chroma_client = chromadb.PersistentClient(path=chroma_dir)
 
-    # Model Offering Catalog lane (PRP-0109, UDR-0087 D7): an ``embeddings``
-    # offering overrides the dedicated EMBEDDING_DEPLOYMENT_NAME / endpoint;
-    # None -> the existing env path (byte-for-byte). The query embedder must use
-    # the SAME model as ingest to keep vector dimensions consistent.
+    # Model Offering Catalog (PRP-0114, UDR-0095 D1): the single ``embeddings``
+    # offering is the SOLE source of the query embedding model (non-demo). The query
+    # embedder MUST use the SAME model as ingest to keep vector dimensions
+    # consistent -- both read this one offering. This function is only called when
+    # an offering exists OR DEMO_MODE (the agent factory gates registration,
+    # CTR-0077); the demo branch builds no Azure client (DemoEmbedder, UDR-0095 D4).
     config = models_catalog.embedding_config()
-    _embedding_model = (
-        config.deployment if config is not None else os.environ.get("EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-small")
-    )
+    _embedding_model = config.deployment if config is not None else "demo-embedder"
 
-    # PRP-0066: skip Azure client construction in demo mode -- DemoEmbedder
-    # has no client dependency. Avoids needless credential resolution and
-    # network probes on a demo host with no Azure OpenAI endpoint set.
-    if not is_demo_mode():
-        if config is not None and config.base_url:
+    if not is_demo_mode() and config is not None:
+        if config.base_url:
             from openai import OpenAI
 
             _openai_client = OpenAI(
@@ -75,10 +72,10 @@ def init_rag_search(chroma_dir: str, collection_name: str, top_k: int) -> None:
                 base_url=config.base_url,
             )
         else:
-            endpoint = (config.endpoint if config is not None and config.endpoint else os.environ.get("AZURE_OPENAI_ENDPOINT", "")) or ""
+            endpoint = config.endpoint or os.environ.get("AZURE_OPENAI_ENDPOINT", "")
             if endpoint:
-                api_version = config.api_version if (config is not None and config.api_version) else "2024-10-21"
-                cred_kwargs = {"api_key": config.api_key} if (config is not None and config.api_key) else get_azure_openai_kwargs()
+                api_version = config.api_version or models_catalog.DEFAULT_EMBEDDING_API_VERSION
+                cred_kwargs = {"api_key": config.api_key} if config.api_key else get_azure_openai_kwargs()
                 _openai_client = AzureOpenAI(
                     azure_endpoint=endpoint,
                     api_version=api_version,

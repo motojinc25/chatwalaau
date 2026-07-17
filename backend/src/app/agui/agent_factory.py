@@ -150,8 +150,13 @@ def _build_tools_and_instructions(
             settings.coding_max_turns,
         )
 
-    # RAG Search tool (CTR-0077, PRP-0037) -- excluded when include_rag=False
-    if include_rag and settings.chroma_dir:
+    # RAG Search tool (CTR-0077, PRP-0037) -- excluded when include_rag=False.
+    # PRP-0114 / UDR-0095 D1/D2/D4: the query embedder is configured SOLELY by a
+    # catalog `embeddings` offering (non-demo). rag_search is registered only when
+    # CHROMA_DIR is set AND (an embeddings offering exists OR DEMO_MODE). CHROMA_DIR
+    # set but no offering (non-demo) -> not registered (graceful); a startup advisory
+    # (app.main) names the fix.
+    if include_rag and settings.chroma_dir and (models_catalog.embedding_config() is not None or is_demo_mode()):
         try:
             from app.rag.tools import init_rag_search, rag_search
 
@@ -187,13 +192,13 @@ def _build_tools_and_instructions(
             logger.exception("Failed to initialize RAG search tool")
 
     # Conditionally register image generation tools (CTR-0050, PRP-0027).
-    # PRP-0066 / UDR-0041: also enabled in demo mode (no deployment name
-    # is required because the tools route to DemoImageProvider).
-    # PRP-0109 / UDR-0087 D7: a catalog `image` offering also enables the tools
-    # (in place of IMAGE_DEPLOYMENT_NAME); the tools resolve the deployment from
-    # the offering via app.image_gen.tools._image_deployment.
+    # PRP-0114 / UDR-0095 D1/D2/D4: image generation is configured SOLELY by a
+    # catalog `image` offering (non-demo). The tools are registered when such an
+    # offering exists OR in DEMO_MODE (which routes to the demo image lane and needs
+    # no offering). No offering (non-demo) -> not registered (graceful); a startup
+    # advisory (app.main) surfaces a leftover IMAGE_DEPLOYMENT_NAME.
     _image_offering = models_catalog.image_config()
-    if settings.image_deployment_name or _image_offering is not None or is_demo_mode():
+    if _image_offering is not None or is_demo_mode():
         from app.image_gen.tools import edit_image, generate_image
 
         tools.extend([generate_image, edit_image])
@@ -205,7 +210,7 @@ def _build_tools_and_instructions(
         )
         logger.info(
             "Image generation tools enabled (deployment=%s, demo=%s)",
-            (_image_offering.deployment if _image_offering is not None else settings.image_deployment_name) or "<demo>",
+            (_image_offering.deployment if _image_offering is not None else "<demo>"),
             is_demo_mode(),
         )
 

@@ -295,25 +295,15 @@ class Settings(BaseSettings):
     # streamed PCM16 is encoded to MP3 at this rate. Allowed: 16000, 24000.
     tts_realtime_audio_rate: int = 24000
 
-    # Image Generation (CTR-0049, CTR-0050, PRP-0027)
-    image_deployment_name: str = ""
-
-    # Image output customization defaults (PRP-0085, FEAT-0044, UDR-0063 D4/D5).
-    # These are the operator-set DEFAULTS applied when neither the user's
-    # per-session selection (state.image_options) nor an explicit LLM tool
-    # argument provides a value. Resolution precedence (CTR-0049):
-    #   explicit LLM argument > state.image_options > these settings > API default.
-    image_size: str = "auto"  # auto | 1024x1024 | 1024x1536 | 1536x1024
-    image_quality: str = "auto"  # auto | low | medium | high
-    image_format: str = "png"  # png | jpeg | webp
-    # output_compression (0-100). Applied ONLY when the format is jpeg or webp.
-    # Empty = use the API default.
-    image_compression: str = ""
-    image_background: str = "auto"  # auto | transparent | opaque
-    # Azure OpenAI Images API version. Kept at the verified-working value;
-    # gpt-image-2 may require a newer preview version -- set this to the version
-    # your image deployment supports (confirm against Azure OpenAI docs).
-    image_api_version: str = "2025-04-01-preview"
+    # Image Generation (CTR-0049, CTR-0050).
+    # PRP-0114 / UDR-0095: image model routing (deployment / api_version) AND the
+    # output-behavior defaults (size / quality / format / compression / background)
+    # now live on the Model Offering Catalog `image` offering (model_ref /
+    # api_version / image_defaults), NOT in Settings. The former IMAGE_DEPLOYMENT_NAME
+    # / IMAGE_API_VERSION / IMAGE_SIZE / IMAGE_QUALITY / IMAGE_FORMAT /
+    # IMAGE_COMPRESSION / IMAGE_BACKGROUND fields were removed here; the shared Azure
+    # endpoint / credential substrate (azure_openai_endpoint, azure_openai_api_key,
+    # azure_credential_mode, azure_tenant_id) is retained and unchanged.
 
     # Coding Tools (CTR-0031, CTR-0032, PRP-0019, PRP-0047)
     coding_enabled: bool = False

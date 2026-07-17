@@ -1,18 +1,19 @@
 """Image generation tools for the main agent (CTR-0049, PRP-0027).
 
 Provides generate_image and edit_image as MAF function tools.
-Uses Azure OpenAI Images API with a configurable deployment via
-IMAGE_DEPLOYMENT_NAME (gpt-image-2 suggested; gpt-image-1.5 still supported).
-Generated images are saved to the session upload directory
+Uses Azure OpenAI Images API with the deployment declared by the single ``image``
+offering in the Model Offering Catalog (PRP-0114, UDR-0095 D1): the tools are only
+registered when such an offering exists (or DEMO_MODE), so a non-demo call always
+has one to resolve. Generated images are saved to the session upload directory
 (.uploads/{thread_id}/generated_{uuid}.{ext}).
 
 Image output options (size / quality / format / compression / background) follow a
-precedence (PRP-0085, FEAT-0044, UDR-0063 D5/D6):
-  explicit LLM argument > state.image_options (per-session UI) > CTR-0006 settings
-  > API default.
+precedence (PRP-0085 / PRP-0114, FEAT-0044, UDR-0095 D3):
+  explicit LLM argument > state.image_options (per-session UI)
+  > offering.image_defaults > API default.
 The per-session selection is delivered by the AG-UI endpoint (CTR-0009) into the
 current_image_options contextvar before agent.run(); the LLM tool arguments default
-to None so an omitted argument falls through to the session / settings default.
+to None so an omitted argument falls through to the session / offering default.
 
 Tools execute in a thread pool via asyncio.to_thread() to prevent blocking
 the FastAPI async event loop during API calls.
@@ -51,11 +52,14 @@ current_image_options: contextvars.ContextVar[dict | None] = contextvars.Context
 _client: AzureOpenAI | None = None
 
 
-def _resolve_option(arg: str | None, key: str, setting_value: str) -> str:
-    """Resolve one image output option by precedence.
+def _resolve_option(arg: str | None, key: str, default_value: object) -> str:
+    """Resolve one image output option by precedence (PRP-0114, UDR-0095 D3).
 
-    explicit LLM argument > state.image_options[key] > CTR-0006 setting > "" (API default).
-    A blank string at any tier is treated as "unspecified" and falls through.
+    explicit LLM argument > state.image_options[key] > offering.image_defaults[key]
+    > "" (API default). A blank / None value at any tier is treated as "unspecified"
+    and falls through. ``default_value`` comes from
+    models_catalog.image_output_defaults() and may be a str (size/quality/...) or an
+    int (compression); it is coerced to str.
     """
     if arg:
         return arg
@@ -63,7 +67,9 @@ def _resolve_option(arg: str | None, key: str, setting_value: str) -> str:
     session_value = session.get(key)
     if session_value:
         return str(session_value)
-    return setting_value or ""
+    if default_value is not None and str(default_value) != "":
+        return str(default_value)
+    return ""
 
 
 def _get_client() -> AzureOpenAI:
@@ -73,11 +79,14 @@ def _get_client() -> AzureOpenAI:
     UDR-0034). AZURE_OPENAI_API_KEY set -> api_key= shape; unset ->
     AzureCliCredential() via azure_ad_token_provider.
 
-    Model Offering Catalog lane (PRP-0109, UDR-0087 D7): an ``image`` offering
-    overrides the endpoint / api_version / api_key (a base_url offering builds a
-    plain OpenAI client). None -> the existing AZURE_OPENAI_ENDPOINT path
-    byte-for-byte. Image generation stays on the dedicated Images API
-    (UDR-0045 D7).
+    Model Offering Catalog (PRP-0114, UDR-0095 D1): the single ``image`` offering
+    supplies the deployment / endpoint / api_version / api_key (a base_url offering
+    builds a plain OpenAI client). The offering may omit ``endpoint`` (falls back to
+    the shared AZURE_OPENAI_ENDPOINT) and ``api_version`` (falls back to
+    DEFAULT_IMAGE_API_VERSION). This function is only reached (non-demo) when an
+    image offering exists -- the tools are otherwise not registered (CTR-0050) --
+    so ``config`` is normally present; the defensive fallbacks keep it safe. Image
+    generation stays on the dedicated Images API (UDR-0045 D7).
     """
     global _client
     if _client is None:
@@ -88,8 +97,14 @@ def _get_client() -> AzureOpenAI:
             _client = OpenAI(api_key=config.api_key or settings.openai_api_key or "", base_url=config.base_url)
         else:
             endpoint = config.endpoint if (config is not None and config.endpoint) else settings.azure_openai_endpoint
-            api_version = config.api_version if (config is not None and config.api_version) else settings.image_api_version
-            cred_kwargs = {"api_key": config.api_key} if (config is not None and config.api_key) else get_azure_openai_kwargs()
+            api_version = (
+                config.api_version
+                if (config is not None and config.api_version)
+                else models_catalog.DEFAULT_IMAGE_API_VERSION
+            )
+            cred_kwargs = (
+                {"api_key": config.api_key} if (config is not None and config.api_key) else get_azure_openai_kwargs()
+            )
             _client = AzureOpenAI(
                 azure_endpoint=endpoint,
                 api_version=api_version,
@@ -99,9 +114,13 @@ def _get_client() -> AzureOpenAI:
 
 
 def _image_deployment() -> str:
-    """Resolve the image deployment name, catalog-aware (PRP-0109, UDR-0087 D7)."""
+    """Resolve the image deployment name from the catalog image offering (PRP-0114).
+
+    Returns "" when no image offering is configured; in a non-demo deployment the
+    tools are not registered in that case (CTR-0050), so this is defensive.
+    """
     config = models_catalog.image_config()
-    return config.deployment if config is not None else settings.image_deployment_name
+    return config.deployment if config is not None else ""
 
 
 def _resolve_image_params(
@@ -111,20 +130,23 @@ def _resolve_image_params(
     background: str | None,
     compression: str | None,
 ) -> dict:
-    """Resolve the effective image output parameters by precedence (UDR-0063 D5).
+    """Resolve the effective image output parameters by precedence (UDR-0095 D3).
 
-    Returns a kwargs dict for the Azure Images API. output_compression is included
-    only when the resolved format is jpeg or webp and a compression value exists.
+    Returns a kwargs dict for the Azure Images API. The operator DEFAULT tier is the
+    image offering's ``image_defaults`` block (PRP-0114), replacing the removed
+    CTR-0006 IMAGE_* settings. output_compression is included only when the resolved
+    format is jpeg or webp and a compression value exists.
     """
-    fmt = _resolve_option(output_format, "format", settings.image_format) or "png"
+    defaults = models_catalog.image_output_defaults()
+    fmt = _resolve_option(output_format, "format", defaults.get("format")) or "png"
     params: dict = {
-        "size": _resolve_option(size, "size", settings.image_size) or "auto",
-        "quality": _resolve_option(quality, "quality", settings.image_quality) or "auto",
+        "size": _resolve_option(size, "size", defaults.get("size")) or "auto",
+        "quality": _resolve_option(quality, "quality", defaults.get("quality")) or "auto",
         "output_format": fmt,
-        "background": _resolve_option(background, "background", settings.image_background) or "auto",
+        "background": _resolve_option(background, "background", defaults.get("background")) or "auto",
     }
     if fmt in ("jpeg", "webp"):
-        comp = _resolve_option(compression, "compression", settings.image_compression)
+        comp = _resolve_option(compression, "compression", defaults.get("compression"))
         if comp:
             with contextlib.suppress(TypeError, ValueError):
                 params["output_compression"] = max(0, min(100, int(comp)))

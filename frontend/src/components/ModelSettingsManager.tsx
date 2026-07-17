@@ -56,6 +56,20 @@ type Operation = 'chat' | 'embeddings' | 'image'
 type Hosting = 'direct' | 'foundry'
 type Family = 'openai-reasoning' | 'anthropic-adaptive' | 'bare'
 
+/**
+ * Image output-behavior defaults (PRP-0114, UDR-0095 D3). Valid ONLY on an image
+ * offering; each field is the operator DEFAULT, still overridable per session (the
+ * chat-input Image button, state.image_options) and per call (the model). An unset
+ * field falls through to the API default.
+ */
+interface ImageDefaults {
+  size?: string
+  quality?: string
+  format?: string
+  compression?: number
+  background?: string
+}
+
 interface Offering {
   id: string
   provider: Provider
@@ -69,6 +83,7 @@ interface Offering {
   context_window?: number
   default?: boolean
   api_key_env?: string
+  image_defaults?: ImageDefaults
   metadata?: Record<string, unknown>
 }
 
@@ -101,6 +116,28 @@ const PROVIDERS: Provider[] = ['azure-openai', 'anthropic', 'openai', 'foundry']
 const FAMILIES: Family[] = ['openai-reasoning', 'anthropic-adaptive', 'bare']
 const HOSTINGS: Hosting[] = ['direct', 'foundry']
 const ALL_OPERATIONS: Operation[] = ['chat', 'embeddings', 'image']
+
+// Image output-default enums (PRP-0114); mirror models_catalog._IMAGE_DEFAULT_ENUMS.
+const IMAGE_SIZES = ['auto', '1024x1024', '1024x1536', '1536x1024']
+const IMAGE_QUALITIES = ['auto', 'low', 'medium', 'high']
+const IMAGE_FORMATS = ['png', 'jpeg', 'webp']
+const IMAGE_BACKGROUNDS = ['auto', 'transparent', 'opaque']
+const IMAGE_DEFAULTS_HELP =
+  'Operator defaults for image generation output. Each is overridable per session (the Image button in the chat input) and per call (the model). Leave "API default" to send nothing. Compression applies to jpeg/webp only.'
+
+/** Keep only the set image_defaults fields; returns undefined when empty. */
+function cleanImageDefaults(d: ImageDefaults | undefined): ImageDefaults | undefined {
+  if (!d) return undefined
+  const out: ImageDefaults = {}
+  for (const k of ['size', 'quality', 'format', 'background'] as const) {
+    const v = d[k]
+    if (typeof v === 'string' && v.trim()) out[k] = v.trim()
+  }
+  if (typeof d.compression === 'number' && Number.isFinite(d.compression)) {
+    out.compression = Math.max(0, Math.min(100, Math.trunc(d.compression)))
+  }
+  return Object.keys(out).length ? out : undefined
+}
 
 const SETTINGS_ITEMS: Array<{ id: string; label: string; description: string }> = [
   {
@@ -161,6 +198,10 @@ function toWireOfferings(offerings: EditableOffering[]): Offering[] {
     if (o.api_version?.trim()) out.api_version = o.api_version.trim()
     if (o.api_key_env?.trim()) out.api_key_env = o.api_key_env.trim()
     if (ops.includes('chat') && o.default) out.default = true
+    if (ops.includes('image')) {
+      const d = cleanImageDefaults(o.image_defaults)
+      if (d) out.image_defaults = d
+    }
     if (o.metadata) out.metadata = o.metadata
     return out
   })
@@ -256,6 +297,10 @@ function OfferingCard({
 }: OfferingCardProps) {
   const ops = opsOf(offering)
   const isAnthropic = offering.provider === 'anthropic'
+  const isImage = ops.includes('image')
+  const imgDefaults = offering.image_defaults ?? {}
+  const setImgDefault = (patch: Partial<ImageDefaults>) =>
+    onChange(index, { image_defaults: { ...imgDefaults, ...patch } })
   const envNames = offeringEnvNames(offering)
 
   // Drag-to-reorder (UDR-0093 D5). The array order IS the presentation order the
@@ -477,6 +522,87 @@ function OfferingCard({
               ))}
             </div>
           </Field>
+        </div>
+      )}
+
+      {expanded && isImage && (
+        <div className="mt-3 space-y-2 rounded-md border border-dashed p-2">
+          <span className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+            Image output defaults
+            <Help text={IMAGE_DEFAULTS_HELP} />
+          </span>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Field label="Size">
+              <select
+                className={CONTROL_CLASS}
+                value={imgDefaults.size ?? ''}
+                disabled={readOnly}
+                onChange={(e) => setImgDefault({ size: e.target.value || undefined })}>
+                <option value="">API default</option>
+                {IMAGE_SIZES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Quality">
+              <select
+                className={CONTROL_CLASS}
+                value={imgDefaults.quality ?? ''}
+                disabled={readOnly}
+                onChange={(e) => setImgDefault({ quality: e.target.value || undefined })}>
+                <option value="">API default</option>
+                {IMAGE_QUALITIES.map((q) => (
+                  <option key={q} value={q}>
+                    {q}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Format">
+              <select
+                className={CONTROL_CLASS}
+                value={imgDefaults.format ?? ''}
+                disabled={readOnly}
+                onChange={(e) => setImgDefault({ format: e.target.value || undefined })}>
+                <option value="">API default</option>
+                {IMAGE_FORMATS.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Background">
+              <select
+                className={CONTROL_CLASS}
+                value={imgDefaults.background ?? ''}
+                disabled={readOnly}
+                onChange={(e) => setImgDefault({ background: e.target.value || undefined })}>
+                <option value="">API default</option>
+                {IMAGE_BACKGROUNDS.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Compression" hint="0-100; applies to jpeg / webp only.">
+              <Input
+                type="number"
+                min={0}
+                max={100}
+                className="h-8 text-xs"
+                value={imgDefaults.compression ?? ''}
+                disabled={readOnly}
+                placeholder="API default"
+                onChange={(e) =>
+                  setImgDefault({ compression: e.target.value ? Number.parseInt(e.target.value, 10) : undefined })
+                }
+              />
+            </Field>
+          </div>
         </div>
       )}
 
