@@ -18,7 +18,6 @@ import logging
 import re
 from typing import Any
 
-from app.core.config import settings
 from app.ontology.vocabulary import (
     CW,
     CW_CARDINALITY,
@@ -128,29 +127,15 @@ def ensure_read_only(sparql: str, *, construct_only: bool = False) -> None:
         raise ValueError(f"Only CONSTRUCT queries are allowed on this lane (got {form})")
 
 
-def _default_model() -> str:
-    """Resolve the fallback conversion model (honors DEMO_MODE)."""
-    from app.demo import is_demo_mode
-
-    if is_demo_mode():
-        from app.demo import resolve_demo_models
-
-        models = resolve_demo_models()
-        return models[0] if models else "chatwalaau-demo"
-    from app import providers
-
-    resolved = providers.resolve_models()
-    return resolved[0][0] if resolved else ""
-
-
 async def generate_sparql(question: str, store: Any, *, construct_only: bool = False) -> str:
     """NL -> SPARQL via one non-streaming completion through the chokepoint (D8)."""
     from agent_framework import Message
 
     from app.agui.agent_registry import _build_chat_client
+    from app.models_catalog import resolve_task_model
 
     form = "CONSTRUCT" if construct_only else "SELECT, CONSTRUCT, ASK, or DESCRIBE"
-    model = settings.ontology_nl_model.strip() or _default_model()
+    model = resolve_task_model("ontology_nl")
     client = _build_chat_client(model)
     messages = [
         Message(role="system", contents=[_NL_SYSTEM_PROMPT.format(form=form)]),

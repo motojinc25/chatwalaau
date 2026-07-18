@@ -344,8 +344,9 @@ async def _summarize(transcript_text: str) -> dict[str, Any]:
     from agent_framework import Message
 
     from app.agui.agent_registry import _build_chat_client
+    from app.models_catalog import resolve_task_model
 
-    model = settings.teams_meeting_summary_model.strip() or _default_model()
+    model = resolve_task_model("meeting_summary")
     client = _build_chat_client(model)
     # Bound the transcript to a safe context size (defensive; long meetings).
     excerpt = transcript_text[:48_000]
@@ -372,26 +373,6 @@ def _parse_summary(text: str) -> dict[str, Any]:
     except (json.JSONDecodeError, ValueError):
         pass
     return {"summary": text, "_unparsed": True}
-
-
-def _default_model() -> str:
-    """Resolve the fallback summarization model (honors DEMO_MODE).
-
-    Mirrors app.background.session_title._default_model: the configured default model
-    comes from the provider registry, NOT from a module-level agent_registry singleton
-    (there is none -- the registry is built at startup and held by app.main).
-    """
-    from app.demo import is_demo_mode
-
-    if is_demo_mode():
-        from app.demo import resolve_demo_models
-
-        models = resolve_demo_models()
-        return models[0] if models else "chatwalaau-demo"
-    from app import providers
-
-    resolved = providers.resolve_models()
-    return resolved[0][0] if resolved else ""
 
 
 def _write_output(name: str, meeting: dict[str, Any], summary: dict[str, Any]) -> str:

@@ -5,10 +5,11 @@ Three endpoints let an operator READ and WRITE the Model Offering Catalog
 so a new ``model_offerings.jsonc`` takes effect without a restart (UDR-0090 D2):
 
     GET  /api/model-offerings         -- the current catalog in structured form
-                                         (offerings + auth_profiles), the active
-                                         lane, a validity check, and env_status
-                                         booleans for referenced env-var NAMES
-                                         (never secret values, D4).
+                                         (offerings + auth_profiles + task-model
+                                         roles + the role_registry, PRP-0115), the
+                                         active lane, a validity check, and
+                                         env_status booleans for referenced env-var
+                                         NAMES (never secret values, D4).
     PUT  /api/model-offerings         -- validate (parity with the loader, D8),
                                          write the file as structured JSON
                                          (comments dropped, D3), then reset the
@@ -56,6 +57,11 @@ class CatalogPayload(BaseModel):
 
     offerings: list[dict[str, Any]] = Field(default_factory=list)
     auth_profiles: dict[str, Any] = Field(default_factory=dict)
+    # Task-model assignments (PRP-0115, UDR-0096). A role key -> offering id (or a
+    # {"model": "<id>"} object). Round-tripped through the same validate -> write ->
+    # hot-reload path; a full-document PUT must include it or a hand-authored block
+    # would be erased (the PRP-0112 auth_profiles lesson).
+    roles: dict[str, Any] = Field(default_factory=dict)
 
 
 class EnvCheckRequest(BaseModel):
@@ -127,6 +133,8 @@ def register_model_offerings(app: FastAPI, *, agent_registry) -> None:
             )
 
         data: dict[str, Any] = {"offerings": body.offerings, "auth_profiles": body.auth_profiles}
+        if body.roles:
+            data["roles"] = body.roles
 
         # Snapshot the prior file bytes for rollback BEFORE writing (D2).
         prior_bytes = path.read_bytes() if path.is_file() else None

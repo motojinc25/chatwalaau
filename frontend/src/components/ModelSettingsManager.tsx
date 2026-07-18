@@ -87,6 +87,13 @@ interface Offering {
   metadata?: Record<string, unknown>
 }
 
+/** A task-model role descriptor (PRP-0115, UDR-0096 D6), served by the backend. */
+interface RoleDescriptor {
+  key: string
+  label: string
+  description: string
+}
+
 interface CatalogStatus {
   active: boolean
   demo_mode: boolean
@@ -95,6 +102,14 @@ interface CatalogStatus {
   valid: boolean
   errors: string[]
   offerings: Offering[]
+  /**
+   * Task-model assignments as authored (PRP-0115, UDR-0096). A role key -> an
+   * offering id (or a { model } object). A full-document PUT MUST round-trip this
+   * or a hand-authored block would be erased (the auth_profiles lesson, UDR-0093 D4).
+   */
+  roles?: Record<string, string | { model?: string }>
+  /** Data-driven task-role registry the GUI renders (PRP-0115, UDR-0096 D6). */
+  role_registry?: RoleDescriptor[]
   env_status: Record<string, boolean>
   /**
    * Named auth references, as authored (UDR-0093 D4).
@@ -205,6 +220,39 @@ function toWireOfferings(offerings: EditableOffering[]): Offering[] {
     if (o.metadata) out.metadata = o.metadata
     return out
   })
+}
+
+/** Normalize a raw role value (string or { model }) to an offering-id string. */
+function roleModel(value: string | { model?: string } | undefined): string {
+  if (typeof value === 'string') return value.trim()
+  if (value && typeof value === 'object' && typeof value.model === 'string') return value.model.trim()
+  return ''
+}
+
+/** Read the raw roles map into a flat { key -> offering-id } editable map. */
+function readRoles(raw: CatalogStatus['roles']): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (raw && typeof raw === 'object') {
+    for (const [k, v] of Object.entries(raw)) out[k] = roleModel(v)
+  }
+  return out
+}
+
+/** Drop unset (empty) role bindings for the wire / dirty comparison. */
+function cleanRoles(roles: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(roles)) {
+    if (v?.trim()) out[k] = v.trim()
+  }
+  return out
+}
+
+/** The chat offering ids currently composed, for the role-assignment dropdowns. */
+function chatOfferingIds(offerings: EditableOffering[]): string[] {
+  return offerings
+    .filter((o) => opsOf(o).includes('chat'))
+    .map((o) => o.id.trim())
+    .filter(Boolean)
 }
 
 /** Click-to-open help marker (also shows on hover via title). */
@@ -629,7 +677,10 @@ export function ModelSettingsManager() {
   const [offerings, setOfferings] = useState<EditableOffering[]>([])
   // Not edited here, only preserved across a save (UDR-0093 D4).
   const [authProfiles, setAuthProfiles] = useState<Record<string, string>>({})
-  const [baseline, setBaseline] = useState('[]')
+  // Task-model assignments (PRP-0115, UDR-0096): role key -> offering id.
+  const [roles, setRoles] = useState<Record<string, string>>({})
+  const [roleRegistry, setRoleRegistry] = useState<RoleDescriptor[]>([])
+  const [baseline, setBaseline] = useState('{}')
   // Which offering cards are expanded for editing. Collapsed by default (UDR-0093
   // D6): dragging full-height editor cards to reorder them is unusable, and the
   // operator asked for the order to be quick to set.
@@ -650,7 +701,10 @@ export function ModelSettingsManager() {
     // Preserve the auth_profiles block verbatim so the next save sends it back
     // (UDR-0093 D4). We never render or edit it -- we just refuse to destroy it.
     setAuthProfiles(data.auth_profiles ?? {})
-    setBaseline(JSON.stringify(toWireOfferings(editable)))
+    const nextRoles = readRoles(data.roles)
+    setRoles(nextRoles)
+    setRoleRegistry(data.role_registry ?? [])
+    setBaseline(JSON.stringify({ offerings: toWireOfferings(editable), roles: cleanRoles(nextRoles) }))
   }, [])
 
   // Probe availability once on mount. GET /api/model-offerings is gated by an API
@@ -692,8 +746,12 @@ export function ModelSettingsManager() {
 
   const readOnly = demoBlocked
 
-  // Dirty = the composed catalog differs from what was last loaded/saved.
-  const dirty = useMemo(() => JSON.stringify(toWireOfferings(offerings)) !== baseline, [offerings, baseline])
+  // Dirty = the composed catalog (offerings + task-model roles) differs from what
+  // was last loaded/saved.
+  const dirty = useMemo(
+    () => JSON.stringify({ offerings: toWireOfferings(offerings), roles: cleanRoles(roles) }) !== baseline,
+    [offerings, roles, baseline],
+  )
 
   const closeNow = useCallback(() => {
     setOpen(false)
@@ -894,6 +952,9 @@ export function ModelSettingsManager() {
         body: JSON.stringify({
           offerings: toWireOfferings(offerings),
           ...(Object.keys(authProfiles).length > 0 ? { auth_profiles: authProfiles } : {}),
+          // Round-trip task-model assignments (PRP-0115, UDR-0096). Only non-empty
+          // bindings are sent; an omitted role means "follow session / default".
+          ...(Object.keys(cleanRoles(roles)).length > 0 ? { roles: cleanRoles(roles) } : {}),
         }),
       })
       if (res.ok) {
@@ -914,7 +975,11 @@ export function ModelSettingsManager() {
     } finally {
       setBusy(false)
     }
-  }, [offerings, authProfiles, adopt])
+  }, [offerings, authProfiles, roles, adopt])
+
+  const setRole = useCallback((key: string, offeringId: string) => {
+    setRoles((prev) => ({ ...prev, [key]: offeringId }))
+  }, [])
 
   const filteredItems = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -1131,6 +1196,58 @@ export function ModelSettingsManager() {
                         </section>
                       )
                     })}
+
+                    {/* Task model assignments (PRP-0115, UDR-0096). Assign a chat
+                        offering to each background / internal task; an unset role
+                        follows the session / default model. Registry-driven, so a
+                        future task model needs no UI change (D6). */}
+                    {roleRegistry.length > 0 && (
+                      <section className="space-y-2 border-t pt-4">
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-sm font-semibold">Task model assignments</h4>
+                          <span className="text-[11px] text-muted-foreground">
+                            Which model runs each background task. Leave "Follow session / default" to use the chat's
+                            own model.
+                          </span>
+                        </div>
+                        {(() => {
+                          const chatIds = chatOfferingIds(offerings)
+                          return roleRegistry.map((role) => {
+                            const bound = roles[role.key] ?? ''
+                            const dangling = bound !== '' && !chatIds.includes(bound)
+                            return (
+                              <div key={role.key} className="flex items-center gap-3 rounded-md border bg-card p-2">
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-[12px] font-medium">{role.label}</div>
+                                  <div className="truncate text-[11px] text-muted-foreground">{role.description}</div>
+                                </div>
+                                {dangling && (
+                                  <span
+                                    className="inline-flex shrink-0 items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-400"
+                                    title={`'${bound}' is not a current chat offering; this task will use the session / default model.`}>
+                                    <TriangleAlert className="h-3 w-3" /> unknown offering
+                                  </span>
+                                )}
+                                <select
+                                  className={cn(CONTROL_CLASS, 'w-56 shrink-0')}
+                                  value={bound}
+                                  disabled={readOnly}
+                                  aria-label={`Model for ${role.label}`}
+                                  onChange={(e) => setRole(role.key, e.target.value)}>
+                                  <option value="">Follow session / default</option>
+                                  {dangling && <option value={bound}>{bound} (missing)</option>}
+                                  {chatIds.map((id) => (
+                                    <option key={id} value={id}>
+                                      {id}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            )
+                          })
+                        })()}
+                      </section>
+                    )}
                   </div>
                 </div>
               </>

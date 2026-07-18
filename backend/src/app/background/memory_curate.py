@@ -65,21 +65,6 @@ _TURN_CHAR_CAP = 8000
 _MAX_LINES = 40
 
 
-def _default_model() -> str:
-    """Resolve the fallback reconciliation model (honors DEMO_MODE; mirrors CTR-0117)."""
-    from app.demo import is_demo_mode
-
-    if is_demo_mode():
-        from app.demo import resolve_demo_models
-
-        models = resolve_demo_models()
-        return models[0] if models else "chatwalaau-demo"
-    from app import providers
-
-    resolved = providers.resolve_models()
-    return resolved[0][0] if resolved else ""
-
-
 def _parse_memory_lines(raw: str) -> list[str]:
     """Parse the model output into a clean list of memory entries (tolerant)."""
     text = raw.strip()
@@ -119,8 +104,9 @@ async def _reconcile(memory_body: str, turn_text: str, model: str | None) -> lis
     from agent_framework import Message
 
     from app.agui.agent_registry import _build_chat_client
+    from app.models_catalog import resolve_task_model
 
-    reconcile_model = settings.agent_memory_curation_model.strip() or (model or "") or _default_model()
+    reconcile_model = resolve_task_model("agent_memory_curation", model)
     client = _build_chat_client(reconcile_model)
     prompt = _USER_TEMPLATE.format(memory=memory_body or "(empty)", turn=turn_text)
     messages = [
@@ -235,7 +221,9 @@ async def run_memory_curate_task(ctx: dict[str, Any]) -> None:
         memory_body = load_agent_memory()
         current_entries = parse_entries(memory_body)
         reconciled = _parse_memory_lines("\n".join(current_entries))
-        resolved_model = settings.agent_memory_curation_model.strip() or (model or "") or "<provider-default>"
+        from app.models_catalog import resolve_task_model
+
+        resolved_model = resolve_task_model("agent_memory_curation", model) or "<provider-default>"
         logger.info(
             "memory curation reconciling: thread=%s turn=%s model=%s current_entries=%d",
             thread_id,

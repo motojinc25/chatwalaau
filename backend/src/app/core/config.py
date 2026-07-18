@@ -121,11 +121,11 @@ class Settings(BaseSettings):
     # leading characters of the first user message (pre-PRP-0077 behavior,
     # byte-for-byte); "llm" upgrades it via a background task (CTR-0108) that
     # summarizes the first user message + first assistant reply, post-turn and
-    # non-blocking (on failure the truncation title remains). SESSION_TITLE_MODEL
-    # picks the summarization model; empty (default) uses the session's model.
-    # Unknown SESSION_TITLE_MODE values are treated as "truncate".
+    # non-blocking (on failure the truncation title remains). The summarization
+    # model is the catalog `roles.session_title` binding (PRP-0115 / UDR-0096); the
+    # removed SESSION_TITLE_MODEL env var no longer applies. Unknown
+    # SESSION_TITLE_MODE values are treated as "truncate".
     session_title_mode: str = "truncate"
-    session_title_model: str = ""
 
     # Temporary Chat (CTR-0106, CTR-0006, PRP-0076 / UDR-0052 D4/D9).
     # Quarantine retention for ephemeral "incognito-style" conversations: a
@@ -153,13 +153,13 @@ class Settings(BaseSettings):
     # secret/PII filter, USER_CHAR_LIMIT cap, and backup-on-write as the inline
     # tool). USER_MEMORY_EXTRACTION (default false) gates the feature and ALSO
     # requires USER_PROFILE_ENABLED=true; false is byte-for-byte pre-PRP-0079
-    # (Phase 1) behavior. USER_MEMORY_EXTRACTION_MODEL picks the extraction
-    # model; empty (default) uses the session's model. The pass runs at most once
-    # every USER_MEMORY_EXTRACTION_EVERY_N_TURNS new user turns (default 4;
+    # (Phase 1) behavior. The extraction model is the catalog
+    # `roles.user_memory_extraction` binding (PRP-0115 / UDR-0096); the removed
+    # USER_MEMORY_EXTRACTION_MODEL env var no longer applies. The pass runs at most
+    # once every USER_MEMORY_EXTRACTION_EVERY_N_TURNS new user turns (default 4;
     # clamped to >= 1 at use time) -- below the threshold the task is a cheap
     # no-op (no LLM call). temp_ chats and DEMO_MODE never extract.
     user_memory_extraction: bool = False
-    user_memory_extraction_model: str = ""
     user_memory_extraction_every_n_turns: int = 4
 
     # Agent Curated Memory (CTR-0162 / CTR-0163, CTR-0006, PRP-0100 / UDR-0079).
@@ -174,12 +174,12 @@ class Settings(BaseSettings):
     # default-on toggle has an unchanged per-session prompt until a first entry is
     # curated (UDR-0079 D8). MEMORY_CHAR_LIMIT bounds the serialized memory body
     # (default 2200); an over-cap add/modify is rejected with guidance to
-    # remove/consolidate. AGENT_MEMORY_CURATION_MODEL picks the background reconcile
-    # model for the like pass (CTR-0163); empty (default) uses the session's model
-    # (mirrors USER_MEMORY_EXTRACTION_MODEL). The file path is fixed (not an env var).
+    # remove/consolidate. The background reconcile model for the like pass (CTR-0163)
+    # is the catalog `roles.agent_memory_curation` binding (PRP-0115 / UDR-0096); the
+    # removed AGENT_MEMORY_CURATION_MODEL env var no longer applies. The file path is
+    # fixed (not an env var).
     agent_memory_enabled: bool = True
     memory_char_limit: int = 2200
-    agent_memory_curation_model: str = ""
 
     # Built-in Memory Editor (CTR-0166, CTR-0006, PRP-0101 / UDR-0080 D4). The
     # human-facing Memory Management portal edits the three fixed `.agent/*.md`
@@ -459,8 +459,8 @@ class Settings(BaseSettings):
     # Teams Meeting Pipeline (FEAT-0053, CTR-0156, PRP-0097, UDR-0076)
     # Output subdir within the coding workspace for the summary JSON (CTR-0031 jail).
     teams_meeting_output_dir: str = "meeting-summaries"
-    # Summary model override; empty = the registry/session default model.
-    teams_meeting_summary_model: str = ""
+    # Summary model = the catalog `roles.meeting_summary` binding (PRP-0115 / UDR-0096);
+    # the removed TEAMS_MEETING_SUMMARY_MODEL env var no longer applies.
     # A transcript artifact is often not ready right when a meeting ends. The fetch stage
     # polls for it up to this many seconds (default 600 = 10 min) before failing.
     teams_meeting_transcript_max_wait_seconds: int = 600
@@ -481,9 +481,8 @@ class Settings(BaseSettings):
     # Cap on triples serialized into a query_ontology tool answer (UDR-0084 D9);
     # truncation is explicitly noticed in the tool result.
     ontology_tool_max_triples: int = 200
-    # Optional model override for the NL -> SPARQL completion; empty = the default
-    # model via the registry chokepoint (the SESSION_TITLE_MODEL precedent).
-    ontology_nl_model: str = ""
+    # The NL -> SPARQL completion model is the catalog `roles.ontology_nl` binding
+    # (PRP-0115 / UDR-0096); the removed ONTOLOGY_NL_MODEL env var no longer applies.
 
     @property
     def msgraph_webhook_allowed_cidr_list(self) -> list[str]:

@@ -152,11 +152,41 @@ def _warn_unconfigured_model_offerings() -> None:
             )
 
 
+def _warn_removed_role_model_env() -> None:
+    """Startup advisory for removed per-task model env vars (PRP-0115, UDR-0096 D1).
+
+    The five ``*_MODEL`` selectors (SESSION_TITLE_MODEL, USER_MEMORY_EXTRACTION_MODEL,
+    AGENT_MEMORY_CURATION_MODEL, TEAMS_MEETING_SUMMARY_MODEL, ONTOLOGY_NL_MODEL) are
+    no longer read; the model is assigned in the catalog ``roles`` block. When one is
+    still present in the environment, name it and point at the successor role so the
+    operator migrates it. Non-failing (an advisory must never block startup); DEMO is
+    unaffected (the catalog / roles are ignored under demo).
+    """
+    import logging as _logging
+    import os as _os
+
+    from app.models_catalog import LEGACY_ROLE_ENV_VARS
+
+    _logger = _logging.getLogger(__name__)
+    for env_name, role in LEGACY_ROLE_ENV_VARS.items():
+        if (_os.environ.get(env_name) or "").strip():
+            _logger.warning(
+                "%s is set but no longer read (PRP-0115). Assign the model under 'Task model "
+                "assignments' in Model Settings, with `chatwalaau models role set %s <offering-id>`, "
+                "or as a `roles.%s` entry in model_offerings.jsonc.",
+                env_name,
+                role,
+                role,
+            )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Application lifespan: startup and shutdown hooks."""
     # Model Offering Catalog advisory for image / embedding (PRP-0114, UDR-0095 D2).
     _warn_unconfigured_model_offerings()
+    # Advisory for removed per-task model env vars (PRP-0115, UDR-0096 D1).
+    _warn_removed_role_model_env()
     # Session token store rehydrate (PRP-0110, CTR-0095 v2, UDR-0089 D4). Building
     # the singleton loads the digest projection from disk when the web auth lane is
     # enabled and AUTH_SESSION_PERSIST is true, so a restart no longer signs users

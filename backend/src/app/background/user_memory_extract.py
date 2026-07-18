@@ -79,21 +79,6 @@ _TRANSCRIPT_CHAR_CAP = 8000
 _MAX_LINES = 40
 
 
-def _default_model() -> str:
-    """Resolve the fallback reconciliation model (mirrors session_title)."""
-    from app.demo import is_demo_mode
-
-    if is_demo_mode():
-        from app.demo import resolve_demo_models
-
-        models = resolve_demo_models()
-        return models[0] if models else "chatwalaau-demo"
-    from app import providers
-
-    resolved = providers.resolve_models()
-    return resolved[0][0] if resolved else ""
-
-
 def _message_text(message: dict[str, Any]) -> str:
     """Flatten an AG-UI message's content (str or list of parts) to text."""
     content = message.get("content")
@@ -195,8 +180,9 @@ async def _reconcile(profile: str, transcript: str, model: str | None) -> list[s
     from agent_framework import Message
 
     from app.agui.agent_registry import _build_chat_client
+    from app.models_catalog import resolve_task_model
 
-    reconcile_model = settings.user_memory_extraction_model.strip() or (model or "") or _default_model()
+    reconcile_model = resolve_task_model("user_memory_extraction", model)
     client = _build_chat_client(reconcile_model)
     prompt = _USER_TEMPLATE.format(profile=profile, transcript=transcript)
     messages = [

@@ -64,6 +64,76 @@ VALID_OPERATIONS = frozenset({"chat", "embeddings", "image"})
 VALID_FAMILIES = frozenset({"openai-reasoning", "anthropic-adaptive", "bare"})
 VALID_HOSTINGS = frozenset({"direct", "foundry"})
 
+
+# ---- Task-model role registry (PRP-0115, UDR-0096) ------------------------
+# The catalog's optional top-level ``roles`` block assigns a chat OFFERING to a
+# background / internal task (session title, memory extraction / curation, Teams
+# meeting summary, ontology NL -> SPARQL). A role value is an offering id (or an
+# object whose ``model`` is one, D7); an unset role falls back to the session
+# model, then the catalog default (D3). Because the resolved value is always a
+# real chat offering id, provider routing is correct by construction -- the
+# pre-PRP-0115 free-form ``*_MODEL`` env strings could be routed to the wrong
+# provider (silent azure-openai default; UDR-0096 D2). The registry below is the
+# single data-driven extension point (D6): a new task model is one entry here plus
+# one ``resolve_task_model(<key>, ...)`` call at the consumer.
+
+
+@dataclass(frozen=True)
+class TaskRole:
+    """A background/internal task that resolves its model from the catalog."""
+
+    key: str
+    label: str
+    description: str
+
+
+TASK_ROLES: tuple[TaskRole, ...] = (
+    TaskRole(
+        "session_title",
+        "Chat title generation",
+        "Summarizes a new chat into a short sidebar title.",
+    ),
+    TaskRole(
+        "user_memory_extraction",
+        "User memory extraction",
+        "Distills a conversation into durable user preferences.",
+    ),
+    TaskRole(
+        "agent_memory_curation",
+        "Agent memory curation",
+        "Reconciles liked turns into the agent's curated memory.",
+    ),
+    TaskRole(
+        "meeting_summary",
+        "Meeting summarization",
+        "Summarizes a Teams meeting transcript into structured JSON.",
+    ),
+    TaskRole(
+        "ontology_nl",
+        "Ontology NL to SPARQL",
+        "Converts a natural-language question into a SPARQL query.",
+    ),
+)
+
+_TASK_ROLE_KEYS: frozenset[str] = frozenset(r.key for r in TASK_ROLES)
+
+# Legacy per-role model env vars removed by PRP-0115 (UDR-0096 D1). Retained ONLY
+# to power the non-failing startup advisory that points an operator who still has
+# one set at the successor ``roles`` block (app.main).
+LEGACY_ROLE_ENV_VARS: dict[str, str] = {
+    "SESSION_TITLE_MODEL": "session_title",
+    "USER_MEMORY_EXTRACTION_MODEL": "user_memory_extraction",
+    "AGENT_MEMORY_CURATION_MODEL": "agent_memory_curation",
+    "TEAMS_MEETING_SUMMARY_MODEL": "meeting_summary",
+    "ONTOLOGY_NL_MODEL": "ontology_nl",
+}
+
+
+def role_registry() -> list[dict[str, str]]:
+    """Return the task-role descriptors for the management API / CLI / GUI (D6)."""
+    return [{"key": r.key, "label": r.label, "description": r.description} for r in TASK_ROLES]
+
+
 # Default per-model context window used when an offering does not declare its own
 # ``context_window`` (PRP-0113, UDR-0094 D5). This replaces the removed
 # ``MODEL_MAX_CONTEXT_TOKENS`` env config and matches the prior
@@ -159,9 +229,17 @@ class Offering:
 class Catalog:
     """An ordered, validated set of offerings (the CATALOG lane SSOT)."""
 
-    def __init__(self, offerings: list[Offering]) -> None:
+    def __init__(self, offerings: list[Offering], roles: dict[str, str] | None = None) -> None:
         self._offerings = list(offerings)
         self._by_id = {o.id: o for o in offerings}
+        # Known task-role bindings -> offering id (PRP-0115, UDR-0096). Only KNOWN
+        # role keys with a non-empty binding are kept; a dangling / non-chat target
+        # is stored as-authored and resolved to "unset" at use time (D5).
+        self._roles = dict(roles or {})
+
+    def role_binding(self, role: str) -> str | None:
+        """Return the offering id bound to a task role, or None if unset (D3)."""
+        return self._roles.get(role)
 
     def get(self, offering_id: str | None) -> Offering | None:
         if offering_id is None:
@@ -419,6 +497,51 @@ def _parse_auth_profiles(data: dict[str, Any]) -> dict[str, str]:
     return profiles
 
 
+def _role_value_model(value: Any, role_key: str) -> str | None:
+    """Extract the offering-id string from a ``roles`` value (PRP-0115, UDR-0096 D7).
+
+    A value is either an offering-id string or an object whose ``model`` is one
+    (extra object keys are reserved for future per-role options and preserved-but-
+    ignored in v1). Returns None for an empty / null binding (unset). Raises
+    :class:`CatalogError` on a malformed value.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        model = value.get("model")
+        if model is None:
+            return None
+        if not isinstance(model, str):
+            raise CatalogError(f"role '{role_key}': 'model' must be a string (an offering id)")
+        return model.strip() or None
+    raise CatalogError(f"role '{role_key}': value must be an offering-id string or an object with a 'model' string")
+
+
+def _parse_roles(raw: Any) -> dict[str, str]:
+    """Validate the optional top-level ``roles`` block (PRP-0115, UDR-0096).
+
+    Returns ``{known_role_key: offering_id}`` for every KNOWN role whose binding is
+    a non-empty offering-id reference. Structural problems (a non-object block, a
+    value that is neither a non-empty string nor a ``{"model": "<id>"}`` object)
+    raise :class:`CatalogError`. A dangling / non-chat reference is NOT rejected
+    here -- it degrades to unset at resolve time with a warning at load (D5).
+    UNKNOWN role keys are structurally validated but NOT returned; the serializer
+    preserves them verbatim for forward-compat (D7).
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise CatalogError("'roles' must be an object mapping a task-role key to an offering id")
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        model = _role_value_model(value, str(key))
+        if model and key in _TASK_ROLE_KEYS:
+            out[key] = model
+    return out
+
+
 def parse_catalog(data: Any) -> Catalog:
     """Validate a parsed JSONC object into a :class:`Catalog` (UDR-0087 D2/D3).
 
@@ -432,6 +555,7 @@ def parse_catalog(data: Any) -> Catalog:
 
     auth_profiles = _parse_auth_profiles(data)
     offerings = [_parse_offering(entry, i, auth_profiles) for i, entry in enumerate(raw_offerings)]
+    roles = _parse_roles(data.get("roles"))
 
     # Unique ids.
     seen: set[str] = set()
@@ -454,7 +578,7 @@ def parse_catalog(data: Any) -> Catalog:
     if len([o for o in offerings if o.is_image]) > 1:
         raise CatalogError("at most one 'image' offering is supported (v1)")
 
-    return Catalog(offerings)
+    return Catalog(offerings, roles=roles)
 
 
 def load_catalog(path: Path) -> Catalog:
@@ -521,8 +645,32 @@ def active_catalog() -> Catalog | None:
         len(catalog.all()),
         catalog.default_offering().id if catalog.default_offering() else "(none)",
     )
+    _warn_invalid_role_bindings(catalog)
     _active = catalog
     return catalog
+
+
+def _warn_invalid_role_bindings(catalog: Catalog) -> None:
+    """Emit a one-time WARNING per task-role binding that cannot be honored (D5).
+
+    A role that names a missing or non-chat offering degrades to unset (the task
+    uses the session / default model) rather than failing startup; the warning
+    keeps the misconfiguration operator-visible.
+    """
+    for role, offering_id in catalog._roles.items():
+        offering = catalog.get(offering_id)
+        if offering is None:
+            logger.warning(
+                "roles.%s references unknown offering '%s'; that task will use the session / default model.",
+                role,
+                offering_id,
+            )
+        elif not offering.is_chat:
+            logger.warning(
+                "roles.%s references non-chat offering '%s'; that task will use the session / default model.",
+                role,
+                offering_id,
+            )
 
 
 def reset_active() -> None:
@@ -562,6 +710,47 @@ def catalog_context_window(offering_id: str | None) -> int | None:
     """Return the offering's declared ``context_window``, or None (legacy)."""
     offering = offering_for(offering_id)
     return offering.context_window if offering is not None else None
+
+
+def resolve_task_model(role: str, session_model: str | None = None) -> str:
+    """Resolve the model id for a background / internal task role (PRP-0115, UDR-0096).
+
+    Precedence (D3): the catalog ``roles`` binding for ``role`` -- when it names an
+    existing chat offering -- then the per-session model, then the catalog DEFAULT
+    offering. Returns an OFFERING ID (or the session model, which is also an
+    offering id), so the caller's ``providers.build_chat_client`` routes to the
+    correct provider by construction, eliminating the silent azure-openai default
+    the free-form ``*_MODEL`` env strings were exposed to (UDR-0096 D2).
+
+    DEMO_MODE is orthogonal (D9): the catalog (and roles) is ignored; resolution
+    falls to the session model, then the first demo model. A role that names a
+    missing / non-chat offering degrades to unset (warned once at load, D5). The
+    single resolution seam, replacing the five duplicated ``_default_model()``
+    helpers (D4).
+    """
+    if settings.demo_mode:
+        if session_model:
+            return session_model
+        from app.demo import resolve_demo_models
+
+        models = resolve_demo_models()
+        return models[0] if models else "chatwalaau-demo"
+
+    catalog = active_catalog()
+    if catalog is not None:
+        bound = catalog.role_binding(role)
+        if bound:
+            offering = catalog.get(bound)
+            if offering is not None and offering.is_chat:
+                return bound
+            # dangling / non-chat -> treat as unset (D5; warned at load).
+    if session_model:
+        return session_model
+    if catalog is not None:
+        default = catalog.default_offering()
+        if default is not None:
+            return default.id
+    return ""
 
 
 # ---- Optional non-chat offering lanes (UDR-0087 D7) -----------------------
@@ -787,6 +976,15 @@ def serialize_catalog(data: dict[str, Any]) -> str:
     out["offerings"] = (
         [_normalize_offering(o) for o in offerings if isinstance(o, dict)] if isinstance(offerings, list) else []
     )
+    # Task-model assignments (PRP-0115, UDR-0096). Emitted after offerings; empty /
+    # null bindings are dropped. Values are kept verbatim (a string or a {model:...}
+    # object) so forward-compat per-role options and unknown-but-authored role keys
+    # round-trip unchanged (D7).
+    roles = data.get("roles")
+    if isinstance(roles, dict):
+        cleaned = {k: v for k, v in roles.items() if v not in (None, "")}
+        if cleaned:
+            out["roles"] = cleaned
     return json.dumps(out, indent=2, ensure_ascii=False) + "\n"
 
 
@@ -851,5 +1049,10 @@ def catalog_status() -> dict[str, Any]:
         "errors": errors,
         "auth_profiles": data.get("auth_profiles", {}) if isinstance(data.get("auth_profiles"), dict) else {},
         "offerings": data.get("offerings", []) if isinstance(data.get("offerings"), list) else [],
+        # Task-model assignments as authored (raw, may include a dangling reference
+        # the GUI flags), plus the data-driven role registry the GUI/CLI render
+        # (PRP-0115, UDR-0096 D6).
+        "roles": data.get("roles", {}) if isinstance(data.get("roles"), dict) else {},
+        "role_registry": role_registry(),
         "env_status": detect_env(names),
     }

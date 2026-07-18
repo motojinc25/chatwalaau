@@ -66,6 +66,27 @@ def register_models_parser(
     remove_parser.add_argument("--file", default=None, help="Catalog path (default: MODEL_OFFERINGS_FILE)")
     remove_parser.set_defaults(func=_run_models_remove)
 
+    # Subcommand "role": assign a chat offering to a background/internal task
+    # (PRP-0115, UDR-0096). Offline authoring of the catalog `roles` block.
+    role_parser = models_sub.add_parser("role", help="Assign task models (session title, memory, ...) to offerings")
+    role_sub = role_parser.add_subparsers(dest="role_action")
+    role_sub.required = True
+
+    role_list = role_sub.add_parser("list", help="List task roles and their current offering assignments")
+    role_list.add_argument("--file", default=None, help="Catalog path (default: MODEL_OFFERINGS_FILE)")
+    role_list.set_defaults(func=_run_role_list)
+
+    role_set = role_sub.add_parser("set", help="Assign a chat offering to a task role")
+    role_set.add_argument("role", help="Task role key (see `models role list`)")
+    role_set.add_argument("offering_id", help="A chat offering id to bind to this role")
+    role_set.add_argument("--file", default=None, help="Catalog path (default: MODEL_OFFERINGS_FILE)")
+    role_set.set_defaults(func=_run_role_set)
+
+    role_clear = role_sub.add_parser("clear", help="Unset a task role (falls back to the session / default model)")
+    role_clear.add_argument("role", help="Task role key (see `models role list`)")
+    role_clear.add_argument("--file", default=None, help="Catalog path (default: MODEL_OFFERINGS_FILE)")
+    role_clear.set_defaults(func=_run_role_clear)
+
 
 def _add_offering_options(parser: argparse.ArgumentParser, argparse_mod: Any, *, include_id: bool = True) -> None:
     """Attach the offering fields as optional flags (prompted when omitted)."""
@@ -334,6 +355,76 @@ def _run_models_remove(args: argparse.Namespace) -> None:
     if len(data["offerings"]) == before:
         print(f"ERROR: no offering with id '{args.id}' in {path}.")
         sys.exit(1)
+    _write(data, path)
+
+
+# ---- role assignments (writes model_offerings.jsonc `roles`) --------------
+
+
+def _run_role_list(args: argparse.Namespace) -> None:
+    from app import models_catalog
+
+    path = _resolve_path(args)
+    data = _load_raw(path)
+    roles = data.get("roles") if isinstance(data.get("roles"), dict) else {}
+    chat_ids = [
+        o.get("id")
+        for o in data.get("offerings", [])
+        if isinstance(o, dict) and "chat" in (o.get("operations") or ["chat"])
+    ]
+
+    if getattr(args, "json_output", False):
+        output_json({"roles": roles, "registry": models_catalog.role_registry(), "chat_offerings": chat_ids})
+        return
+
+    print("Task model assignments (roles):")
+    for role in models_catalog.role_registry():
+        key = role["key"]
+        bound = roles.get(key)
+        if isinstance(bound, dict):
+            bound = bound.get("model")
+        shown = bound or "(follow session / default)"
+        print(f"  {key:<24} {shown}")
+        print(f"    {role['description']}")
+    if chat_ids:
+        print(f"\nChat offerings available: {', '.join(str(c) for c in chat_ids)}")
+
+
+def _run_role_set(args: argparse.Namespace) -> None:
+    from app import models_catalog
+
+    if args.role not in {r.key for r in models_catalog.TASK_ROLES}:
+        valid = ", ".join(r.key for r in models_catalog.TASK_ROLES)
+        print(f"ERROR: unknown role '{args.role}'. Valid roles: {valid}")
+        sys.exit(1)
+
+    path = _resolve_path(args)
+    data = _load_raw(path)
+    chat_ids = {
+        o.get("id")
+        for o in data.get("offerings", [])
+        if isinstance(o, dict) and "chat" in (o.get("operations") or ["chat"])
+    }
+    if args.offering_id not in chat_ids:
+        print(
+            f"ERROR: '{args.offering_id}' is not a chat offering in {path}. "
+            f"Available chat offerings: {', '.join(str(c) for c in sorted(chat_ids)) or '(none)'}"
+        )
+        sys.exit(1)
+
+    roles = dict(data.get("roles")) if isinstance(data.get("roles"), dict) else {}
+    roles[args.role] = args.offering_id
+    data["roles"] = roles
+    _write(data, path)
+
+
+def _run_role_clear(args: argparse.Namespace) -> None:
+    path = _resolve_path(args)
+    data = _load_raw(path)
+    roles = dict(data.get("roles")) if isinstance(data.get("roles"), dict) else {}
+    if args.role in roles:
+        del roles[args.role]
+    data["roles"] = roles
     _write(data, path)
 
 

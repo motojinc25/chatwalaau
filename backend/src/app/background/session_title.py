@@ -6,8 +6,9 @@ background task (post-turn, fire-and-forget, error-isolated), so it never blocks
 or fails the chat turn.
 
 Gated by ``SESSION_TITLE_MODE`` (CTR-0006): ``truncate`` (default) dispatches
-nothing; ``llm`` enables this task. The model is ``SESSION_TITLE_MODEL`` if set,
-else the session's model, else the provider-resolved default. The ChatClient is
+nothing; ``llm`` enables this task. The model is the catalog ``roles.session_title``
+binding if set, else the session's model, else the catalog default
+(``models_catalog.resolve_task_model``, PRP-0115 / UDR-0096). The ChatClient is
 built through the same chokepoint the agent registry uses
 (``app.agui.agent_registry._build_chat_client``), so DEMO_MODE is honored and
 provider routing is reused. The call is a SINGLE non-streaming completion -- NOT
@@ -25,7 +26,6 @@ import logging
 from typing import Any
 
 from app.background import register_task
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -51,21 +51,6 @@ _TITLE_CHAR_CAP = 100
 _TRAILING_PUNCT = " \t\r\n.。!！?？,，;；:：、"
 
 
-def _default_model() -> str:
-    """Resolve the fallback summarization model (honors DEMO_MODE)."""
-    from app.demo import is_demo_mode
-
-    if is_demo_mode():
-        from app.demo import resolve_demo_models
-
-        models = resolve_demo_models()
-        return models[0] if models else "chatwalaau-demo"
-    from app import providers
-
-    resolved = providers.resolve_models()
-    return resolved[0][0] if resolved else ""
-
-
 def _clean_title(raw: str) -> str:
     """Normalize model output to a single-line, unquoted, capped title."""
     title = " ".join(raw.split())  # collapse whitespace / newlines to one line
@@ -80,8 +65,9 @@ async def _generate_title(user_text: str, assistant_text: str, model: str | None
     from agent_framework import Message
 
     from app.agui.agent_registry import _build_chat_client
+    from app.models_catalog import resolve_task_model
 
-    title_model = settings.session_title_model.strip() or (model or "") or _default_model()
+    title_model = resolve_task_model("session_title", model)
     client = _build_chat_client(title_model)
     prompt = _TITLE_USER_TEMPLATE.format(
         user=user_text[:_INPUT_CHAR_CAP],
