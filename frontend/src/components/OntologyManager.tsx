@@ -16,16 +16,19 @@
  */
 
 import Editor from '@monaco-editor/react'
-import type { Connection, Edge, Node, NodeChange, NodeProps } from '@xyflow/react'
+import type { Connection, Edge, EdgeProps, Node, NodeChange, NodeProps } from '@xyflow/react'
 import {
   applyNodeChanges,
   Background,
+  BaseEdge,
   ConnectionMode,
+  EdgeLabelRenderer,
   Handle,
   MarkerType,
   Position,
   ReactFlow,
   ReactFlowProvider,
+  useInternalNode,
   useReactFlow,
 } from '@xyflow/react'
 import {
@@ -35,6 +38,7 @@ import {
   LayoutGrid,
   Loader2,
   Maximize,
+  Pencil,
   Plus,
   RotateCcw,
   Search,
@@ -44,7 +48,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import {
   AlertDialog,
@@ -179,52 +183,51 @@ interface EntityNodeData extends Record<string, unknown> {
 
 type EntityFlowNode = Node<EntityNodeData, 'entity'>
 
-type Side = 'top' | 'right' | 'bottom' | 'left'
-
-const HANDLE_SIDES: { side: Side; position: Position }[] = [
-  { side: 'top', position: Position.Top },
-  { side: 'right', position: Position.Right },
-  { side: 'bottom', position: Position.Bottom },
-  { side: 'left', position: Position.Left },
-]
-
-/** Pick the facing sides of two circles from their relative positions, so an
- * edge always attaches to the nearest of the four rim connectors (In/Out on
- * every side; recomputed as nodes move). */
-function closestSides(source: { x: number; y: number }, target: { x: number; y: number }): [Side, Side] {
-  const dx = target.x - source.x
-  const dy = target.y - source.y
-  if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? ['right', 'left'] : ['left', 'right']
-  return dy >= 0 ? ['bottom', 'top'] : ['top', 'bottom']
-}
+const NODE_SIZE = 72
+// Selector for the inner draggable disc: the node's `dragHandle` restricts drag
+// to the inner circle so the outer ring stays a pure connection zone (UDR-0098 D1).
+const ENTITY_DRAG_CLASS = 'entity-drag'
+// The full-node connection handle CSS: fills the node, invisible, no transform,
+// so a drag can start / end anywhere on the perimeter (360 degrees).
+const RING_HANDLE_CLASS =
+  '!absolute !inset-0 !m-0 !h-full !w-full !min-h-0 !min-w-0 !transform-none !rounded-full !border-0 !bg-transparent'
 
 const EntityNode = memo(function EntityNode({ data }: NodeProps<EntityFlowNode>) {
   return (
-    <div
-      className={cn(
-        'relative flex h-[72px] w-[72px] items-center justify-center rounded-full border-2 bg-white text-zinc-900 shadow-sm transition-opacity',
-        data.isSelected && 'ring-2 ring-blue-500 ring-offset-2',
-        !data.isSelected && data.related && 'ring-2 ring-blue-300 ring-offset-2',
-        data.matched && 'ring-2 ring-amber-500 ring-offset-2',
-      )}
-      style={{ borderColor: data.color || '#d4d4d8', opacity: data.dimmed ? 0.25 : 1 }}>
-      {/* In/Out connectors on all four sides (ConnectionMode.Loose lets a drag
-          start or end on any of them, so connections work through 360 degrees). */}
-      {HANDLE_SIDES.map(({ side, position }) => (
-        <Fragment key={side}>
-          <Handle id={`t-${side}`} type="target" position={position} className="!h-2.5 !w-2.5 !bg-zinc-400" />
-          <Handle id={`s-${side}`} type="source" position={position} className="!h-2.5 !w-2.5 !bg-zinc-400" />
-        </Fragment>
-      ))}
-      <span className="text-2xl leading-none">{data.emoji || data.label.charAt(0).toUpperCase()}</span>
+    <div className="relative transition-opacity" style={{ height: NODE_SIZE, width: NODE_SIZE }}>
+      {/* Outer ring = ONE 360-degree connection zone (UDR-0098 D1). Two full-node
+          handles (target + source) sit under everything; ConnectionMode.Loose lets
+          a drag start or end anywhere on the ring. */}
+      <Handle id="ring-target" type="target" position={Position.Top} className={RING_HANDLE_CLASS} />
+      <Handle id="ring-source" type="source" position={Position.Top} className={RING_HANDLE_CLASS} />
+      {/* Outer ring visual -- non-interactive so the handle beneath receives the drag. */}
+      <div
+        className={cn(
+          'pointer-events-none absolute inset-0 rounded-full border-2 bg-white shadow-sm',
+          data.isSelected && 'ring-2 ring-blue-500 ring-offset-2',
+          !data.isSelected && data.related && 'ring-2 ring-blue-300 ring-offset-2',
+          data.matched && 'ring-2 ring-amber-500 ring-offset-2',
+        )}
+        style={{ borderColor: data.color || '#d4d4d8', opacity: data.dimmed ? 0.25 : 1 }}
+      />
+      {/* Inner disc = the move/drag surface (dragHandle '.entity-drag'), on top. */}
+      <div
+        className={cn(
+          ENTITY_DRAG_CLASS,
+          'absolute inset-[7px] flex cursor-move items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-900',
+        )}
+        style={{ opacity: data.dimmed ? 0.25 : 1 }}
+        title="Drag to move; drag from the outer ring to connect">
+        <span className="text-2xl leading-none">{data.emoji || data.label.charAt(0).toUpperCase()}</span>
+      </div>
       {data.propertyCount > 0 && (
-        <span className="absolute -right-1.5 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full border bg-zinc-100 px-1 text-[10px] font-medium text-zinc-600">
+        <span className="pointer-events-none absolute -right-1.5 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full border bg-zinc-100 px-1 text-[10px] font-medium text-zinc-600">
           {data.propertyCount}
         </span>
       )}
       {data.keyCount > 0 && (
         <span
-          className="absolute -bottom-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full border bg-amber-100 text-amber-700"
+          className="pointer-events-none absolute -bottom-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full border bg-amber-100 text-amber-700"
           title={`${data.keyCount} key propert${data.keyCount === 1 ? 'y' : 'ies'}`}>
           <KeyRound className="h-3 w-3" />
         </span>
@@ -238,6 +241,110 @@ const EntityNode = memo(function EntityNode({ data }: NodeProps<EntityFlowNode>)
 })
 
 const nodeTypes = { entity: EntityNode }
+
+// ---- Custom floating relationship edge (UDR-0098 D1/D2) ----------------------
+// Attaches at the nearest circle perimeter (recomputed live via useInternalNode)
+// and fans parallel edges out by per-edge curvature so multiple relationships
+// between the same node pair are individually selectable.
+
+interface RelEdgeData extends Record<string, unknown> {
+  label: string
+  stroke: string
+  strokeWidth: number
+  opacity: number
+  labelColor: string
+  parallelIndex: number
+  parallelCount: number
+}
+
+const PARALLEL_SPREAD = 26 // px of perpendicular offset per fan-out step
+
+function nodeCenter(node: ReturnType<typeof useInternalNode>): { x: number; y: number; r: number } {
+  const w = node?.measured?.width ?? NODE_SIZE
+  const h = node?.measured?.height ?? NODE_SIZE
+  const px = node?.internals.positionAbsolute.x ?? 0
+  const py = node?.internals.positionAbsolute.y ?? 0
+  return { x: px + w / 2, y: py + h / 2, r: Math.min(w, h) / 2 }
+}
+
+const FloatingRelationshipEdge = memo(function FloatingRelationshipEdge({
+  id,
+  source,
+  target,
+  markerEnd,
+  data,
+}: EdgeProps) {
+  const sourceNode = useInternalNode(source)
+  const targetNode = useInternalNode(target)
+  const d = (data ?? {}) as unknown as RelEdgeData
+  if (!sourceNode || !targetNode) return null
+
+  const a = nodeCenter(sourceNode)
+  const b = nodeCenter(targetNode)
+  const idx = d.parallelIndex ?? 0
+  const count = d.parallelCount ?? 1
+  const factor = idx - (count - 1) / 2
+  const baseStyle = { stroke: d.stroke, strokeWidth: d.strokeWidth, opacity: d.opacity }
+
+  let path: string
+  let lx: number
+  let ly: number
+
+  if (source === target) {
+    // Self-relationship -> a loop above the node; multiple loops stack outward.
+    const h = 34 + Math.abs(factor) * 26 + (count > 1 ? 8 : 0)
+    const startX = a.x - a.r * 0.5
+    const startY = a.y - a.r * 0.87
+    const endX = a.x + a.r * 0.5
+    const endY = a.y - a.r * 0.87
+    path = `M ${startX} ${startY} C ${a.x - a.r} ${a.y - a.r - h} ${a.x + a.r} ${a.y - a.r - h} ${endX} ${endY}`
+    lx = a.x
+    ly = a.y - a.r - h * 0.72
+  } else {
+    // Canonical (id-sorted) perpendicular so opposite-direction siblings fan to
+    // opposite sides instead of overlapping.
+    const [c1, c2] = source < target ? [a, b] : [b, a]
+    const dx = c2.x - c1.x
+    const dy = c2.y - c1.y
+    const len = Math.hypot(dx, dy) || 1
+    const px = -dy / len
+    const py = dx / len
+    const off = factor * PARALLEL_SPREAD
+    const mx = (a.x + b.x) / 2 + px * off
+    const my = (a.y + b.y) / 2 + py * off
+    // Perimeter attach points aimed at the control point (tangent-ish entry).
+    const sAng = Math.atan2(my - a.y, mx - a.x)
+    const tAng = Math.atan2(my - b.y, mx - b.x)
+    const sx = a.x + Math.cos(sAng) * a.r
+    const sy = a.y + Math.sin(sAng) * a.r
+    const tx = b.x + Math.cos(tAng) * b.r
+    const ty = b.y + Math.sin(tAng) * b.r
+    path = `M ${sx} ${sy} Q ${mx} ${my} ${tx} ${ty}`
+    lx = 0.25 * sx + 0.5 * mx + 0.25 * tx
+    ly = 0.25 * sy + 0.5 * my + 0.25 * ty
+  }
+
+  return (
+    <>
+      <BaseEdge id={id} path={path} markerEnd={markerEnd} style={baseStyle} />
+      {d.label ? (
+        <EdgeLabelRenderer>
+          <div
+            className="nodrag nopan pointer-events-none absolute rounded bg-white/85 px-1 text-[10px] font-medium"
+            style={{
+              transform: `translate(-50%, -50%) translate(${lx}px, ${ly}px)`,
+              color: d.labelColor,
+              opacity: d.opacity,
+            }}>
+            {d.label}
+          </div>
+        </EdgeLabelRenderer>
+      ) : null}
+    </>
+  )
+})
+
+const edgeTypes = { floating: FloatingRelationshipEdge }
 
 // ---- Canvas toolbar (needs the ReactFlowProvider context) --------------------
 
@@ -350,6 +457,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [creating, setCreating] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<CatalogEntry | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<CatalogEntry | null>(null)
+  const [renameName, setRenameName] = useState('')
+  const [renameDescription, setRenameDescription] = useState('')
+  const [renaming, setRenaming] = useState(false)
   const [importing, setImporting] = useState(false)
   const importInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -463,6 +574,26 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       setCreating(false)
     }
   }, [createName, createDescription, fetchCatalog, loadOntology])
+
+  const renameOntology = useCallback(async () => {
+    if (!renameTarget) return
+    setRenaming(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/ontology/catalog/${renameTarget.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: renameName, description: renameDescription }),
+      })
+      if (!res.ok) throw new Error('Failed to rename the ontology')
+      setRenameTarget(null)
+      await fetchCatalog()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to rename the ontology')
+    } finally {
+      setRenaming(false)
+    }
+  }, [renameTarget, renameName, renameDescription, fetchCatalog])
 
   const confirmDelete = useCallback(async () => {
     if (!deleteTarget) return
@@ -650,6 +781,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         id: entity.iri,
         type: 'entity' as const,
         position: { x: entity.x, y: entity.y },
+        // Drag only from the inner disc; the outer ring is the connection zone (UDR-0098 D1).
+        dragHandle: `.${ENTITY_DRAG_CLASS}`,
         data: {
           label: entity.label,
           emoji: entity.emoji,
@@ -698,43 +831,44 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     [markDirty],
   )
 
-  const entityPositions = useMemo(() => {
-    const map = new Map<string, { x: number; y: number }>()
-    for (const entity of entities) map.set(entity.iri, { x: entity.x, y: entity.y })
-    return map
-  }, [entities])
-
-  const edges = useMemo<Edge[]>(
-    () =>
-      relationships.map((rel) => {
-        const isSelected = selection?.kind === 'relationship' && selection.iri === rel.iri
-        const isRelated = !isSelected && related.edges.has(rel.iri)
-        const matched = highlight !== null && (highlight.has(rel.source) || highlight.has(rel.target))
-        const dimmed = highlight !== null && !matched
-        const stroke = isSelected ? '#2563eb' : isRelated ? '#93c5fd' : matched ? '#f59e0b' : '#94a3b8'
-        const sourcePos = entityPositions.get(rel.source)
-        const targetPos = entityPositions.get(rel.target)
-        const [sourceSide, targetSide]: [Side, Side] =
-          sourcePos && targetPos ? closestSides(sourcePos, targetPos) : ['right', 'left']
-        return {
-          id: rel.iri,
-          source: rel.source,
-          target: rel.target,
-          sourceHandle: `s-${sourceSide}`,
-          targetHandle: `t-${targetSide}`,
+  const edges = useMemo<Edge[]>(() => {
+    // Fan-out bookkeeping: how many relationships share each unordered node pair,
+    // and this edge's index within that group (UDR-0098 D2).
+    const pairKey = (s: string, t: string) => (s < t ? `${s}|${t}` : `${t}|${s}`)
+    const pairTotal = new Map<string, number>()
+    for (const rel of relationships) {
+      const key = pairKey(rel.source, rel.target)
+      pairTotal.set(key, (pairTotal.get(key) ?? 0) + 1)
+    }
+    const pairSeen = new Map<string, number>()
+    return relationships.map((rel) => {
+      const key = pairKey(rel.source, rel.target)
+      const parallelIndex = pairSeen.get(key) ?? 0
+      pairSeen.set(key, parallelIndex + 1)
+      const parallelCount = pairTotal.get(key) ?? 1
+      const isSelected = selection?.kind === 'relationship' && selection.iri === rel.iri
+      const isRelated = !isSelected && related.edges.has(rel.iri)
+      const matched = highlight !== null && (highlight.has(rel.source) || highlight.has(rel.target))
+      const dimmed = highlight !== null && !matched
+      const stroke = isSelected ? '#2563eb' : isRelated ? '#93c5fd' : matched ? '#f59e0b' : '#94a3b8'
+      return {
+        id: rel.iri,
+        source: rel.source,
+        target: rel.target,
+        type: 'floating',
+        markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
+        data: {
           label: `${rel.label} [${CARDINALITY_SYMBOL[rel.cardinality] ?? rel.cardinality}]`,
-          markerEnd: { type: MarkerType.ArrowClosed, color: stroke },
-          style: {
-            stroke,
-            strokeWidth: isSelected || isRelated || matched ? 2.5 : 1.5,
-            opacity: dimmed ? 0.2 : 1,
-          },
-          labelStyle: { fill: isSelected ? '#2563eb' : '#52525b', fontSize: 10, opacity: dimmed ? 0.2 : 1 },
-          labelBgStyle: { fill: '#ffffff', opacity: dimmed ? 0.2 : 0.85 },
-        }
-      }),
-    [relationships, selection, related, highlight, entityPositions],
-  )
+          stroke,
+          strokeWidth: isSelected || isRelated || matched ? 2.5 : 1.5,
+          opacity: dimmed ? 0.2 : 1,
+          labelColor: isSelected ? '#2563eb' : '#52525b',
+          parallelIndex,
+          parallelCount,
+        } satisfies RelEdgeData,
+      }
+    })
+  }, [relationships, selection, related, highlight])
 
   const resetLayout = useCallback(async () => {
     if (entities.length === 0) return
@@ -896,6 +1030,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                     onCreate={() => setCreateOpen(true)}
                     onImportClick={() => importInputRef.current?.click()}
                     onExport={(entry) => void exportOntology(entry)}
+                    onRename={(entry) => {
+                      setRenameName(entry.name)
+                      setRenameDescription(entry.description ?? '')
+                      setRenameTarget(entry)
+                    }}
                     onDelete={(entry) => setDeleteTarget(entry)}
                   />
                 }
@@ -920,6 +1059,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                             nodes={nodes}
                             edges={edges}
                             nodeTypes={nodeTypes}
+                            edgeTypes={edgeTypes}
                             onNodesChange={onNodesChange}
                             onNodeDragStop={onNodeDragStop}
                             onConnect={onConnect}
@@ -1074,6 +1214,52 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         </DialogContent>
       </Dialog>
 
+      {/* Rename (name + description); id and projection unchanged (PRP-0116, CTR-0171). */}
+      <Dialog open={renameTarget !== null} onOpenChange={(o) => !renaming && !o && setRenameTarget(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename ontology</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <label htmlFor="ontology-rename-name" className="mb-1 block text-xs font-medium text-muted-foreground">
+                Name
+              </label>
+              <Input
+                id="ontology-rename-name"
+                value={renameName}
+                onChange={(e) => setRenameName(e.target.value)}
+                placeholder="e.g. Plant Asset Model"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="ontology-rename-description"
+                className="mb-1 block text-xs font-medium text-muted-foreground">
+                Description (used by the assistant to pick this ontology)
+              </label>
+              <textarea
+                id="ontology-rename-description"
+                value={renameDescription}
+                onChange={(e) => setRenameDescription(e.target.value)}
+                rows={3}
+                className="w-full rounded-md border bg-transparent px-3 py-2 text-sm"
+                placeholder="What domain does this concept model describe?"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRenameTarget(null)} disabled={renaming}>
+              Cancel
+            </Button>
+            <Button onClick={() => void renameOntology()} disabled={renaming || !renameName.trim()}>
+              {renaming ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Delete confirmation + blocking indicator (operator requirement). */}
       <AlertDialog open={deleteTarget !== null} onOpenChange={(o) => !o && !deleting && setDeleteTarget(null)}>
         <AlertDialogContent>
@@ -1155,6 +1341,7 @@ function CatalogPane(props: {
   onCreate: () => void
   onImportClick: () => void
   onExport: (entry: CatalogEntry) => void
+  onRename: (entry: CatalogEntry) => void
   onDelete: (entry: CatalogEntry) => void
 }) {
   return (
@@ -1201,6 +1388,15 @@ function CatalogPane(props: {
                 )}
               </button>
               <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-5 w-5 text-zinc-500"
+                  onClick={() => props.onRename(entry)}
+                  aria-label={`Rename ${entry.name}`}
+                  title="Rename">
+                  <Pencil className="h-3 w-3" />
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"

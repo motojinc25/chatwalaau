@@ -81,10 +81,11 @@ JOB_TYPES: dict[str, JobType] = {
         params=[
             ParamSpec(
                 name="file_path",
-                label="PDF path",
+                label="PDF (filename or path)",
                 type="string",
                 required=True,
-                help="Path to the PDF (e.g. .uploads/<thread>/file.pdf).",
+                help="The uploaded PDF's filename (e.g. report.pdf) or a full path. A bare "
+                "filename is resolved against the uploads folder.",
             ),
             ParamSpec(name="collection", label="Collection", type="string", help="ChromaDB collection name."),
             ParamSpec(name="chunk_size", label="Chunk size", type="int", help="Characters per chunk."),

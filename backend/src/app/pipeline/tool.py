@@ -28,7 +28,8 @@ PIPELINE_TOOL_INSTRUCTION = (
     "You can run data-processing PIPELINE jobs via the manage_pipeline tool. The main "
     "job type is 'rag-ingest', which parses a PDF, chunks and embeds it, and stores it in "
     "the vector knowledge base so rag_search can cite it. Use action='submit' with "
-    "job_type='rag-ingest' and file_path set to the uploaded PDF path. Use action='list' "
+    "job_type='rag-ingest' and file_path set to the uploaded PDF's filename (a bare "
+    "filename is resolved against the uploads folder) or a full path. Use action='list' "
     "to see jobs, 'get' for one job's progress, 'cancel' to stop a running job, and "
     "'delete' to remove a finished job. Pipeline jobs run only curated in-process job "
     "types (no shell)."
@@ -50,7 +51,12 @@ def _summary(job: dict) -> dict:
 async def manage_pipeline(
     action: Annotated[str, Field(description="One of: submit, list, get, cancel, delete.")],
     job_type: Annotated[str, Field(description="For submit: a registered type, e.g. 'rag-ingest'.")] = "",
-    file_path: Annotated[str, Field(description="For rag-ingest: path to the PDF, relative to the server.")] = "",
+    file_path: Annotated[
+        str,
+        Field(
+            description="For rag-ingest: the uploaded PDF's filename (resolved against the uploads folder) or a path."
+        ),
+    ] = "",
     collection: Annotated[str, Field(description="For rag-ingest: optional ChromaDB collection name.")] = "",
     chunk_size: Annotated[int, Field(description="For rag-ingest: optional characters per chunk.")] = 0,
     chunk_overlap: Annotated[int, Field(description="For rag-ingest: optional overlap characters.")] = 0,

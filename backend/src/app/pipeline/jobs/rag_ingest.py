@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import chromadb
 
+from app.core.config import settings
 from app.pipeline.models import Job, JobStatus
 from app.pipeline.rag.chunker import chunk_pages
 from app.pipeline.rag.embedder import EMBEDDING_BATCH_SIZE, embed_texts
@@ -28,6 +29,31 @@ if TYPE_CHECKING:
     from app.pipeline.store import PipelineStore
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_pdf_path(raw: str) -> Path | None:
+    """Resolve the rag-ingest ``file_path`` param to an actual file (PRP-0116 follow-up).
+
+    An attached / uploaded PDF lives under ``UPLOAD_DIR`` (``.uploads/<thread>/...``),
+    which an operator typing into the pipeline form (or the agent) usually does not
+    know the full path of. Resolution order:
+      1. the value as given (a full/relative path that already resolves), then
+      2. by BASENAME under ``UPLOAD_DIR`` (no directory traversal -- only the file
+         name is used), picking the most recently modified match (almost certainly
+         the file just uploaded).
+    Returns ``None`` when nothing matches.
+    """
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if candidate.is_file():
+        return candidate
+    uploads = Path(settings.upload_dir)
+    if uploads.is_dir():
+        matches = [p for p in uploads.rglob(candidate.name) if p.is_file()]
+        if matches:
+            return max(matches, key=lambda p: p.stat().st_mtime)
+    return None
 
 
 async def run_rag_ingest_job(
@@ -48,7 +74,7 @@ async def run_rag_ingest_job(
         storage: Persistence layer for saving progress.
         cancel_event: Set by the queue to request cancellation.
     """
-    file_path = Path(job.params.get("file_path", ""))
+    raw_file_path = str(job.params.get("file_path", ""))
     collection_name = job.params.get("collection", os.environ.get("RAG_COLLECTION_NAME", "default"))
     chunk_size = int(job.params.get("chunk_size", os.environ.get("RAG_CHUNK_SIZE", "1500")))
     chunk_overlap = int(job.params.get("chunk_overlap", os.environ.get("RAG_CHUNK_OVERLAP", "300")))
@@ -57,10 +83,12 @@ async def run_rag_ingest_job(
     chunk_min_size = int(chunk_min_raw) if chunk_min_raw not in (None, "") else None
     chroma_dir = os.environ.get("CHROMA_DIR", ".chroma")
 
-    # Validate file exists
-    if not file_path.is_file():
+    # Validate file exists. Resolve a bare filename against UPLOAD_DIR so an
+    # operator (or the agent) can reference an uploaded PDF by name (PRP-0116).
+    file_path = _resolve_pdf_path(raw_file_path)
+    if file_path is None:
         job.status = JobStatus.failed
-        job.error = f"PDF file not found: {file_path}"
+        job.error = f"PDF file not found: {raw_file_path}"
         job.completed_at = datetime.now(UTC).isoformat()
         storage.save(job)
         return

@@ -206,6 +206,21 @@ class Settings(BaseSettings):
     # File Upload
     upload_dir: str = ".uploads"
 
+    # Attached PDF handling (CTR-0009, PRP-0116, UDR-0099).
+    # An attached PDF is given to the LLM as context, like an image. How:
+    #   auto (default): NATIVE document attachment for providers whose connector
+    #     supports it (azure-openai / openai / foundry -> sent as a Responses
+    #     `input_file`); TEXT extraction for others (anthropic connector drops
+    #     non-image data, so its PDF text is extracted instead).
+    #   native: always attach the raw PDF (only for a provider that supports it).
+    #   text: always extract the PDF text (safe fallback, e.g. if a deployment
+    #     rejects `input_file`).
+    pdf_attach_mode: str = "auto"
+    # Character cap on TEXT-extracted PDF content (text/anthropic path). Text
+    # beyond it is truncated with a `truncated="true"` marker (the
+    # CODING_FILE_READ_MAX_BYTES precedent).
+    pdf_inline_max_chars: int = 20000
+
     # Session Export/Import (CTR-0015, CTR-0006, PRP-0084 / UDR-0062 D5).
     # Maximum accepted size (bytes) of an uploaded chat import bundle (.zip).
     # Bounds the compressed upload; the import path additionally enforces an

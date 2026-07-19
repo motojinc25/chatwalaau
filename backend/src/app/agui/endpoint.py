@@ -376,9 +376,71 @@ def _strip_pdf_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return cleaned
 
 
+# Providers whose MAF connector accepts a native PDF document (sent as a Responses
+# `input_file`). The anthropic connector currently drops non-image data, so its PDFs
+# take the text-extraction path (PRP-0116, UDR-0099 D1).
+_NATIVE_PDF_PROVIDERS = frozenset({"azure-openai", "openai", "foundry"})
+
+
+def _pdf_wants_native(model: str | None) -> bool:
+    """Decide whether an attached PDF is sent to the model natively (like an image)
+    or extracted to text (PRP-0116, UDR-0099 D1). Controlled by PDF_ATTACH_MODE:
+    ``text`` -> never native; ``native`` -> always native; ``auto`` (default) ->
+    native only for a provider whose connector supports it."""
+    mode = (settings.pdf_attach_mode or "auto").strip().lower()
+    if mode == "text":
+        return False
+    if mode == "native":
+        return True
+    try:
+        provider_name = providers.provider_for(model or "").name
+    except Exception:
+        provider_name = ""
+    return provider_name in _NATIVE_PDF_PROVIDERS
+
+
+def _extract_pdf_inline(file_path: Path, name: str) -> str:
+    """Extract an attached PDF's text for inline injection (PRP-0116, UDR-0099).
+
+    Returns a ``<pdf-content>`` block capped at ``PDF_INLINE_MAX_CHARS`` so the
+    agent can analyze the PDF directly. A scanned / image-only PDF (no extractable
+    text) or a parse failure degrades to a short note pointing at the RAG pipeline
+    (UDR-0099 D3) -- never raises.
+    """
+    rag_note = (
+        f"[Attached PDF: {name} -- no extractable text (likely a scanned/image PDF). "
+        f"Ingest it with the RAG pipeline to search it.]"
+    )
+    if not file_path.is_file():
+        return f"[Attached PDF: {name} -- file not found on disk.]"
+    try:
+        from app.pipeline.rag.pdf_parser import extract_pages
+
+        pages = extract_pages(file_path)
+    except Exception:  # corrupt / unreadable PDF -- degrade, never fail the chat
+        logger.warning("inline PDF extraction failed for %s", name, exc_info=True)
+        return rag_note
+    if not pages:
+        return rag_note
+
+    cap = max(0, int(settings.pdf_inline_max_chars))
+    text = "\n\n".join(f"--- page {p['page']} ---\n{p['text'].strip()}" for p in pages)
+    truncated = len(text) > cap
+    if truncated:
+        text = text[:cap]
+    return (
+        f"[Attached PDF: {name}]\n"
+        f'<pdf-content name="{name}" pages="{len(pages)}" truncated="{str(truncated).lower()}">\n'
+        f"{text}\n"
+        f"</pdf-content>"
+    )
+
+
 def _inject_image_content(
     maf_messages: list[Any],
     raw_messages: list[dict[str, Any]],
+    *,
+    pdf_native: bool = False,
 ) -> None:
     """Inject image Content into MAF Messages from AG-UI request.
 
@@ -406,14 +468,33 @@ def _inject_image_content(
         for img in images:
             uri = img.get("uri", "")
             media_type = img.get("media_type", "")
-            # PDF files: collect references for text injection (not sent as image content)
+            # PDF files: given to the LLM as context, like an image (PRP-0116,
+            # UDR-0099). NATIVE mode attaches the raw PDF as document content (the
+            # Responses connector emits an `input_file`); the TEXT path extracts the
+            # PDF text and injects it inline (for a provider whose connector drops
+            # non-image data, or when PDF_ATTACH_MODE=text).
             if media_type == "application/pdf" or uri.endswith(".pdf"):
                 if uri.startswith("/api/uploads/"):
                     parts = uri.split("/")  # ["", "api", "uploads", thread_id, filename]
                     if len(parts) >= 5:
-                        # Convert API URI to disk path for submit_job file_path param
-                        disk_path = f"{settings.upload_dir}/{parts[3]}/{parts[4]}"
-                        pdf_refs.append(f"[Attached PDF: {parts[4]}, file_path={disk_path}]")
+                        name = parts[4]
+                        pdf_path = upload_dir / parts[3] / name
+                        if pdf_native and pdf_path.is_file():
+                            # `filename` is REQUIRED by the OpenAI Responses `input_file`
+                            # block when `file_data` is used; the connector reads it from
+                            # additional_properties (a bare Content has no filename), so
+                            # omitting it yields a 400 "missing required parameter".
+                            target.contents.append(
+                                Content.from_data(
+                                    data=pdf_path.read_bytes(),
+                                    media_type="application/pdf",
+                                    additional_properties={"filename": name},
+                                )
+                            )
+                            # A short marker so the model also sees the file's name in text.
+                            pdf_refs.append(f"[Attached PDF: {name}]")
+                        else:
+                            pdf_refs.append(_extract_pdf_inline(pdf_path, name))
                 continue
             if uri.startswith("/api/uploads/"):
                 parts = uri.split("/")  # ["", "api", "uploads", thread_id, filename]
@@ -424,7 +505,7 @@ def _inject_image_content(
             elif uri.startswith(("http://", "https://")):
                 target.contents.append(Content.from_uri(uri=uri, media_type=media_type))
 
-        # Append PDF references as text so the agent knows the file paths
+        # Append the extracted PDF text (or fallback note) to the user message
         if pdf_refs and target is not None:
             existing_text = ""
             for c in target.contents:
@@ -565,8 +646,12 @@ async def _stream_with_reasoning(
         # Convert AG-UI messages to MAF Message objects
         messages, _ = normalize_agui_input_messages(sanitized_messages)
 
-        # Inject image content from request into MAF messages (CTR-0022)
-        _inject_image_content(messages, request_body.messages)
+        # Inject image + PDF content from the request into MAF messages (CTR-0022).
+        # A PDF is attached natively (like an image) for providers that support it,
+        # else its text is extracted (PRP-0116, UDR-0099); resolve the mode from the
+        # requested model's provider.
+        _pdf_model = request_body.state.get("model") if request_body.state else None
+        _inject_image_content(messages, request_body.messages, pdf_native=_pdf_wants_native(_pdf_model))
 
         # Create session with metadata (same as _agent_run.py:685-691)
         session = AgentSession()

@@ -21,6 +21,7 @@ import {
   FolderPlus,
   FolderUp,
   Loader2,
+  Paperclip,
   RefreshCw,
   Save,
   SplitSquareHorizontal,
@@ -79,6 +80,27 @@ import '@/lib/monaco-setup'
 interface FileExplorerProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /**
+   * Attach an image/PDF preview to the chat composer (CTR-0137 v?, PRP-0116).
+   * When provided, image/PDF viewer tabs show an "Attach to chat" action
+   * (enabled only when the overlay is closeable -- no dirty tabs). Handing a
+   * File up keeps the active thread id owned by the composer.
+   */
+  onAttach?: (file: File) => void
+}
+
+/** Best-guess MIME for a workspace media file being attached to the composer. */
+function attachMime(name: string, kind: TabKind): string {
+  if (kind === 'pdf') return 'application/pdf'
+  const e = extOf(name)
+  const map: Record<string, string> = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+  }
+  return map[e] ?? `image/${e || 'octet-stream'}`
 }
 
 interface FileNode {
@@ -256,7 +278,7 @@ function useElementSize() {
   return [setEl, size] as const
 }
 
-export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
+export function FileExplorer({ open, onOpenChange, onAttach }: FileExplorerProps) {
   const [data, setData] = useState<FileNode[]>([])
   const [rootLoaded, setRootLoaded] = useState(false)
   const loadedRef = useRef<Set<string>>(new Set())
@@ -912,6 +934,24 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
     [anyDirty, onOpenChange],
   )
 
+  // Attach an image/PDF preview tab to the chat composer (PRP-0116, CTR-0137).
+  // Enabled only when the overlay is closeable (no dirty tabs): fetch the bytes
+  // already loaded for the preview blob, wrap as a File, hand it up, and close.
+  const attachTabToChat = useCallback(
+    async (tab: Tab) => {
+      if (!onAttach || anyDirty || !tab.blobUrl || (tab.kind !== 'image' && tab.kind !== 'pdf')) return
+      try {
+        const blob = await (await fetch(tab.blobUrl)).blob()
+        const file = new File([blob], tab.name, { type: attachMime(tab.name, tab.kind) })
+        onAttach(file)
+        onOpenChange(false)
+      } catch {
+        // Best-effort: a failed fetch leaves the explorer open (no attachment).
+      }
+    },
+    [onAttach, anyDirty, onOpenChange],
+  )
+
   // ---- Tree node renderer ----
 
   const NodeRenderer = useCallback(
@@ -1066,6 +1106,8 @@ export function FileExplorer({ open, onOpenChange }: FileExplorerProps) {
           onEditorChange={onEditorChange}
           onEditorMount={handleMount}
           onDownloadTab={downloadFile}
+          onAttachTab={onAttach ? (tab) => void attachTabToChat(tab) : undefined}
+          attachDisabled={anyDirty}
         />
       )
     }
@@ -1387,6 +1429,8 @@ interface GroupViewProps {
   onEditorChange: (value: string | undefined) => void
   onEditorMount: OnMount
   onDownloadTab: (path: string) => void
+  onAttachTab?: (tab: Tab) => void
+  attachDisabled?: boolean
 }
 
 function GroupView({
@@ -1402,6 +1446,8 @@ function GroupView({
   onEditorChange,
   onEditorMount,
   onDownloadTab,
+  onAttachTab,
+  attachDisabled,
 }: GroupViewProps) {
   const activeTab = group.tabs.find((t) => t.path === group.activePath) ?? null
   const { setNodeRef: setStripRef, isOver: stripOver } = useDroppable({
@@ -1443,6 +1489,22 @@ function GroupView({
           />
         ))}
         <div className="ml-auto flex items-center pr-1">
+          {onAttachTab && activeTab && (activeTab.kind === 'image' || activeTab.kind === 'pdf') ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 text-[12px] text-zinc-600"
+              disabled={attachDisabled}
+              title={
+                attachDisabled
+                  ? 'Save or discard unsaved changes before attaching'
+                  : 'Attach this file to the chat composer'
+              }
+              onClick={() => onAttachTab(activeTab)}>
+              <Paperclip className="h-3.5 w-3.5" />
+              Attach to chat
+            </Button>
+          ) : null}
           {activeTab && isDirty(activeTab) ? (
             <Button
               variant="ghost"

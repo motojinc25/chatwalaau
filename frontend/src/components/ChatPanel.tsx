@@ -53,6 +53,10 @@ interface ChatPanelProps {
   onSlashCron?: () => void
   /** Slash command /files (CTR-0137, PRP-0091): open the File Explorer overlay. */
   onSlashFiles?: () => void
+  /** File Explorer attach bridge (CTR-0137, PRP-0116): a File to add to the composer. */
+  attachFile?: File | null
+  /** Signals the attachFile was consumed so the parent can clear it. */
+  onAttachConsumed?: () => void
   /** Temporary Chat mode (CTR-0107, PRP-0076): dark input, no BG toggle, no history. */
   temporary?: boolean
 }
@@ -97,6 +101,8 @@ export function ChatPanel({
   onBranchFromMessage,
   onSlashCron,
   onSlashFiles,
+  attachFile,
+  onAttachConsumed,
   temporary = false,
 }: ChatPanelProps) {
   const [bgEnabled, setBgEnabled] = useState(() => localStorage.getItem(BG_STORAGE_KEY) === 'true')
@@ -225,6 +231,15 @@ export function ChatPanel({
 
   const { attachments, addFiles, attachPaintImage, removeAttachment, clearAttachments, getImageRefs, isUploading } =
     useImageAttachment()
+
+  // File Explorer attach bridge (CTR-0137, PRP-0116): the parent hands a File
+  // sourced from an image/PDF preview; upload it to the active thread via the
+  // existing composer attach path, then signal it consumed so it is not re-added.
+  useEffect(() => {
+    if (!attachFile || !threadId) return
+    void addFiles([attachFile], threadId)
+    onAttachConsumed?.()
+  }, [attachFile, threadId, addFiles, onAttachConsumed])
 
   // Paint editor (CTR-0160 / CTR-0161, PRP-0099). State is lifted here so the
   // Plus-menu entry, the pending-attachment Edit affordance, and the sent-image

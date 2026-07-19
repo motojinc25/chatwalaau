@@ -9,11 +9,11 @@ import logging
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.auth import verify_api_key
+from app.auth import verify_api_key, verify_api_key_no_loopback
 from app.core.config import settings
 from app.upload.validation import UploadValidationError, validate_upload_metadata
 
@@ -58,8 +58,20 @@ async def upload_file(thread_id: str, file: UploadFile) -> UploadResponse:
 
 
 @router.get("/api/uploads/{thread_id}/{filename}")
-async def serve_upload(thread_id: str, filename: str) -> FileResponse:
-    """Serve an uploaded file."""
+async def serve_upload(thread_id: str, filename: str, request: Request) -> FileResponse:
+    """Serve an uploaded file (CTR-0022 v4, UDR-0097).
+
+    Gated by the unified auth model. A same-origin browser request -- an ``<img>``,
+    an ``<a>`` navigation, or a ``fetch`` -- automatically carries the session
+    cookie, so a logged-in SPA displays and opens images while an unauthenticated
+    caller gets 401. When web login (``AUTH_USERNAME``) is enabled the loopback
+    bypass does NOT apply to this route (UDR-0097 D5), so a directly-opened image
+    URL cannot be viewed without a session even on ``localhost`` / behind a proxy;
+    with no web login configured, zero-config localhost stays open. The agent reads
+    image bytes from DISK, not through this route.
+    """
+    await verify_api_key_no_loopback(request)
+
     safe_name = Path(filename).name
     file_path = (_upload_dir() / thread_id / safe_name).resolve()
     upload_root = _upload_dir().resolve()

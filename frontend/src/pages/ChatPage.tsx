@@ -101,6 +101,9 @@ export function ChatPage() {
   // launcher icon and the /files slash command open the same overlay instance.
   const fileExplorerAvailable = useFileExplorerAvailable()
   const [filesOpen, setFilesOpen] = useState(false)
+  // Bridge a File Explorer image/PDF attach into the composer (PRP-0116, CTR-0137).
+  // The File is handed up here; ChatPanel (which owns the thread id) consumes it.
+  const [attachFile, setAttachFile] = useState<File | null>(null)
 
   // Memory Management portal (CTR-0167, PRP-0101). Lifted here so the sidebar-footer
   // launcher icon opens the modal. Always available (identity always exists).
@@ -201,7 +204,7 @@ export function ChatPage() {
 
       {fileExplorerAvailable && (
         <Suspense fallback={null}>
-          <FileExplorer open={filesOpen} onOpenChange={setFilesOpen} />
+          <FileExplorer open={filesOpen} onOpenChange={setFilesOpen} onAttach={setAttachFile} />
         </Suspense>
       )}
 
@@ -250,6 +253,8 @@ export function ChatPage() {
             onBranchFromMessage={temp.isTemporary ? undefined : handleBranch}
             onSlashCron={() => setCronOpen(true)}
             onSlashFiles={() => setFilesOpen(true)}
+            attachFile={attachFile}
+            onAttachConsumed={() => setAttachFile(null)}
             temporary={temp.isTemporary}
           />
         )}

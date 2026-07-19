@@ -17,6 +17,7 @@ import {
   Volume2,
 } from 'lucide-react'
 import { type KeyboardEvent, memo, useCallback, useEffect, useRef, useState } from 'react'
+import { AuthedImage } from '@/components/AuthedImage'
 import { ImageGenerationResults } from '@/components/ImageGenerationResult'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
 import { McpAppView } from '@/components/mcp-apps/McpAppView'
@@ -36,6 +37,7 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { WeatherToolResults } from '@/components/WeatherCard'
+import { openUploadFullSize } from '@/lib/uploads'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from '@/types/chat'
 
@@ -429,8 +431,8 @@ function ChatMessageItemImpl({
                   // opens the scene and produces a NEW composer attachment.
                   const isPaint = (img.uri.split('/').pop() ?? '').startsWith('paint_')
                   const imgEl = (
-                    <img
-                      src={img.uri}
+                    <AuthedImage
+                      uri={img.uri}
                       alt="Attached"
                       className={
                         isGenerated
@@ -442,9 +444,13 @@ function ChatMessageItemImpl({
                   if (isPaint && onPaintEdit) {
                     return (
                       <div key={img.uri} className="group/paint relative inline-block">
-                        <a href={img.uri} target="_blank" rel="noopener noreferrer" className="block">
+                        <button
+                          type="button"
+                          onClick={() => openUploadFullSize(img.uri)}
+                          className="block cursor-zoom-in"
+                          aria-label="Open full size">
                           {imgEl}
-                        </a>
+                        </button>
                         <button
                           type="button"
                           onClick={() => onPaintEdit(img.uri)}
@@ -457,9 +463,14 @@ function ChatMessageItemImpl({
                     )
                   }
                   return (
-                    <a key={img.uri} href={img.uri} target="_blank" rel="noopener noreferrer" className="block">
+                    <button
+                      key={img.uri}
+                      type="button"
+                      onClick={() => openUploadFullSize(img.uri)}
+                      className="block cursor-zoom-in"
+                      aria-label="Open full size">
                       {imgEl}
-                    </a>
+                    </button>
                   )
                 })}
               </div>

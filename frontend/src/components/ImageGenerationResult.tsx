@@ -1,6 +1,8 @@
 import { Paintbrush } from 'lucide-react'
 import { useMemo } from 'react'
+import { AuthedImage } from '@/components/AuthedImage'
 import { Button } from '@/components/ui/button'
+import { openUploadFullSize } from '@/lib/uploads'
 import type { ToolCall } from '@/types/chat'
 
 interface GeneratedImage {
@@ -38,13 +40,17 @@ function ImageResultCard({ toolCall, onMaskEdit }: { toolCall: ToolCall; onMaskE
       <div className={isSingle ? '' : 'grid grid-cols-2 gap-2'}>
         {parsed.images.map((img) => (
           <div key={img.filename} className="group/img relative">
-            <a href={img.url} target="_blank" rel="noopener noreferrer" className="block">
-              <img
-                src={img.url}
+            <button
+              type="button"
+              onClick={() => openUploadFullSize(img.url)}
+              className="block w-full cursor-zoom-in"
+              aria-label="Open full size">
+              <AuthedImage
+                uri={img.url}
                 alt={img.revised_prompt ?? 'Generated image'}
                 className="max-w-full rounded-lg border border-border/50 shadow-xs transition-shadow hover:shadow-md"
               />
-            </a>
+            </button>
             {onMaskEdit && (
               <Button
                 variant="secondary"

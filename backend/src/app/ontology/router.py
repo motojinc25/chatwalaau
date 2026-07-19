@@ -2,6 +2,7 @@
 
     GET    /api/ontology/catalog            -- list the catalog (also the SPA probe)
     POST   /api/ontology/catalog            -- create an ontology (name + description)
+    PATCH  /api/ontology/catalog/{id}       -- rename (name and/or description)
     DELETE /api/ontology/catalog/{id}       -- delete (backup-then-remove)
     POST   /api/ontology/import             -- import a Turtle / RDF-XML file
     GET    /api/ontology/{id}               -- the JSON graph projection (CTR-0169)
@@ -58,6 +59,12 @@ class OntologyCreate(BaseModel):
     description: str = Field(default="", max_length=2000)
 
 
+class OntologyRename(BaseModel):
+    # At least one of name/description must be present (validated in the handler).
+    name: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+
+
 class QueryRequest(BaseModel):
     sparql: str = Field(min_length=1, max_length=20000)
 
@@ -84,6 +91,24 @@ async def create_ontology(body: OntologyCreate) -> dict:
     """Create a new, empty ontology (consumes CTR-0083)."""
     _require_enabled()
     entry = store.create_ontology(body.name, body.description)
+    return {**entry, "base_iri": base_iri_for(entry["id"])}
+
+
+@router.patch("/catalog/{ontology_id}", dependencies=[Depends(verify_api_key)])
+async def rename_ontology(ontology_id: str, body: OntologyRename) -> dict:
+    """Rename a catalog item's name and/or description (consumes CTR-0083).
+
+    Additive catalog CRUD gap fill (PRP-0116): the id and the graph projection
+    are UNCHANGED -- only the catalog entry's name/description move. It is a
+    mutating endpoint and consumes CTR-0083 (invariant 7).
+    """
+    _require_enabled()
+    if body.name is None and body.description is None:
+        raise HTTPException(status_code=422, detail="Provide name and/or description")
+    _entry_or_404(ontology_id)
+    entry = store.rename_ontology(ontology_id, name=body.name, description=body.description)
+    if entry is None:  # raced with a delete
+        raise HTTPException(status_code=404, detail={"error": "ontology_not_found"})
     return {**entry, "base_iri": base_iri_for(entry["id"])}
 
 

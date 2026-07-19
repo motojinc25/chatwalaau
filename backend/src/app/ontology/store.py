@@ -177,6 +177,33 @@ def create_ontology(name: str, description: str, *, initial_turtle: str = "") ->
     return entry
 
 
+def rename_ontology(
+    ontology_id: str, *, name: str | None = None, description: str | None = None
+) -> dict[str, str] | None:
+    """Rename a catalog entry (name and/or description); id + Turtle unchanged.
+
+    PRP-0116 / CTR-0171: additive catalog CRUD gap fill. The projection file is
+    untouched -- only the catalog entry's name/description and updated_at change.
+    Returns the updated entry, or None when the id is unknown.
+    """
+    entries = read_catalog()
+    updated: dict[str, str] | None = None
+    for entry in entries:
+        if entry["id"] == ontology_id:
+            if name is not None:
+                entry["name"] = name.strip() or entry["id"]
+            if description is not None:
+                entry["description"] = description.strip()
+            entry["updated_at"] = _now()
+            updated = entry
+            break
+    if updated is None:
+        return None
+    write_catalog(entries)
+    logger.info("ontology renamed: %s (%s)", ontology_id, updated["name"])
+    return updated
+
+
 def delete_ontology(ontology_id: str) -> bool:
     """Backup-then-remove the Turtle file and drop the catalog entry (UDR-0084 D10)."""
     entry = get_entry(ontology_id)
@@ -314,6 +341,7 @@ __all__ = [
     "ontology_dir",
     "read_catalog",
     "read_ontology_bytes",
+    "rename_ontology",
     "save_ontology_text",
     "write_catalog",
 ]

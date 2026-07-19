@@ -204,6 +204,36 @@ async def verify_api_key(request: Request) -> Identity:
     raise HTTPException(status_code=401, detail=_INVALID_KEY_DETAIL)
 
 
+async def verify_api_key_no_loopback(request: Request) -> Identity:
+    """``verify_api_key`` WITHOUT the loopback bypass when web login is enabled
+    (CTR-0022, UDR-0097 D5).
+
+    A directly-opened ``/api/uploads/...`` URL bypasses the SPA AuthGuard, and
+    behind a dev / reverse proxy every request reaches the backend from the proxy's
+    loopback address, so the normal loopback bypass would leave uploaded images
+    openable by anyone -- even on ``localhost`` -- once ``AUTH_USERNAME`` is set.
+
+    - Web login configured (``AUTH_USERNAME`` set): require a valid session cookie
+      or a matching Bearer ``API_KEY``; 401 otherwise. The loopback bypass and
+      ``APP_REQUIRE_AUTH_ON_LAN=false`` open mode do NOT apply.
+    - Web login NOT configured: defer to ``verify_api_key`` so zero-config
+      localhost and API_KEY-only deployments are unchanged (there is no browser
+      credential to require in those modes).
+    """
+    if not settings.web_auth_enabled:
+        return await verify_api_key(request)
+
+    session_identity = await _try_session_lane(request)
+    if session_identity is not None:
+        return session_identity
+
+    bearer = _extract_bearer(request)
+    if bearer is not None and settings.api_key and bearer == settings.api_key:
+        return _VIA_API_KEY
+
+    raise HTTPException(status_code=401, detail=_MISSING_CREDENTIAL_DETAIL)
+
+
 async def authorize_websocket(websocket: Any) -> bool:
     """Authorize a WebSocket handshake (CTR-0110), mirroring ``verify_api_key``.
 
