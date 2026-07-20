@@ -121,20 +121,42 @@ def _build_tools_and_instructions(
         sessions_dir=Path(settings.sessions_dir),
     )
 
+    # Per-agent tool surface (PRP-0117, UDR-0100 D2). The active declarative agent's
+    # tool_allowlist (None => inherit the full shared surface) SUBSETS the tools
+    # assembled below. Resolved here so EVERY consumer of this chokepoint -- the
+    # AgentRegistry rebuild AND build_devui_agent -- honors it identically. Local
+    # imports avoid the agent_factory <-> declarative import cycle (the router
+    # precedent, declarative/router.py). ``_fn_ok`` gates a built-in function tool.
+    from app.agent.declarative.store import active_spec as _active_spec
+    from app.agent.declarative.tool_ids import parse_allowlist as _parse_allowlist
+
+    _allow = _parse_allowlist(_active_spec().tool_allowlist)
+
+    def _fn_ok(name: str) -> bool:
+        return _allow is None or _allow.allows_function(name)
+
     # Web search is provider-supplied and added per-model in the AgentRegistry /
     # build_devui_agent (PRP-0069, UDR-0045 D5), so it is NOT part of this shared
     # base tool list and the web search guidance lives in WEB_SEARCH_INSTRUCTION
     # (appended only for models whose provider supplies a web search tool).
-    tools: list[Any] = [get_coords_by_city, get_current_weather_by_coords, get_weather_next_week]
+    _weather_tools = [
+        t for t in (get_coords_by_city, get_current_weather_by_coords, get_weather_next_week) if _fn_ok(t.__name__)
+    ]
+    tools: list[Any] = list(_weather_tools)
     # Capability / tool guidance only. The Global Agent Identity (Prompt Assembly
     # slot #1) is prepended by build_system_prompt() at the end of assembly,
     # replacing the former anonymous persona sentence (PRP-0073, CTR-0104,
-    # UDR-0049 D4).
+    # UDR-0049 D4). The weather guidance is emitted only when at least one weather
+    # tool survives the per-agent allow-list.
     instructions = (
-        "You can look up weather information for any city worldwide. "
-        "For weather queries: first use get_coords_by_city to get coordinates, "
-        "then use get_current_weather_by_coords or get_weather_next_week. "
-        "After calling weather tools, provide a clear summary of the weather information."
+        (
+            "You can look up weather information for any city worldwide. "
+            "For weather queries: first use get_coords_by_city to get coordinates, "
+            "then use get_current_weather_by_coords or get_weather_next_week. "
+            "After calling weather tools, provide a clear summary of the weather information."
+        )
+        if _weather_tools
+        else ""
     )
 
     # Conditionally register coding tools (CTR-0032, PRP-0019)
@@ -142,13 +164,15 @@ def _build_tools_and_instructions(
         _validate_coding_config()
         from app.coding.tools import bash_execute, file_glob, file_grep, file_read, file_write
 
-        tools.extend([file_read, file_write, bash_execute, file_glob, file_grep])
-        instructions += " " + _build_coding_instructions()
-        logger.info(
-            "Coding tools enabled (workspace=%s, max_turns=%d)",
-            settings.coding_workspace_dir,
-            settings.coding_max_turns,
-        )
+        coding_tools = [t for t in (file_read, file_write, bash_execute, file_glob, file_grep) if _fn_ok(t.__name__)]
+        if coding_tools:
+            tools.extend(coding_tools)
+            instructions += " " + _build_coding_instructions()
+            logger.info(
+                "Coding tools enabled (workspace=%s, max_turns=%d)",
+                settings.coding_workspace_dir,
+                settings.coding_max_turns,
+            )
 
     # RAG Search tool (CTR-0077, PRP-0037) -- excluded when include_rag=False.
     # PRP-0114 / UDR-0095 D1/D2/D4: the query embedder is configured SOLELY by a
@@ -156,7 +180,12 @@ def _build_tools_and_instructions(
     # CHROMA_DIR is set AND (an embeddings offering exists OR DEMO_MODE). CHROMA_DIR
     # set but no offering (non-demo) -> not registered (graceful); a startup advisory
     # (app.main) names the fix.
-    if include_rag and settings.chroma_dir and (models_catalog.embedding_config() is not None or is_demo_mode()):
+    if (
+        include_rag
+        and settings.chroma_dir
+        and (models_catalog.embedding_config() is not None or is_demo_mode())
+        and _fn_ok("rag_search")
+    ):
         try:
             from app.rag.tools import init_rag_search, rag_search
 
@@ -201,18 +230,20 @@ def _build_tools_and_instructions(
     if _image_offering is not None or is_demo_mode():
         from app.image_gen.tools import edit_image, generate_image
 
-        tools.extend([generate_image, edit_image])
-        instructions += (
-            " You can generate images from text descriptions using generate_image. "
-            "You can also edit existing images using edit_image by providing the filename "
-            "of an uploaded or previously generated image. "
-            "After generating or editing an image, describe what was created."
-        )
-        logger.info(
-            "Image generation tools enabled (deployment=%s, demo=%s)",
-            (_image_offering.deployment if _image_offering is not None else "<demo>"),
-            is_demo_mode(),
-        )
+        image_tools = [t for t in (generate_image, edit_image) if _fn_ok(t.__name__)]
+        if image_tools:
+            tools.extend(image_tools)
+            instructions += (
+                " You can generate images from text descriptions using generate_image. "
+                "You can also edit existing images using edit_image by providing the filename "
+                "of an uploaded or previously generated image. "
+                "After generating or editing an image, describe what was created."
+            )
+            logger.info(
+                "Image generation tools enabled (deployment=%s, demo=%s)",
+                (_image_offering.deployment if _image_offering is not None else "<demo>"),
+                is_demo_mode(),
+            )
 
     # MCP tools (CTR-0060, PRP-0031) -- excluded when include_mcp=False.
     # PRP-0086 / UDR-0064: the active MCP tool set is gated at runtime by the
@@ -233,18 +264,33 @@ def _build_tools_and_instructions(
                 if store.server_disabled(server):
                     tool.allowed_tools = None  # reset so a later re-enable is clean
                     continue
+                # Per-agent allow-list (PRP-0117, UDR-0100 D2): drop a server the
+                # active declarative agent did not select at all. A whole-server
+                # selection (mcp:<server>) passes through to the override logic below;
+                # a per-tool selection (mcp:<server>/<tool>) further narrows it.
+                if _allow is not None and not _allow.mcp_server_selected(server):
+                    tool.allowed_tools = None
+                    continue
                 full_names = get_server_tool_names(server)
                 disabled = store.disabled_tools_for(server)
-                if full_names and disabled:
-                    allowed = [n for n in full_names if n not in disabled]
-                    if not allowed:
-                        # Every tool of this server is disabled -> drop the server.
+                if full_names:
+                    # Enabled subset after the MCP override store...
+                    override_enabled = [n for n in full_names if n not in disabled]
+                    # ...then intersected with the per-agent allow-list when active
+                    # (whole-server returns override_enabled verbatim).
+                    if _allow is not None:
+                        final_allowed = _allow.mcp_allowed_tools(server, override_enabled) or []
+                    else:
+                        final_allowed = override_enabled
+                    if not final_allowed:
+                        # Nothing of this server survives -> drop it.
                         tool.allowed_tools = None
                         continue
                     # None when nothing is filtered, so the unmodified case stays
-                    # byte-for-byte identical to pre-PRP-0086.
-                    tool.allowed_tools = allowed if len(allowed) != len(full_names) else None
+                    # byte-for-byte identical to pre-PRP-0086 / no allow-list.
+                    tool.allowed_tools = final_allowed if len(final_allowed) != len(full_names) else None
                 else:
+                    # Server tools not known yet (not connected) -> expose all.
                     tool.allowed_tools = None
                 enabled_mcp_tools.append(tool)
                 enabled_servers.append(server)
@@ -272,7 +318,7 @@ def _build_tools_and_instructions(
     # (UDR-0051 D9), so the wrap below is a no-op for it. The Memory Block itself
     # (slot #2) is a per-session frozen snapshot injected per run by the AG-UI
     # endpoint, not baked here.
-    if settings.user_profile_enabled:
+    if settings.user_profile_enabled and _fn_ok("manage_user_memory"):
         from app.agent.user_memory import USER_MEMORY_INSTRUCTION, manage_user_memory
 
         tools.append(manage_user_memory)
@@ -284,7 +330,7 @@ def _build_tools_and_instructions(
     # approval require-set (UDR-0079 D11). The <agent-memory> Block itself (slot
     # #2b) is a per-session frozen snapshot injected per run by the AG-UI endpoint,
     # not baked here.
-    if settings.agent_memory_enabled:
+    if settings.agent_memory_enabled and _fn_ok("manage_memory"):
         from app.agent.agent_memory import AGENT_MEMORY_INSTRUCTION, manage_memory
 
         tools.append(manage_memory)
@@ -294,7 +340,7 @@ def _build_tools_and_instructions(
     # shared agent only when CRON_ENABLED so the LLM can schedule script jobs. It
     # is NOT in the approval require-set; the workspace jail + CODING_ENABLED gate
     # are enforced at run time by the executor (CTR-0132).
-    if settings.cron_enabled:
+    if settings.cron_enabled and _fn_ok("manage_cron"):
         from app.cron.tool import CRON_TOOL_INSTRUCTION, manage_cron
 
         tools.append(manage_cron)
@@ -305,7 +351,7 @@ def _build_tools_and_instructions(
     # (rag-ingest). Replaces the former batch MCP tools; writes through the same engine +
     # store as the REST API (CTR-0146). NOT in the approval require-set (curated job
     # types, no shell).
-    if settings.pipeline_enabled:
+    if settings.pipeline_enabled and _fn_ok("manage_pipeline"):
         from app.pipeline.tool import PIPELINE_TOOL_INSTRUCTION, manage_pipeline
 
         tools.append(manage_pipeline)
@@ -315,7 +361,7 @@ def _build_tools_and_instructions(
     # agent only when WEBHOOK_ENABLED so the LLM can manage Graph subscriptions and run
     # the Teams meeting pipeline on demand. Writes through the same store + Graph client +
     # pipeline engine as the REST API (CTR-0154). NOT in the approval require-set.
-    if settings.webhook_enabled:
+    if settings.webhook_enabled and _fn_ok("manage_webhook"):
         from app.webhook.tool import WEBHOOK_TOOL_INSTRUCTION, manage_webhook
 
         tools.append(manage_webhook)
@@ -325,7 +371,7 @@ def _build_tools_and_instructions(
     # shared agent only when ONTOLOGY_ENABLED so the LLM can answer questions from
     # the operator's RDF concept models (catalog + CONSTRUCT-only NL query answering
     # fenced Turtle). Read-only by construction; NOT in the approval require-set.
-    if settings.ontology_enabled:
+    if settings.ontology_enabled and _fn_ok("query_ontology"):
         from app.ontology.tool import ONTOLOGY_TOOL_INSTRUCTION, query_ontology
 
         tools.append(query_ontology)
@@ -344,7 +390,10 @@ def _build_tools_and_instructions(
     # Context providers (CTR-0043, PRP-0024)
     context_providers: list[Any] = [history_provider]
     middleware: list[Any] = []
-    skills_provider = create_skills_provider()
+    # Per-agent Skills subset (PRP-0117, UDR-0100 D2/D3): when the active agent has a
+    # tool_allowlist, only the selected skill names survive (an allow-list with no
+    # skill entries yields the empty set -> no skills). None => inherit all.
+    skills_provider = create_skills_provider(allowlist_names=(_allow.skills if _allow is not None else None))
     if skills_provider:
         context_providers.append(skills_provider)
         # PRP-0108 / UDR-0086 D2: MAF 1.10 skill tools are approval-required

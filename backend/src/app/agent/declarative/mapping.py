@@ -28,6 +28,12 @@ from app.agent.declarative.spec import (
     DeclarativeAgentError,
     DeclarativeAgentSpec,
 )
+from app.agent.declarative.tool_ids import (
+    function_id,
+    mcp_server_id,
+    mcp_tool_id,
+    skill_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +213,68 @@ def _map_output_schema(data: dict[str, Any], warnings: list[str]) -> dict | None
     return {"schema": schema, "mode": "json_schema"}
 
 
+# YAML ``tools[].kind`` values ChatWalaʻau can SELECT (PRP-0117, UDR-0100 D1). The
+# other MAF tool kinds (web_search / file_search / code_interpreter / custom /
+# openapi) are either provider-supplied (web search) or unsupported as a per-agent
+# selection here; they are recorded as a warning (which blocks activation, D9).
+_SELECTABLE_TOOL_KINDS = {"function", "mcp", "skill"}
+
+
+def _map_tools(data: dict[str, Any], warnings: list[str]) -> list[str] | None:
+    """Map the YAML ``tools`` block to a ``tool_allowlist`` (PRP-0117, UDR-0100 D1).
+
+    Returns a list of stable identifiers (see ``app.agent.declarative.tool_ids``)
+    that SUBSETS the globally available tool surface, or ``None`` when there is no
+    ``tools`` block (inherit the full surface -- CORE stays byte-for-byte). Structural
+    problems (a non-list block, a non-mapping entry, a missing name, or an
+    unsupported kind) are recorded as warnings; whether each identifier resolves to a
+    tool that actually exists is validated later against live state in the loader
+    (``_annotate_tool_warnings``), mirroring the model-id warning path (UDR-0072 D4).
+    """
+    raw = data.get("tools")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        warnings.append("tools ignored (expected a list); the agent will inherit all tools.")
+        return None
+
+    ids: list[str] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            warnings.append(f"tools[{index}] ignored (expected a mapping).")
+            continue
+        kind = str(entry.get("kind", "function")).strip().lower()
+        name = str(entry.get("name") or "").strip()
+        if kind not in _SELECTABLE_TOOL_KINDS:
+            warnings.append(
+                f"tools[{index}] kind {kind!r} is not selectable per-agent "
+                "(allowed: function, mcp, skill; web_search is provider-supplied)."
+            )
+            continue
+        if not name:
+            warnings.append(f"tools[{index}] ignored (missing name).")
+            continue
+        if kind == "function":
+            ids.append(function_id(name))
+        elif kind == "skill":
+            ids.append(skill_id(name))
+        else:  # mcp
+            allowed = entry.get("allowedTools") or entry.get("allowed_tools")
+            if isinstance(allowed, list) and allowed:
+                for tool_name in allowed:
+                    tn = str(tool_name).strip()
+                    if tn:
+                        ids.append(mcp_tool_id(name, tn))
+            else:
+                ids.append(mcp_server_id(name))
+
+    # De-duplicate while preserving order (a whole-server id is kept alongside any
+    # per-tool ids; parse_allowlist collapses them to the whole server at build time).
+    seen: set[str] = set()
+    deduped = [i for i in ids if not (i in seen or seen.add(i))]
+    return deduped or None
+
+
 def map_document(
     text: str,
     *,
@@ -240,6 +308,7 @@ def map_document(
 
     model_filter, model_options_override = _map_model(data, warnings)
     structured_output = _map_output_schema(data, warnings)
+    tool_allowlist = _map_tools(data, warnings)
 
     return DeclarativeAgentSpec(
         id=agent_id,
@@ -251,6 +320,7 @@ def map_document(
         model_filter=model_filter,
         model_options_override=model_options_override,
         structured_output=structured_output,
+        tool_allowlist=tool_allowlist,
         warnings=warnings,
     )
 

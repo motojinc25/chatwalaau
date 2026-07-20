@@ -200,7 +200,7 @@ def build_skill_source() -> DeduplicatingSkillsSource:
     )
 
 
-def create_skills_provider() -> SkillsProvider | None:
+def create_skills_provider(allowlist_names: set[str] | None = None) -> SkillsProvider | None:
     """Create SkillsProvider if SKILLS_DIR exists and is a directory.
 
     PRP-0087 / UDR-0065: the active Skills set is gated at runtime by the in-memory
@@ -215,6 +215,12 @@ def create_skills_provider() -> SkillsProvider | None:
     When every discovered skill is disabled the filtered source yields no skills,
     so MAF injects no advertise text and no skill tools at all -- observationally
     identical to omitting the provider (UDR-0065 D3).
+
+    PRP-0117 / UDR-0100 D2/D3: ``allowlist_names`` layers the active declarative
+    agent's per-agent Skills subset on top of the override store. ``None`` means
+    "inherit all" (byte-for-byte). A set (possibly empty) means "keep ONLY these
+    skill names"; combined with the disabled set, the predicate becomes
+    "enabled AND selected", so an allow-list with no skill entries yields no skills.
 
     Returns:
         SkillsProvider instance if skills directory exists, None otherwise.
@@ -241,15 +247,25 @@ def create_skills_provider() -> SkillsProvider | None:
     # (create_skills_approval_middleware below), not in this constructor.
     disabled = frozenset(get_skills_override_store().disabled_names())
     source = build_skill_source()
-    if disabled:
-        source = FilteringSkillsSource(source, predicate=lambda s: s.frontmatter.name not in disabled)
+    if disabled or allowlist_names is not None:
+        allow = None if allowlist_names is None else frozenset(allowlist_names)
+
+        def _predicate(s: Any) -> bool:
+            name = s.frontmatter.name
+            if name in disabled:
+                return False
+            return allow is None or name in allow
+
+        source = FilteringSkillsSource(source, predicate=_predicate)
 
     provider = SkillsProvider(source)
     logger.info(
-        "SkillsProvider created (skills_dir=%s, disabled_skills=%d [%s], script_execution=%s, script_approval=%s)",
+        "SkillsProvider created (skills_dir=%s, disabled_skills=%d [%s], allowlist=%s, "
+        "script_execution=%s, script_approval=%s)",
         skills_path,
         len(disabled),
         ", ".join(sorted(disabled)) if disabled else "none",
+        "all" if allowlist_names is None else f"{len(allowlist_names)} selected",
         "on" if settings.coding_enabled else "off (CODING_ENABLED=false)",
         settings.tool_approval_mode != "skip",
     )

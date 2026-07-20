@@ -119,6 +119,33 @@ def _annotate_model_warnings(spec: DeclarativeAgentSpec) -> DeclarativeAgentSpec
     return spec
 
 
+def _annotate_tool_warnings(spec: DeclarativeAgentSpec) -> DeclarativeAgentSpec:
+    """Append a warning for any tool_allowlist id that is not recognized (UDR-0100 D3).
+
+    Mirrors ``_annotate_model_warnings``: the mapping records structural problems, and
+    here we validate each identifier against live state (known built-in / connected or
+    configured MCP / discovered skill). An unrecognized identifier is a typo and blocks
+    activation (UDR-0072 D9); a recognized-but-gated-off tool is fine (it simply adds no
+    tool at build time). Best-effort: any inventory read failure leaves the spec unchanged.
+    """
+    if not spec.tool_allowlist:
+        return spec
+    try:
+        from app.agent.declarative.tool_inventory import known_tool_ids
+
+        known = known_tool_ids()
+    except Exception:  # never break resolution on an inventory read problem
+        logger.debug("Tool inventory read failed during allow-list validation", exc_info=True)
+        return spec
+    unknown = [i for i in spec.tool_allowlist if i not in known]
+    if unknown:
+        spec.warnings.append(
+            f"tool(s) {unknown} are not recognized (check the tool name / MCP server / "
+            "skill against the tool inventory). Fix or remove them to activate the agent."
+        )
+    return spec
+
+
 def resolve_spec(agent_id: str) -> DeclarativeAgentSpec:
     """Resolve an agent id to a mapped spec, raising on parse/mapping failure.
 
@@ -139,7 +166,9 @@ def resolve_spec(agent_id: str) -> DeclarativeAgentSpec:
                 group_path=group_path,
                 default_name=path.stem,
             )
-            return _annotate_model_warnings(spec)
+            _annotate_model_warnings(spec)
+            _annotate_tool_warnings(spec)
+            return spec
     raise DeclarativeAgentError(f"Unknown declarative agent id: {agent_id!r}")
 
 
@@ -163,6 +192,10 @@ def load_inventory(active_id: str) -> dict:
             "loaded": True,
             "error": None,
             "warnings": core.warnings,
+            # CTR-0143 v2 (PRP-0117): the bundled CORE agent is not a file on disk, so
+            # it can be neither edited nor deleted; it never restricts its tool surface.
+            "editable": False,
+            "tool_allowlist": None,
         }
     )
 
@@ -177,15 +210,21 @@ def load_inventory(active_id: str) -> dict:
             "loaded": False,
             "error": None,
             "warnings": [],
+            # CTR-0143 v2 (PRP-0117): a custom agent is a YAML file, so the management
+            # modal offers Edit / Delete even when it currently fails to map.
+            "editable": True,
+            "tool_allowlist": None,
         }
         try:
             text = path.read_text(encoding="utf-8")
             spec = map_document(text, agent_id=cid, source="custom", group_path=group_path, default_name=path.stem)
             _annotate_model_warnings(spec)
+            _annotate_tool_warnings(spec)
             entry["name"] = spec.name
             entry["description"] = spec.description
             entry["loaded"] = True
             entry["warnings"] = spec.warnings
+            entry["tool_allowlist"] = spec.tool_allowlist
         except DeclarativeAgentError as exc:
             entry["error"] = str(exc)
         except OSError as exc:

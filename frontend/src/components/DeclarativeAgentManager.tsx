@@ -1,8 +1,15 @@
-import { Bot, CircleCheck, Loader2, RefreshCw, TriangleAlert } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Bot, CircleCheck, Loader2, Pencil, Plus, RefreshCw, Trash2, TriangleAlert } from 'lucide-react'
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { cn } from '@/lib/utils'
+
+// Heavy editor (React Flow + monaco) is lazy so it stays out of the main bundle
+// until the operator opens Create / Edit (CTR-0179, PRP-0117).
+const DeclarativeAgentEditor = lazyWithReload(() =>
+  import('@/components/DeclarativeAgentEditor').then((m) => ({ default: m.DeclarativeAgentEditor })),
+)
 
 /**
  * Declarative Agent Management modal (CTR-0144, FEAT-0051, PRP-0094, UDR-0072).
@@ -29,6 +36,8 @@ interface AgentEntry {
   loaded: boolean
   error?: string | null
   warnings?: string[]
+  editable?: boolean
+  tool_allowlist?: string[] | null
 }
 
 /** Dispatched on the window after the active declarative agent changes, so the
@@ -38,7 +47,7 @@ export const ACTIVE_AGENT_CHANGED_EVENT = 'chatwalaau:active-agent-changed'
 const TOP_LEVEL_LABEL = 'Top level'
 const BUILTIN_LABEL = 'Built-in'
 
-type ConfirmMode = 'activate' | 'reload' | null
+type ConfirmMode = 'activate' | 'reload' | 'delete' | null
 
 function groupLabel(entry: AgentEntry): string {
   if (entry.source === 'core') return BUILTIN_LABEL
@@ -55,6 +64,9 @@ export function DeclarativeAgentManager() {
   const [activeId, setActiveId] = useState<string>('core')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [confirmMode, setConfirmMode] = useState<ConfirmMode>(null)
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [editId, setEditId] = useState<string | null>(null)
+  const [canAuthor, setCanAuthor] = useState(false)
 
   const adopt = useCallback((data: { active?: string; agents?: AgentEntry[] }) => {
     const next = (data.agents ?? []) as AgentEntry[]
@@ -98,6 +110,18 @@ export function DeclarativeAgentManager() {
     setOpen(true)
     setConfirmMode(null)
     void fetchInventory()
+    // Probe whether authoring is available + writable (drives the Create button).
+    void (async () => {
+      try {
+        const res = await fetch('/api/agents/authoring/status')
+        if (res.ok) {
+          const data = (await res.json()) as { available?: boolean; writable?: boolean }
+          setCanAuthor(Boolean(data.available && data.writable))
+        }
+      } catch {
+        setCanAuthor(false)
+      }
+    })()
   }, [fetchInventory])
 
   const handleOpenChange = useCallback(
@@ -155,6 +179,43 @@ export function DeclarativeAgentManager() {
       setBusy(false)
     }
   }, [adopt])
+
+  const doDelete = useCallback(async () => {
+    if (!selectedId) return
+    setConfirmMode(null)
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/agents/authoring/${encodeURI(selectedId)}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null)
+        throw new Error(detail?.detail?.message || detail?.detail?.error || 'Failed to delete agent')
+      }
+      setSelectedId(null)
+      adopt(await res.json())
+      window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete agent')
+    } finally {
+      setBusy(false)
+    }
+  }, [selectedId, adopt])
+
+  const openEditor = useCallback((id: string | null) => {
+    setEditId(id)
+    setEditorOpen(true)
+  }, [])
+
+  const onEditorSaved = useCallback(
+    (id?: string) => {
+      void fetchInventory()
+      if (id) setSelectedId(id)
+      // The saved agent may become the active tool surface once activated; refresh
+      // the model selector defaults conservatively.
+      window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
+    },
+    [fetchInventory],
+  )
 
   // Group agents for the left tree (CORE first, then nested-folder groups).
   const groups = useMemo(() => {
@@ -299,13 +360,36 @@ export function DeclarativeAgentManager() {
                         </div>
                       )}
 
-                      <Button size="sm" disabled={!canActivate} onClick={() => setConfirmMode('activate')}>
-                        {current.active
-                          ? 'Currently active'
-                          : hasWarnings
-                            ? 'Resolve warnings to activate'
-                            : 'Activate this agent'}
-                      </Button>
+                      {current.loaded && (current.tool_allowlist?.length ?? 0) > 0 && (
+                        <p className="mb-3 text-[11px] text-muted-foreground">
+                          Tool surface restricted to {current.tool_allowlist?.length} tool(s):{' '}
+                          <span className="font-mono">{current.tool_allowlist?.join(', ')}</span>
+                        </p>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button size="sm" disabled={!canActivate} onClick={() => setConfirmMode('activate')}>
+                          {current.active
+                            ? 'Currently active'
+                            : hasWarnings
+                              ? 'Resolve warnings to activate'
+                              : 'Activate this agent'}
+                        </Button>
+                        {current.editable && canAuthor && (
+                          <>
+                            <Button variant="outline" size="sm" onClick={() => openEditor(current.id)}>
+                              <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-destructive hover:text-destructive"
+                              onClick={() => setConfirmMode('delete')}>
+                              <Trash2 className="mr-1 h-3.5 w-3.5" /> Delete
+                            </Button>
+                          </>
+                        )}
+                      </div>
                     </>
                   ) : (
                     <p className="text-sm text-muted-foreground">Select an agent on the left.</p>
@@ -325,12 +409,18 @@ export function DeclarativeAgentManager() {
                 ) : (
                   <div className="w-[360px] rounded-lg border bg-background p-4 shadow-lg">
                     <p className="text-sm font-medium">
-                      {confirmMode === 'activate' ? 'Activate this agent?' : 'Reload agents from disk?'}
+                      {confirmMode === 'activate'
+                        ? 'Activate this agent?'
+                        : confirmMode === 'delete'
+                          ? 'Delete this agent?'
+                          : 'Reload agents from disk?'}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {confirmMode === 'activate'
                         ? 'This rebuilds the agents; the next message, the API, and Teams will use the selected agent.'
-                        : 'Re-scans the declarative agents directory and rebuilds the agents.'}
+                        : confirmMode === 'delete'
+                          ? 'This permanently deletes the agent YAML file and rebuilds the agents. If it was active, the built-in agent takes over.'
+                          : 'Re-scans the declarative agents directory and rebuilds the agents.'}
                     </p>
                     <div className="mt-3 flex justify-end gap-2">
                       <Button variant="outline" size="sm" onClick={() => setConfirmMode(null)}>
@@ -339,6 +429,10 @@ export function DeclarativeAgentManager() {
                       {confirmMode === 'activate' ? (
                         <Button size="sm" onClick={doActivate}>
                           Activate
+                        </Button>
+                      ) : confirmMode === 'delete' ? (
+                        <Button variant="destructive" size="sm" onClick={doDelete}>
+                          Delete
                         </Button>
                       ) : (
                         <Button size="sm" onClick={doReload}>
@@ -355,6 +449,11 @@ export function DeclarativeAgentManager() {
           <div className="flex items-center justify-between gap-2 border-t px-6 py-3">
             <span className="truncate text-xs text-destructive">{error}</span>
             <div className="flex items-center gap-2">
+              {canAuthor && (
+                <Button variant="outline" size="sm" onClick={() => openEditor(null)} disabled={busy || loading}>
+                  <Plus className="mr-1 h-3.5 w-3.5" /> Create
+                </Button>
+              )}
               <Button variant="ghost" size="sm" onClick={() => setConfirmMode('reload')} disabled={busy || loading}>
                 <RefreshCw className="mr-1 h-3.5 w-3.5" /> Reload
               </Button>
@@ -365,6 +464,17 @@ export function DeclarativeAgentManager() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {editorOpen && (
+        <Suspense fallback={null}>
+          <DeclarativeAgentEditor
+            open={editorOpen}
+            onOpenChange={setEditorOpen}
+            editId={editId}
+            onSaved={onEditorSaved}
+          />
+        </Suspense>
+      )}
     </>
   )
 }

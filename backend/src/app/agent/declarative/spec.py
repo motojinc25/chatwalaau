@@ -60,6 +60,13 @@ class DeclarativeAgentSpec:
     # {"schema": <json schema | None>, "mode": "json_schema"|"json_object"} default
     # structured output; None => no default (per-message control unchanged, D5).
     structured_output: dict | None = None
+    # Per-agent tool surface allow-list (PRP-0117, UDR-0100 D1). A list of stable
+    # tool identifiers (see app.agent.declarative.tool_ids) that SUBSETS the globally
+    # available tool surface; None => inherit the full shared surface (so CORE and
+    # every agent without a ``tools:`` block stays byte-for-byte, UDR-0072 D13). It
+    # can only narrow, never introduce a tool. Applied at the single tool-assembly
+    # chokepoint (app.agui.agent_factory) on the activate/reload rebuild (UDR-0100 D2).
+    tool_allowlist: list[str] | None = None
 
     # Non-fatal mapping notes (ignored fields) surfaced in the inventory (D3/D5).
     warnings: list[str] = field(default_factory=list)
