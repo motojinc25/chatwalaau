@@ -1303,8 +1303,8 @@ export function SessionSidebar({
               <Network className="h-4 w-4" />
             </Button>
           )}
-          {/* Declarative Agent management (CTR-0144, PRP-0094): self-probing icon next to
-              the File Explorer icon; always shown when the endpoint is reachable. */}
+          {/* Declarative Agents & Workflows management (CTR-0144 v3, PRP-0094 / PRP-0118):
+              ONE self-probing icon manages both Prompt agents and Workflows. */}
           <DeclarativeAgentManager />
           {/* Webhook gateway launcher (CTR-0157, PRP-0097): next to Declarative Agents;
               shown only when WEBHOOK_ENABLED. */}

@@ -1,29 +1,42 @@
-import { Bot, CircleCheck, Loader2, Pencil, Plus, RefreshCw, Trash2, TriangleAlert } from 'lucide-react'
+import {
+  Bot,
+  CircleCheck,
+  Loader2,
+  Pencil,
+  Play,
+  Plus,
+  RefreshCw,
+  Trash2,
+  TriangleAlert,
+  Workflow as WorkflowIcon,
+} from 'lucide-react'
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { useWorkflowAuthoring, type WorkflowEntry } from '@/hooks/useWorkflowAuthoring'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
+import { getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT, setWorkflowRunTarget } from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
 
-// Heavy editor (React Flow + monaco) is lazy so it stays out of the main bundle
-// until the operator opens Create / Edit (CTR-0179, PRP-0117).
+// Heavy editors (React Flow + monaco) are lazy so they stay out of the main bundle
+// until the operator opens Create / Edit (CTR-0179 / CTR-0184).
 const DeclarativeAgentEditor = lazyWithReload(() =>
   import('@/components/DeclarativeAgentEditor').then((m) => ({ default: m.DeclarativeAgentEditor })),
 )
+const DeclarativeWorkflowEditor = lazyWithReload(() =>
+  import('@/components/DeclarativeWorkflowEditor').then((m) => ({ default: m.DeclarativeWorkflowEditor })),
+)
 
 /**
- * Declarative Agent Management modal (CTR-0144, FEAT-0051, PRP-0094, UDR-0072).
+ * Declarative Agents & Workflows management modal (CTR-0144 v3, FEAT-0051 / FEAT-0062,
+ * UDR-0072 / UDR-0101 D2).
  *
- * A sidebar-footer icon (next to the File Explorer icon) opens a ~90% modal -- the
- * Skills-management shape -- that lists the bundled CORE agent plus custom
- * declarative agents discovered from DECLARATIVE_AGENTS_DIR as a nested-folder tree.
- * Exactly one agent is active (single-select); CORE is always present and is the
- * default. Activating an agent shows a confirmation, PUTs to CTR-0143, and shows a
- * blocking "rebuilding" indicator until the per-model agents are rebuilt (CTR-0070).
- * The YAML is a SPECIFICATION; ChatWalaʻau owns construction -- a YAML with a mapping
- * error (loaded=false / error) is visibly flagged and CANNOT be activated. The
- * selection is not persisted client-side (the server store is the source of truth).
- * Switching is SPA-only; the OpenAI API and Teams follow the active agent.
+ * ONE modal manages both declarative Prompt agents and declarative Workflows, told
+ * apart by a Prompt / Workflow tag. A Prompt agent is ACTIVATED (server-side rebuild,
+ * the existing flow); a Workflow is chosen as the chat RUN-TARGET (client-side). The
+ * effective run-target -- the active agent, or a selected workflow -- drives the next
+ * message, and the assistant message is labeled with its name. Create opens the
+ * matching editor (Prompt vs Workflow) on a separate full-screen screen.
  */
 
 interface AgentEntry {
@@ -44,39 +57,68 @@ interface AgentEntry {
  * model selector / options panels re-read /api/model (CTR-0144, PRP-0094). */
 export const ACTIVE_AGENT_CHANGED_EVENT = 'chatwalaau:active-agent-changed'
 
-const TOP_LEVEL_LABEL = 'Top level'
 const BUILTIN_LABEL = 'Built-in'
+const TOP_LEVEL_LABEL = 'Top level'
 
+type Kind = 'Prompt' | 'Workflow'
 type ConfirmMode = 'activate' | 'reload' | 'delete' | null
 
-function groupLabel(entry: AgentEntry): string {
+interface Unified {
+  kind: Kind
+  id: string
+  name: string
+  description?: string
+  group_path: string[]
+  loaded: boolean
+  error?: string | null
+  warnings?: string[]
+  editable?: boolean
+  // Prompt
+  source?: 'core' | 'custom'
+  active?: boolean
+  tool_allowlist?: string[] | null
+  // Workflow
+  referenced_agents?: string[]
+  action_kinds?: string[]
+}
+
+function agentGroup(entry: AgentEntry): string {
   if (entry.source === 'core') return BUILTIN_LABEL
   return entry.group_path.length ? entry.group_path.join(' / ') : TOP_LEVEL_LABEL
 }
 
 export function DeclarativeAgentManager() {
+  const wfApi = useWorkflowAuthoring()
   const [available, setAvailable] = useState(false)
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [agents, setAgents] = useState<AgentEntry[]>([])
+  const [workflows, setWorkflows] = useState<WorkflowEntry[]>([])
   const [activeId, setActiveId] = useState<string>('core')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selected, setSelected] = useState<{ kind: Kind; id: string } | null>(null)
   const [confirmMode, setConfirmMode] = useState<ConfirmMode>(null)
-  const [editorOpen, setEditorOpen] = useState(false)
-  const [editId, setEditId] = useState<string | null>(null)
   const [canAuthor, setCanAuthor] = useState(false)
+  const [wfCanAuthor, setWfCanAuthor] = useState(false)
+  const [createMenu, setCreateMenu] = useState(false)
+  const [agentEditorOpen, setAgentEditorOpen] = useState(false)
+  const [wfEditorOpen, setWfEditorOpen] = useState(false)
+  const [editId, setEditId] = useState<string | null>(null)
+  const [wfTarget, setWfTarget] = useState(() => getWorkflowRunTarget())
 
-  const adopt = useCallback((data: { active?: string; agents?: AgentEntry[] }) => {
-    const next = (data.agents ?? []) as AgentEntry[]
-    setAgents(next)
-    setActiveId(data.active ?? 'core')
-    setSelectedId((prev) => prev ?? data.active ?? next[0]?.id ?? null)
+  useEffect(() => {
+    const onRt = () => setWfTarget(getWorkflowRunTarget())
+    window.addEventListener(RUN_TARGET_CHANGED_EVENT, onRt)
+    return () => window.removeEventListener(RUN_TARGET_CHANGED_EVENT, onRt)
   }, [])
 
-  // Probe availability once on mount: GET /api/agents is always reachable (the CORE
-  // agent always exists), so the icon shows whenever the endpoint is reachable.
+  const adoptAgents = useCallback((data: { active?: string; agents?: AgentEntry[] }) => {
+    setAgents((data.agents ?? []) as AgentEntry[])
+    setActiveId(data.active ?? 'core')
+  }, [])
+
+  // Probe availability once on mount: GET /api/agents is always reachable.
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -84,7 +126,7 @@ export function DeclarativeAgentManager() {
         const res = await fetch('/api/agents')
         if (!cancelled && res.ok) setAvailable(true)
       } catch {
-        // Silent: declarative agent management is simply unavailable.
+        // Silent: management is simply unavailable.
       }
     })()
     return () => {
@@ -96,33 +138,38 @@ export function DeclarativeAgentManager() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/agents')
-      if (!res.ok) throw new Error('Failed to load agents')
-      adopt(await res.json())
+      const [aRes, wRes] = await Promise.all([
+        fetch('/api/agents').then((r) => (r.ok ? r.json() : { agents: [] })),
+        fetch('/api/workflows').then((r) => (r.ok ? r.json() : { workflows: [] })),
+      ])
+      adoptAgents(aRes)
+      setWorkflows((wRes.workflows ?? []) as WorkflowEntry[])
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load agents')
+      setError(err instanceof Error ? err.message : 'Failed to load')
     } finally {
       setLoading(false)
     }
-  }, [adopt])
+  }, [adoptAgents])
 
   const openModal = useCallback(() => {
     setOpen(true)
     setConfirmMode(null)
+    setWfTarget(getWorkflowRunTarget())
     void fetchInventory()
-    // Probe whether authoring is available + writable (drives the Create button).
     void (async () => {
       try {
         const res = await fetch('/api/agents/authoring/status')
         if (res.ok) {
-          const data = (await res.json()) as { available?: boolean; writable?: boolean }
-          setCanAuthor(Boolean(data.available && data.writable))
+          const d = (await res.json()) as { available?: boolean; writable?: boolean }
+          setCanAuthor(Boolean(d.available && d.writable))
         }
       } catch {
         setCanAuthor(false)
       }
+      const s = await wfApi.authoringStatus()
+      setWfCanAuthor(s.available && s.writable)
     })()
-  }, [fetchInventory])
+  }, [fetchInventory, wfApi])
 
   const handleOpenChange = useCallback(
     (next: boolean) => {
@@ -130,16 +177,17 @@ export function DeclarativeAgentManager() {
         setOpen(true)
         return
       }
-      if (busy) return // block close while rebuilding
+      if (busy) return
       setOpen(false)
       setConfirmMode(null)
+      setCreateMenu(false)
       setError(null)
     },
     [busy],
   )
 
   const doActivate = useCallback(async () => {
-    if (!selectedId) return
+    if (!selected || selected.kind !== 'Prompt') return
     setConfirmMode(null)
     setBusy(true)
     setError(null)
@@ -147,22 +195,23 @@ export function DeclarativeAgentManager() {
       const res = await fetch('/api/agents/active', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: selectedId }),
+        body: JSON.stringify({ id: selected.id }),
       })
       if (!res.ok) {
-        const detail = await res.json().catch(() => null)
-        throw new Error(detail?.detail?.message || detail?.detail?.error || 'Failed to activate agent')
+        const d = await res.json().catch(() => null)
+        throw new Error(d?.detail?.message || d?.detail?.error || 'Failed to activate agent')
       }
-      adopt(await res.json())
-      // Tell the model selector / options panels to re-read /api/model so they reflect
-      // the new agent's preferred model + option defaults immediately (CTR-0144).
+      adoptAgents(await res.json())
+      // Activating a Prompt agent makes it the effective run-target -- clear any
+      // workflow run-target so chat runs the agent (operator-decided, UDR-0101 D5).
+      setWorkflowRunTarget(null)
       window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to activate agent')
     } finally {
       setBusy(false)
     }
-  }, [selectedId, adopt])
+  }, [selected, adoptAgents])
 
   const doReload = useCallback(async () => {
     setConfirmMode(null)
@@ -170,80 +219,104 @@ export function DeclarativeAgentManager() {
     setError(null)
     try {
       const res = await fetch('/api/agents/reload', { method: 'POST' })
-      if (!res.ok) throw new Error('Failed to reload agents')
-      adopt(await res.json())
+      if (res.ok) adoptAgents(await res.json())
+      await fetchInventory()
       window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to reload agents')
+      setError(err instanceof Error ? err.message : 'Failed to reload')
     } finally {
       setBusy(false)
     }
-  }, [adopt])
+  }, [adoptAgents, fetchInventory])
 
   const doDelete = useCallback(async () => {
-    if (!selectedId) return
+    if (!selected) return
     setConfirmMode(null)
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch(`/api/agents/authoring/${encodeURI(selectedId)}`, { method: 'DELETE' })
-      if (!res.ok) {
-        const detail = await res.json().catch(() => null)
-        throw new Error(detail?.detail?.message || detail?.detail?.error || 'Failed to delete agent')
+      if (selected.kind === 'Prompt') {
+        const res = await fetch(`/api/agents/authoring/${encodeURI(selected.id)}`, { method: 'DELETE' })
+        if (!res.ok) {
+          const d = await res.json().catch(() => null)
+          throw new Error(d?.detail?.message || d?.detail?.error || 'Failed to delete agent')
+        }
+        adoptAgents(await res.json())
+        window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
+      } else {
+        await wfApi.remove(selected.id)
+        if (wfTarget?.id === selected.id) setWorkflowRunTarget(null)
       }
-      setSelectedId(null)
-      adopt(await res.json())
-      window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
+      setSelected(null)
+      await fetchInventory()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete agent')
+      setError(err instanceof Error ? err.message : 'Failed to delete')
     } finally {
       setBusy(false)
     }
-  }, [selectedId, adopt])
+  }, [selected, adoptAgents, wfApi, wfTarget, fetchInventory])
 
-  const openEditor = useCallback((id: string | null) => {
-    setEditId(id)
-    setEditorOpen(true)
+  const runWorkflowInChat = useCallback((w: WorkflowEntry) => {
+    setWorkflowRunTarget({ id: w.id, name: w.name })
+    setWfTarget({ id: w.id, name: w.name })
   }, [])
 
-  const onEditorSaved = useCallback(
-    (id?: string) => {
-      void fetchInventory()
-      if (id) setSelectedId(id)
-      // The saved agent may become the active tool surface once activated; refresh
-      // the model selector defaults conservatively.
-      window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
-    },
-    [fetchInventory],
-  )
+  const stopWorkflow = useCallback(() => {
+    setWorkflowRunTarget(null)
+    setWfTarget(null)
+  }, [])
 
-  // Group agents for the left tree (CORE first, then nested-folder groups).
-  const groups = useMemo(() => {
-    const map = new Map<string, AgentEntry[]>()
+  const openAgentEditor = useCallback((id: string | null) => {
+    setCreateMenu(false)
+    setEditId(id)
+    setAgentEditorOpen(true)
+  }, [])
+  const openWfEditor = useCallback((id: string | null) => {
+    setCreateMenu(false)
+    setEditId(id)
+    setWfEditorOpen(true)
+  }, [])
+
+  const onSaved = useCallback(() => {
+    void fetchInventory()
+    window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
+  }, [fetchInventory])
+
+  // ---- unified grouping: Prompt agents (folder groups) then Workflows ----
+  const sections = useMemo(() => {
+    const out: Array<{ header: string; kind: Kind; items: Unified[] }> = []
+    const agentGroups = new Map<string, Unified[]>()
     for (const a of agents) {
-      const label = groupLabel(a)
-      const arr = map.get(label) ?? []
-      arr.push(a)
-      map.set(label, arr)
+      const label = agentGroup(a)
+      const arr = agentGroups.get(label) ?? []
+      arr.push({ kind: 'Prompt', ...a })
+      agentGroups.set(label, arr)
     }
-    const ordered: Array<[string, AgentEntry[]]> = []
-    const builtin = map.get(BUILTIN_LABEL)
-    if (builtin) ordered.push([BUILTIN_LABEL, builtin])
-    for (const [label, arr] of map) {
-      if (label !== BUILTIN_LABEL) ordered.push([label, arr])
+    const builtin = agentGroups.get(BUILTIN_LABEL)
+    if (builtin) out.push({ header: 'Agents · Built-in', kind: 'Prompt', items: builtin })
+    for (const [label, arr] of agentGroups) {
+      if (label !== BUILTIN_LABEL) out.push({ header: `Agents · ${label}`, kind: 'Prompt', items: arr })
     }
-    return ordered
-  }, [agents])
+    if (workflows.length) {
+      out.push({
+        header: 'Workflows',
+        kind: 'Workflow',
+        items: workflows.map((w) => ({ kind: 'Workflow' as const, ...w })),
+      })
+    }
+    return out
+  }, [agents, workflows])
 
   if (!available) return null
 
-  const current = agents.find((a) => a.id === selectedId) ?? null
-  // An agent can be activated only when it is loaded, not already active, has no
-  // mapping error, AND has no warnings (a warning means the YAML must be fixed first,
-  // PRP-0094 / UDR-0072 D9).
+  const current: Unified | null =
+    sections.flatMap((s) => s.items).find((e) => selected && e.kind === selected.kind && e.id === selected.id) ?? null
+
   const hasWarnings = (current?.warnings?.length ?? 0) > 0
   const canActivate =
-    current?.loaded === true && !current.active && current.id !== activeId && !current.error && !hasWarnings
+    current?.kind === 'Prompt' && current.loaded === true && current.id !== activeId && !current.error && !hasWarnings
+  const isRunTargetWorkflow = current?.kind === 'Workflow' && wfTarget?.id === current.id
+  const canUseWorkflow = current?.kind === 'Workflow' && current.loaded && !hasWarnings && !isRunTargetWorkflow
 
   return (
     <>
@@ -252,19 +325,18 @@ export function DeclarativeAgentManager() {
         size="icon"
         className="h-6 w-6 text-muted-foreground"
         onClick={openModal}
-        aria-label="Declarative agents"
-        title="Declarative agents (switch the active agent)">
+        aria-label="Declarative agents and workflows"
+        title="Declarative agents & workflows">
         <Bot className="h-4 w-4" />
       </Button>
 
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="flex h-[90vh] w-[90vw] max-w-[90vw] flex-col gap-0 p-0">
           <DialogHeader className="border-b px-6 py-4">
-            <DialogTitle>Declarative Agents</DialogTitle>
+            <DialogTitle>Declarative Agents &amp; Workflows</DialogTitle>
             <DialogDescription>
-              Switch the active agent. The YAML is a specification; ChatWalaʻau owns construction (credentials and
-              sampling params like temperature are ignored or rejected). Activating rebuilds the agents, so the next
-              message -- and the API and Teams -- use the selected agent.
+              Manage Prompt agents and Workflows in one place. Activate a Prompt agent, or select a Workflow to run in
+              chat -- the assistant message shows which one produced the answer.
             </DialogDescription>
           </DialogHeader>
 
@@ -275,59 +347,84 @@ export function DeclarativeAgentManager() {
               </div>
             ) : (
               <>
-                {/* Left: nested-folder grouped agent list */}
+                {/* Left: unified list (Agents then Workflows) */}
                 <div className="w-72 shrink-0 overflow-y-auto border-r">
-                  {groups.map(([label, items]) => (
-                    <div key={label}>
-                      <div className="bg-muted/50 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                        {label}
+                  {sections.map((section) => (
+                    <div key={section.header}>
+                      <div className="flex items-center gap-1.5 bg-muted/50 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        {section.kind === 'Workflow' ? (
+                          <WorkflowIcon className="h-3 w-3" />
+                        ) : (
+                          <Bot className="h-3 w-3" />
+                        )}
+                        {section.header}
                       </div>
-                      {items.map((a) => (
-                        <button
-                          key={a.id}
-                          type="button"
-                          onClick={() => setSelectedId(a.id)}
-                          className={cn(
-                            'flex w-full items-center gap-2 border-b px-3 py-2 text-left',
-                            selectedId === a.id && 'bg-accent',
-                          )}>
-                          <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                            {a.active ? (
-                              <CircleCheck className="h-4 w-4 text-primary" />
-                            ) : a.loaded ? (
-                              <span className="h-2.5 w-2.5 rounded-full border" />
-                            ) : (
-                              <TriangleAlert className="h-3.5 w-3.5 text-amber-600 dark:text-amber-500" />
-                            )}
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm font-medium">{a.name}</span>
-                            <span className="block truncate text-[11px] text-muted-foreground">
-                              {a.active ? 'Active' : a.loaded ? a.id : 'Error'}
+                      {section.items.map((e) => {
+                        const isSel = selected?.kind === e.kind && selected.id === e.id
+                        const clean = e.loaded && (e.warnings?.length ?? 0) === 0
+                        const isActive =
+                          e.kind === 'Prompt' ? e.active && !wfTarget : e.kind === 'Workflow' && wfTarget?.id === e.id
+                        return (
+                          <button
+                            key={`${e.kind}:${e.id}`}
+                            type="button"
+                            onClick={() => setSelected({ kind: e.kind, id: e.id })}
+                            className={cn(
+                              'flex w-full items-center gap-2 border-b px-3 py-2 text-left',
+                              isSel && 'bg-accent',
+                            )}>
+                            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                              {isActive ? (
+                                <CircleCheck className="h-4 w-4 text-primary" />
+                              ) : clean ? (
+                                <span className="h-2.5 w-2.5 rounded-full border" />
+                              ) : (
+                                <TriangleAlert className="h-3.5 w-3.5 text-amber-600 dark:text-amber-500" />
+                              )}
                             </span>
-                          </span>
-                        </button>
-                      ))}
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm font-medium">{e.name}</span>
+                              <span className="block truncate text-[11px] text-muted-foreground">
+                                {isActive
+                                  ? e.kind === 'Workflow'
+                                    ? 'Running in chat'
+                                    : 'Active'
+                                  : !e.loaded
+                                    ? 'Error'
+                                    : (e.warnings?.length ?? 0) > 0
+                                      ? 'Needs fixing'
+                                      : e.id}
+                              </span>
+                            </span>
+                            <span
+                              className={cn(
+                                'shrink-0 rounded px-1 py-0.5 text-[9px] font-medium uppercase',
+                                e.kind === 'Workflow' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+                              )}>
+                              {e.kind}
+                            </span>
+                          </button>
+                        )
+                      })}
                     </div>
                   ))}
                 </div>
 
-                {/* Right: selected agent detail */}
+                {/* Right: selected detail */}
                 <div className="min-w-0 flex-1 overflow-y-auto p-5">
                   {current ? (
                     <>
                       <div className="mb-2 flex items-center gap-2">
                         <h3 className="truncate text-base font-semibold">{current.name}</h3>
-                        {current.active && (
-                          <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
-                            Active
-                          </span>
-                        )}
-                        {current.source === 'core' && (
-                          <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                            Built-in
-                          </span>
-                        )}
+                        <span
+                          className={cn(
+                            'rounded px-1.5 py-0.5 text-[11px] font-medium',
+                            current.kind === 'Workflow'
+                              ? 'bg-primary/10 text-primary'
+                              : 'bg-muted text-muted-foreground',
+                          )}>
+                          {current.kind}
+                        </span>
                       </div>
                       <p className="mb-1 font-mono text-[11px] text-muted-foreground">{current.id}</p>
                       {current.description && (
@@ -337,21 +434,17 @@ export function DeclarativeAgentManager() {
                       {current.error && (
                         <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[12px] text-amber-700 dark:text-amber-400">
                           <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-                          <div>
-                            <div className="font-medium">This agent cannot be activated.</div>
-                            <div className="mt-0.5 whitespace-pre-wrap">{current.error}</div>
-                          </div>
+                          <div className="whitespace-pre-wrap">{current.error}</div>
                         </div>
                       )}
-
                       {hasWarnings && (
                         <div className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-400">
                           <div className="mb-1 flex items-center gap-1.5 font-medium">
                             <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
-                            Fix these warnings in the YAML before activating:
+                            {current.kind === 'Workflow' ? 'Resolve before running:' : 'Fix before activating:'}
                           </div>
                           <ul className="space-y-1 pl-5">
-                            {current?.warnings?.map((w) => (
+                            {current.warnings?.map((w) => (
                               <li key={w} className="list-disc">
                                 {w}
                               </li>
@@ -360,24 +453,56 @@ export function DeclarativeAgentManager() {
                         </div>
                       )}
 
-                      {current.loaded && (current.tool_allowlist?.length ?? 0) > 0 && (
+                      {current.kind === 'Prompt' && current.loaded && (current.tool_allowlist?.length ?? 0) > 0 && (
                         <p className="mb-3 text-[11px] text-muted-foreground">
                           Tool surface restricted to {current.tool_allowlist?.length} tool(s):{' '}
                           <span className="font-mono">{current.tool_allowlist?.join(', ')}</span>
                         </p>
                       )}
+                      {current.kind === 'Workflow' && (current.referenced_agents?.length ?? 0) > 0 && (
+                        <p className="mb-2 text-[11px] text-muted-foreground">
+                          Invokes agent(s): <span className="font-mono">{current.referenced_agents?.join(', ')}</span>
+                        </p>
+                      )}
+                      {current.kind === 'Workflow' && (current.action_kinds?.length ?? 0) > 0 && (
+                        <p className="mb-3 text-[11px] text-muted-foreground">
+                          Steps: <span className="font-mono">{current.action_kinds?.join(' -> ')}</span>
+                        </p>
+                      )}
 
                       <div className="flex flex-wrap items-center gap-2">
-                        <Button size="sm" disabled={!canActivate} onClick={() => setConfirmMode('activate')}>
-                          {current.active
-                            ? 'Currently active'
-                            : hasWarnings
-                              ? 'Resolve warnings to activate'
-                              : 'Activate this agent'}
-                        </Button>
-                        {current.editable && canAuthor && (
+                        {current.kind === 'Prompt' ? (
+                          <Button size="sm" disabled={!canActivate} onClick={() => setConfirmMode('activate')}>
+                            {current.active && !wfTarget
+                              ? 'Active'
+                              : hasWarnings
+                                ? 'Resolve warnings to activate'
+                                : 'Activate this agent'}
+                          </Button>
+                        ) : isRunTargetWorkflow ? (
+                          <Button size="sm" variant="outline" onClick={stopWorkflow}>
+                            Stop running in chat
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            disabled={!canUseWorkflow}
+                            onClick={() => {
+                              const w = workflows.find((x) => x.id === current.id)
+                              if (w) runWorkflowInChat(w)
+                            }}>
+                            <Play className="mr-1 h-3.5 w-3.5" />
+                            {hasWarnings ? 'Resolve warnings to run' : 'Run in chat'}
+                          </Button>
+                        )}
+                        {current.editable && (current.kind === 'Workflow' ? wfCanAuthor : canAuthor) && (
                           <>
-                            <Button variant="outline" size="sm" onClick={() => openEditor(current.id)}>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                current.kind === 'Workflow' ? openWfEditor(current.id) : openAgentEditor(current.id)
+                              }>
                               <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
                             </Button>
                             <Button
@@ -392,19 +517,18 @@ export function DeclarativeAgentManager() {
                       </div>
                     </>
                   ) : (
-                    <p className="text-sm text-muted-foreground">Select an agent on the left.</p>
+                    <p className="text-sm text-muted-foreground">Select an agent or workflow on the left.</p>
                   )}
                 </div>
               </>
             )}
 
-            {/* Activate / reload / rebuild overlay + confirmation */}
             {(busy || confirmMode) && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/80">
                 {busy ? (
                   <div className="flex items-center gap-2 text-sm">
                     <Loader2 className="h-5 w-5 animate-spin" />
-                    Rebuilding agents...
+                    {confirmMode === 'delete' ? 'Working...' : 'Rebuilding agents...'}
                   </div>
                 ) : (
                   <div className="w-[360px] rounded-lg border bg-background p-4 shadow-lg">
@@ -412,15 +536,15 @@ export function DeclarativeAgentManager() {
                       {confirmMode === 'activate'
                         ? 'Activate this agent?'
                         : confirmMode === 'delete'
-                          ? 'Delete this agent?'
-                          : 'Reload agents from disk?'}
+                          ? `Delete this ${current?.kind === 'Workflow' ? 'workflow' : 'agent'}?`
+                          : 'Reload from disk?'}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {confirmMode === 'activate'
-                        ? 'This rebuilds the agents; the next message, the API, and Teams will use the selected agent.'
+                        ? 'This rebuilds the agents; the next message, the API, and Teams use the selected agent.'
                         : confirmMode === 'delete'
-                          ? 'This permanently deletes the agent YAML file and rebuilds the agents. If it was active, the built-in agent takes over.'
-                          : 'Re-scans the declarative agents directory and rebuilds the agents.'}
+                          ? 'This permanently deletes the YAML file.'
+                          : 'Re-scans the declarative directory.'}
                     </p>
                     <div className="mt-3 flex justify-end gap-2">
                       <Button variant="outline" size="sm" onClick={() => setConfirmMode(null)}>
@@ -449,10 +573,39 @@ export function DeclarativeAgentManager() {
           <div className="flex items-center justify-between gap-2 border-t px-6 py-3">
             <span className="truncate text-xs text-destructive">{error}</span>
             <div className="flex items-center gap-2">
-              {canAuthor && (
-                <Button variant="outline" size="sm" onClick={() => openEditor(null)} disabled={busy || loading}>
-                  <Plus className="mr-1 h-3.5 w-3.5" /> Create
-                </Button>
+              {(canAuthor || wfCanAuthor) && (
+                <div className="relative">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCreateMenu((s) => !s)}
+                    disabled={busy || loading}>
+                    <Plus className="mr-1 h-3.5 w-3.5" /> Create
+                  </Button>
+                  {createMenu && (
+                    <>
+                      <div className="fixed inset-0 z-10" onClick={() => setCreateMenu(false)} aria-hidden />
+                      <div className="absolute bottom-full right-0 z-20 mb-1 w-52 rounded-md border bg-background p-1 shadow-lg">
+                        {canAuthor && (
+                          <button
+                            type="button"
+                            onClick={() => openAgentEditor(null)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent">
+                            <Bot className="h-3.5 w-3.5 text-muted-foreground" /> New Prompt agent
+                          </button>
+                        )}
+                        {wfCanAuthor && (
+                          <button
+                            type="button"
+                            onClick={() => openWfEditor(null)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent">
+                            <WorkflowIcon className="h-3.5 w-3.5 text-muted-foreground" /> New Workflow
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               )}
               <Button variant="ghost" size="sm" onClick={() => setConfirmMode('reload')} disabled={busy || loading}>
                 <RefreshCw className="mr-1 h-3.5 w-3.5" /> Reload
@@ -465,13 +618,23 @@ export function DeclarativeAgentManager() {
         </DialogContent>
       </Dialog>
 
-      {editorOpen && (
+      {agentEditorOpen && (
         <Suspense fallback={null}>
           <DeclarativeAgentEditor
-            open={editorOpen}
-            onOpenChange={setEditorOpen}
+            open={agentEditorOpen}
+            onOpenChange={setAgentEditorOpen}
             editId={editId}
-            onSaved={onEditorSaved}
+            onSaved={onSaved}
+          />
+        </Suspense>
+      )}
+      {wfEditorOpen && (
+        <Suspense fallback={null}>
+          <DeclarativeWorkflowEditor
+            open={wfEditorOpen}
+            onOpenChange={setWfEditorOpen}
+            editId={editId}
+            onSaved={onSaved}
           />
         </Suspense>
       )}

@@ -69,11 +69,32 @@ def _jail_ok(root: Path, candidate: Path) -> bool:
     return cand_real == root_real or cand_real.startswith(root_real + os.sep)
 
 
+def read_top_kind(path: Path) -> str:
+    """Return the top-level ``kind`` of a declarative YAML ("Prompt" / "Workflow" / "").
+
+    A cheap best-effort parse used to DISPATCH a shared DECLARATIVE_AGENTS_DIR tree
+    between the agent loader (kind: Prompt) and the workflow loader (kind: Workflow)
+    (PRP-0118, UDR-0101 D2). A parse failure returns "" so a malformed file still
+    surfaces in the AGENT inventory as a broken agent (its historical behavior).
+    """
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if isinstance(data, dict):
+        return str(data.get("kind") or "").strip()
+    return ""
+
+
 def _discover_files() -> list[tuple[str, Path, tuple[str, ...]]]:
-    """Discover custom YAML files as (agent_id, path, group_path).
+    """Discover custom Prompt-agent YAML files as (agent_id, path, group_path).
 
     ``agent_id`` is the POSIX relative path without extension (e.g. "support/triage");
-    ``group_path`` is the tuple of parent folders. Sorted for stable ordering.
+    ``group_path`` is the tuple of parent folders. Sorted for stable ordering. A
+    ``kind: Workflow`` file is SKIPPED here -- it belongs to the workflow loader
+    (CTR-0180), not the agent inventory (PRP-0118, UDR-0101 D2).
     """
     root = _agents_dir()
     if root is None:
@@ -87,6 +108,8 @@ def _discover_files() -> list[tuple[str, Path, tuple[str, ...]]]:
         if not _jail_ok(root, path):
             logger.warning("Declarative agent file outside jail ignored: %s", path)
             continue
+        if read_top_kind(path) == "Workflow":
+            continue  # workflow files are dispatched to the workflow loader (UDR-0101 D2)
         rel = path.relative_to(root)
         parts = rel.with_suffix("").parts
         agent_id = "/".join(parts)

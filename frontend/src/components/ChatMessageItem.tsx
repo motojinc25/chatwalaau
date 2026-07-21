@@ -543,6 +543,18 @@ function ChatMessageItemImpl({
             ) : (
               !isWaiting && <span className="inline-block h-4 w-1 animate-pulse bg-current" />
             )}
+            {/* Unified in-progress indicator (PRP-0118 follow-up): while the turn is
+                still running -- and text has already arrived, so the top isWaiting
+                spinner is gone -- keep an animated "processing" cue at the tail until
+                the run fully completes. Common to Prompt agents and Workflows (a
+                workflow may pause between nodes / while an agent node thinks, which
+                would otherwise look finished). */}
+            {!isUser && isLoading && hasTextContent && (
+              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/70">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                <span>{message.runTarget?.startsWith('⧉') ? 'Running workflow…' : 'Working…'}</span>
+              </div>
+            )}
           </>
         )}
 
@@ -649,6 +661,13 @@ function ChatMessageItemImpl({
                 aria-label="Delete message">
                 <Trash2 className="h-3 w-3" />
               </Button>
+            )}
+            {!isUser && message.runTarget && (
+              <span
+                className="ml-1 rounded bg-primary/10 px-1 text-[11px] text-primary"
+                title="Agent / workflow that produced this turn">
+                {message.runTarget}
+              </span>
             )}
             {!isUser && message.model && (
               <span className="ml-1 text-[11px] text-muted-foreground/50">{message.model}</span>

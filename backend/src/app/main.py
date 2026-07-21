@@ -469,6 +469,18 @@ from app.agent.declarative.router import register_declarative_agents
 register_declarative_agents(app, agent_registry=agent_registry)
 log_active_agent()
 
+# Declarative Workflows (CTR-0180..0185, PRP-0118, UDR-0101) -- a `kind: Workflow`
+# declarative entity discovered from the SAME DECLARATIVE_AGENTS_DIR tree (dispatched
+# by `kind`, UDR-0101 D2). Management + authoring API (CTR-0182/0183); the `workflow`
+# Pipeline job type registers the asynchronous lane (CTR-0181 / UDR-0074 D7). A
+# workflow is a per-conversation run-target (AG-UI state.workflow_id), not a persona,
+# so no agent_registry rebuild is needed here (UDR-0101 D3).
+from app.workflow.router import register_workflows
+from app.workflow.runtime import register_workflow_job_type
+
+register_workflows(app)
+register_workflow_job_type()
+
 # Model Offering Catalog Management API (CTR-0175, PRP-0111, UDR-0090) -- read/write
 # the model_offerings.jsonc catalog (FEAT-0059 / CTR-0174) at runtime. PUT / reload
 # rewrite the file (structured JSON, comments dropped) and rebuild the registry

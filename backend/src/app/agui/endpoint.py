@@ -103,6 +103,25 @@ def _generate_id() -> str:
     return str(uuid.uuid4())
 
 
+def _latest_user_text(messages: list[dict[str, Any]]) -> str:
+    """Return the text of the most recent user message (workflow input, PRP-0118).
+
+    Content may be a plain string or an AG-UI content-part list; text parts are
+    concatenated. Returns "" when there is no user text.
+    """
+    for msg in reversed(messages or []):
+        if (msg.get("role") if isinstance(msg, dict) else None) != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+            return "".join(parts)
+        return ""
+    return ""
+
+
 def _is_previous_response_not_found(exc: BaseException) -> bool:
     """Detect an Azure/OpenAI 400 ``previous_response_not_found`` in the chain.
 
@@ -591,6 +610,20 @@ async def _stream_with_reasoning(
     encoder = EventEncoder()
     thread_id = request_body.thread_id or _generate_id()
     run_id = request_body.run_id or _generate_id()
+
+    # Declarative Workflow run-target (PRP-0118, CTR-0181, UDR-0101 D5). When the AG-UI
+    # request selects a workflow (state.workflow_id), stream the compiled workflow graph
+    # instead of the active Prompt agent; stream_workflow emits its own RUN_STARTED /
+    # RUN_FINISHED lifecycle and the additive workflow_* CUSTOM events. Absent the flag
+    # the endpoint runs the active agent exactly as before (byte-for-byte, UDR-0101 D5).
+    _workflow_id = (request_body.state or {}).get("workflow_id") if request_body.state else None
+    if _workflow_id:
+        from app.workflow.runtime import stream_workflow
+
+        _wf_input = _latest_user_text(request_body.messages)
+        async for _chunk in stream_workflow(str(_workflow_id), _wf_input, encoder, thread_id=thread_id):
+            yield _chunk
+        return
 
     yield encoder.encode(
         RunStartedEvent(

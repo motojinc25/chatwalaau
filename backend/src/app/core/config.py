@@ -371,6 +371,16 @@ class Settings(BaseSettings):
     # (temperature / top_p / ...) are rejected at activation (D3/D5).
     declarative_agents_dir: str = ""
 
+    # Declarative Workflows (CTR-0006, CTR-0180..0185, PRP-0118, UDR-0101)
+    # A `kind: Workflow` declarative entity is discovered from the SAME
+    # DECLARATIVE_AGENTS_DIR tree as `kind: Prompt` agents (dispatched by `kind`,
+    # UDR-0101 D2), so there is no separate directory / enable flag: unset
+    # DECLARATIVE_AGENTS_DIR = no workflows (default-safe, UDR-0101 D12). This is the
+    # one workflow-specific knob: a runaway-loop / cost guard that caps the compiled
+    # workflow's supersteps (MAF builder max_iterations; the YAML `maxTurns` still
+    # applies as a fallback when smaller). Clamped to [1, 100000] at use time.
+    workflow_max_iterations: int = 100
+
     # Prompt Templates (CTR-0046, PRP-0026)
     templates_dir: str = ".templates"
 

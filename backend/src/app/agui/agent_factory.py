@@ -96,6 +96,7 @@ def _build_tools_and_instructions(
     include_mcp: bool,
     include_rag: bool,
     apply_approval: bool = True,
+    spec: Any = None,
 ) -> tuple[list[Any], list[Any], str, list[Any]]:
     """Assemble (tools, context_providers, instructions, middleware) from current settings.
 
@@ -130,7 +131,12 @@ def _build_tools_and_instructions(
     from app.agent.declarative.store import active_spec as _active_spec
     from app.agent.declarative.tool_ids import parse_allowlist as _parse_allowlist
 
-    _allow = _parse_allowlist(_active_spec().tool_allowlist)
+    # ``spec`` lets a caller pin a SPECIFIC declarative spec instead of the globally
+    # active one -- used to build a workflow node agent from its referenced Prompt
+    # agent (PRP-0118, CTR-0180). Defaulting to active_spec() keeps every existing
+    # caller (AgentRegistry rebuild, build_devui_agent) byte-for-byte.
+    _effective_spec = spec if spec is not None else _active_spec()
+    _allow = _parse_allowlist(_effective_spec.tool_allowlist)
 
     def _fn_ok(name: str) -> bool:
         return _allow is None or _allow.allows_function(name)

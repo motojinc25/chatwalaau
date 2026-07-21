@@ -60,6 +60,19 @@ interface UseChatOptions {
    */
   temporary?: boolean
   /**
+   * Declarative Workflow run-target (CTR-0185, PRP-0118, UDR-0101 D3/D5). When set, the
+   * run is sent with AG-UI state.workflow_id so the endpoint streams the compiled
+   * workflow (its own RUN_STARTED/RUN_FINISHED + additive workflow_* CUSTOM events)
+   * instead of the active Prompt agent. Per-conversation, not a persona.
+   */
+  selectedWorkflowId?: string
+  /**
+   * PRP-0118: label of the run-target (a workflow name, or a non-default active agent
+   * name) stamped onto the assistant message so the action bar shows which agent /
+   * workflow produced the turn.
+   */
+  runTargetLabel?: string
+  /**
    * PRP-0067 / CTR-0100. Receives AG-UI CUSTOM events that useChat does
    * not itself act on (e.g., tool_approval_request /
    * tool_approval_response). useToolApproval supplies this callback.
@@ -99,6 +112,8 @@ export function useChat(options?: UseChatOptions) {
   const selectedOutputSchemaRef = useRef<Record<string, unknown> | null>(options?.selectedOutputSchema ?? null)
   const selectedImageOptionsRef = useRef<Record<string, string>>(options?.selectedImageOptions ?? {})
   const temporaryRef = useRef(options?.temporary ?? false)
+  const selectedWorkflowIdRef = useRef(options?.selectedWorkflowId ?? '')
+  const runTargetLabelRef = useRef(options?.runTargetLabel ?? '')
   const onCustomEventRef = useRef(options?.onCustomEvent)
   const onNoticeRef = useRef(options?.onNotice)
   const onConnectionRecoveredRef = useRef(options?.onConnectionRecovered)
@@ -159,6 +174,14 @@ export function useChat(options?: UseChatOptions) {
   }, [options?.temporary])
 
   useEffect(() => {
+    selectedWorkflowIdRef.current = options?.selectedWorkflowId ?? ''
+  }, [options?.selectedWorkflowId])
+
+  useEffect(() => {
+    runTargetLabelRef.current = options?.runTargetLabel ?? ''
+  }, [options?.runTargetLabel])
+
+  useEffect(() => {
     onCustomEventRef.current = options?.onCustomEvent
   }, [options?.onCustomEvent])
 
@@ -201,6 +224,9 @@ export function useChat(options?: UseChatOptions) {
         role: 'assistant',
         content: '',
         createdAt: new Date().toISOString(),
+        // Run-target label (PRP-0118): which agent / workflow produced this turn. Known
+        // client-side at send time (the modal decides it); shown in the action bar.
+        ...(runTargetLabelRef.current ? { runTarget: runTargetLabelRef.current } : {}),
       }
 
       // PRP-0110 / UDR-0088 D3: the send is COMMITTED once the AG-UI SSE stream
@@ -286,6 +312,11 @@ export function useChat(options?: UseChatOptions) {
           aguiState.image_options = selectedImageOptionsRef.current
         if (bgEnabledRef.current) aguiState.background = true
         if (temporaryRef.current) aguiState.temporary = true
+        // Declarative Workflow run-target (PRP-0118, CTR-0009, UDR-0101 D5). When set,
+        // the backend streams the compiled workflow instead of the active agent; the
+        // model / options / structured-output state above is ignored server-side (each
+        // node's model + options come from its referenced Prompt agent, UDR-0101 D7).
+        if (selectedWorkflowIdRef.current) aguiState.workflow_id = selectedWorkflowIdRef.current
         if (options?.resumeToken) aguiState.continuation_token = options.resumeToken
 
         // PRP-0069 follow-up: for regenerate / resume / similar flows

@@ -63,6 +63,10 @@ export interface ChatMessage {
   mcpApp?: McpAppEvent
   /** Model that generated this assistant message (CTR-0071, PRP-0035) */
   model?: string
+  /** Run-target that produced this turn: a workflow name or a non-default agent name
+   * (CTR-0185, PRP-0118). Shown in the action bar so the operator sees which agent /
+   * workflow answered. */
+  runTarget?: string
   /** Reasoning effort used for this assistant message (CTR-0030, PRP-0071) */
   reasoning?: string
   /** Text verbosity used for this assistant message (gpt-5.x only; CTR-0030, PRP-0081) */

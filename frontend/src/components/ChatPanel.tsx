@@ -1,9 +1,10 @@
-import { ImageIcon } from 'lucide-react'
+import { ImageIcon, Workflow as WorkflowIcon } from 'lucide-react'
 import { type DragEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BackgroundResponsesToggle } from '@/components/BackgroundResponsesToggle'
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
+import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { HelpPortal } from '@/components/HelpPortal'
 import { ImageOutputOptions } from '@/components/ImageOutputOptions'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
@@ -18,6 +19,12 @@ import { StructuredOutputControl, type StructuredSelection } from '@/components/
 import { ToolApprovalList } from '@/components/ToolApprovalCard'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
+import {
+  EMPTY_WORKFLOW_RUN,
+  reduceWorkflowEvent,
+  WorkflowProgressPanel,
+  type WorkflowRunState,
+} from '@/components/WorkflowProgressPanel'
 import { useChat } from '@/hooks/useChat'
 import { useChatScroll } from '@/hooks/useChatScroll'
 import { type ImageAttachment, useImageAttachment } from '@/hooks/useImageAttachment'
@@ -28,6 +35,7 @@ import { useTemplates } from '@/hooks/useTemplates'
 import { useToolApproval } from '@/hooks/useToolApproval'
 import { useTTS } from '@/hooks/useTTS'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
+import { getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
 import type { ChatMessage, ImageRef } from '@/types/chat'
 
@@ -108,6 +116,38 @@ export function ChatPanel({
   const [bgEnabled, setBgEnabled] = useState(() => localStorage.getItem(BG_STORAGE_KEY) === 'true')
   const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null)
   const [selectedModel, setSelectedModel] = useState('')
+  // Run-target (CTR-0185, PRP-0118, UDR-0101 D5 amended). Decided from the unified
+  // Declarative Agents modal, not a composer picker: a selected Workflow (from the
+  // run-target store) streams the compiled workflow (state.workflow_id) and hides the
+  // per-message model / options controls; otherwise the active Prompt agent runs.
+  const [wfTarget, setWfTarget] = useState(getWorkflowRunTarget)
+  const [activeAgentName, setActiveAgentName] = useState('')
+  const [workflowRun, setWorkflowRun] = useState<WorkflowRunState>(EMPTY_WORKFLOW_RUN)
+  const selectedWorkflowId = wfTarget?.id ?? ''
+  // Label shown on the assistant message: the workflow name, or a non-default active
+  // Prompt agent's name (the CORE / default agent shows nothing extra).
+  const runTargetLabel = wfTarget ? `⧉ ${wfTarget.name}` : activeAgentName || undefined
+
+  // Keep the run-target in sync with the modal (workflow selection + agent activation).
+  useEffect(() => {
+    const onRt = () => setWfTarget(getWorkflowRunTarget())
+    const onAgent = () => {
+      fetch('/api/model')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          const a = d?.active_agent as { id?: string; name?: string } | undefined
+          setActiveAgentName(a && a.id !== 'core' ? (a.name ?? '') : '')
+        })
+        .catch(() => setActiveAgentName(''))
+    }
+    onAgent()
+    window.addEventListener(RUN_TARGET_CHANGED_EVENT, onRt)
+    window.addEventListener(ACTIVE_AGENT_CHANGED_EVENT, onAgent)
+    return () => {
+      window.removeEventListener(RUN_TARGET_CHANGED_EVENT, onRt)
+      window.removeEventListener(ACTIVE_AGENT_CHANGED_EVENT, onAgent)
+    }
+  }, [])
   // Per-message generation options (effort + verbosity), catalog-driven
   // (CTR-0071, PRP-0081). Sent as AG-UI state.model_options.
   const [selectedModelOptions, setSelectedModelOptions] = useState<Record<string, string>>({})
@@ -198,17 +238,24 @@ export function ChatPanel({
     selectedOutputSchema: structured.schema,
     selectedImageOptions,
     temporary,
-    onCustomEvent: approvalApi.ingestCustomEvent,
+    selectedWorkflowId,
+    runTargetLabel,
+    // Fan the AG-UI CUSTOM events to the tool-approval consumer AND fold the additive
+    // workflow_* progress events into the live workflow run state (PRP-0118, CTR-0185).
+    onCustomEvent: useCallback(
+      (name: string | undefined, value: Record<string, unknown> | undefined) => {
+        approvalApi.ingestCustomEvent(name, value)
+        if (name?.startsWith('workflow_')) setWorkflowRun((s) => reduceWorkflowEvent(s, name, value))
+      },
+      [approvalApi],
+    ),
     // v0.77.1: transient upstream 5xx auto-retry status (CTR-0009). Shown as a
     // brief amber banner so the user knows the run is being resent, not stalled.
     onNotice: useCallback((message: string) => setNotification({ type: 'info', message }), []),
     // PRP-0110 / UDR-0088 D7: a send succeeded after a pre-commit failure -- the
     // server is back. Reassure the user through the existing notification surface;
     // there is no proactive liveness monitor (UDR-0088 D5).
-    onConnectionRecovered: useCallback(
-      () => setNotification({ type: 'success', message: 'Connection recovered' }),
-      [],
-    ),
+    onConnectionRecovered: useCallback(() => setNotification({ type: 'success', message: 'Connection recovered' }), []),
   })
 
   // Auto-resume from continuation_token (page reload or sidebar switch).
@@ -612,20 +659,35 @@ export function ChatPanel({
         </div>
       )}
 
+      {/* Live workflow graph progress (CTR-0185, PRP-0118, UDR-0101 D8). */}
+      <WorkflowProgressPanel state={workflowRun} />
+
       {compact ? (
         <div ref={inputRef}>
-          <div className="flex items-center justify-end gap-1 px-4">
-            <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
-            <ModelOptionsSelector
-              threadId={threadId ?? ''}
-              selectedModel={selectedModel}
-              onOptionsChange={handleModelOptionsChange}
-            />
-            <StructuredOutputControl
-              threadId={threadId ?? ''}
-              selectedModel={selectedModel}
-              onChange={handleStructuredChange}
-            />
+          <div className="flex flex-wrap items-center justify-end gap-1 px-4">
+            {/* UDR-0101 D7: a workflow's nodes fix their own model + options, so the
+                per-message model / options / structured controls are hidden when a workflow
+                run-target is selected (in the Declarative Agents modal). */}
+            {selectedWorkflowId && (
+              <span className="flex items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary">
+                <WorkflowIcon className="h-3.5 w-3.5" /> {wfTarget?.name}
+              </span>
+            )}
+            {!selectedWorkflowId && (
+              <>
+                <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
+                <ModelOptionsSelector
+                  threadId={threadId ?? ''}
+                  selectedModel={selectedModel}
+                  onOptionsChange={handleModelOptionsChange}
+                />
+                <StructuredOutputControl
+                  threadId={threadId ?? ''}
+                  selectedModel={selectedModel}
+                  onChange={handleStructuredChange}
+                />
+              </>
+            )}
             <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
             <McpToolManager />
             <SkillsManager />
@@ -685,17 +747,27 @@ export function ChatPanel({
           <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
           <div className="relative bg-background">
             <div className="mx-auto flex max-w-3xl items-center justify-end gap-1 px-4">
-              <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
-              <ModelOptionsSelector
-                threadId={threadId ?? ''}
-                selectedModel={selectedModel}
-                onOptionsChange={handleModelOptionsChange}
-              />
-              <StructuredOutputControl
-                threadId={threadId ?? ''}
-                selectedModel={selectedModel}
-                onChange={handleStructuredChange}
-              />
+              {/* UDR-0101 D7: hide the per-message model / options controls under a workflow. */}
+              {selectedWorkflowId && (
+                <span className="flex items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary">
+                  <WorkflowIcon className="h-3.5 w-3.5" /> {wfTarget?.name}
+                </span>
+              )}
+              {!selectedWorkflowId && (
+                <>
+                  <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
+                  <ModelOptionsSelector
+                    threadId={threadId ?? ''}
+                    selectedModel={selectedModel}
+                    onOptionsChange={handleModelOptionsChange}
+                  />
+                  <StructuredOutputControl
+                    threadId={threadId ?? ''}
+                    selectedModel={selectedModel}
+                    onChange={handleStructuredChange}
+                  />
+                </>
+              )}
               <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
               <McpToolManager />
               <SkillsManager />
