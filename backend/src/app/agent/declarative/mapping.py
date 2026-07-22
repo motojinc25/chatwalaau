@@ -295,6 +295,9 @@ def map_document(
     warnings: list[str] = []
 
     name = str(data.get("name") or data.get("displayName") or default_name or agent_id)
+    # ``displayName`` is ALSO kept separately (v0.112.1) so the management UI can show a
+    # friendly label next to the identifier; it stays a fallback for ``name`` above.
+    display_name = str(data.get("displayName") or "").strip()
     description = str(data.get("description") or "")
 
     # instructions -> Identity slot #1 (D6). The sentinel "=Identity" (and absence)
@@ -313,6 +316,7 @@ def map_document(
     return DeclarativeAgentSpec(
         id=agent_id,
         name=name,
+        display_name=display_name,
         description=description,
         source=source,
         group_path=group_path,

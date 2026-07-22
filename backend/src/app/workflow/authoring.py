@@ -71,6 +71,9 @@ def build_workflow_yaml(document: dict[str, Any]) -> str:
     name = str(document.get("name") or "").strip()
     if name:
         doc["name"] = name
+    display_name = str(document.get("displayName") or "").strip()
+    if display_name:
+        doc["displayName"] = display_name
     description = str(document.get("description") or "").strip()
     if description:
         doc["description"] = description
@@ -134,6 +137,7 @@ def document_from_yaml(text: str) -> dict[str, Any]:
         return {}
     return {
         "name": str(data.get("name") or ""),
+        "displayName": str(data.get("displayName") or ""),
         "description": str(data.get("description") or ""),
         "maxTurns": data.get("maxTurns"),
         "actions": data.get("actions") if isinstance(data.get("actions"), list) else [],

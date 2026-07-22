@@ -75,7 +75,7 @@ const ACTION_KINDS = [
 ] as const
 
 function emptyDocument(): WorkflowDocument {
-  return { name: '', description: '', maxTurns: null, actions: [] }
+  return { name: '', displayName: '', description: '', maxTurns: null, actions: [] }
 }
 
 function newAction(kind: string, index: number): WorkflowAction {
@@ -375,6 +375,14 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
                     value={doc.name}
                     onChange={(e) => patch({ name: e.target.value })}
                     placeholder="TriageFlow"
+                  />
+                </Field>
+                <Field label="Display name (optional)">
+                  <input
+                    className={CONTROL}
+                    value={doc.displayName ?? ''}
+                    onChange={(e) => patch({ displayName: e.target.value })}
+                    placeholder="Triage Flow"
                   />
                 </Field>
                 <Field label="Description">

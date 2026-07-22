@@ -154,7 +154,8 @@ def map_workflow_document(
     if str(data.get("kind") or "").strip() != WORKFLOW_KIND:
         raise WorkflowError("Workflow document must set 'kind: Workflow'.")
 
-    name = str(data.get("name") or default_name or workflow_id).strip()
+    name = str(data.get("name") or data.get("displayName") or default_name or workflow_id).strip()
+    display_name = str(data.get("displayName") or "").strip()
     description = str(data.get("description") or "").strip()
 
     referenced: list[str] = []
@@ -200,6 +201,7 @@ def map_workflow_document(
     return WorkflowSpec(
         id=workflow_id,
         name=name or workflow_id,
+        display_name=display_name,
         description=description,
         source=source,
         group_path=group_path,
@@ -276,6 +278,7 @@ def load_workflow_inventory() -> dict:
         entry: dict = {
             "id": wid,
             "name": path.stem,
+            "display_name": "",
             "description": "",
             "group_path": list(group_path),
             "source": "custom",
@@ -294,6 +297,7 @@ def load_workflow_inventory() -> dict:
             annotate_agent_ref_warnings(spec)
             entry.update(
                 name=spec.name,
+                display_name=spec.display_name,
                 description=spec.description,
                 loaded=True,
                 warnings=spec.warnings,

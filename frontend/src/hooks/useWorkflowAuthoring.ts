@@ -30,6 +30,8 @@ export interface WorkflowAction {
 
 export interface WorkflowDocument {
   name: string
+  /** Optional friendly label (YAML `displayName`), shown in the management UI. */
+  displayName?: string
   description?: string
   maxTurns?: number | null
   actions: WorkflowAction[]
@@ -51,6 +53,7 @@ export interface WorkflowValidationResult {
 export interface WorkflowEntry {
   id: string
   name: string
+  display_name?: string
   description?: string
   group_path: string[]
   source: 'custom'

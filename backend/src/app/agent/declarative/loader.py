@@ -208,6 +208,7 @@ def load_inventory(active_id: str) -> dict:
         {
             "id": core.id,
             "name": core.name,
+            "display_name": core.display_name,
             "description": core.description,
             "group_path": [],
             "source": "core",
@@ -226,6 +227,7 @@ def load_inventory(active_id: str) -> dict:
         entry: dict = {
             "id": cid,
             "name": path.stem,
+            "display_name": "",
             "description": "",
             "group_path": list(group_path),
             "source": "custom",
@@ -244,6 +246,7 @@ def load_inventory(active_id: str) -> dict:
             _annotate_model_warnings(spec)
             _annotate_tool_warnings(spec)
             entry["name"] = spec.name
+            entry["display_name"] = spec.display_name
             entry["description"] = spec.description
             entry["loaded"] = True
             entry["warnings"] = spec.warnings

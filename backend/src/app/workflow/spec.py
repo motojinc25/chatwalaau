@@ -29,6 +29,9 @@ class WorkflowSpec:
 
     id: str
     name: str
+    # Optional human-friendly label from the YAML ``displayName`` (v0.112.1), mirroring
+    # the declarative agent spec; surfaced in the management UI's secondary line.
+    display_name: str = ""
     description: str = ""
     source: str = "custom"  # always "custom" (there is no bundled CORE workflow)
     group_path: tuple[str, ...] = ()

@@ -3,7 +3,6 @@ import {
   CircleCheck,
   Loader2,
   Pencil,
-  Play,
   Plus,
   RefreshCw,
   Trash2,
@@ -42,6 +41,7 @@ const DeclarativeWorkflowEditor = lazyWithReload(() =>
 interface AgentEntry {
   id: string
   name: string
+  display_name?: string
   description?: string
   group_path: string[]
   source: 'core' | 'custom'
@@ -67,6 +67,7 @@ interface Unified {
   kind: Kind
   id: string
   name: string
+  display_name?: string
   description?: string
   group_path: string[]
   loaded: boolean
@@ -186,32 +187,54 @@ export function DeclarativeAgentManager() {
     [busy],
   )
 
+  // Activation is ONE flow for both kinds (v0.112.1): confirm -> blocking "Rebuilding"
+  // indicator -> apply. A Prompt agent rebuilds the per-model agents server-side; a
+  // Workflow is compiled/validated (the equivalent build step) and then becomes the chat
+  // run-target. Exactly one of the two is the effective run-target.
   const doActivate = useCallback(async () => {
-    if (!selected || selected.kind !== 'Prompt') return
+    if (!selected) return
     setConfirmMode(null)
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch('/api/agents/active', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: selected.id }),
-      })
-      if (!res.ok) {
-        const d = await res.json().catch(() => null)
-        throw new Error(d?.detail?.message || d?.detail?.error || 'Failed to activate agent')
+      if (selected.kind === 'Prompt') {
+        const res = await fetch('/api/agents/active', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: selected.id }),
+        })
+        if (!res.ok) {
+          const d = await res.json().catch(() => null)
+          throw new Error(d?.detail?.message || d?.detail?.error || 'Failed to activate agent')
+        }
+        adoptAgents(await res.json())
+        // Activating a Prompt agent makes it the effective run-target -- clear any
+        // workflow run-target so chat runs the agent (operator-decided, UDR-0101 D5).
+        setWorkflowRunTarget(null)
+        setWfTarget(null)
+        window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
+      } else {
+        // Compile/validate the STORED workflow (the "build" step) before it goes live,
+        // so an unrunnable workflow can never become the run-target.
+        const res = await fetch(`/api/workflows/${encodeURI(selected.id)}/validate`, { method: 'POST' })
+        if (!res.ok) {
+          const d = await res.json().catch(() => null)
+          throw new Error(d?.detail?.message || d?.detail?.error || 'Workflow failed to compile')
+        }
+        const result = (await res.json()) as { valid: boolean; error: string | null; warnings: string[] }
+        if (!result.valid) throw new Error(result.error || 'Workflow failed to compile')
+        if (result.warnings.length) throw new Error(`Resolve the warnings first: ${result.warnings[0]}`)
+        const w = workflows.find((x) => x.id === selected.id)
+        const target = { id: selected.id, name: w?.name ?? selected.id }
+        setWorkflowRunTarget(target)
+        setWfTarget(target)
       }
-      adoptAgents(await res.json())
-      // Activating a Prompt agent makes it the effective run-target -- clear any
-      // workflow run-target so chat runs the agent (operator-decided, UDR-0101 D5).
-      setWorkflowRunTarget(null)
-      window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to activate agent')
+      setError(err instanceof Error ? err.message : 'Failed to activate')
     } finally {
       setBusy(false)
     }
-  }, [selected, adoptAgents])
+  }, [selected, adoptAgents, workflows])
 
   const doReload = useCallback(async () => {
     setConfirmMode(null)
@@ -256,16 +279,6 @@ export function DeclarativeAgentManager() {
     }
   }, [selected, adoptAgents, wfApi, wfTarget, fetchInventory])
 
-  const runWorkflowInChat = useCallback((w: WorkflowEntry) => {
-    setWorkflowRunTarget({ id: w.id, name: w.name })
-    setWfTarget({ id: w.id, name: w.name })
-  }, [])
-
-  const stopWorkflow = useCallback(() => {
-    setWorkflowRunTarget(null)
-    setWfTarget(null)
-  }, [])
-
   const openAgentEditor = useCallback((id: string | null) => {
     setCreateMenu(false)
     setEditId(id)
@@ -282,7 +295,9 @@ export function DeclarativeAgentManager() {
     window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
   }, [fetchInventory])
 
-  // ---- unified grouping: Prompt agents (folder groups) then Workflows ----
+  // ---- unified grouping: Built-in, Agents (+ nested folders), Workflows (+ nested) ----
+  // The "Built-in", "Agents" and "Workflows" sections are ALWAYS rendered (even when
+  // empty) so the two kinds are discoverable before anything is authored (v0.112.1).
   const sections = useMemo(() => {
     const out: Array<{ header: string; kind: Kind; items: Unified[] }> = []
     const agentGroups = new Map<string, Unified[]>()
@@ -292,17 +307,23 @@ export function DeclarativeAgentManager() {
       arr.push({ kind: 'Prompt', ...a })
       agentGroups.set(label, arr)
     }
-    const builtin = agentGroups.get(BUILTIN_LABEL)
-    if (builtin) out.push({ header: 'Agents · Built-in', kind: 'Prompt', items: builtin })
+    out.push({ header: 'Built-in', kind: 'Prompt', items: agentGroups.get(BUILTIN_LABEL) ?? [] })
+    out.push({ header: 'Agents', kind: 'Prompt', items: agentGroups.get(TOP_LEVEL_LABEL) ?? [] })
     for (const [label, arr] of agentGroups) {
-      if (label !== BUILTIN_LABEL) out.push({ header: `Agents · ${label}`, kind: 'Prompt', items: arr })
+      if (label !== BUILTIN_LABEL && label !== TOP_LEVEL_LABEL) {
+        out.push({ header: `Agents · ${label}`, kind: 'Prompt', items: arr })
+      }
     }
-    if (workflows.length) {
-      out.push({
-        header: 'Workflows',
-        kind: 'Workflow',
-        items: workflows.map((w) => ({ kind: 'Workflow' as const, ...w })),
-      })
+    const wfGroups = new Map<string, Unified[]>()
+    for (const w of workflows) {
+      const label = w.group_path.length ? w.group_path.join(' / ') : TOP_LEVEL_LABEL
+      const arr = wfGroups.get(label) ?? []
+      arr.push({ kind: 'Workflow', ...w })
+      wfGroups.set(label, arr)
+    }
+    out.push({ header: 'Workflows', kind: 'Workflow', items: wfGroups.get(TOP_LEVEL_LABEL) ?? [] })
+    for (const [label, arr] of wfGroups) {
+      if (label !== TOP_LEVEL_LABEL) out.push({ header: `Workflows · ${label}`, kind: 'Workflow', items: arr })
     }
     return out
   }, [agents, workflows])
@@ -313,10 +334,11 @@ export function DeclarativeAgentManager() {
     sections.flatMap((s) => s.items).find((e) => selected && e.kind === selected.kind && e.id === selected.id) ?? null
 
   const hasWarnings = (current?.warnings?.length ?? 0) > 0
-  const canActivate =
-    current?.kind === 'Prompt' && current.loaded === true && current.id !== activeId && !current.error && !hasWarnings
-  const isRunTargetWorkflow = current?.kind === 'Workflow' && wfTarget?.id === current.id
-  const canUseWorkflow = current?.kind === 'Workflow' && current.loaded && !hasWarnings && !isRunTargetWorkflow
+  // The single effective run-target: a selected Workflow wins, else the active Prompt
+  // agent. Drives the "Active" state of BOTH kinds identically (v0.112.1).
+  const isCurrentActive =
+    current?.kind === 'Workflow' ? wfTarget?.id === current.id : current?.id === activeId && !wfTarget
+  const canActivate = current !== null && current.loaded === true && !current.error && !hasWarnings && !isCurrentActive
 
   return (
     <>
@@ -384,23 +406,18 @@ export function DeclarativeAgentManager() {
                             </span>
                             <span className="min-w-0 flex-1">
                               <span className="block truncate text-sm font-medium">{e.name}</span>
+                              {/* Line 2 is the Display name (v0.112.1); it is NOT swapped
+                                  for an "Active" label -- the check icon shows active state.
+                                  A load error / blocking warning still takes precedence. */}
                               <span className="block truncate text-[11px] text-muted-foreground">
-                                {isActive
-                                  ? e.kind === 'Workflow'
-                                    ? 'Running in chat'
-                                    : 'Active'
-                                  : !e.loaded
-                                    ? 'Error'
-                                    : (e.warnings?.length ?? 0) > 0
-                                      ? 'Needs fixing'
-                                      : e.id}
+                                {!e.loaded
+                                  ? 'Error'
+                                  : (e.warnings?.length ?? 0) > 0
+                                    ? 'Needs fixing'
+                                    : e.display_name || e.id}
                               </span>
                             </span>
-                            <span
-                              className={cn(
-                                'shrink-0 rounded px-1 py-0.5 text-[9px] font-medium uppercase',
-                                e.kind === 'Workflow' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
-                              )}>
+                            <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[9px] font-medium uppercase text-muted-foreground">
                               {e.kind}
                             </span>
                           </button>
@@ -416,17 +433,14 @@ export function DeclarativeAgentManager() {
                     <>
                       <div className="mb-2 flex items-center gap-2">
                         <h3 className="truncate text-base font-semibold">{current.name}</h3>
-                        <span
-                          className={cn(
-                            'rounded px-1.5 py-0.5 text-[11px] font-medium',
-                            current.kind === 'Workflow'
-                              ? 'bg-primary/10 text-primary'
-                              : 'bg-muted text-muted-foreground',
-                          )}>
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
                           {current.kind}
                         </span>
                       </div>
-                      <p className="mb-1 font-mono text-[11px] text-muted-foreground">{current.id}</p>
+                      {/* Line 2 is the Display name (v0.112.1); falls back to the id. */}
+                      <p className={cn('mb-1 text-[11px] text-muted-foreground', !current.display_name && 'font-mono')}>
+                        {current.display_name || current.id}
+                      </p>
                       {current.description && (
                         <p className="mb-3 text-sm text-muted-foreground">{current.description}</p>
                       )}
@@ -471,30 +485,11 @@ export function DeclarativeAgentManager() {
                       )}
 
                       <div className="flex flex-wrap items-center gap-2">
-                        {current.kind === 'Prompt' ? (
-                          <Button size="sm" disabled={!canActivate} onClick={() => setConfirmMode('activate')}>
-                            {current.active && !wfTarget
-                              ? 'Active'
-                              : hasWarnings
-                                ? 'Resolve warnings to activate'
-                                : 'Activate this agent'}
-                          </Button>
-                        ) : isRunTargetWorkflow ? (
-                          <Button size="sm" variant="outline" onClick={stopWorkflow}>
-                            Stop running in chat
-                          </Button>
-                        ) : (
-                          <Button
-                            size="sm"
-                            disabled={!canUseWorkflow}
-                            onClick={() => {
-                              const w = workflows.find((x) => x.id === current.id)
-                              if (w) runWorkflowInChat(w)
-                            }}>
-                            <Play className="mr-1 h-3.5 w-3.5" />
-                            {hasWarnings ? 'Resolve warnings to run' : 'Run in chat'}
-                          </Button>
-                        )}
+                        {/* ONE activation affordance for both kinds (v0.112.1): same label,
+                            same confirmation, same blocking "Rebuilding" indicator. */}
+                        <Button size="sm" disabled={!canActivate} onClick={() => setConfirmMode('activate')}>
+                          {isCurrentActive ? 'Active' : hasWarnings ? 'Resolve warnings to activate' : 'Activate'}
+                        </Button>
                         {current.editable && (current.kind === 'Workflow' ? wfCanAuthor : canAuthor) && (
                           <>
                             <Button
@@ -528,20 +523,26 @@ export function DeclarativeAgentManager() {
                 {busy ? (
                   <div className="flex items-center gap-2 text-sm">
                     <Loader2 className="h-5 w-5 animate-spin" />
-                    {confirmMode === 'delete' ? 'Working...' : 'Rebuilding agents...'}
+                    {confirmMode === 'delete'
+                      ? 'Working...'
+                      : current?.kind === 'Workflow'
+                        ? 'Rebuilding workflows...'
+                        : 'Rebuilding agents...'}
                   </div>
                 ) : (
                   <div className="w-[360px] rounded-lg border bg-background p-4 shadow-lg">
                     <p className="text-sm font-medium">
                       {confirmMode === 'activate'
-                        ? 'Activate this agent?'
+                        ? `Activate this ${current?.kind === 'Workflow' ? 'workflow' : 'agent'}?`
                         : confirmMode === 'delete'
                           ? `Delete this ${current?.kind === 'Workflow' ? 'workflow' : 'agent'}?`
                           : 'Reload from disk?'}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {confirmMode === 'activate'
-                        ? 'This rebuilds the agents; the next message, the API, and Teams use the selected agent.'
+                        ? current?.kind === 'Workflow'
+                          ? 'This builds the workflow and makes it the run-target; your next message runs it instead of the active agent.'
+                          : 'This rebuilds the agents; the next message, the API, and Teams use the selected agent.'
                         : confirmMode === 'delete'
                           ? 'This permanently deletes the YAML file.'
                           : 'Re-scans the declarative directory.'}

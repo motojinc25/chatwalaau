@@ -40,6 +40,9 @@ class DeclarativeAgentSpec:
 
     id: str
     name: str
+    # Optional human-friendly label from the YAML ``displayName`` (v0.112.1). Distinct
+    # from ``name`` (the identifier); surfaced in the management UI's secondary line.
+    display_name: str = ""
     description: str = ""
     source: str = "custom"  # "core" | "custom"
     # Nested folders relative to DECLARATIVE_AGENTS_DIR (UDR-0072 D11); () for CORE

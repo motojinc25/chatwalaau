@@ -145,6 +145,7 @@ def register_workflows(app: FastAPI) -> None:
         return {
             "id": spec.id,
             "name": spec.name,
+            "display_name": spec.display_name,
             "description": spec.description,
             "group_path": list(spec.group_path),
             "referenced_agents": spec.referenced_agents,
