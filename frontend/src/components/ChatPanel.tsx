@@ -1,4 +1,4 @@
-import { ImageIcon, Workflow as WorkflowIcon } from 'lucide-react'
+import { Bot, ImageIcon, Workflow as WorkflowIcon } from 'lucide-react'
 import { type DragEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BackgroundResponsesToggle } from '@/components/BackgroundResponsesToggle'
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
@@ -121,12 +121,17 @@ export function ChatPanel({
   // run-target store) streams the compiled workflow (state.workflow_id) and hides the
   // per-message model / options controls; otherwise the active Prompt agent runs.
   const [wfTarget, setWfTarget] = useState(getWorkflowRunTarget)
-  const [activeAgentName, setActiveAgentName] = useState('')
+  const [activeAgent, setActiveAgent] = useState<{ id: string; name: string }>({ id: '', name: '' })
   const [workflowRun, setWorkflowRun] = useState<WorkflowRunState>(EMPTY_WORKFLOW_RUN)
   const selectedWorkflowId = wfTarget?.id ?? ''
-  // Label shown on the assistant message: the workflow name, or a non-default active
-  // Prompt agent's name (the CORE / default agent shows nothing extra).
-  const runTargetLabel = wfTarget ? `⧉ ${wfTarget.name}` : activeAgentName || undefined
+  // Label stamped on the assistant message: the workflow name, or the active agent's
+  // name -- including the Built-in agent (v0.112.2), so a reloaded chat can always say
+  // which Built-in / Prompt / Workflow agent answered.
+  const runTargetLabel = wfTarget ? `⧉ ${wfTarget.name}` : activeAgent.name || undefined
+  // A declarative agent pins its own model + options, so the per-message controls would
+  // be misleading -- hide them for a custom Prompt agent exactly as for a workflow
+  // (v0.112.2). The Built-in (CORE) agent keeps the controls, as before.
+  const hideModelControls = Boolean(selectedWorkflowId) || (activeAgent.id !== '' && activeAgent.id !== 'core')
 
   // Keep the run-target in sync with the modal (workflow selection + agent activation).
   useEffect(() => {
@@ -136,9 +141,9 @@ export function ChatPanel({
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
           const a = d?.active_agent as { id?: string; name?: string } | undefined
-          setActiveAgentName(a && a.id !== 'core' ? (a.name ?? '') : '')
+          setActiveAgent({ id: a?.id ?? '', name: a?.name ?? '' })
         })
-        .catch(() => setActiveAgentName(''))
+        .catch(() => setActiveAgent({ id: '', name: '' }))
     }
     onAgent()
     window.addEventListener(RUN_TARGET_CHANGED_EVENT, onRt)
@@ -665,15 +670,17 @@ export function ChatPanel({
       {compact ? (
         <div ref={inputRef}>
           <div className="flex flex-wrap items-center justify-end gap-1 px-4">
-            {/* UDR-0101 D7: a workflow's nodes fix their own model + options, so the
-                per-message model / options / structured controls are hidden when a workflow
-                run-target is selected (in the Declarative Agents modal). */}
-            {selectedWorkflowId && (
+            {/* UDR-0101 D7 (extended v0.112.2): a workflow's nodes -- and a custom Prompt
+                agent -- fix their own model + options, so the per-message model / options /
+                structured controls are hidden and the active run-target is named instead.
+                The Built-in agent keeps the controls. */}
+            {hideModelControls && (
               <span className="flex items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary">
-                <WorkflowIcon className="h-3.5 w-3.5" /> {wfTarget?.name}
+                {selectedWorkflowId ? <WorkflowIcon className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
+                {selectedWorkflowId ? wfTarget?.name : activeAgent.name}
               </span>
             )}
-            {!selectedWorkflowId && (
+            {!hideModelControls && (
               <>
                 <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
                 <ModelOptionsSelector
@@ -747,13 +754,15 @@ export function ChatPanel({
           <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
           <div className="relative bg-background">
             <div className="mx-auto flex max-w-3xl items-center justify-end gap-1 px-4">
-              {/* UDR-0101 D7: hide the per-message model / options controls under a workflow. */}
-              {selectedWorkflowId && (
+              {/* UDR-0101 D7 (extended v0.112.2): hidden under a workflow OR a custom
+                  Prompt agent; the Built-in agent keeps the controls. */}
+              {hideModelControls && (
                 <span className="flex items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary">
-                  <WorkflowIcon className="h-3.5 w-3.5" /> {wfTarget?.name}
+                  {selectedWorkflowId ? <WorkflowIcon className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
+                  {selectedWorkflowId ? wfTarget?.name : activeAgent.name}
                 </span>
               )}
-              {!selectedWorkflowId && (
+              {!hideModelControls && (
                 <>
                   <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
                   <ModelOptionsSelector

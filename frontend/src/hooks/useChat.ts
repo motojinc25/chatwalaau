@@ -644,8 +644,15 @@ export function useChat(options?: UseChatOptions) {
           if (completedActivityLog.length > 0) {
             assistantMsg.activity_log = completedActivityLog
           }
-          if (completedUsage) {
-            assistantMsg.usage = completedUsage
+          // Persist the run-target INSIDE the usage object (the established place for
+          // per-message model / reasoning / verbosity), so a reloaded chat shows which
+          // Built-in / Prompt agent or Workflow answered (v0.112.2). A workflow run emits
+          // no usage event, so the object is created when only the label exists.
+          if (completedUsage || runTargetLabelRef.current) {
+            assistantMsg.usage = {
+              ...(completedUsage ?? {}),
+              ...(runTargetLabelRef.current ? { run_target: runTargetLabelRef.current } : {}),
+            }
           }
           const userMsg: Record<string, unknown> = { role: 'user', content: userContent, id: userMessage.id }
           if (dispatchImages && dispatchImages.length > 0) {

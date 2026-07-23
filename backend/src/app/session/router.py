@@ -552,6 +552,11 @@ class UsageItem(BaseModel):
     verbosity: str | None = None
     structured: bool | None = None
     output_status: dict[str, Any] | None = None
+    # Run-target that produced the turn -- the Built-in / Prompt agent name, or the
+    # workflow name (v0.112.2). Persisted for the same reason as `model` above: without
+    # it, model_dump dropped the label and a reloaded chat could not show WHICH agent or
+    # workflow answered. Absent on legacy messages.
+    run_target: str | None = None
 
 
 class SaveMessageItem(BaseModel):

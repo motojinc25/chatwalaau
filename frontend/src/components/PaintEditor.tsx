@@ -803,7 +803,25 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
                 className="w-24"
                 aria-label="Stroke width"
               />
-              <span className="w-6 text-xs tabular-nums text-zinc-500">{width}</span>
+              {/* v0.112.2: the value is also directly typeable, not just draggable.
+                  Empty input is allowed while typing; the value is clamped to [1, 40]
+                  on change and normalized on blur so the canvas never gets NaN. */}
+              <input
+                type="number"
+                min={1}
+                max={40}
+                value={width}
+                onChange={(e) => {
+                  const n = Number(e.target.value)
+                  if (Number.isFinite(n)) setWidth(Math.min(40, Math.max(1, Math.round(n))))
+                }}
+                onBlur={(e) => {
+                  const n = Number(e.target.value)
+                  setWidth(Number.isFinite(n) && n > 0 ? Math.min(40, Math.max(1, Math.round(n))) : 1)
+                }}
+                className="w-12 rounded border border-zinc-200 bg-white px-1 py-0.5 text-xs tabular-nums text-zinc-700 outline-none focus:ring-1 focus:ring-zinc-400"
+                aria-label="Stroke width value"
+              />
             </div>
 
             <span className="mx-2 h-5 w-px bg-zinc-200" />

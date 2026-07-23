@@ -30,6 +30,10 @@ export interface UsageInfo {
   verbosity?: string
   /** Structured output active for this turn (CTR-0009 v14, PRP-0082). */
   structured?: boolean
+  /** Run-target that produced this turn -- the Built-in / Prompt agent name, or the
+   * workflow name (v0.112.2). Persisted here (like `model`) so a reloaded chat still
+   * shows which agent / workflow answered. */
+  run_target?: string
   /**
    * Soft, non-blocking validation status of the structured answer (UDR-0058 D4).
    * `parsed` false means the JSON was empty (refusal) or unparseable (truncation /
