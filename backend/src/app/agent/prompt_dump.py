@@ -21,11 +21,17 @@ from datetime import UTC, datetime
 import logging
 from pathlib import Path
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.core.config import settings
 
+if TYPE_CHECKING:
+    from app.agent.tool_surface import ToolRow, ToolSurfaceReport
+
 logger = logging.getLogger(__name__)
+
+# Column at which a row's status starts, so the tool list stays scannable.
+_NAME_COLUMN = 34
 
 
 def _safe(value: str) -> str:
@@ -64,6 +70,68 @@ def _message_text(message: dict[str, Any]) -> tuple[str, int]:
     return text, images
 
 
+def _render_row(row: ToolRow, *, indent: int = 0) -> list[str]:
+    """Render one tool row (and its children) as aligned Markdown list lines."""
+    pad = " " * indent
+    label = f"{pad}- {row.name}"
+    trailer = row.status
+    detail = row.reason or row.note
+    if row.reason and row.note:
+        detail = f"{row.reason}; {row.note}"
+    if detail:
+        trailer = f"{row.status}  {detail}"
+    lines = [f"{label.ljust(_NAME_COLUMN)}{trailer}"]
+    for child in row.children:
+        lines.extend(_render_row(child, indent=indent + 4))
+    return lines
+
+
+def _render_section(title: str, rows: list[ToolRow]) -> list[str]:
+    lines = [f"### {title}", ""]
+    if not rows:
+        lines.extend(["- (none)", ""])
+        return lines
+    for row in rows:
+        lines.extend(_render_row(row))
+    lines.append("")
+    return lines
+
+
+def render_tool_surface(report: ToolSurfaceReport) -> list[str]:
+    """Render the Tool Surface section of a dump (PRP-0119, CTR-0009 v18).
+
+    Deliberately compact -- one line per tool, no descriptions and no JSON schemas
+    (UDR-0102: the dump answers "is it there and why", not "what does it do"), so a
+    large MCP deployment costs a few KB per turn rather than tens.
+    """
+    from app.agent.tool_surface import (
+        STATUS_ACTIVE,
+        STATUS_EXCLUDED,
+        STATUS_MISMATCH,
+        STATUS_WARNING,
+    )
+
+    counts = report.counts()
+    lines = [
+        "## Tool Surface",
+        "",
+        f"- agent: {report.agent_label or '(none)'}",
+        f"- model: {report.model or '(unknown)'}",
+        f"- digest: {report.digest}",
+        (
+            f"- summary: {counts[STATUS_ACTIVE]} active / {counts[STATUS_EXCLUDED]} excluded / "
+            f"{counts[STATUS_WARNING]} warning / {counts[STATUS_MISMATCH]} mismatch"
+        ),
+    ]
+    lines.extend(f"- note: {note}" for note in report.notes)
+    lines.append("")
+    lines.extend(_render_section("Built-in functions", report.functions))
+    lines.extend(_render_section("MCP", report.mcp))
+    lines.extend(_render_section("Skills", report.skills))
+    lines.extend(_render_section("Provider-supplied", report.provider_supplied))
+    return lines
+
+
 def dump_prompt(
     *,
     thread_id: str,
@@ -73,6 +141,7 @@ def dump_prompt(
     messages: list[dict[str, Any]],
     meta: dict[str, Any] | None = None,
     include_system_prompt: bool = True,
+    tool_surface: ToolSurfaceReport | None = None,
 ) -> Path | None:
     """Write the flowing prompt to a file, or return None.
 
@@ -83,6 +152,12 @@ def dump_prompt(
     ``include_system_prompt`` writes the assembled system prompt block on the first
     turn ("session start"); on later turns the system prompt is unchanged (a frozen
     snapshot), so only the flowing conversation is written and the section notes that.
+
+    ``tool_surface`` (PRP-0119, CTR-0009 v18) writes the agent's tool surface. Unlike
+    the system prompt it is written on EVERY turn: MCP tool state is re-read per run
+    (UDR-0064 D3) and the whole surface is rebuildable mid-session from the MCP,
+    Skills, and declarative-agent management surfaces, so a first-turn-only section
+    would be stale exactly when it matters (UDR-0102 D6).
 
     Returns the written path when ``PROMPT_DUMP_ENABLED`` and the write succeeds;
     ``None`` when disabled or on any failure (logged as a WARNING, never raised).
@@ -109,6 +184,14 @@ def dump_prompt(
         lines.append(f"- system_prompt_included: {include_system_prompt}")
         lines.append(f"- system_prompt_chars: {len(system_prompt or '')}")
         lines.append(f"- conversation_messages: {len(messages)}")
+        if tool_surface is not None:
+            _counts = tool_surface.counts()
+            lines.append(f"- tool_surface_digest: {tool_surface.digest}")
+            lines.append(f"- tool_surface_counts: {_counts}")
+
+        if tool_surface is not None:
+            lines.append("")
+            lines.extend(render_tool_surface(tool_surface))
 
         lines.append("\n## System Prompt\n")
         if include_system_prompt:

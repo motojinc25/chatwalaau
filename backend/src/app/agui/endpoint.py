@@ -890,6 +890,14 @@ async def _stream_with_reasoning(
                         _history_msgs = _raw
             _dump_first_turn = not any(isinstance(m, dict) and m.get("role") == "assistant" for m in _history_msgs)
             _flowing = [*_history_msgs, *request_body.messages]
+            # Tool surface (PRP-0119, CTR-0009 v18, UDR-0102). Read from the BUILT
+            # agent -- the object about to run -- not from the authoring inventory
+            # (CTR-0178), so a configuration-vs-build divergence is visible rather
+            # than restated (UDR-0102 D1). Read-only and best-effort: returns None on
+            # any failure and the dump proceeds without the section.
+            from app.agent.tool_surface import describe_tool_surface
+
+            _tool_surface = await describe_tool_surface(agent, spec=spec, model=effective_model)
             _dump_path = dump_prompt(
                 thread_id=thread_id,
                 run_id=run_id,
@@ -897,6 +905,7 @@ async def _stream_with_reasoning(
                 system_prompt=_effective_system_prompt,
                 messages=_flowing,
                 include_system_prompt=_dump_first_turn,
+                tool_surface=_tool_surface,
                 meta={
                     "first_turn": _dump_first_turn,
                     "temporary": temporary,
@@ -909,12 +918,17 @@ async def _stream_with_reasoning(
             if _dump_path is not None:
                 logger.info(
                     "Prompt dump written: %s (first_turn=%s, system_prompt_chars=%d, "
-                    "history_messages=%d, new_messages=%d)",
+                    "history_messages=%d, new_messages=%d, tool_surface=%s)",
                     _dump_path,
                     _dump_first_turn,
                     len(_effective_system_prompt),
                     len(_history_msgs),
                     len(request_body.messages),
+                    (
+                        f"{_tool_surface.digest} {_tool_surface.counts()}"
+                        if _tool_surface is not None
+                        else "unavailable"
+                    ),
                 )
 
         # Set thread_id for image generation tools (CTR-0050, PRP-0027)
