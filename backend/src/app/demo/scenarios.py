@@ -10,7 +10,7 @@ scripts cover every UI surface the demo needs to exercise:
 - ``reasoning``: a text_reasoning preamble + text body so the
   reasoning-block UI (CTR-0017) is exercised.
 - ``weather``: triggers the live Weather tool (Open-Meteo, free) by
-  emitting a ``get_coords_by_city`` function_call. After the Agent
+  emitting a ``weather_geocode_city`` function_call. After the Agent
   fans out to the tool loop, the model is invoked again -- the demo
   client then emits a short text summary instead of a second tool
   call.
@@ -357,7 +357,7 @@ def build_script(
         city = _extract_city(user_text)
         return [
             TextStep(_WEATHER_INTRO),
-            FunctionCallStep(name="get_coords_by_city", arguments={"city": city}),
+            FunctionCallStep(name="weather_geocode_city", arguments={"city": city}),
         ]
     if kind == "image":
         return [

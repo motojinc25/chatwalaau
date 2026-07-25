@@ -315,8 +315,7 @@ def _mcp_rows(agent: Any, allow: ResolvedAllowlist | None) -> list[ToolRow]:
         if not exposed:
             # Server prepared but not connected: get_server_tool_names() is empty, so
             # the factory falls back to allowed_tools=None -- a fail-OPEN widening of
-            # the allow-list (agent_factory.py:298-300). Surfaced, not changed here;
-            # the behaviour decision is PRP-0120.
+            # the allow-list (agent_factory.py:298-300). Surfaced, not changed here
             rows.append(
                 ToolRow(
                     name,

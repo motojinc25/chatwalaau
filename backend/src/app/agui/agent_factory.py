@@ -24,6 +24,7 @@ from agent_framework import Agent
 
 from app import models_catalog, providers
 from app.agent.approval import resolve_require_set, wrap_with_approval
+from app.agent.capability_guidance import ToolGuidance, render_capability_guidance
 from app.agent.compaction import resolve_compaction_strategy
 from app.agent.identity import build_system_prompt
 from app.agui.agent_registry import WEB_SEARCH_INSTRUCTION, AgentRegistry, _build_chat_client
@@ -33,7 +34,7 @@ from app.mcp.lifecycle import get_mcp_tools, get_server_tool_names
 from app.mcp.overrides import get_override_store
 from app.session.provider import FileHistoryProvider
 from app.skills.provider import create_skills_approval_middleware, create_skills_provider
-from app.weather.tools import get_coords_by_city, get_current_weather_by_coords, get_weather_next_week
+from app.weather.tools import weather_geocode_city, weather_get_current, weather_get_forecast
 
 logger = logging.getLogger(__name__)
 
@@ -146,24 +147,27 @@ def _build_tools_and_instructions(
     # base tool list and the web search guidance lives in WEB_SEARCH_INSTRUCTION
     # (appended only for models whose provider supplies a web search tool).
     _weather_tools = [
-        t for t in (get_coords_by_city, get_current_weather_by_coords, get_weather_next_week) if _fn_ok(t.__name__)
+        t for t in (weather_geocode_city, weather_get_current, weather_get_forecast) if _fn_ok(t.__name__)
     ]
     tools: list[Any] = list(_weather_tools)
-    # Capability / tool guidance only. The Global Agent Identity (Prompt Assembly
-    # slot #1) is prepended by build_system_prompt() at the end of assembly,
-    # replacing the former anonymous persona sentence (PRP-0073, CTR-0104,
-    # UDR-0049 D4). The weather guidance is emitted only when at least one weather
-    # tool survives the per-agent allow-list.
-    instructions = (
-        (
-            "You can look up weather information for any city worldwide. "
-            "For weather queries: first use get_coords_by_city to get coordinates, "
-            "then use get_current_weather_by_coords or get_weather_next_week. "
-            "After calling weather tools, provide a clear summary of the weather information."
+    # Capability / tool guidance (Prompt Assembly slot #3). Each tool category
+    # contributes a named ToolGuidance block; render_capability_guidance wraps each in
+    # a <tool-guide name="..."> tag at the end (PRP-0120, CTR-0104 v4, UDR-0103 D1).
+    # The Global Agent Identity (slot #1) is prepended by build_system_prompt() and the
+    # Memory Blocks (slot #2) by the AgentRegistry -- unchanged. A category's guidance
+    # is appended IFF that category contributes at least one tool, generalizing the
+    # former weather-only "emit iff built" behavior.
+    guidance: list[ToolGuidance] = []
+    if _weather_tools:
+        guidance.append(
+            ToolGuidance(
+                "weather",
+                "You can look up weather information for any city worldwide. "
+                "For weather queries: first use weather_geocode_city to get coordinates, "
+                "then use weather_get_current or weather_get_forecast. "
+                "After calling weather tools, provide a clear summary of the weather information.",
+            )
         )
-        if _weather_tools
-        else ""
-    )
 
     # Conditionally register coding tools (CTR-0032, PRP-0019)
     if settings.coding_enabled:
@@ -173,7 +177,7 @@ def _build_tools_and_instructions(
         coding_tools = [t for t in (file_read, file_write, bash_execute, file_glob, file_grep) if _fn_ok(t.__name__)]
         if coding_tools:
             tools.extend(coding_tools)
-            instructions += " " + _build_coding_instructions()
+            guidance.append(ToolGuidance("coding", _build_coding_instructions()))
             logger.info(
                 "Coding tools enabled (workspace=%s, max_turns=%d)",
                 settings.coding_workspace_dir,
@@ -201,20 +205,22 @@ def _build_tools_and_instructions(
                 top_k=settings.rag_top_k,
             )
             tools.append(rag_search)
-            instructions += (
-                "\n\n## RAG (Retrieval-Augmented Generation) - IMPORTANT\n"
-                "You have a local document knowledge base powered by rag_search. "
-                "ALWAYS use rag_search FIRST (before web search) when:\n"
-                "- The user asks about content from uploaded/ingested documents or PDFs\n"
-                "- The user references a specific document, report, or file by name\n"
-                "- The user says 'this document', 'the PDF', 'the report', 'the file'\n"
-                "- The conversation previously involved PDF ingestion\n"
-                "- The user asks to 'search documents', 'find in documents', or 'look up in the knowledge base'\n\n"
-                "To ingest a PDF: use submit_job with job_type='rag-ingest' and "
-                "params={'file_path': '<path from [Attached PDF: ...] reference>'}.\n"
-                "To search documents: use rag_search with the user's question as the query.\n"
-                "Include source citations (filename, page number) when presenting RAG results.\n"
-                "If rag_search returns no results, inform the user and optionally fall back to web search."
+            guidance.append(
+                ToolGuidance(
+                    "rag",
+                    "You have a local document knowledge base powered by rag_search. "
+                    "ALWAYS use rag_search FIRST (before web search) when:\n"
+                    "- The user asks about content from uploaded/ingested documents or PDFs\n"
+                    "- The user references a specific document, report, or file by name\n"
+                    "- The user says 'this document', 'the PDF', 'the report', 'the file'\n"
+                    "- The conversation previously involved PDF ingestion\n"
+                    "- The user asks to 'search documents', 'find in documents', or 'look up in the knowledge base'\n\n"
+                    "To ingest a PDF: use submit_job with job_type='rag-ingest' and "
+                    "params={'file_path': '<path from [Attached PDF: ...] reference>'}.\n"
+                    "To search documents: use rag_search with the user's question as the query.\n"
+                    "Include source citations (filename, page number) when presenting RAG results.\n"
+                    "If rag_search returns no results, inform the user and optionally fall back to web search.",
+                )
             )
             logger.info(
                 "RAG search tool enabled (chroma_dir=%s, collection=%s)",
@@ -239,11 +245,14 @@ def _build_tools_and_instructions(
         image_tools = [t for t in (generate_image, edit_image) if _fn_ok(t.__name__)]
         if image_tools:
             tools.extend(image_tools)
-            instructions += (
-                " You can generate images from text descriptions using generate_image. "
-                "You can also edit existing images using edit_image by providing the filename "
-                "of an uploaded or previously generated image. "
-                "After generating or editing an image, describe what was created."
+            guidance.append(
+                ToolGuidance(
+                    "image",
+                    "You can generate images from text descriptions using generate_image. "
+                    "You can also edit existing images using edit_image by providing the filename "
+                    "of an uploaded or previously generated image. "
+                    "After generating or editing an image, describe what was created.",
+                )
             )
             logger.info(
                 "Image generation tools enabled (deployment=%s, demo=%s)",
@@ -303,14 +312,17 @@ def _build_tools_and_instructions(
             if enabled_mcp_tools:
                 tools.extend(enabled_mcp_tools)
                 servers_list = ", ".join(enabled_servers)
-                instructions += (
-                    f" You have MCP (Model Context Protocol) tools available from the following "
-                    f"connected servers: {servers_list}. "
-                    "When the user's request can be fulfilled by an MCP tool, ALWAYS prefer "
-                    "using the MCP tool over web search or other built-in tools. "
-                    "MCP tools provide direct, structured access to external services and "
-                    "are more reliable than general web search for their specific domains. "
-                    "After using an MCP tool, summarize the result clearly for the user."
+                guidance.append(
+                    ToolGuidance(
+                        "mcp",
+                        f"You have MCP (Model Context Protocol) tools available from the following "
+                        f"connected servers: {servers_list}. "
+                        "When the user's request can be fulfilled by an MCP tool, ALWAYS prefer "
+                        "using the MCP tool over web search or other built-in tools. "
+                        "MCP tools provide direct, structured access to external services and "
+                        "are more reliable than general web search for their specific domains. "
+                        "After using an MCP tool, summarize the result clearly for the user.",
+                    )
                 )
                 logger.info(
                     "MCP tools added to agent: %d active server(s): %s",
@@ -328,7 +340,7 @@ def _build_tools_and_instructions(
         from app.agent.user_memory import USER_MEMORY_INSTRUCTION, manage_user_memory
 
         tools.append(manage_user_memory)
-        instructions += USER_MEMORY_INSTRUCTION
+        guidance.append(ToolGuidance("user-memory", USER_MEMORY_INSTRUCTION))
 
     # Agent Curated Memory tool (PRP-0100, CTR-0162, UDR-0079 D7). Registered on
     # the shared agent at this single chokepoint when AGENT_MEMORY_ENABLED, so the
@@ -340,7 +352,7 @@ def _build_tools_and_instructions(
         from app.agent.agent_memory import AGENT_MEMORY_INSTRUCTION, manage_memory
 
         tools.append(manage_memory)
-        instructions += AGENT_MEMORY_INSTRUCTION
+        guidance.append(ToolGuidance("agent-memory", AGENT_MEMORY_INSTRUCTION))
 
     # Cron management tool (PRP-0089, CTR-0134, UDR-0067 D7). Registered on the
     # shared agent only when CRON_ENABLED so the LLM can schedule script jobs. It
@@ -350,7 +362,7 @@ def _build_tools_and_instructions(
         from app.cron.tool import CRON_TOOL_INSTRUCTION, manage_cron
 
         tools.append(manage_cron)
-        instructions += CRON_TOOL_INSTRUCTION
+        guidance.append(ToolGuidance("cron", CRON_TOOL_INSTRUCTION))
 
     # Pipeline management tool (PRP-0096, CTR-0147, UDR-0074 D9). Registered on the
     # shared agent only when PIPELINE_ENABLED so the LLM can submit data-processing jobs
@@ -361,7 +373,7 @@ def _build_tools_and_instructions(
         from app.pipeline.tool import PIPELINE_TOOL_INSTRUCTION, manage_pipeline
 
         tools.append(manage_pipeline)
-        instructions += PIPELINE_TOOL_INSTRUCTION
+        guidance.append(ToolGuidance("pipeline", PIPELINE_TOOL_INSTRUCTION))
 
     # Webhook management tool (PRP-0097, CTR-0155, UDR-0075). Registered on the shared
     # agent only when WEBHOOK_ENABLED so the LLM can manage Graph subscriptions and run
@@ -371,7 +383,7 @@ def _build_tools_and_instructions(
         from app.webhook.tool import WEBHOOK_TOOL_INSTRUCTION, manage_webhook
 
         tools.append(manage_webhook)
-        instructions += WEBHOOK_TOOL_INSTRUCTION
+        guidance.append(ToolGuidance("webhook", WEBHOOK_TOOL_INSTRUCTION))
 
     # Ontology query tool (PRP-0105, CTR-0172, UDR-0084 D9). Registered on the
     # shared agent only when ONTOLOGY_ENABLED so the LLM can answer questions from
@@ -381,7 +393,13 @@ def _build_tools_and_instructions(
         from app.ontology.tool import ONTOLOGY_TOOL_INSTRUCTION, query_ontology
 
         tools.append(query_ontology)
-        instructions += ONTOLOGY_TOOL_INSTRUCTION
+        guidance.append(ToolGuidance("ontology", ONTOLOGY_TOOL_INSTRUCTION))
+
+    # Render the collected slot-#3 blocks into the capability guidance string
+    # (PRP-0120, CTR-0104 v4, UDR-0103 D1). Each block becomes a <tool-guide
+    # name="..."> tag in append order; an empty list renders "" so the no-tool /
+    # DevUI / headless path is byte-for-byte "no capability guidance".
+    instructions = render_capability_guidance(guidance)
 
     # Tool approval gating (PRP-0067, CTR-0099, UDR-0043 D1).
     # The agent factory is the single chokepoint where bare Python

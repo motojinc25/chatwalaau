@@ -164,7 +164,7 @@ function formatDate(dateStr: string): string {
   return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
 }
 
-const WEATHER_TOOLS = new Set(['get_coords_by_city', 'get_current_weather_by_coords', 'get_weather_next_week'])
+const WEATHER_TOOLS = new Set(['weather_geocode_city', 'weather_get_current', 'weather_get_forecast'])
 
 export function WeatherToolResults({ toolCalls }: { toolCalls: ToolCall[] }) {
   const weatherResults = useMemo(
@@ -194,15 +194,15 @@ function WeatherResultCard({ toolCall }: { toolCall: ToolCall }) {
 
   if (!parsed || parsed.error) return null
 
-  if (toolCall.name === 'get_coords_by_city' && parsed.name) {
+  if (toolCall.name === 'weather_geocode_city' && parsed.name) {
     return <LocationCard data={parsed as LocationData} />
   }
 
-  if (toolCall.name === 'get_current_weather_by_coords' && parsed.temperature) {
+  if (toolCall.name === 'weather_get_current' && parsed.temperature) {
     return <CurrentWeatherCard data={parsed as WeatherData} />
   }
 
-  if (toolCall.name === 'get_weather_next_week' && parsed.days) {
+  if (toolCall.name === 'weather_get_forecast' && parsed.days) {
     return <ForecastCard data={parsed as ForecastData} />
   }
 

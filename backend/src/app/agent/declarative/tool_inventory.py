@@ -57,23 +57,37 @@ def _image_available() -> bool:
 # a new built-in function tool is added to _build_tools_and_instructions, add it here
 # too (the one maintenance point called out in UDR-0100 Consequences).
 BUILTIN_FUNCTION_TOOLS: tuple[BuiltinFunctionTool, ...] = (
-    BuiltinFunctionTool("get_coords_by_city", "weather", "Geocode a city name to coordinates.", lambda: True),
-    BuiltinFunctionTool("get_current_weather_by_coords", "weather", "Current weather for coordinates.", lambda: True),
-    BuiltinFunctionTool("get_weather_next_week", "weather", "7-day weather forecast for coordinates.", lambda: True),
+    BuiltinFunctionTool("weather_geocode_city", "weather", "Geocode a city name to coordinates.", lambda: True),
+    BuiltinFunctionTool("weather_get_current", "weather", "Current weather for coordinates.", lambda: True),
+    BuiltinFunctionTool("weather_get_forecast", "weather", "7-day weather forecast for coordinates.", lambda: True),
     BuiltinFunctionTool("file_read", "coding", "Read a file in the workspace.", lambda: settings.coding_enabled),
     BuiltinFunctionTool("file_write", "coding", "Create or modify a workspace file.", lambda: settings.coding_enabled),
-    BuiltinFunctionTool("bash_execute", "coding", "Run a shell command in the workspace.", lambda: settings.coding_enabled),
-    BuiltinFunctionTool("file_glob", "coding", "Find workspace files by glob pattern.", lambda: settings.coding_enabled),
+    BuiltinFunctionTool(
+        "bash_execute", "coding", "Run a shell command in the workspace.", lambda: settings.coding_enabled
+    ),
+    BuiltinFunctionTool(
+        "file_glob", "coding", "Find workspace files by glob pattern.", lambda: settings.coding_enabled
+    ),
     BuiltinFunctionTool("file_grep", "coding", "Search workspace file contents.", lambda: settings.coding_enabled),
     BuiltinFunctionTool("rag_search", "rag", "Search the local document knowledge base.", _rag_available),
     BuiltinFunctionTool("generate_image", "image", "Generate an image from a text prompt.", _image_available),
     BuiltinFunctionTool("edit_image", "image", "Edit an uploaded or generated image.", _image_available),
-    BuiltinFunctionTool("manage_user_memory", "memory", "Curate the durable user profile.", lambda: settings.user_profile_enabled),
-    BuiltinFunctionTool("manage_memory", "memory", "Curate durable agent memory.", lambda: settings.agent_memory_enabled),
+    BuiltinFunctionTool(
+        "manage_user_memory", "memory", "Curate the durable user profile.", lambda: settings.user_profile_enabled
+    ),
+    BuiltinFunctionTool(
+        "manage_memory", "memory", "Curate durable agent memory.", lambda: settings.agent_memory_enabled
+    ),
     BuiltinFunctionTool("manage_cron", "automation", "Schedule and manage cron jobs.", lambda: settings.cron_enabled),
-    BuiltinFunctionTool("manage_pipeline", "automation", "Submit and manage pipeline jobs.", lambda: settings.pipeline_enabled),
-    BuiltinFunctionTool("manage_webhook", "automation", "Manage webhook subscriptions and runs.", lambda: settings.webhook_enabled),
-    BuiltinFunctionTool("query_ontology", "knowledge", "Query the RDF concept models.", lambda: settings.ontology_enabled),
+    BuiltinFunctionTool(
+        "manage_pipeline", "automation", "Submit and manage pipeline jobs.", lambda: settings.pipeline_enabled
+    ),
+    BuiltinFunctionTool(
+        "manage_webhook", "automation", "Manage webhook subscriptions and runs.", lambda: settings.webhook_enabled
+    ),
+    BuiltinFunctionTool(
+        "query_ontology", "knowledge", "Query the RDF concept models.", lambda: settings.ontology_enabled
+    ),
 )
 
 _BUILTIN_BY_NAME = {t.name: t for t in BUILTIN_FUNCTION_TOOLS}

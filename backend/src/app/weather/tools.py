@@ -130,7 +130,7 @@ def _get_weather_description(weather_code: int) -> str:
     return weather_codes.get(weather_code, "Unknown")
 
 
-def get_coords_by_city(
+def weather_geocode_city(
     city: Annotated[str, Field(description="The city name (e.g., 'London', 'New York', 'Tokyo')")],
     country: Annotated[str, Field(description="Optional country code to disambiguate (e.g., 'US', 'UK', 'JP')")] = "",
 ) -> str:
@@ -145,7 +145,7 @@ def get_coords_by_city(
         return f"Error fetching coordinates: {e}"
 
 
-def get_current_weather_by_coords(
+def weather_get_current(
     latitude: Annotated[float, Field(description="Latitude (-90 to 90)")],
     longitude: Annotated[float, Field(description="Longitude (-180 to 180)")],
     location_name: Annotated[str, Field(description="Human-readable location name for display")] = "",
@@ -178,7 +178,7 @@ def get_current_weather_by_coords(
         return json.dumps({"error": f"Error fetching weather data: {e}"})
 
 
-def get_weather_next_week(
+def weather_get_forecast(
     latitude: Annotated[float, Field(description="Latitude (-90 to 90)")],
     longitude: Annotated[float, Field(description="Longitude (-180 to 180)")],
     location_name: Annotated[str, Field(description="Human-readable location name for display")] = "",

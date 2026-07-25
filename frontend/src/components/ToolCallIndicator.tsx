@@ -25,13 +25,13 @@ interface ToolCallIndicatorProps {
 const toolDisplayNames: Record<string, { label: string; doneLabel: string; icon: typeof Globe }> = {
   web_search_preview: { label: 'Searching the web...', doneLabel: 'Searched the web', icon: Globe },
   web_search: { label: 'Searching the web...', doneLabel: 'Searched the web', icon: Globe },
-  get_coords_by_city: { label: 'Looking up location...', doneLabel: 'Looked up location', icon: MapPin },
-  get_current_weather_by_coords: {
+  weather_geocode_city: { label: 'Looking up location...', doneLabel: 'Looked up location', icon: MapPin },
+  weather_get_current: {
     label: 'Fetching current weather...',
     doneLabel: 'Fetched current weather',
     icon: Cloud,
   },
-  get_weather_next_week: { label: 'Fetching weekly forecast...', doneLabel: 'Fetched weekly forecast', icon: Calendar },
+  weather_get_forecast: { label: 'Fetching weekly forecast...', doneLabel: 'Fetched weekly forecast', icon: Calendar },
   file_read: { label: 'Reading file...', doneLabel: 'Read file', icon: File },
   file_write: { label: 'Writing file...', doneLabel: 'Wrote file', icon: FilePen },
   bash_execute: { label: 'Executing command...', doneLabel: 'Executed command', icon: Terminal },
