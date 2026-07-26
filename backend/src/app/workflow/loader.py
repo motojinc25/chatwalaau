@@ -26,21 +26,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The curated action subset ChatWalaʻau maps for the first release (UDR-0101 D6).
-# An action outside this set is a blocking warning (raw HttpRequest / InvokeMcpTool
-# also fail the MAF build because no handler is supplied). Keep in sync with the
-# authoring palette (CTR-0184).
+# The full mapped action surface (PRP-0121, UDR-0104 D1 -- supersedes the UDR-0101 D6
+# curated subset). An action OUTSIDE this set is still a blocking warning (the D6
+# mechanism, preserved). The three boundary-crossing kinds (InvokeFunctionTool /
+# InvokeMcpTool / HttpRequestAction) compile via ChatWalaʻau-owned jailed handlers
+# (CTR-0186) and are additionally a blocking warning when their opt-in class is OFF
+# (handlers.boundary_action_warnings). Keep in sync with the authoring palette (CTR-0184).
 ALLOWED_ACTION_KINDS = frozenset(
     {
-        "SendActivity",
-        "SetValue",
+        # Variable
         "SetVariable",
-        "SetTextVariable",
         "SetMultipleVariables",
+        "SetTextVariable",
+        "SetValue",  # alias retained
         "ResetVariable",
         "ClearAllVariables",
-        "CreateConversation",
-        "InvokeAzureAgent",
+        "ParseValue",
+        "EditTableV2",
+        # Control Flow
         "If",
         "ConditionGroup",
         "Foreach",
@@ -48,18 +51,84 @@ ALLOWED_ACTION_KINDS = frozenset(
         "ContinueLoop",
         "GotoAction",
         "Join",
+        # Output
+        "SendActivity",
+        # Agent
+        "InvokeAzureAgent",
+        # Tool + HTTP (jailed + opt-in, CTR-0186 / UDR-0104 D2)
+        "InvokeFunctionTool",
+        "InvokeMcpTool",
+        "HttpRequestAction",
+        # Human-in-the-Loop
+        "Question",
+        "RequestExternalInput",
+        # Workflow Control
         "EndWorkflow",
         "EndConversation",
+        "CreateConversation",
+        "AddConversationMessage",
     }
 )
 
 # Nesting keys under which child actions live (walked to collect kinds / agent refs).
 _NESTED_ACTION_KEYS = ("actions", "then", "else", "elseActions")
 
+# The MAF builder requires ``serverUrl`` on an InvokeMcpTool action at COMPILE time,
+# but the jail (CTR-0186) deliberately keeps raw serverUrl out of the authored surface
+# and re-points by ``serverLabel`` at invocation. So the backend injects this sentinel
+# for any InvokeMcpTool that omits serverUrl -- the jailed handler ALWAYS overrides it
+# with the configured server's real URL, so the sentinel is never dialed (UDR-0104 D2).
+_MCP_SENTINEL_URL = "https://workflow-mcp.local/"
+
+
+def _prepare_compile_text(text: str) -> str:
+    """Return YAML text ready for the MAF builder (inject the MCP serverUrl sentinel).
+
+    Only rewrites when an InvokeMcpTool omits ``serverUrl``; otherwise returns the
+    original text byte-for-byte so hand-authored workflows compile unchanged.
+    """
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return text
+    if not isinstance(data, dict):
+        return text
+    changed = False
+    for action in _walk_actions(data.get("actions")):
+        if str(action.get("kind") or "") == "InvokeMcpTool" and not action.get("serverUrl"):
+            label = str(action.get("serverLabel") or "server").strip() or "server"
+            action["serverUrl"] = _MCP_SENTINEL_URL + label
+            changed = True
+    if not changed:
+        return text
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
 
 def _max_iterations() -> int:
     """Clamp the operator's WORKFLOW_MAX_ITERATIONS to a sane bound (UDR-0101 D10)."""
     return max(1, min(int(settings.workflow_max_iterations or 100), 100_000))
+
+
+def _new_factory(agents: dict[str, Any] | None = None):
+    """Build a ``WorkflowFactory`` with the jailed boundary-crossing handlers (CTR-0186).
+
+    The HTTP / MCP handlers and the function-tool registry are ALWAYS injected so a
+    workflow that uses those actions COMPILES; the opt-in is enforced by (a) a blocking
+    warning the mapper adds for any disabled-class action, and (b) each handler
+    re-checking its flag at invocation time (UDR-0104 D2, defense in depth).
+    """
+    from agent_framework_declarative import WorkflowFactory
+
+    from app.workflow import handlers
+
+    factory = WorkflowFactory(
+        agents=agents or {},
+        max_iterations=_max_iterations(),
+        http_request_handler=handlers.build_http_request_handler(),
+        mcp_tool_handler=handlers.build_mcp_tool_handler(),
+    )
+    handlers.register_function_tools(factory)
+    return factory
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +237,9 @@ def map_workflow_document(
             action_kinds.append(kind)
         if kind and kind not in ALLOWED_ACTION_KINDS:
             warnings.append(
-                f"action kind {kind!r} is not supported yet; remove it or use a mapped "
-                "action (SendActivity / SetValue / InvokeAzureAgent / If / ConditionGroup "
-                "/ Foreach / loop control / EndWorkflow)."
+                f"action kind {kind!r} is not supported; remove it or use a mapped action "
+                "(Variable / control-flow / SendActivity / InvokeAzureAgent / tool / HTTP / "
+                "HITL / workflow-control)."
             )
         if kind == "InvokeAzureAgent":
             ref = _agent_ref(action)
@@ -185,13 +254,20 @@ def map_workflow_document(
             else:
                 referenced.append(ref)
 
-    # Structural compile with NO agents: validates the graph + rejects unmapped
-    # actions (HttpRequest / InvokeMcpTool raise without a handler) without building
-    # any LLM client. The runtime compile (compile_for_run) injects real agents.
-    try:
-        from agent_framework_declarative import WorkflowFactory
+    # A boundary-crossing action (InvokeFunctionTool / InvokeMcpTool / HttpRequestAction)
+    # whose opt-in class is OFF is a blocking warning (UDR-0104 D2). The action still
+    # COMPILES (the jailed handlers are injected below) so the operator sees a clean
+    # warning rather than a hard compile error.
+    from app.workflow.handlers import boundary_action_warnings
 
-        WorkflowFactory(max_iterations=_max_iterations()).create_workflow_from_yaml(text)
+    warnings.extend(boundary_action_warnings(action_kinds))
+
+    # Structural compile with NO agents: validates the graph + rejects unmapped actions
+    # without building any LLM client. The jailed CTR-0186 handlers are injected so the
+    # boundary-crossing actions compile; the runtime compile (compile_for_run) adds the
+    # real node agents.
+    try:
+        _new_factory().create_workflow_from_yaml(_prepare_compile_text(text))
     except Exception as exc:  # DeclarativeWorkflowError / ValueError from the builder
         raise WorkflowError(f"Workflow could not be compiled: {exc}") from exc
 
@@ -346,9 +422,7 @@ def compile_for_run(workflow_id: str):
     """
     spec = resolve_workflow(workflow_id)
     if spec.warnings:
-        raise WorkflowError(
-            "Workflow cannot run until its warnings are resolved: " + "; ".join(spec.warnings)
-        )
+        raise WorkflowError("Workflow cannot run until its warnings are resolved: " + "; ".join(spec.warnings))
 
     from app.agent.declarative.spec import DeclarativeAgentError
     from app.workflow.builder import build_prompt_agent
@@ -372,11 +446,8 @@ def compile_for_run(workflow_id: str):
     else:
         raise WorkflowError(f"Unknown workflow id: {workflow_id!r}")
 
-    from agent_framework_declarative import WorkflowFactory
-
     try:
-        factory = WorkflowFactory(agents=agents, max_iterations=_max_iterations())
-        return factory.create_workflow_from_yaml(text)
+        return _new_factory(agents=agents).create_workflow_from_yaml(_prepare_compile_text(text))
     except Exception as exc:
         raise WorkflowError(f"Workflow could not be compiled: {exc}") from exc
 

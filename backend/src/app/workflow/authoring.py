@@ -62,10 +62,12 @@ def build_workflow_yaml(document: dict[str, Any]) -> str:
     """Serialize a structured authoring document to canonical workflow YAML.
 
     The DAG editor flattens its graph to an ordered ``actions`` list; this serializer
-    fixes ``kind: Workflow`` and field order (kind, name, description, maxTurns,
-    actions) and renders long text (e.g. SendActivity text) as a block scalar. Actions
-    are passed through structurally (the editor authors only mapped kinds); unknown
-    top-level keys are ignored.
+    fixes ``kind: Workflow`` and field order (kind, name, displayName, description,
+    maxTurns, inputs, outputs, actions) and renders long text (e.g. SendActivity text)
+    as a block scalar. Actions are passed through structurally, recursing into nested
+    control-flow child lists (then / else / actions / conditions), so a full nested
+    workflow round-trips (PRP-0121). The optional ``inputs`` / ``outputs`` typed maps
+    are passed through verbatim. Unknown top-level keys are ignored.
     """
     doc: dict[str, Any] = {"kind": WORKFLOW_KIND}
     name = str(document.get("name") or "").strip()
@@ -80,6 +82,14 @@ def build_workflow_yaml(document: dict[str, Any]) -> str:
     max_turns = document.get("maxTurns")
     if isinstance(max_turns, int) and max_turns > 0:
         doc["maxTurns"] = max_turns
+
+    # Optional typed workflow I/O (PRP-0121). Passed through verbatim when non-empty.
+    inputs = document.get("inputs")
+    if isinstance(inputs, dict) and inputs:
+        doc["inputs"] = inputs
+    outputs = document.get("outputs")
+    if isinstance(outputs, dict) and outputs:
+        doc["outputs"] = outputs
 
     actions = document.get("actions")
     if isinstance(actions, list) and actions:
@@ -140,6 +150,8 @@ def document_from_yaml(text: str) -> dict[str, Any]:
         "displayName": str(data.get("displayName") or ""),
         "description": str(data.get("description") or ""),
         "maxTurns": data.get("maxTurns"),
+        "inputs": data.get("inputs") if isinstance(data.get("inputs"), dict) else {},
+        "outputs": data.get("outputs") if isinstance(data.get("outputs"), dict) else {},
         "actions": data.get("actions") if isinstance(data.get("actions"), list) else [],
     }
 

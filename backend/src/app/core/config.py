@@ -381,6 +381,26 @@ class Settings(BaseSettings):
     # applies as a fallback when smaller). Clamped to [1, 100000] at use time.
     workflow_max_iterations: int = 100
 
+    # Declarative Workflow boundary-crossing action jail (CTR-0186, PRP-0121, UDR-0104
+    # D2). The three actions that cross the credential / provider / network boundary are
+    # OFF by default; each is enabled independently and runs only through a
+    # ChatWalaʻau-owned handler (never a raw YAML binding). With all three unset the
+    # runtime behaves exactly as under UDR-0101 D6 (the action is a blocking warning).
+    #   - InvokeFunctionTool: exposes only the deployment's agent-equivalent function
+    #     tools (coding still gated by CODING_ENABLED).
+    workflow_function_actions_enabled: bool = False
+    #   - InvokeMcpTool: reaches only MCP servers already configured (mcp_servers.jsonc)
+    #     AND enabled in the runtime gating store (FEAT-0045).
+    workflow_mcp_actions_enabled: bool = False
+    #   - HttpRequestAction: outbound HTTP behind a host allow-list + SSRF guard.
+    workflow_http_actions_enabled: bool = False
+    # Comma-separated host allow-list for HttpRequestAction (empty = deny all). The SSRF
+    # guard additionally blocks loopback / private / link-local / metadata addresses
+    # regardless of this list.
+    workflow_http_allowed_hosts: str = ""
+    # Per-request timeout (ms) for HttpRequestAction.
+    workflow_http_timeout_ms: int = 10000
+
     # Prompt Templates (CTR-0046, PRP-0026)
     templates_dir: str = ".templates"
 

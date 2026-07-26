@@ -10,7 +10,13 @@ import { useCallback, useMemo } from 'react'
  * fetch interceptor, so these are plain `fetch` calls like the rest of the SPA.
  */
 
-/** One declarative workflow action (mapped subset; free-form per kind). */
+/**
+ * One declarative workflow action. Permissive on purpose: the editor supports the
+ * full Microsoft Agent Framework action surface (23 kinds, PRP-0121) and the backend
+ * is the single validator/serializer (UDR-0101 D9). Fields below are the ones the
+ * editor reads/writes by kind; the index signature keeps every other MAF field
+ * (nested branches, arguments maps, etc.) typechecking and round-tripping.
+ */
 export interface WorkflowAction {
   kind: string
   id?: string
@@ -18,14 +24,66 @@ export interface WorkflowAction {
   activity?: { text?: string }
   // InvokeAzureAgent
   agentName?: string
-  // SetValue / SetVariable
+  agent?: { name?: string }
+  input?: { messages?: unknown; arguments?: Record<string, unknown> }
+  output?: { responseObject?: unknown; messages?: unknown; autoSend?: boolean; result?: unknown }
+  // SetValue / SetVariable / SetTextVariable / ResetVariable / ParseValue
   path?: string
   value?: unknown
+  variable?: string
+  variables?: Record<string, unknown>
+  // ParseValue / Foreach
+  source?: string
+  // Foreach
+  itemName?: string
+  indexName?: string
+  // EditTableV2
+  table?: string
+  operation?: string
+  row?: { key?: string; value?: unknown }
   // If
   condition?: string
-  // Foreach
-  source?: string
+  then?: WorkflowAction[]
+  else?: WorkflowAction[]
+  // ConditionGroup
+  conditions?: Array<{ condition?: string; id?: string; actions?: WorkflowAction[] }>
+  elseActions?: WorkflowAction[]
+  // Foreach / control-flow bodies
+  actions?: WorkflowAction[]
+  // GotoAction
+  actionId?: string
+  // InvokeFunctionTool
+  functionName?: string
+  requireApproval?: boolean
+  arguments?: Record<string, unknown>
+  // InvokeMcpTool
+  serverLabel?: string
+  toolName?: string
+  // HttpRequestAction
+  method?: string
+  url?: string
+  headers?: Record<string, unknown>
+  queryParameters?: Record<string, unknown>
+  response?: unknown
+  responseHeaders?: unknown
+  // Question / RequestExternalInput
+  question?: { text?: string }
+  prompt?: { text?: string }
+  default?: unknown
+  // CreateConversation
+  conversationId?: string
   [key: string]: unknown
+}
+
+/** A top-level workflow input declaration: `inputs: { name: { type, description } }`. */
+export interface WorkflowInput {
+  type?: string
+  description?: string
+}
+
+/** A top-level workflow output declaration: `outputs: { name: { type } }`. */
+export interface WorkflowOutput {
+  type?: string
 }
 
 export interface WorkflowDocument {
@@ -34,6 +92,10 @@ export interface WorkflowDocument {
   displayName?: string
   description?: string
   maxTurns?: number | null
+  /** Optional declared inputs, keyed by name. */
+  inputs?: Record<string, WorkflowInput>
+  /** Optional declared outputs, keyed by name. */
+  outputs?: Record<string, WorkflowOutput>
   actions: WorkflowAction[]
 }
 

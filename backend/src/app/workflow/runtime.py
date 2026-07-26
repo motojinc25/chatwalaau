@@ -29,6 +29,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _request_prompt(event: Any) -> str | None:
+    """Best-effort prompt text from a HITL ``request_info`` event (Question / external input)."""
+    data = getattr(event, "data", None)
+    for attr in ("prompt", "text", "message", "question"):
+        value = getattr(data, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value
+        inner = getattr(value, "text", None)
+        if isinstance(inner, str) and inner.strip():
+            return inner
+    if isinstance(data, str) and data.strip():
+        return data
+    return None
+
+
 def _event_text(event: Any) -> str | None:
     """Best-effort text payload from a workflow OUTPUT / DATA event."""
     data = getattr(event, "data", None)
@@ -113,19 +128,25 @@ async def stream_workflow(
                 )
                 # fall through so any text payload is still surfaced
             if etype == "request_info":
+                # Human-in-the-Loop request (Question / RequestExternalInput, UDR-0104 D4).
+                # Surface the prompt text / target variable / default best-effort so the
+                # SPA can render a request card (CTR-0185). The interactive lane parks
+                # here; the async (Pipeline) lane uses MAF checkpoint pause / resume.
                 yield encoder.encode(
                     CustomEvent(
                         type=EventType.CUSTOM,
                         name="workflow_input_request",
-                        value={"request_id": getattr(event, "request_id", None), "node": executor_id},
+                        value={
+                            "request_id": getattr(event, "request_id", None),
+                            "node": executor_id,
+                            "prompt": _request_prompt(event),
+                        },
                     )
                 )
                 continue
             if etype in ("failed", "error"):
                 details = getattr(event, "details", None)
-                yield encoder.encode(
-                    RunErrorEvent(type=EventType.RUN_ERROR, message=str(details or "Workflow failed"))
-                )
+                yield encoder.encode(RunErrorEvent(type=EventType.RUN_ERROR, message=str(details or "Workflow failed")))
                 return
 
             text = _event_text(event)
