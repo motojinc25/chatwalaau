@@ -230,11 +230,15 @@ def map_workflow_document(
     referenced: list[str] = []
     dynamic: list[str] = []
     action_kinds: list[str] = []
+    action_ids: list[str] = []
     warnings: list[str] = []
     for action in _walk_actions(data.get("actions")):
         kind = str(action.get("kind") or "").strip()
         if kind:
             action_kinds.append(kind)
+        aid = action.get("id")
+        if isinstance(aid, str) and aid.strip():
+            action_ids.append(aid.strip())
         if kind and kind not in ALLOWED_ACTION_KINDS:
             warnings.append(
                 f"action kind {kind!r} is not supported; remove it or use a mapped action "
@@ -261,6 +265,20 @@ def map_workflow_document(
     from app.workflow.handlers import boundary_action_warnings
 
     warnings.extend(boundary_action_warnings(action_kinds))
+
+    # Duplicate action ids break GotoAction targeting and are HARD-rejected by the MAF
+    # builder; detect them first and raise a clean, friendly message instead of the raw
+    # builder stack (v0.115.2).
+    _dupe_ids = sorted({aid for aid in action_ids if action_ids.count(aid) > 1})
+    if _dupe_ids:
+        raise WorkflowError(f"Duplicate action id(s) {_dupe_ids}: each action id must be unique.")
+
+    # Power Fx syntax check of every ``=`` expression (v0.115.2). Syntax-only, so a
+    # reference to an undefined workflow variable is not a false positive; a no-op when
+    # the .NET-backed Power Fx engine is unavailable.
+    from app.workflow.powerfx import powerfx_warnings
+
+    warnings.extend(powerfx_warnings(data.get("actions")))
 
     # Structural compile with NO agents: validates the graph + rejects unmapped actions
     # without building any LLM client. The jailed CTR-0186 handlers are injected so the

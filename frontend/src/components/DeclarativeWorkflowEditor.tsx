@@ -2,7 +2,11 @@ import Editor from '@monaco-editor/react'
 import {
   applyNodeChanges,
   Background,
+  BaseEdge,
   type Edge,
+  EdgeLabelRenderer,
+  type EdgeProps,
+  getSmoothStepPath,
   Handle,
   MarkerType,
   type Node,
@@ -11,8 +15,12 @@ import {
   Position,
   ReactFlow,
   ReactFlowProvider,
+  useReactFlow,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import { closestCenter, DndContext, type DragEndEvent, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
+import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import ELK from 'elkjs/lib/elk.bundled.js'
 import {
   ArrowDown,
@@ -22,6 +30,7 @@ import {
   Eraser,
   GitBranch,
   Globe,
+  GripVertical,
   Inbox,
   ListTree,
   Loader2,
@@ -46,7 +55,17 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
-import { type ComponentType, memo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type ComponentType,
+  memo,
+  type ReactNode,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
@@ -170,8 +189,14 @@ function emptyDocument(): WorkflowDocument {
   return { name: '', displayName: '', description: '', maxTurns: null, actions: [] }
 }
 
-function newAction(kind: string, index: number): WorkflowAction {
-  const id = `${kind.toLowerCase()}_${index}`
+/** A short (4-char base36) id so a new action gets a stable, unique-ish id instead of a
+ * positional suffix (v0.115.2). Editable in the form; the backend rejects duplicates. */
+function shortId(): string {
+  return Math.random().toString(36).slice(2, 6).padEnd(4, '0')
+}
+
+function newAction(kind: string): WorkflowAction {
+  const id = `${kind.toLowerCase()}_${shortId()}`
   switch (kind) {
     // Variable
     case 'SetVariable':
@@ -411,6 +436,87 @@ LaneNode.displayName = 'LaneNode'
 
 const nodeTypes = { step: StepNode, container: ContainerNode, lane: LaneNode }
 
+/**
+ * Editable smooth-step edge used for the GotoAction back-edge (v0.115.2). It renders a
+ * smoothstep (orthogonal, rounded) path whose bend CENTER is draggable, so the jump edge
+ * bows off the node column by default (clearing the nodes between the jump and its
+ * target) and can be re-routed off any node it still overlaps. The bend offset is
+ * ephemeral (like node drag positions); the YAML carries no visual routing.
+ */
+const EditableStepEdge = memo(
+  ({ id, sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, markerEnd, style }: EdgeProps) => {
+    const { getViewport } = useReactFlow()
+    // Default bend: left of the column (further for longer jumps) so the step route
+    // clears the intervening nodes.
+    const bow = Math.min(240, 70 + Math.abs(sourceY - targetY) * 0.25)
+    const defaultCenter = { x: (sourceX + targetX) / 2 - bow, y: (sourceY + targetY) / 2 }
+    const [center, setCenter] = useState<{ x: number; y: number } | null>(null)
+    const c = center ?? defaultCenter
+    const dragRef = useRef<{ x: number; y: number } | null>(null)
+
+    const [edgePath] = getSmoothStepPath({
+      sourceX,
+      sourceY,
+      sourcePosition,
+      targetX,
+      targetY,
+      targetPosition,
+      borderRadius: 12,
+      centerX: c.x,
+      centerY: c.y,
+    })
+
+    const onPointerDown = (e: ReactPointerEvent) => {
+      e.stopPropagation()
+      ;(e.target as Element).setPointerCapture(e.pointerId)
+      dragRef.current = { x: e.clientX, y: e.clientY }
+    }
+    const onPointerMove = (e: ReactPointerEvent) => {
+      const start = dragRef.current
+      if (!start) return
+      const zoom = getViewport().zoom || 1
+      const dx = (e.clientX - start.x) / zoom
+      const dy = (e.clientY - start.y) / zoom
+      dragRef.current = { x: e.clientX, y: e.clientY }
+      setCenter((prev) => {
+        const base = prev ?? defaultCenter
+        return { x: base.x + dx, y: base.y + dy }
+      })
+    }
+    const onPointerUp = () => {
+      dragRef.current = null
+    }
+
+    return (
+      <>
+        <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} style={style} />
+        <EdgeLabelRenderer>
+          <div
+            className="nodrag nopan absolute flex items-center gap-1"
+            style={{ transform: `translate(-50%, -50%) translate(${c.x}px, ${c.y}px)`, pointerEvents: 'all' }}>
+            <button
+              type="button"
+              aria-label="Drag to move the goto edge"
+              title="Drag to move the goto edge"
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              className="h-3 w-3 cursor-move rounded-full border-2 border-primary bg-background"
+            />
+            <span className="rounded bg-background/90 px-1 text-[9px] font-medium text-primary">goto</span>
+          </div>
+        </EdgeLabelRenderer>
+      </>
+    )
+  },
+)
+EditableStepEdge.displayName = 'EditableStepEdge'
+
+// Override the built-in `smoothstep` type with the editable variant (v0.115.2): every
+// edge that asks for `type: 'smoothstep'` (only the GotoAction back-edge here) becomes a
+// draggable, animated step edge.
+const edgeTypes = { smoothstep: EditableStepEdge }
+
 // ---- elk hierarchical layout ----------------------------------------------
 const elk = new ELK()
 type ElkGraphNode = {
@@ -467,7 +573,16 @@ function buildElkLevel(actions: WorkflowAction[], pathKey: string, meta: Map<str
           ? { id: l.key, layoutOptions: LANE_OPTS, children: sub.children, edges: sub.edges }
           : { id: l.key, width: LANE_MIN_W, height: LANE_MIN_H }
       })
-      children.push({ id, layoutOptions: CONTAINER_OPTS, children: laneNodes })
+      // Layout-only edges between consecutive lanes force the elk RIGHT layout to place
+      // them side-by-side in order: If -> then (left) / else (right); ConditionGroup ->
+      // branch1..n (left to right) / else (rightmost). These are NOT rendered as React
+      // Flow edges (only buildEdges() produces those), so they only constrain layout.
+      const laneOrderEdges = lanes.slice(0, -1).map((l, li) => ({
+        id: `lane-order/${id}/${li}`,
+        sources: [l.key],
+        targets: [lanes[li + 1].key],
+      }))
+      children.push({ id, layoutOptions: CONTAINER_OPTS, children: laneNodes, edges: laneOrderEdges })
       meta.set(id, { type: 'container', label: a.kind, sub: actionSummary(a) })
     }
     if (i < actions.length - 1) {
@@ -525,9 +640,12 @@ function buildEdges(actions: WorkflowAction[]): Edge[] {
         id: `goto/${g.from}`,
         source: g.from,
         target,
-        label: 'goto',
+        // A GotoAction jump is an editable smoothstep (step) back-edge whose bend bows off
+        // the node column and can be dragged off any node it overlaps; animated so it is
+        // visually distinct from the sequential flow (v0.115.2).
+        type: 'smoothstep',
         animated: true,
-        style: { stroke: 'hsl(var(--primary))', strokeDasharray: '4 3' },
+        style: { stroke: 'hsl(var(--primary))' },
         markerEnd: { type: MarkerType.ArrowClosed, color: 'hsl(var(--primary))' },
       })
     }
@@ -849,6 +967,7 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
                     nodes={nodes}
                     edges={edges}
                     nodeTypes={nodeTypes}
+                    edgeTypes={edgeTypes}
                     onNodesChange={onNodesChange}
                     nodesConnectable={false}
                     nodesDraggable
@@ -1033,9 +1152,28 @@ function ActionList({ actions, pathKey, agentNames, selected, onSelect, allowLoo
         break
       }
     }
-    const next = [...actions.slice(0, insertAt), newAction(kind, actions.length + 1), ...actions.slice(insertAt)]
+    const next = [...actions.slice(0, insertAt), newAction(kind), ...actions.slice(insertAt)]
     onSelect(`${pathKey}/${insertAt}`)
     update(next)
+  }
+
+  // Drag-and-drop reordering within this list (v0.115.2). Each list is its own
+  // DndContext so nested lanes reorder independently. Sortable ids are the (unique)
+  // action ids, de-duplicated against a transient duplicate-id edit state.
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }))
+  const seenIds = new Set<string>()
+  const rowIds = actions.map((a, i) => {
+    let rid = str(a.id).trim() || `${pathKey}#${i}`
+    if (seenIds.has(rid)) rid = `${rid}#${i}`
+    seenIds.add(rid)
+    return rid
+  })
+  const onDragEnd = (e: DragEndEvent) => {
+    const from = rowIds.indexOf(String(e.active.id))
+    const to = e.over ? rowIds.indexOf(String(e.over.id)) : -1
+    if (from < 0 || to < 0 || from === to) return
+    onSelect(null)
+    update(arrayMove(actions, from, to))
   }
 
   return (
@@ -1044,115 +1182,181 @@ function ActionList({ actions, pathKey, agentNames, selected, onSelect, allowLoo
         <AddActionMenu onAdd={addKind} allowLoop={allowLoop} />
       </div>
       {actions.length === 0 && <p className="text-[11px] text-muted-foreground">No actions. Add a step.</p>}
-      {actions.map((a, i) => {
-        const key = `${pathKey}/${i}`
-        const lanes = actionLanes(a, key)
-        const Icon = ICON_BY_KIND[a.kind] ?? WorkflowIcon
-        return (
-          <div
-            key={a.id ?? key}
-            className={cn('rounded-md border', selected === key ? 'border-primary' : 'border-border')}>
-            <div className="flex items-center gap-2 px-2 py-1.5 text-xs">
-              <button
-                type="button"
-                onClick={() => onSelect(selected === key ? null : key)}
-                className="flex min-w-0 flex-1 items-center gap-2 text-left">
-                <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-muted text-[10px]">
-                  {i + 1}
-                </span>
-                <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">{a.kind}</span>
-                  <span className="block truncate text-[10px] text-muted-foreground">{actionSummary(a)}</span>
-                </span>
-              </button>
-              <div className="flex shrink-0 items-center gap-0.5">
-                <button
-                  type="button"
-                  aria-label="Move up"
-                  className="rounded p-0.5 text-muted-foreground hover:bg-accent"
-                  onClick={() => moveAt(i, -1)}>
-                  <ArrowUp className="h-3 w-3" />
-                </button>
-                <button
-                  type="button"
-                  aria-label="Move down"
-                  className="rounded p-0.5 text-muted-foreground hover:bg-accent"
-                  onClick={() => moveAt(i, 1)}>
-                  <ArrowDown className="h-3 w-3" />
-                </button>
-                <button
-                  type="button"
-                  aria-label="Remove action"
-                  className="rounded p-0.5 text-muted-foreground hover:text-destructive"
-                  onClick={() => removeAt(i)}>
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+        <SortableContext items={rowIds} strategy={verticalListSortingStrategy}>
+          {actions.map((a, i) => (
+            <ActionRow
+              key={rowIds[i]}
+              sortId={rowIds[i]}
+              action={a}
+              index={i}
+              pathKey={pathKey}
+              agentNames={agentNames}
+              selected={selected}
+              onSelect={onSelect}
+              allowLoop={allowLoop}
+              patchAt={patchAt}
+              removeAt={removeAt}
+              moveAt={moveAt}
+            />
+          ))}
+        </SortableContext>
+      </DndContext>
+    </div>
+  )
+}
+
+interface ActionRowProps {
+  sortId: string
+  action: WorkflowAction
+  index: number
+  pathKey: string
+  agentNames: string[]
+  selected: string | null
+  onSelect: (key: string | null) => void
+  allowLoop: boolean
+  patchAt: (i: number, p: Partial<WorkflowAction>) => void
+  removeAt: (i: number) => void
+  moveAt: (i: number, dir: -1 | 1) => void
+}
+
+function ActionRow({
+  sortId,
+  action: a,
+  index: i,
+  pathKey,
+  agentNames,
+  selected,
+  onSelect,
+  allowLoop,
+  patchAt,
+  removeAt,
+  moveAt,
+}: ActionRowProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: sortId })
+  const key = `${pathKey}/${i}`
+  const lanes = actionLanes(a, key)
+  const Icon = ICON_BY_KIND[a.kind] ?? WorkflowIcon
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={cn(
+        'rounded-md border',
+        selected === key ? 'border-primary' : 'border-border',
+        isDragging && 'relative z-10 opacity-70 shadow-md',
+      )}>
+      <div className="flex items-center gap-1 px-2 py-1.5 text-xs">
+        <button
+          type="button"
+          aria-label="Drag to reorder"
+          className="cursor-grab touch-none rounded p-0.5 text-muted-foreground hover:bg-accent active:cursor-grabbing"
+          {...attributes}
+          {...listeners}>
+          <GripVertical className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={() => onSelect(selected === key ? null : key)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left">
+          <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-muted text-[10px]">
+            {i + 1}
+          </span>
+          <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate font-medium">{a.kind}</span>
+            <span className="block truncate text-[10px] text-muted-foreground">{actionSummary(a)}</span>
+          </span>
+        </button>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            aria-label="Move up"
+            className="rounded p-0.5 text-muted-foreground hover:bg-accent"
+            onClick={() => moveAt(i, -1)}>
+            <ArrowUp className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            aria-label="Move down"
+            className="rounded p-0.5 text-muted-foreground hover:bg-accent"
+            onClick={() => moveAt(i, 1)}>
+            <ArrowDown className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            aria-label="Remove action"
+            className="rounded p-0.5 text-muted-foreground hover:text-destructive"
+            onClick={() => removeAt(i)}>
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      </div>
+      {selected === key && (
+        <div className="space-y-2 border-t p-2">
+          <Field label="Action id (must be unique)">
+            <input
+              className={CONTROL}
+              value={str(a.id)}
+              onChange={(e) => patchAt(i, { id: e.target.value })}
+              placeholder="unique_id"
+            />
+          </Field>
+          <ActionForm action={a} agentNames={agentNames} onChange={(p) => patchAt(i, p)} />
+        </div>
+      )}
+      {lanes.length > 0 && (
+        <div className="space-y-2 border-t bg-muted/20 p-2">
+          {a.kind === 'ConditionGroup' && (
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-medium text-muted-foreground">Branches</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-5 px-1.5 text-[10px]"
+                onClick={() => {
+                  const conds = a.conditions ?? []
+                  patchAt(i, {
+                    conditions: [...conds, { condition: '', id: `${a.id ?? key}_c${conds.length + 1}`, actions: [] }],
+                  })
+                }}>
+                <Plus className="mr-0.5 h-3 w-3" /> Branch
+              </Button>
             </div>
-            {selected === key && (
-              <div className="space-y-2 border-t p-2">
-                <ActionForm action={a} agentNames={agentNames} onChange={(p) => patchAt(i, p)} />
-              </div>
-            )}
-            {lanes.length > 0 && (
-              <div className="space-y-2 border-t bg-muted/20 p-2">
-                {a.kind === 'ConditionGroup' && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-medium text-muted-foreground">Branches</span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-5 px-1.5 text-[10px]"
-                      onClick={() => {
-                        const conds = a.conditions ?? []
-                        patchAt(i, {
-                          conditions: [
-                            ...conds,
-                            { condition: '', id: `${a.id ?? key}_c${conds.length + 1}`, actions: [] },
-                          ],
-                        })
-                      }}>
-                      <Plus className="mr-0.5 h-3 w-3" /> Branch
-                    </Button>
-                  </div>
+          )}
+          {lanes.map((lane, li) => (
+            <div key={lane.key} className="rounded border border-dashed border-border/70 pl-2">
+              <div className="flex items-center justify-between py-1 pr-1">
+                <span className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  <ListTree className="h-3 w-3" /> {lane.label}
+                </span>
+                {a.kind === 'ConditionGroup' && li < (a.conditions ?? []).length && (
+                  <input
+                    className="w-32 rounded border border-input bg-background px-1 py-0.5 text-[10px] outline-none"
+                    placeholder="=condition"
+                    value={str((a.conditions ?? [])[li]?.condition)}
+                    onChange={(e) => {
+                      const conds = a.conditions ?? []
+                      patchAt(i, {
+                        conditions: conds.map((c, jj) => (jj === li ? { ...c, condition: e.target.value } : c)),
+                      })
+                    }}
+                  />
                 )}
-                {lanes.map((lane, li) => (
-                  <div key={lane.key} className="rounded border border-dashed border-border/70 pl-2">
-                    <div className="flex items-center justify-between py-1 pr-1">
-                      <span className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                        <ListTree className="h-3 w-3" /> {lane.label}
-                      </span>
-                      {a.kind === 'ConditionGroup' && li < (a.conditions ?? []).length && (
-                        <input
-                          className="w-32 rounded border border-input bg-background px-1 py-0.5 text-[10px] outline-none"
-                          placeholder="=condition"
-                          value={str((a.conditions ?? [])[li]?.condition)}
-                          onChange={(e) => {
-                            const conds = a.conditions ?? []
-                            patchAt(i, {
-                              conditions: conds.map((c, jj) => (jj === li ? { ...c, condition: e.target.value } : c)),
-                            })
-                          }}
-                        />
-                      )}
-                    </div>
-                    <ActionList
-                      actions={lane.actions}
-                      pathKey={lane.key}
-                      agentNames={agentNames}
-                      selected={selected}
-                      onSelect={onSelect}
-                      allowLoop={lane.loop || allowLoop}
-                      update={(next) => patchAt(i, lane.patch(next))}
-                    />
-                  </div>
-                ))}
               </div>
-            )}
-          </div>
-        )
-      })}
+              <ActionList
+                actions={lane.actions}
+                pathKey={lane.key}
+                agentNames={agentNames}
+                selected={selected}
+                onSelect={onSelect}
+                allowLoop={lane.loop || allowLoop}
+                update={(next) => patchAt(i, lane.patch(next))}
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
