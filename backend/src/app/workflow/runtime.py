@@ -66,14 +66,19 @@ async def stream_workflow(
     encoder: Any,
     *,
     thread_id: str | None = None,
+    result: dict[str, Any] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Run ``workflow_id`` and yield encoded AG-UI SSE event strings (UDR-0101 D5/D8).
 
     Emits: RUN_STARTED -> workflow_started (CUSTOM) -> per-node workflow_node_* CUSTOM
-    events + TEXT_MESSAGE_* for agent-node output -> workflow_completed (CUSTOM) ->
-    RUN_FINISHED. A compile / run failure emits RUN_ERROR. The caller (endpoint.py)
-    supplies the encoder and the AG-UI lifecycle wrappers are produced here so the
-    workflow branch is self-contained.
+    events + TEXT_MESSAGE_* for agent-node output -> workflow_completed (CUSTOM, carrying
+    the completed-node count) -> RUN_FINISHED. A compile / run failure emits RUN_ERROR.
+    The completion is surfaced by the workflow_completed CUSTOM event (the run-progress
+    indicator, CTR-0185), NOT a body message, so a silent workflow leaves no
+    "Workflow completed" chat bubble (v0.115.1). The caller passes a ``result`` dict that
+    is filled with ``{"assistant_text": str, "steps": int, "produced_text": bool}`` so
+    the endpoint can drive Auto Session Title (generate from output, else clear the
+    pending spinner) -- otherwise a first-turn workflow run would spin forever.
     """
     from ag_ui.core import (
         CustomEvent,
@@ -104,6 +109,8 @@ async def stream_workflow(
 
     msg_id: str | None = None
     last_text_node: str | None = None
+    nodes_completed = 0
+    assistant_parts: list[str] = []
     try:
         async for event in workflow.run(message, stream=True):
             etype = str(getattr(event, "type", ""))
@@ -119,6 +126,7 @@ async def stream_workflow(
                 )
                 continue
             if etype in ("executor_completed", "executor_bypassed"):
+                nodes_completed += 1
                 yield encoder.encode(
                     CustomEvent(
                         type=EventType.CUSTOM,
@@ -165,14 +173,28 @@ async def stream_workflow(
                         TextMessageContentEvent(type=EventType.TEXT_MESSAGE_CONTENT, message_id=msg_id, delta="\n\n")
                     )
                 last_text_node = executor_id
+                assistant_parts.append(text)
                 yield encoder.encode(
                     TextMessageContentEvent(type=EventType.TEXT_MESSAGE_CONTENT, message_id=msg_id, delta=text)
                 )
 
+        # Only close a message if node output actually produced one. A workflow with no
+        # SendActivity / agent reply produces NO body bubble (v0.115.1); its completion
+        # is shown by the workflow_completed run-progress indicator (CTR-0185), not a
+        # chat message. The endpoint drives Auto Session Title from ``result`` so a
+        # first-turn silent run still finalizes (title cleared, history saved).
         if msg_id is not None:
             yield encoder.encode(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
+        if result is not None:
+            result["assistant_text"] = "".join(assistant_parts).strip()
+            result["steps"] = nodes_completed
+            result["produced_text"] = msg_id is not None
         yield encoder.encode(
-            CustomEvent(type=EventType.CUSTOM, name="workflow_completed", value={"workflow_id": workflow_id})
+            CustomEvent(
+                type=EventType.CUSTOM,
+                name="workflow_completed",
+                value={"workflow_id": workflow_id, "steps": nodes_completed},
+            )
         )
         yield encoder.encode(RunFinishedEvent(type=EventType.RUN_FINISHED, thread_id=thread, run_id=run_id))
     except Exception as exc:  # a node-agent / runtime failure ends the run

@@ -621,8 +621,42 @@ async def _stream_with_reasoning(
         from app.workflow.runtime import stream_workflow
 
         _wf_input = _latest_user_text(request_body.messages)
-        async for _chunk in stream_workflow(str(_workflow_id), _wf_input, encoder, thread_id=thread_id):
+        _wf_result: dict[str, Any] = {}
+        async for _chunk in stream_workflow(
+            str(_workflow_id), _wf_input, encoder, thread_id=thread_id, result=_wf_result
+        ):
             yield _chunk
+        # Auto Session Title (PRP-0077, CTR-0109, UDR-0053 D17): the workflow branch
+        # returns before the shared post-turn block, so it must drive titling itself --
+        # otherwise a FIRST-turn workflow run leaves auto_title_pending set and the
+        # sidebar spinner animates forever (v0.115.1). Generate a title from the
+        # workflow's output when it produced text; otherwise clear the pending spinner.
+        _wf_temporary = bool((request_body.state or {}).get("temporary"))
+        if (
+            settings.session_title_mode == "llm"
+            and not _wf_temporary
+            and _is_first_assistant_turn(request_body.messages)
+        ):
+            _wf_assistant = str(_wf_result.get("assistant_text") or "")
+            _wf_user = _first_user_text(request_body.messages)
+            try:
+                from app.background import dispatch as _dispatch_background
+
+                if _wf_user and _wf_assistant:
+                    _dispatch_background(
+                        "session-title",
+                        dedup_key=thread_id,
+                        ctx={
+                            "thread_id": thread_id,
+                            "user_text": _wf_user,
+                            "assistant_text": _wf_assistant,
+                            "model": "",
+                        },
+                    )
+                else:
+                    _dispatch_background("session-title-clear", dedup_key=thread_id, ctx={"thread_id": thread_id})
+            except Exception:
+                logger.warning("failed to dispatch workflow session title for %s", thread_id, exc_info=True)
         return
 
     yield encoder.encode(

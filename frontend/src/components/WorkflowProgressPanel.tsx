@@ -21,6 +21,8 @@ export interface WorkflowRunState {
   active: boolean
   completed: boolean
   nodes: WorkflowNodeState[]
+  /** completed-node count reported by the workflow_completed event (v0.115.1). */
+  steps?: number
 }
 
 /** Fold a workflow_* CUSTOM event into the run state (pure; used by the parent). */
@@ -44,8 +46,10 @@ export function reduceWorkflowEvent(
         nodes: state.nodes.map((n) => (n.node === node && n.status === 'running' ? { ...n, status: 'done' } : n)),
       }
     }
-    case 'workflow_completed':
-      return { ...state, active: false, completed: true }
+    case 'workflow_completed': {
+      const steps = typeof value?.steps === 'number' ? (value.steps as number) : undefined
+      return { ...state, active: false, completed: true, ...(steps !== undefined ? { steps } : {}) }
+    }
     default:
       return state
   }
@@ -53,27 +57,41 @@ export function reduceWorkflowEvent(
 
 export const EMPTY_WORKFLOW_RUN: WorkflowRunState = { active: false, completed: false, nodes: [] }
 
-export function WorkflowProgressPanel({ state }: { state: WorkflowRunState }) {
+/**
+ * Embeddable workflow run indicator. Rendered INSIDE the assistant message
+ * (ChatMessageItem) -- both live during a run and, on reload, from the persisted
+ * completion marker (v0.115.1). There is no longer a standalone panel above the
+ * composer; `className` lets the host place it in the message flow.
+ */
+export function WorkflowProgressPanel({ state, className }: { state: WorkflowRunState; className?: string }) {
   if (!state.active && !state.completed) return null
-  if (state.nodes.length === 0 && !state.active) return null
   return (
-    <div className="mx-4 mb-2 rounded-md border bg-muted/40 p-2 text-xs">
-      <div className="mb-1 flex items-center gap-1.5 font-medium text-muted-foreground">
-        <WorkflowIcon className="h-3.5 w-3.5" />
-        {state.completed ? 'Workflow complete' : 'Workflow running'}
+    <div className={cn('rounded-md border bg-muted/40 p-2 text-xs', className)}>
+      <div
+        className={cn('flex items-center gap-1.5 font-medium text-muted-foreground', state.nodes.length > 0 && 'mb-1')}>
+        {state.completed ? (
+          <CircleCheck className="h-3.5 w-3.5 text-primary" />
+        ) : (
+          <WorkflowIcon className="h-3.5 w-3.5" />
+        )}
+        {state.completed
+          ? `Workflow complete${state.steps ? ` (${state.steps} step${state.steps === 1 ? '' : 's'})` : ''}`
+          : 'Workflow running'}
       </div>
-      <ol className="space-y-0.5">
-        {state.nodes.map((n) => (
-          <li key={`${n.node}-${n.index}`} className="flex items-center gap-1.5">
-            {n.status === 'done' ? (
-              <CircleCheck className="h-3 w-3 text-primary" />
-            ) : (
-              <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-            )}
-            <span className={cn('truncate', n.status === 'done' && 'text-muted-foreground')}>{n.node}</span>
-          </li>
-        ))}
-      </ol>
+      {state.nodes.length > 0 && (
+        <ol className="space-y-0.5">
+          {state.nodes.map((n) => (
+            <li key={`${n.node}-${n.index}`} className="flex items-center gap-1.5">
+              {n.status === 'done' ? (
+                <CircleCheck className="h-3 w-3 text-primary" />
+              ) : (
+                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+              )}
+              <span className={cn('truncate', n.status === 'done' && 'text-muted-foreground')}>{n.node}</span>
+            </li>
+          ))}
+        </ol>
+      )}
     </div>
   )
 }

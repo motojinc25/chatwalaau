@@ -37,6 +37,7 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { WeatherToolResults } from '@/components/WeatherCard'
+import { WorkflowProgressPanel, type WorkflowRunState } from '@/components/WorkflowProgressPanel'
 import { openUploadFullSize } from '@/lib/uploads'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from '@/types/chat'
@@ -104,6 +105,13 @@ interface ChatMessageItemProps {
   onToggleMemoryLike?: (messageIndex: number) => void
   /** Curation status for this message's turn; undefined = not liked. */
   memoryLikeStatus?: 'pending' | 'curated' | 'failed'
+  /**
+   * Live declarative workflow run state (CTR-0185, v0.115.1). Passed to the LAST
+   * assistant message while a workflow is the run-target so its node progress +
+   * completion render INSIDE the message (the standalone panel was removed). On reload
+   * this is absent and the persisted `message.workflowCompleted` marker is used instead.
+   */
+  workflowRun?: WorkflowRunState
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -310,10 +318,20 @@ function ChatMessageItemImpl({
   onRegenerateWithModel,
   onToggleMemoryLike,
   memoryLikeStatus,
+  workflowRun,
 }: ChatMessageItemProps) {
   const isUser = message.role === 'user'
   const hasTextContent = message.content != null && message.content.trim().length > 0
-  const isWaiting = !isUser && isLoading && !hasTextContent
+  // Workflow run indicator (v0.115.1): the LIVE state during a run (prop), else the
+  // persisted completion marker on reload. Rendered inside the message; the standalone
+  // WorkflowProgressPanel above the composer was removed.
+  const workflowState: WorkflowRunState | undefined =
+    workflowRun && (workflowRun.active || workflowRun.completed)
+      ? workflowRun
+      : message.workflowCompleted
+        ? { active: false, completed: true, nodes: [], steps: message.workflowCompleted.steps }
+        : undefined
+  const isWaiting = !isUser && isLoading && !hasTextContent && !workflowState
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
@@ -535,13 +553,16 @@ function ChatMessageItemImpl({
             {message.toolCalls && message.toolCalls.length > 0 && (
               <ImageGenerationResults toolCalls={message.toolCalls} onMaskEdit={onMaskEdit} />
             )}
+            {/* Declarative workflow run: node progress (live) + completion indicator,
+                rendered inside the message (the standalone panel was removed, v0.115.1). */}
+            {workflowState && <WorkflowProgressPanel state={workflowState} className="mb-1" />}
             {message.content ? (
               // Structured output (CTR-0012 v11, PRP-0082, UDR-0058 D5): render the
               // JSON answer as a `json` code block (reuses CodeBlock copy/download)
               // instead of Markdown. Streaming partial JSON shows as it arrives.
               <MarkdownRenderer content={message.structured ? toJsonCodeFence(message.content) : message.content} />
             ) : (
-              !isWaiting && <span className="inline-block h-4 w-1 animate-pulse bg-current" />
+              !isWaiting && !workflowState && <span className="inline-block h-4 w-1 animate-pulse bg-current" />
             )}
             {/* Unified in-progress indicator (PRP-0118 follow-up): while the turn is
                 still running -- and text has already arrived, so the top isWaiting

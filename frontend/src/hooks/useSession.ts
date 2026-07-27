@@ -160,6 +160,9 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
       // Which agent / workflow produced the turn (v0.112.2), so a reloaded chat still
       // shows it in the action bar.
       ...(usage?.run_target ? { runTarget: usage.run_target } : {}),
+      // Restore the silent-workflow completion marker so a reloaded turn renders as a
+      // "Workflow complete" indicator, not an empty bubble (v0.115.1).
+      ...(usage?.workflow_completed ? { workflowCompleted: usage.workflow_completed } : {}),
       // Restore the structured-output flag so a reloaded JSON answer still renders
       // as a code block (CTR-0118 / CTR-0012 v11, PRP-0082, UDR-0058 D9).
       ...(usage?.structured ? { structured: true } : {}),

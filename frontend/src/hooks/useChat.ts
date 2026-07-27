@@ -366,6 +366,13 @@ export function useChat(options?: UseChatOptions) {
         const completedActivityLog: { type: string; id: string }[] = []
         let currentReasoningContent = ''
         let completedUsage: UsageInfo | undefined
+        // Declarative workflow completion (v0.115.1): a workflow run surfaces its
+        // completion via the workflow_completed CUSTOM event (steps count), NOT a body
+        // message. Track it so a SILENT run (no SendActivity / agent reply) still saves
+        // the turn -- rendered as a compact "Workflow complete" indicator, not an empty
+        // bubble -- so history + the session-list refresh (and title) still happen.
+        let workflowCompleted = false
+        let workflowSteps = 0
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
@@ -568,6 +575,11 @@ export function useChat(options?: UseChatOptions) {
                     const counter = attempt && max ? ` (${attempt}/${max})` : ''
                     onNoticeRef.current?.(`Temporary server error -- retrying${counter}...`)
                   }
+                  if (event.name === 'workflow_completed') {
+                    workflowCompleted = true
+                    const steps = (event.value as Record<string, unknown> | undefined)?.steps
+                    if (typeof steps === 'number') workflowSteps = steps
+                  }
                   if (event.name === 'structured_output' && event.value) {
                     // PRP-0082 (CTR-0009 v14): this turn is structured -> render the
                     // answer as a JSON code block as it streams (UDR-0058 D5).
@@ -625,8 +637,18 @@ export function useChat(options?: UseChatOptions) {
           }
         }
 
-        // Save messages to session after stream completes
-        if (assistantContent) {
+        // Save messages to session after stream completes. A declarative workflow that
+        // produced no chat reply (workflowCompleted, no body) is ALSO saved so the turn
+        // finalizes (history + session-list refresh + title); it persists as a compact
+        // "Workflow complete" indicator, not an empty bubble (v0.115.1).
+        const silentWorkflow = !assistantContent && workflowCompleted
+        if (silentWorkflow) {
+          // Render the live (empty) assistant bubble as the completion indicator.
+          setMessages((prev) =>
+            prev.map((msg) => (msg.id === assistantId ? { ...msg, workflowCompleted: { steps: workflowSteps } } : msg)),
+          )
+        }
+        if (assistantContent || workflowCompleted) {
           // Persist the message ids so identity is STABLE across reload (the
           // backend stores them as `message_id`; the loader restores them). Keeps
           // id-keyed state such as the Agent Memory per-turn like (CTR-0165) intact.
@@ -647,11 +669,13 @@ export function useChat(options?: UseChatOptions) {
           // Persist the run-target INSIDE the usage object (the established place for
           // per-message model / reasoning / verbosity), so a reloaded chat shows which
           // Built-in / Prompt agent or Workflow answered (v0.112.2). A workflow run emits
-          // no usage event, so the object is created when only the label exists.
-          if (completedUsage || runTargetLabelRef.current) {
+          // no usage event, so the object is created when only the label exists. A silent
+          // workflow also stores its completion marker (steps) for reload rendering.
+          if (completedUsage || runTargetLabelRef.current || workflowCompleted) {
             assistantMsg.usage = {
               ...(completedUsage ?? {}),
               ...(runTargetLabelRef.current ? { run_target: runTargetLabelRef.current } : {}),
+              ...(workflowCompleted ? { workflow_completed: { steps: workflowSteps } } : {}),
             }
           }
           const userMsg: Record<string, unknown> = { role: 'user', content: userContent, id: userMessage.id }

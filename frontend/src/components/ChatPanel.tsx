@@ -19,12 +19,7 @@ import { StructuredOutputControl, type StructuredSelection } from '@/components/
 import { ToolApprovalList } from '@/components/ToolApprovalCard'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
-import {
-  EMPTY_WORKFLOW_RUN,
-  reduceWorkflowEvent,
-  WorkflowProgressPanel,
-  type WorkflowRunState,
-} from '@/components/WorkflowProgressPanel'
+import { EMPTY_WORKFLOW_RUN, reduceWorkflowEvent, type WorkflowRunState } from '@/components/WorkflowProgressPanel'
 import { useChat } from '@/hooks/useChat'
 import { useChatScroll } from '@/hooks/useChatScroll'
 import { type ImageAttachment, useImageAttachment } from '@/hooks/useImageAttachment'
@@ -634,6 +629,9 @@ export function ChatPanel({
                 onRegenerateWithModel={regenerateWithModel}
                 onToggleMemoryLike={turn ? handleToggleMemoryLike : undefined}
                 memoryLikeStatus={turn ? memory.states[turn.turnKey] : undefined}
+                workflowRun={
+                  selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant' ? workflowRun : undefined
+                }
               />
             )
           })}
@@ -663,9 +661,6 @@ export function ChatPanel({
           {notification.message}
         </div>
       )}
-
-      {/* Live workflow graph progress (CTR-0185, PRP-0118, UDR-0101 D8). */}
-      <WorkflowProgressPanel state={workflowRun} />
 
       {compact ? (
         <div ref={inputRef}>

@@ -34,6 +34,10 @@ export interface UsageInfo {
    * workflow name (v0.112.2). Persisted here (like `model`) so a reloaded chat still
    * shows which agent / workflow answered. */
   run_target?: string
+  /** Declarative workflow completion marker (v0.115.1). A workflow run that produced no
+   * chat reply persists this so the turn reloads as a compact "Workflow complete"
+   * indicator instead of an empty bubble; `steps` is the completed-node count. */
+  workflow_completed?: { steps: number }
   /**
    * Soft, non-blocking validation status of the structured answer (UDR-0058 D4).
    * `parsed` false means the JSON was empty (refusal) or unparseable (truncation /
@@ -71,6 +75,10 @@ export interface ChatMessage {
    * (CTR-0185, PRP-0118). Shown in the action bar so the operator sees which agent /
    * workflow answered. */
   runTarget?: string
+  /** v0.115.1: set when this assistant turn is a declarative workflow that produced no
+   * chat reply. Rendered as a compact "Workflow complete" indicator instead of an empty
+   * bubble; restored from `usage.workflow_completed` on reload. */
+  workflowCompleted?: { steps: number }
   /** Reasoning effort used for this assistant message (CTR-0030, PRP-0071) */
   reasoning?: string
   /** Text verbosity used for this assistant message (gpt-5.x only; CTR-0030, PRP-0081) */

@@ -1,10 +1,12 @@
 import Editor from '@monaco-editor/react'
 import {
+  applyNodeChanges,
   Background,
   type Edge,
   Handle,
   MarkerType,
   type Node,
+  type NodeChange,
   type NodeProps,
   Position,
   ReactFlow,
@@ -485,7 +487,7 @@ function elkToNodes(elkNodes: ElkGraphNode[], parentId: string | null, meta: Map
       type: m.type,
       position: { x: n.x ?? 0, y: n.y ?? 0 },
       data: { label: m.label, sub: m.sub, selected: false, onSelect: () => {} },
-      draggable: false,
+      draggable: m.type !== 'lane',
       selectable: m.type !== 'lane',
       style: { width: n.width ?? NODE_W, height: n.height ?? NODE_H },
       ...(parentId ? { parentId, extent: 'parent' as const } : {}),
@@ -548,6 +550,7 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
   const [dirty, setDirty] = useState(false)
   const [leaveConfirm, setLeaveConfirm] = useState(false)
   const [showIO, setShowIO] = useState(false)
+  const [showMeta, setShowMeta] = useState(false)
 
   // ---- initial load: Prompt agent names + source for edit ----
   useEffect(() => {
@@ -649,14 +652,25 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
     }
   }, [doc.actions, open])
 
+  // Local node state seeded from the elk layout so nodes can be dragged (a structural
+  // change re-runs elk and reseeds; manual positions are ephemeral, v0.115.1).
+  const [rfNodes, setRfNodes] = useState<Node[]>([])
+  useEffect(() => {
+    setRfNodes(layoutNodes)
+  }, [layoutNodes])
+  const onNodesChange = useCallback(
+    (changes: Array<NodeChange<Node>>) => setRfNodes((nds) => applyNodeChanges(changes, nds)),
+    [],
+  )
+
   const nodes = useMemo(
     () =>
-      layoutNodes.map((n) =>
+      rfNodes.map((n) =>
         n.type === 'lane'
           ? n
           : { ...n, data: { ...n.data, selected: selected === n.id, onSelect: () => setSelected(n.id) } },
       ),
-    [layoutNodes, selected],
+    [rfNodes, selected],
   )
   const edges = useMemo(() => buildEdges(doc.actions), [doc.actions])
 
@@ -741,30 +755,44 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
                     placeholder="TriageFlow"
                   />
                 </Field>
-                <Field label="Display name (optional)">
-                  <input
-                    className={CONTROL}
-                    value={doc.displayName ?? ''}
-                    onChange={(e) => patch({ displayName: e.target.value })}
-                    placeholder="Triage Flow"
-                  />
-                </Field>
-                <Field label="Description">
-                  <textarea
-                    className={cn(CONTROL, 'h-14 resize-none')}
-                    value={doc.description ?? ''}
-                    onChange={(e) => patch({ description: e.target.value })}
-                  />
-                </Field>
-                <Field label="Max turns (optional)">
-                  <input
-                    className={CONTROL}
-                    type="number"
-                    min={1}
-                    value={doc.maxTurns ?? ''}
-                    onChange={(e) => patch({ maxTurns: e.target.value ? Number(e.target.value) : null })}
-                  />
-                </Field>
+                {/* display name / description / max turns (collapsible) */}
+                <div className="rounded-md border">
+                  <button
+                    type="button"
+                    onClick={() => setShowMeta((s) => !s)}
+                    className="flex w-full items-center justify-between px-2 py-1.5 text-[11px] font-medium text-muted-foreground hover:bg-accent">
+                    <span>Display name / description / max turns</span>
+                    <span className="text-[10px]">{showMeta ? 'Hide' : 'Show'}</span>
+                  </button>
+                  {showMeta && (
+                    <div className="space-y-3 border-t p-2">
+                      <Field label="Display name (optional)">
+                        <input
+                          className={CONTROL}
+                          value={doc.displayName ?? ''}
+                          onChange={(e) => patch({ displayName: e.target.value })}
+                          placeholder="Triage Flow"
+                        />
+                      </Field>
+                      <Field label="Description">
+                        <textarea
+                          className={cn(CONTROL, 'h-14 resize-none')}
+                          value={doc.description ?? ''}
+                          onChange={(e) => patch({ description: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="Max turns (optional)">
+                        <input
+                          className={CONTROL}
+                          type="number"
+                          min={1}
+                          value={doc.maxTurns ?? ''}
+                          onChange={(e) => patch({ maxTurns: e.target.value ? Number(e.target.value) : null })}
+                        />
+                      </Field>
+                    </div>
+                  )}
+                </div>
 
                 {/* inputs / outputs (collapsible) */}
                 <div className="rounded-md border">
@@ -821,8 +849,9 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
                     nodes={nodes}
                     edges={edges}
                     nodeTypes={nodeTypes}
+                    onNodesChange={onNodesChange}
                     nodesConnectable={false}
-                    nodesDraggable={false}
+                    nodesDraggable
                     fitView
                     minZoom={0.15}
                     proOptions={{ hideAttribution: true }}>
@@ -996,8 +1025,17 @@ function ActionList({ actions, pathKey, agentNames, selected, onSelect, allowLoo
     update(next)
   }
   const addKind = (kind: string) => {
-    onSelect(`${pathKey}/${actions.length}`)
-    update([...actions, newAction(kind, actions.length + 1)])
+    // Insert right AFTER the selected sibling in this list; otherwise append (v0.115.1).
+    let insertAt = actions.length
+    for (let idx = 0; idx < actions.length; idx++) {
+      if (selected === `${pathKey}/${idx}`) {
+        insertAt = idx + 1
+        break
+      }
+    }
+    const next = [...actions.slice(0, insertAt), newAction(kind, actions.length + 1), ...actions.slice(insertAt)]
+    onSelect(`${pathKey}/${insertAt}`)
+    update(next)
   }
 
   return (
