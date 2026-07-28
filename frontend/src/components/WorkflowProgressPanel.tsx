@@ -1,4 +1,4 @@
-import { CircleCheck, Loader2, Workflow as WorkflowIcon } from 'lucide-react'
+import { CircleAlert, CircleCheck, Loader2, Workflow as WorkflowIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /**
@@ -19,13 +19,17 @@ export interface WorkflowNodeState {
    * backend still renders.
    */
   label?: string
-  status: 'running' | 'done'
+  status: 'running' | 'done' | 'failed'
   index: number
 }
 
 export interface WorkflowRunState {
   active: boolean
   completed: boolean
+  /** The run ended in an error (v0.116.1); mutually exclusive with `completed`. */
+  failed?: boolean
+  /** Operator-facing failure text from the workflow_failed / workflow_node_failed event. */
+  error?: string
   nodes: WorkflowNodeState[]
   /** completed-node count reported by the workflow_completed event (v0.115.1). */
   steps?: number
@@ -53,6 +57,29 @@ export function reduceWorkflowEvent(
         nodes: state.nodes.map((n) => (n.node === node && n.status === 'running' ? { ...n, status: 'done' } : n)),
       }
     }
+    case 'workflow_node_failed': {
+      const node = String(value?.node ?? '')
+      const message = value?.message ? String(value.message) : undefined
+      return {
+        ...state,
+        ...(message ? { error: message } : {}),
+        nodes: state.nodes.map((n) => (n.node === node && n.status === 'running' ? { ...n, status: 'failed' } : n)),
+      }
+    }
+    case 'workflow_failed': {
+      const steps = typeof value?.steps === 'number' ? (value.steps as number) : undefined
+      const message = value?.message ? String(value.message) : undefined
+      return {
+        ...state,
+        active: false,
+        completed: false,
+        failed: true,
+        ...(message ? { error: message } : {}),
+        ...(steps !== undefined ? { steps } : {}),
+        // A step still marked running when the run died did not finish.
+        nodes: state.nodes.map((n) => (n.status === 'running' ? { ...n, status: 'failed' } : n)),
+      }
+    }
     case 'workflow_completed': {
       const steps = typeof value?.steps === 'number' ? (value.steps as number) : undefined
       return { ...state, active: false, completed: true, ...(steps !== undefined ? { steps } : {}) }
@@ -71,30 +98,51 @@ export const EMPTY_WORKFLOW_RUN: WorkflowRunState = { active: false, completed: 
  * composer; `className` lets the host place it in the message flow.
  */
 export function WorkflowProgressPanel({ state, className }: { state: WorkflowRunState; className?: string }) {
-  if (!state.active && !state.completed) return null
+  if (!state.active && !state.completed && !state.failed) return null
   return (
-    <div className={cn('rounded-md border bg-muted/40 p-2 text-xs', className)}>
+    <div
+      className={cn(
+        'rounded-md border p-2 text-xs',
+        state.failed ? 'border-destructive/40 bg-destructive/10' : 'bg-muted/40',
+        className,
+      )}>
       <div
-        className={cn('flex items-center gap-1.5 font-medium text-muted-foreground', state.nodes.length > 0 && 'mb-1')}>
-        {state.completed ? (
+        className={cn(
+          'flex items-center gap-1.5 font-medium',
+          state.failed ? 'text-destructive' : 'text-muted-foreground',
+          (state.nodes.length > 0 || state.error) && 'mb-1',
+        )}>
+        {state.failed ? (
+          <CircleAlert className="h-3.5 w-3.5" />
+        ) : state.completed ? (
           <CircleCheck className="h-3.5 w-3.5 text-primary" />
         ) : (
           <WorkflowIcon className="h-3.5 w-3.5" />
         )}
-        {state.completed
-          ? `Workflow complete${state.steps ? ` (${state.steps} step${state.steps === 1 ? '' : 's'})` : ''}`
-          : 'Workflow running'}
+        {state.failed
+          ? `Workflow failed${state.steps ? ` (after ${state.steps} step${state.steps === 1 ? '' : 's'})` : ''}`
+          : state.completed
+            ? `Workflow complete${state.steps ? ` (${state.steps} step${state.steps === 1 ? '' : 's'})` : ''}`
+            : 'Workflow running'}
       </div>
+      {state.failed && state.error && <p className="mb-1 text-[11px] text-destructive">{state.error}</p>}
       {state.nodes.length > 0 && (
         <ol className="space-y-0.5">
           {state.nodes.map((n) => (
             <li key={`${n.node}-${n.index}`} className="flex items-center gap-1.5">
-              {n.status === 'done' ? (
+              {n.status === 'failed' ? (
+                <CircleAlert className="h-3 w-3 text-destructive" />
+              ) : n.status === 'done' ? (
                 <CircleCheck className="h-3 w-3 text-primary" />
               ) : (
                 <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
               )}
-              <span className={cn('truncate', n.status === 'done' && 'text-muted-foreground')}>
+              <span
+                className={cn(
+                  'truncate',
+                  n.status === 'done' && 'text-muted-foreground',
+                  n.status === 'failed' && 'text-destructive',
+                )}>
                 {n.label || n.node}
               </span>
             </li>

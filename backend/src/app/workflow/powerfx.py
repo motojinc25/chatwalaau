@@ -70,6 +70,48 @@ def _iter_expressions(value: Any):
             yield from _iter_expressions(inner)
 
 
+def powerfx_available() -> bool:
+    """Return whether a ``=`` expression can actually be EVALUATED at run time.
+
+    Probes the exact symbol the MAF evaluator guards on
+    (``_declarative_base.Engine``): when that is ``None`` every ``=`` expression raises
+    ``RuntimeError: PowerFx is not available (dotnet runtime not installed)`` mid-run.
+    Falls back to our own engine probe if the private symbol ever moves.
+    """
+    try:
+        from agent_framework_declarative._workflows import _declarative_base
+
+        return getattr(_declarative_base, "Engine", None) is not None
+    except Exception:
+        logger.debug("Power Fx availability probe failed; falling back to the local engine", exc_info=True)
+        return _get_engine() is not None
+
+
+def powerfx_availability_warnings(actions: Any) -> list[str]:
+    """Return a blocking warning when the workflow needs Power Fx but it is unavailable.
+
+    A ``=`` expression is evaluated by Power Fx on .NET. Without that runtime the
+    expression raises mid-run, after earlier actions have already taken effect. Reporting
+    it as a warning blocks activation instead, so the failure is visible BEFORE the run
+    (the UDR-0105 D5 principle applied to a missing runtime rather than a bad path).
+    """
+    expressions = []
+    seen: set[str] = set()
+    for expr in _iter_expressions(actions):
+        if expr not in seen:
+            seen.add(expr)
+            expressions.append(expr)
+    if not expressions or powerfx_available():
+        return []
+    sample = ", ".join(repr(e) for e in expressions[:3])
+    more = f" (and {len(expressions) - 3} more)" if len(expressions) > 3 else ""
+    return [
+        f"this workflow uses {len(expressions)} Power Fx expression(s) ({sample}{more}) but the Power Fx "
+        "engine is unavailable on this deployment: install the .NET runtime (the container image ships "
+        "it) or replace the '=' expressions with literal values."
+    ]
+
+
 def powerfx_warnings(actions: Any) -> list[str]:
     """Return a warning for each ``=`` expression in ``actions`` with a Power Fx syntax error.
 
@@ -90,4 +132,4 @@ def powerfx_warnings(actions: Any) -> list[str]:
     return warnings
 
 
-__all__ = ["powerfx_warnings"]
+__all__ = ["powerfx_availability_warnings", "powerfx_available", "powerfx_warnings"]

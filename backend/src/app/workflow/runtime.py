@@ -44,6 +44,35 @@ def _request_prompt(event: Any) -> str | None:
     return None
 
 
+# A MAF failure carries ``WorkflowErrorDetails(error_type=..., message=<python traceback>,
+# executor_id=..., extra=...)``. Rendering that repr puts a raw traceback in the chat, so
+# the message is extracted and -- for the failure modes with a known remedy -- replaced by
+# an actionable sentence.
+_POWERFX_UNAVAILABLE = "PowerFx is not available"
+
+
+def _failure_message(details: Any) -> str:
+    """Return a clean, operator-facing message for a workflow failure.
+
+    Prefers the structured ``message`` field over the dataclass repr, keeps only its last
+    line (the exception text, not the traceback that precedes it), and rewrites the
+    missing-Power-Fx case into a remedy the operator can act on.
+    """
+    if details is None:
+        return "Workflow failed."
+    raw = getattr(details, "message", None)
+    text = str(raw if isinstance(raw, str) and raw.strip() else details).strip()
+    if _POWERFX_UNAVAILABLE in text:
+        return (
+            "This workflow uses a Power Fx expression ('=...') but the Power Fx engine is "
+            "unavailable on this deployment. Install the .NET runtime (the container image "
+            "ships it) or replace the expressions with literal values."
+        )
+    # Keep the exception line, drop any preceding traceback frames.
+    last = [line for line in text.splitlines() if line.strip()]
+    return last[-1].strip() if last else "Workflow failed."
+
+
 def _event_text(event: Any) -> str | None:
     """Best-effort text payload from a workflow OUTPUT / DATA event."""
     data = getattr(event, "data", None)
@@ -164,9 +193,34 @@ async def stream_workflow(
                     )
                 )
                 continue
+            if etype == "executor_failed":
+                # A single node blew up. Surfaced as an ADDITIVE CUSTOM event so the
+                # run-progress indicator can mark THAT step as failed (CTR-0185) before
+                # the run-level error arrives.
+                yield encoder.encode(
+                    CustomEvent(
+                        type=EventType.CUSTOM,
+                        name="workflow_node_failed",
+                        value={
+                            "node": executor_id,
+                            "label": node_labels.get(str(executor_id)) or executor_id,
+                            "message": _failure_message(getattr(event, "details", None)),
+                        },
+                    )
+                )
+                continue
             if etype in ("failed", "error"):
-                details = getattr(event, "details", None)
-                yield encoder.encode(RunErrorEvent(type=EventType.RUN_ERROR, message=str(details or "Workflow failed")))
+                message = _failure_message(getattr(event, "details", None))
+                # workflow_failed lets the indicator render a terminal ERROR state; the
+                # RUN_ERROR that follows is what ends the AG-UI run.
+                yield encoder.encode(
+                    CustomEvent(
+                        type=EventType.CUSTOM,
+                        name="workflow_failed",
+                        value={"workflow_id": workflow_id, "steps": nodes_completed, "message": message},
+                    )
+                )
+                yield encoder.encode(RunErrorEvent(type=EventType.RUN_ERROR, message=message))
                 return
 
             text = _event_text(event)
@@ -211,7 +265,15 @@ async def stream_workflow(
         yield encoder.encode(RunFinishedEvent(type=EventType.RUN_FINISHED, thread_id=thread, run_id=run_id))
     except Exception as exc:  # a node-agent / runtime failure ends the run
         logger.exception("Workflow run failed: %s", workflow_id)
-        yield encoder.encode(RunErrorEvent(type=EventType.RUN_ERROR, message=f"Workflow run failed: {exc}"))
+        message = _failure_message(exc)
+        yield encoder.encode(
+            CustomEvent(
+                type=EventType.CUSTOM,
+                name="workflow_failed",
+                value={"workflow_id": workflow_id, "steps": nodes_completed, "message": message},
+            )
+        )
+        yield encoder.encode(RunErrorEvent(type=EventType.RUN_ERROR, message=message))
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +330,7 @@ async def run_workflow_job(job: Job, storage: PipelineStore, cancel_event: async
             if etype in ("executor_completed", "executor_bypassed"):
                 nodes += 1
             if etype in ("failed", "error"):
-                raise WorkflowError(str(getattr(event, "details", None) or "Workflow failed"))
+                raise WorkflowError(_failure_message(getattr(event, "details", None)))
             text = _event_text(event)
             if text:
                 outputs.append(text)
@@ -279,7 +341,7 @@ async def run_workflow_job(job: Job, storage: PipelineStore, cancel_event: async
                 return
     except Exception as exc:
         job.status = JobStatus.failed
-        job.error = f"Workflow run failed: {exc}"
+        job.error = _failure_message(exc)
         job.completed_at = datetime.now(UTC).isoformat()
         storage.save(job)
         return

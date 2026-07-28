@@ -490,9 +490,14 @@ def map_workflow_document(
     # Power Fx syntax check of every ``=`` expression (v0.115.2). Syntax-only, so a
     # reference to an undefined workflow variable is not a false positive; a no-op when
     # the .NET-backed Power Fx engine is unavailable.
-    from app.workflow.powerfx import powerfx_warnings
+    from app.workflow.powerfx import powerfx_availability_warnings, powerfx_warnings
 
     warnings.extend(powerfx_warnings(data.get("actions")))
+
+    # A ``=`` expression cannot be evaluated at all without the Power Fx engine, so a
+    # workflow that carries one is blocked BEFORE the run instead of raising mid-run
+    # after earlier actions have already taken effect.
+    warnings.extend(powerfx_availability_warnings(data.get("actions")))
 
     # Structural compile with NO agents: validates the graph + rejects unmapped actions
     # without building any LLM client. The jailed CTR-0186 handlers are injected so the

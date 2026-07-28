@@ -326,7 +326,7 @@ function ChatMessageItemImpl({
   // persisted completion marker on reload. Rendered inside the message; the standalone
   // WorkflowProgressPanel above the composer was removed.
   const workflowState: WorkflowRunState | undefined =
-    workflowRun && (workflowRun.active || workflowRun.completed)
+    workflowRun && (workflowRun.active || workflowRun.completed || workflowRun.failed)
       ? workflowRun
       : message.workflowCompleted
         ? { active: false, completed: true, nodes: [], steps: message.workflowCompleted.steps }
