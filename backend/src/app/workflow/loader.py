@@ -12,6 +12,7 @@ blocking warning (UDR-0101 D6).
 
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -81,11 +82,196 @@ _NESTED_ACTION_KEYS = ("actions", "then", "else", "elseActions")
 _MCP_SENTINEL_URL = "https://workflow-mcp.local/"
 
 
-def _prepare_compile_text(text: str) -> str:
-    """Return YAML text ready for the MAF builder (inject the MCP serverUrl sentinel).
+# ---------------------------------------------------------------------------
+# Action field normalization (PRP-0122, UDR-0105 D3/D6)
+# ---------------------------------------------------------------------------
+# The INSTALLED agent-framework-declarative executor is the field contract (UDR-0105
+# D1): the authoring layer must emit the keys the executor actually reads. This module
+# owns the ONE normalizer that (a) migrates superseded authoring keys forward and (b)
+# normalizes a namespace-less variable path to ``Local.``. It is invoked from exactly
+# three places -- the compile preparation hook below, the canonical serializer, and the
+# read-side document reshaping (both in app.workflow.authoring) -- so a workflow behaves
+# identically whether it was authored in the GUI, hand-written, or upgraded in place
+# without ever being opened.
 
-    Only rewrites when an InvokeMcpTool omits ``serverUrl``; otherwise returns the
-    original text byte-for-byte so hand-authored workflows compile unchanged.
+# Namespaces the MAF state layer recognizes (_state.py). An unrecognized prefix becomes
+# a CUSTOM namespace, which is legitimate and MUST NOT be rewritten (UDR-0105 D4).
+_WORKFLOW_SUB_NAMESPACES = ("Inputs", "Outputs")
+
+# Per-kind fields whose value is a state path WRITTEN to by the action. Only write
+# destinations are normalized; a read-side ``conversationId`` (InvokeAzureAgent,
+# InvokeMcpTool, HttpRequestAction) is an expression, not a destination.
+_WRITE_PATH_FIELDS: dict[str, tuple[str, ...]] = {
+    "SetVariable": ("variable",),
+    "SetValue": ("variable", "path"),
+    "SetTextVariable": ("variable",),
+    "ResetVariable": ("variable",),
+    "ParseValue": ("variable",),
+    "EditTableV2": ("table", "variable"),
+    "Question": ("variable",),
+    "RequestExternalInput": ("variable",),
+    "CreateConversation": ("conversationId",),
+    "HttpRequestAction": ("response", "responseHeaders"),
+}
+
+# Destinations nested under an action's ``output`` mapping (agent / tool invocations).
+_OUTPUT_WRITE_KEYS = ("responseObject", "messages", "result")
+
+# Foreach loop-variable NAMES. MAF prefixes these with ``Local.`` itself
+# (_executors_control_flow.py:179), so a stored ``Local.x`` would become
+# ``Local.Local.x``; normalization STRIPS the prefix here rather than adding one.
+_LOOP_NAME_FIELDS = ("itemName", "indexName")
+
+
+def _normalize_write_path(value: Any) -> Any:
+    """Return a write path with a namespace: a bare name gains ``Local.``.
+
+    An expression (``=...``), a non-string, an empty string, and an already-namespaced
+    path (anything containing a dot, INCLUDING a custom namespace -- UDR-0105 D4) are
+    returned unchanged.
+    """
+    if not isinstance(value, str):
+        return value
+    path = value.strip()
+    if not path or path.startswith("=") or "." in path:
+        return value
+    return f"Local.{path}"
+
+
+def _strip_local_prefix(value: Any) -> Any:
+    """Return a Foreach loop-variable NAME without a redundant ``Local.`` prefix."""
+    if not isinstance(value, str):
+        return value
+    name = value.strip()
+    return name[len("Local.") :] if name.startswith("Local.") else value
+
+
+def _migrate_legacy_keys(action: dict[str, Any]) -> None:
+    """Migrate superseded authoring keys to the executor's own names (UDR-0105 D6).
+
+    Each migration applies ONLY when the modern key is absent, so a correct action is
+    never touched and repeated application is idempotent.
+    """
+    kind = str(action.get("kind") or "")
+    if kind == "SetTextVariable":
+        # The executor reads ``text`` (_executors_basic.py:136); the editor emitted ``value``.
+        if "text" not in action and "value" in action:
+            action["text"] = action.pop("value")
+    elif kind == "SetMultipleVariables":
+        # The executor reads an ``assignments`` LIST (_executors_basic.py:157); the editor
+        # emitted a ``variables`` MAP.
+        if "assignments" not in action and isinstance(action.get("variables"), dict):
+            action["assignments"] = [{"variable": k, "value": v} for k, v in action.pop("variables").items()]
+    elif kind == "ParseValue":
+        # The executor reads ``value`` (_executors_basic.py:469); the editor emitted ``source``.
+        if "value" not in action and "source" in action:
+            action["value"] = action.pop("source")
+    # The executor reads ``item`` / ``value`` plus ``key`` / ``index``
+    # (_executors_basic.py:363); the editor emitted a ``row: {key, value}`` pair whose key
+    # names the record field and whose value is that field's value.
+    elif kind == "EditTableV2" and "item" not in action and isinstance(action.get("row"), dict):
+        row = action.pop("row")
+        field_name = row.get("key")
+        field_value = row.get("value")
+        if isinstance(field_name, str) and field_name.strip():
+            action["item"] = {field_name: field_value}
+            action.setdefault("key", field_name)
+        elif field_value is not None:
+            action["item"] = field_value
+
+
+def normalize_workflow_actions(actions: Any) -> None:
+    """Normalize an action tree IN PLACE (legacy keys + write-path namespaces).
+
+    The single normalizer of UDR-0105 D3/D6. Idempotent: applying it twice yields the
+    same tree, so it is safe on every compile, every save, and every read.
+    """
+    for action in _walk_actions(actions):
+        _migrate_legacy_keys(action)
+        kind = str(action.get("kind") or "")
+        for name in _WRITE_PATH_FIELDS.get(kind, ()):
+            if name in action:
+                action[name] = _normalize_write_path(action[name])
+        if kind == "SetMultipleVariables":
+            for assignment in action.get("assignments") or []:
+                if isinstance(assignment, dict) and "variable" in assignment:
+                    assignment["variable"] = _normalize_write_path(assignment["variable"])
+        if kind == "Foreach":
+            for name in _LOOP_NAME_FIELDS:
+                if name in action:
+                    action[name] = _strip_local_prefix(action[name])
+        if kind == "Question":
+            # ``allowFreeText`` is ALWAYS stated in the YAML rather than left implicit,
+            # so the authored document says outright whether a typed answer is accepted.
+            # The value written matches the executor's own default (True).
+            action.setdefault("allowFreeText", True)
+        output = action.get("output")
+        if isinstance(output, dict):
+            for name in _OUTPUT_WRITE_KEYS:
+                if name in output:
+                    output[name] = _normalize_write_path(output[name])
+
+
+def _write_path_warnings(actions: Any) -> list[str]:
+    """Return a blocking warning per write path the MAF state layer will reject.
+
+    Runs on the NORMALIZED tree, so it reports only what will actually reach the state
+    layer at run time: an empty path, ``Workflow`` alone, the read-only
+    ``Workflow.Inputs.*``, an unknown ``Workflow.<x>`` sub-namespace, and (defensively)
+    a bare path that somehow escaped normalization. Each of these raises ValueError in
+    ``_state.py`` mid-run today (UDR-0105 D5). A CUSTOM namespace is NOT reported
+    (UDR-0105 D4).
+    """
+    out: list[str] = []
+
+    def check(action_kind: str, field_name: str, value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        path = value.strip()
+        where = f"{action_kind}.{field_name}"
+        if not path:
+            out.append(f"{where}: the variable path is empty; the action would do nothing.")
+            return
+        if path.startswith("="):
+            return
+        parts = path.split(".")
+        if len(parts) == 1:
+            out.append(
+                f"{where}: {path!r} has no namespace; use 'Local.{path}' "
+                "(the workflow runtime rejects a namespace-less path at run time)."
+            )
+            return
+        if parts[0] != "Workflow":
+            return
+        if parts[1] == "Inputs":
+            out.append(f"{where}: {path!r} is read-only; write to 'Local.*' or 'Workflow.Outputs.*' instead.")
+        elif parts[1] not in _WORKFLOW_SUB_NAMESPACES:
+            out.append(f"{where}: {path!r} is an unknown Workflow namespace; use 'Workflow.Outputs.*'.")
+
+    for action in _walk_actions(actions):
+        kind = str(action.get("kind") or "")
+        for name in _WRITE_PATH_FIELDS.get(kind, ()):
+            if name in action:
+                check(kind, name, action[name])
+        if kind == "SetMultipleVariables":
+            for assignment in action.get("assignments") or []:
+                if isinstance(assignment, dict):
+                    check(kind, "assignments[].variable", assignment.get("variable"))
+        output = action.get("output")
+        if isinstance(output, dict):
+            for name in _OUTPUT_WRITE_KEYS:
+                if name in output:
+                    check(kind, f"output.{name}", output[name])
+    return out
+
+
+def _prepare_compile_text(text: str) -> str:
+    """Return YAML text ready for the MAF builder (normalize + MCP serverUrl sentinel).
+
+    Applies the shared normalizer (UDR-0105 D3/D6) so an EXISTING file that is never
+    re-saved still runs with the corrected field semantics, then injects the MCP
+    serverUrl sentinel. Returns the original text byte-for-byte when neither step
+    changed anything, so a already-canonical workflow compiles unchanged.
     """
     try:
         data = yaml.safe_load(text)
@@ -93,7 +279,9 @@ def _prepare_compile_text(text: str) -> str:
         return text
     if not isinstance(data, dict):
         return text
-    changed = False
+    before = deepcopy(data.get("actions"))
+    normalize_workflow_actions(data.get("actions"))
+    changed = data.get("actions") != before
     for action in _walk_actions(data.get("actions")):
         if str(action.get("kind") or "") == "InvokeMcpTool" and not action.get("serverUrl"):
             label = str(action.get("serverLabel") or "server").strip() or "server"
@@ -185,13 +373,25 @@ def _walk_actions(actions: Any):
 
 
 def _agent_ref(action: dict[str, Any]) -> str | None:
-    """Return the agentName an InvokeAzureAgent action references (literal or expr)."""
-    name = action.get("agentName")
-    if not isinstance(name, str):
-        agent = action.get("agent")
-        if isinstance(agent, dict):
-            name = agent.get("agentName")
-    return name if isinstance(name, str) and name.strip() else None
+    """Return the agent name an InvokeAzureAgent action references (literal or expr).
+
+    Mirrors the FULL MAF resolution order (_executors_agents.py:430-453): ``agent`` as a
+    plain string, ``agent.name``, ``agent.agentName``, then ``agentName``. Missing
+    ``agent.name`` here previously let a workflow authored in the documented
+    ``agent: {name: X}`` shape pass validation with no warning and then fail at run time
+    with "not found in registry" (PRP-0122 FACT 3).
+    """
+    agent = action.get("agent")
+    candidates: list[Any] = []
+    if isinstance(agent, str):
+        candidates.append(agent)
+    elif isinstance(agent, dict):
+        candidates.extend((agent.get("name"), agent.get("agentName")))
+    candidates.append(action.get("agentName"))
+    for name in candidates:
+        if isinstance(name, str) and name.strip():
+            return name
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +427,16 @@ def map_workflow_document(
     display_name = str(data.get("displayName") or "").strip()
     description = str(data.get("description") or "").strip()
 
+    # Normalize the parsed tree before inspecting it (PRP-0122, UDR-0105 D3/D6) so the
+    # warnings below describe what will ACTUALLY run -- the same normalization
+    # _prepare_compile_text applies to the text handed to the MAF builder.
+    normalize_workflow_actions(data.get("actions"))
+
     referenced: list[str] = []
     dynamic: list[str] = []
     action_kinds: list[str] = []
     action_ids: list[str] = []
+    node_labels: dict[str, str] = {}
     warnings: list[str] = []
     for action in _walk_actions(data.get("actions")):
         kind = str(action.get("kind") or "").strip()
@@ -239,6 +445,9 @@ def map_workflow_document(
         aid = action.get("id")
         if isinstance(aid, str) and aid.strip():
             action_ids.append(aid.strip())
+            label = action.get("displayName")
+            if isinstance(label, str) and label.strip():
+                node_labels[aid.strip()] = label.strip()
         if kind and kind not in ALLOWED_ACTION_KINDS:
             warnings.append(
                 f"action kind {kind!r} is not supported; remove it or use a mapped action "
@@ -265,6 +474,11 @@ def map_workflow_document(
     from app.workflow.handlers import boundary_action_warnings
 
     warnings.extend(boundary_action_warnings(action_kinds))
+
+    # A write path the MAF state layer is certain to reject mid-run (read-only
+    # Workflow.Inputs, the Workflow root, an unknown Workflow sub-namespace, an empty
+    # path) blocks activation instead of failing during the run (UDR-0105 D5).
+    warnings.extend(_write_path_warnings(data.get("actions")))
 
     # Duplicate action ids break GotoAction targeting and are HARD-rejected by the MAF
     # builder; detect them first and raise a clean, friendly message instead of the raw
@@ -302,8 +516,35 @@ def map_workflow_document(
         referenced_agents=referenced,
         dynamic_agent_refs=dynamic,
         action_kinds=action_kinds,
+        node_labels=node_labels,
         warnings=warnings,
     )
+
+
+def node_labels_for(workflow_id: str) -> dict[str, str]:
+    """Return ``action id -> displayName`` for a workflow (progress labels, UDR-0105 D7).
+
+    A parse-only read (no compile, no agent build) used by the run lanes to label
+    progress events in the author's own words. Never raises: an unreadable or malformed
+    file simply yields no labels and the runtime falls back to the action id.
+    """
+    for wid, path, _gp in _discover_workflow_files():
+        if wid != workflow_id:
+            continue
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        labels: dict[str, str] = {}
+        for action in _walk_actions(data.get("actions")):
+            aid = action.get("id")
+            label = action.get("displayName")
+            if isinstance(aid, str) and aid.strip() and isinstance(label, str) and label.strip():
+                labels[aid.strip()] = label.strip()
+        return labels
+    return {}
 
 
 def _prompt_agent_lookup() -> dict[str, str]:
@@ -477,6 +718,8 @@ __all__ = [
     "compile_for_run",
     "load_workflow_inventory",
     "map_workflow_document",
+    "node_labels_for",
+    "normalize_workflow_actions",
     "resolve_workflow",
     "validate_workflow_text",
 ]

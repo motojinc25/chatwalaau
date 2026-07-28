@@ -13,6 +13,12 @@ import { cn } from '@/lib/utils'
 
 export interface WorkflowNodeState {
   node: string
+  /**
+   * Human label for the node: the action's `displayName` when the author supplied one,
+   * else the action id (PRP-0122, UDR-0105 D7). Optional so a run streamed by an older
+   * backend still renders.
+   */
+  label?: string
   status: 'running' | 'done'
   index: number
 }
@@ -36,8 +42,9 @@ export function reduceWorkflowEvent(
       return { active: true, completed: false, nodes: [] }
     case 'workflow_node_started': {
       const node = String(value?.node ?? 'step')
+      const label = value?.label ? String(value.label) : undefined
       if (state.nodes.some((n) => n.node === node && n.status === 'running')) return state
-      return { ...state, nodes: [...state.nodes, { node, status: 'running', index: state.nodes.length }] }
+      return { ...state, nodes: [...state.nodes, { node, label, status: 'running', index: state.nodes.length }] }
     }
     case 'workflow_node_completed': {
       const node = String(value?.node ?? '')
@@ -87,7 +94,9 @@ export function WorkflowProgressPanel({ state, className }: { state: WorkflowRun
               ) : (
                 <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
               )}
-              <span className={cn('truncate', n.status === 'done' && 'text-muted-foreground')}>{n.node}</span>
+              <span className={cn('truncate', n.status === 'done' && 'text-muted-foreground')}>
+                {n.label || n.node}
+              </span>
             </li>
           ))}
         </ol>

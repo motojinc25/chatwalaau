@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from app.workflow.loader import compile_for_run
+from app.workflow.loader import compile_for_run, node_labels_for
 from app.workflow.spec import WorkflowError
 
 if TYPE_CHECKING:
@@ -107,6 +107,11 @@ async def stream_workflow(
         CustomEvent(type=EventType.CUSTOM, name="workflow_started", value={"workflow_id": workflow_id})
     )
 
+    # Action id -> displayName, so a progress node reads in the author's own words
+    # instead of the generated executor id (PRP-0122, UDR-0105 D7). ADDITIVE: the
+    # existing ``node`` field is unchanged, and the label falls back to the id.
+    node_labels = node_labels_for(workflow_id)
+
     msg_id: str | None = None
     last_text_node: str | None = None
     nodes_completed = 0
@@ -121,7 +126,11 @@ async def stream_workflow(
                     CustomEvent(
                         type=EventType.CUSTOM,
                         name="workflow_node_started",
-                        value={"node": executor_id, "iteration": getattr(event, "iteration", None)},
+                        value={
+                            "node": executor_id,
+                            "label": node_labels.get(str(executor_id)) or executor_id,
+                            "iteration": getattr(event, "iteration", None),
+                        },
                     )
                 )
                 continue
@@ -131,7 +140,10 @@ async def stream_workflow(
                     CustomEvent(
                         type=EventType.CUSTOM,
                         name="workflow_node_completed",
-                        value={"node": executor_id},
+                        value={
+                            "node": executor_id,
+                            "label": node_labels.get(str(executor_id)) or executor_id,
+                        },
                     )
                 )
                 # fall through so any text payload is still surfaced

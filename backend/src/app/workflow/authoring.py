@@ -20,8 +20,28 @@ import yaml
 from app.agent.declarative.authoring import _Literal, sanitize_stem
 from app.agent.declarative.authoring import authoring_status as _agent_authoring_status
 from app.core.config import settings
-from app.workflow.loader import all_yaml_stems, validate_workflow_text
+from app.workflow.loader import all_yaml_stems, normalize_workflow_actions, validate_workflow_text
 from app.workflow.spec import WORKFLOW_KIND, WorkflowError
+
+
+class _WorkflowDumper(yaml.SafeDumper):
+    """Canonical workflow dumper: block sequences are INDENTED under their key.
+
+    PyYAML's default renders a block sequence at the same column as its parent key
+    (``choices:`` / ``- value: high``). A workflow document is deeply nested -- actions
+    inside branches inside actions -- so the canonical form indents each sequence one
+    level under its key, which is how the operator-facing action reference is written:
+
+        choices:
+          - value: high
+            label: 高
+
+    Purely presentational: the parsed document is identical either way. Inherits the
+    ``_Literal`` block-scalar representer registered on SafeDumper.
+    """
+
+    def increase_indent(self, flow: bool = False, indentless: bool = False) -> Any:
+        return super().increase_indent(flow, False)
 
 
 def _configured_dir() -> Path | None:
@@ -93,9 +113,14 @@ def build_workflow_yaml(document: dict[str, Any]) -> str:
 
     actions = document.get("actions")
     if isinstance(actions, list) and actions:
-        doc["actions"] = [_normalize_action(a) for a in actions if isinstance(a, dict)]
+        actions = [a for a in actions if isinstance(a, dict)]
+        # The shared normalizer owns legacy-key migration + Local.* write-path
+        # namespacing (PRP-0122, UDR-0105 D3/D6), so a GUI save PERSISTS the canonical
+        # form the executor actually reads.
+        normalize_workflow_actions(actions)
+        doc["actions"] = [_normalize_action(a) for a in actions]
 
-    return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, default_flow_style=False)
+    return yaml.dump(doc, Dumper=_WorkflowDumper, sort_keys=False, allow_unicode=True, default_flow_style=False)
 
 
 def _normalize_action(action: dict[str, Any]) -> dict[str, Any]:
@@ -138,13 +163,20 @@ def validate_document(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def document_from_yaml(text: str) -> dict[str, Any]:
-    """Best-effort reshape of a workflow YAML into the structured authoring document."""
+    """Best-effort reshape of a workflow YAML into the structured authoring document.
+
+    Legacy authoring keys are migrated and write paths namespaced on READ (UDR-0105
+    D3/D6), so opening a workflow written before PRP-0122 shows the migrated fields in
+    the forms instead of dropping them. The file on disk is untouched until the operator
+    explicitly saves.
+    """
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError:
         return {}
     if not isinstance(data, dict):
         return {}
+    normalize_workflow_actions(data.get("actions"))
     return {
         "name": str(data.get("name") or ""),
         "displayName": str(data.get("displayName") or ""),

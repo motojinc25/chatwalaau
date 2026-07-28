@@ -57,11 +57,14 @@ import {
 } from 'lucide-react'
 import {
   type ComponentType,
+  createContext,
   memo,
   type ReactNode,
   type PointerEvent as ReactPointerEvent,
   useCallback,
+  useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -195,6 +198,120 @@ function shortId(): string {
   return Math.random().toString(36).slice(2, 6).padEnd(4, '0')
 }
 
+// ---- variable namespace assistance (CTR-0184 v3, UDR-0105 D3/D4) -----------
+// The four namespaces the authoring surface presents. A CUSTOM namespace still works
+// at runtime (MAF creates one for any unknown prefix) but is never SUGGESTED, and a
+// bare name is normalized to `Local.` by the backend on save / compile.
+// ParseValue target types the executor understands (_executors_basic.py:469-).
+const PARSE_VALUE_TYPES = [
+  'string',
+  'number',
+  'integer',
+  'float',
+  'boolean',
+  'bool',
+  'object',
+  'record',
+  'array',
+  'table',
+  'list',
+] as const
+
+// EditTableV2 operations the executor implements (_executors_basic.py:379-).
+const EDIT_TABLE_OPERATIONS = ['add', 'addOrUpdate', 'update', 'remove', 'clear'] as const
+
+const WRITE_NAMESPACES = ['Local.', 'Workflow.Outputs.'] as const
+const READ_NAMESPACES = ['Local.', 'Workflow.Inputs.', 'Workflow.Outputs.', 'System.'] as const
+
+interface VariableCandidates {
+  /** Namespaces + known names valid as a WRITE destination (no Workflow.Inputs). */
+  write: string[]
+  /** Namespaces + known names valid to READ in a value / condition / source. */
+  read: string[]
+}
+
+const VariableCandidatesContext = createContext<VariableCandidates>({
+  write: [...WRITE_NAMESPACES],
+  read: [...READ_NAMESPACES],
+})
+
+/** Collect every `Local.*` name assigned anywhere in the document, recursively. */
+function collectLocalNames(actions: WorkflowAction[] | undefined, out: Set<string>): void {
+  for (const a of actions ?? []) {
+    const add = (v: unknown) => {
+      const s = str(v).trim()
+      if (s.startsWith('Local.')) out.add(s)
+    }
+    add(a.variable)
+    add(a.table)
+    add(a.conversationId)
+    for (const as of a.assignments ?? []) add(as.variable)
+    for (const k of ['responseObject', 'messages', 'result'] as const) add(a.output?.[k])
+    if (a.kind === 'Foreach') {
+      for (const n of [a.itemName, a.indexName]) {
+        const s = str(n).trim()
+        if (s) out.add(`Local.${s}`)
+      }
+    }
+    collectLocalNames(a.then, out)
+    collectLocalNames(a.else, out)
+    collectLocalNames(a.actions, out)
+    collectLocalNames(a.elseActions, out)
+    for (const c of a.conditions ?? []) collectLocalNames(c.actions, out)
+  }
+}
+
+/** Derive the candidate lists from the document already in memory (no new endpoint). */
+function buildVariableCandidates(doc: WorkflowDocument): VariableCandidates {
+  const locals = new Set<string>()
+  collectLocalNames(doc.actions, locals)
+  const inputs = Object.keys(doc.inputs ?? {}).map((n) => `Workflow.Inputs.${n}`)
+  const outputs = Object.keys(doc.outputs ?? {}).map((n) => `Workflow.Outputs.${n}`)
+  const sorted = [...locals].sort()
+  return {
+    write: [...WRITE_NAMESPACES, ...sorted, ...outputs],
+    read: [...READ_NAMESPACES, ...sorted, ...inputs, ...outputs],
+  }
+}
+
+/**
+ * A variable-path input with a namespace candidate list (CTR-0184 v3).
+ *
+ * Purely an input aid: the backend remains the single validator (UDR-0101 D9), so a
+ * value typed by hand is accepted here and judged server-side.
+ */
+function VariableInput({
+  value,
+  onChange,
+  placeholder,
+  mode = 'write',
+}: {
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  mode?: 'write' | 'read'
+}) {
+  const candidates = useContext(VariableCandidatesContext)
+  const listId = useId()
+  const options = mode === 'write' ? candidates.write : candidates.read
+  return (
+    <>
+      <input
+        className={CONTROL}
+        list={listId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder ?? 'Local.name'}
+      />
+      <datalist id={listId}>
+        {options.map((o) => (
+          <option key={o} value={o} />
+        ))}
+      </datalist>
+    </>
+  )
+}
+
 function newAction(kind: string): WorkflowAction {
   const id = `${kind.toLowerCase()}_${shortId()}`
   switch (kind) {
@@ -202,17 +319,20 @@ function newAction(kind: string): WorkflowAction {
     case 'SetVariable':
       return { kind, id, variable: '', value: '' }
     case 'SetMultipleVariables':
-      return { kind, id, variables: {} }
+      return { kind, id, assignments: [{ variable: '', value: '' }] }
     case 'SetTextVariable':
-      return { kind, id, variable: '', value: '' }
+      // The executor reads `text`, not `value` (PRP-0122 FACT 2).
+      return { kind, id, variable: '', text: '' }
     case 'ResetVariable':
       return { kind, id, variable: '' }
     case 'ClearAllVariables':
       return { kind, id }
     case 'ParseValue':
-      return { kind, id, source: '', variable: '' }
+      // The executor reads `value` (+ optional `valueType`), not `source`.
+      return { kind, id, variable: '', value: '', valueType: '' }
     case 'EditTableV2':
-      return { kind, id, table: '', operation: 'add', row: { key: '', value: '' } }
+      // The executor reads `item` / `value` + `key` / `index`, not `row`.
+      return { kind, id, table: '', operation: 'add', item: {}, key: '' }
     // Control flow (nested)
     case 'If':
       // biome-ignore lint/suspicious/noThenProperty: MAF If action serializes a `then` branch, not a thenable
@@ -243,7 +363,9 @@ function newAction(kind: string): WorkflowAction {
       return { kind, id, method: 'GET', url: '' }
     // Human-in-the-loop
     case 'Question':
-      return { kind, id, question: { text: '' }, variable: '' }
+      // allowFreeText is ALWAYS written to the YAML (never left implicit) so the
+      // authored document states the answer policy outright (PRP-0122 follow-up).
+      return { kind, id, question: { text: '' }, variable: '', allowFreeText: true }
     case 'RequestExternalInput':
       return { kind, id, prompt: { text: '' }, variable: '' }
     // Workflow control
@@ -265,16 +387,17 @@ function str(v: unknown): string {
 function actionSummary(a: WorkflowAction): string {
   switch (a.kind) {
     case 'SetVariable':
-    case 'SetTextVariable':
       return a.variable ? `${str(a.variable)} = ${str(a.value).slice(0, 24)}` : 'variable'
+    case 'SetTextVariable':
+      return a.variable ? `${str(a.variable)} = ${str(a.text).slice(0, 24)}` : 'variable'
     case 'SetMultipleVariables':
-      return `${Object.keys(a.variables ?? {}).length} variable(s)`
+      return `${(a.assignments ?? []).length} assignment(s)`
     case 'ResetVariable':
       return a.variable ? str(a.variable) : 'variable'
     case 'ClearAllVariables':
       return 'all variables'
     case 'ParseValue':
-      return a.variable ? `-> ${str(a.variable)}` : str(a.source) || 'parse'
+      return a.variable ? `-> ${str(a.variable)}` : str(a.value) || 'parse'
     case 'EditTableV2':
       return `${str(a.operation) || 'edit'} ${str(a.table)}`.trim()
     case 'If':
@@ -792,6 +915,10 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
   )
   const edges = useMemo(() => buildEdges(doc.actions), [doc.actions])
 
+  // Variable-name candidates for every variable input, derived from the document in
+  // memory (CTR-0184 v3, UDR-0105 D3). No endpoint, no backend state.
+  const variableCandidates = useMemo(() => buildVariableCandidates(doc), [doc])
+
   // ---- save / close ----
   const handleSave = useCallback(async () => {
     setSaving(true)
@@ -823,247 +950,253 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
     !saving && !loading && (rawMode ? rawYaml.trim().length > 0 : doc.name.trim().length > 0) && !validationError
 
   return (
-    <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : requestClose())}>
-      <DialogContent className="flex h-screen w-screen max-w-none flex-col gap-0 rounded-none border-0 bg-background p-0 sm:rounded-none [&>button]:hidden">
-        <DialogTitle className="sr-only">
-          {editId ? 'Edit declarative workflow' : 'Create declarative workflow'}
-        </DialogTitle>
-        <DialogDescription className="sr-only">
-          Compose a declarative workflow graph: sequential actions, control flow and agent invocations.
-        </DialogDescription>
-        <div className="flex shrink-0 items-center justify-between border-b px-5 py-3">
-          <div className="flex items-center gap-2">
-            <WorkflowIcon className="h-5 w-5 text-primary" />
-            <div>
-              <div className="text-sm font-semibold">{editId ? 'Edit workflow' : 'Create workflow'}</div>
-              <div className="text-[11px] text-muted-foreground">
-                A workflow orchestrates declarative Prompt agents. Credentials and sampling are resolved by ChatWalaʻau.
+    <VariableCandidatesContext.Provider value={variableCandidates}>
+      <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : requestClose())}>
+        <DialogContent className="flex h-screen w-screen max-w-none flex-col gap-0 rounded-none border-0 bg-background p-0 sm:rounded-none [&>button]:hidden">
+          <DialogTitle className="sr-only">
+            {editId ? 'Edit declarative workflow' : 'Create declarative workflow'}
+          </DialogTitle>
+          <DialogDescription className="sr-only">
+            Compose a declarative workflow graph: sequential actions, control flow and agent invocations.
+          </DialogDescription>
+          <div className="flex shrink-0 items-center justify-between border-b px-5 py-3">
+            <div className="flex items-center gap-2">
+              <WorkflowIcon className="h-5 w-5 text-primary" />
+              <div>
+                <div className="text-sm font-semibold">{editId ? 'Edit workflow' : 'Create workflow'}</div>
+                <div className="text-[11px] text-muted-foreground">
+                  A workflow orchestrates declarative Prompt agents. Credentials and sampling are resolved by
+                  ChatWalaʻau.
+                </div>
               </div>
             </div>
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <input type="checkbox" checked={rawMode} onChange={(e) => setRawMode(e.target.checked)} />
+                Edit raw YAML
+              </label>
+              <Button variant="outline" size="sm" onClick={requestClose} disabled={saving}>
+                Close
+              </Button>
+              <Button size="sm" onClick={handleSave} disabled={!canSave}>
+                {saving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                {editId ? 'Save' : 'Create'}
+              </Button>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <input type="checkbox" checked={rawMode} onChange={(e) => setRawMode(e.target.checked)} />
-              Edit raw YAML
-            </label>
-            <Button variant="outline" size="sm" onClick={requestClose} disabled={saving}>
-              Close
-            </Button>
-            <Button size="sm" onClick={handleSave} disabled={!canSave}>
-              {saving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
-              {editId ? 'Save' : 'Create'}
-            </Button>
-          </div>
-        </div>
 
-        {loading ? (
-          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
-          </div>
-        ) : (
-          <PanelGroup direction="horizontal" className="min-h-0 flex-1">
-            {/* LEFT: workflow fields + inputs/outputs + recursive action tree */}
-            <Panel defaultSize={36} minSize={24}>
-              <div className={cn('h-full space-y-3 overflow-y-auto p-4', rawMode && 'pointer-events-none opacity-50')}>
-                <Field label="Name (identifier)">
-                  <input
-                    className={CONTROL}
-                    value={doc.name}
-                    onChange={(e) => patch({ name: e.target.value })}
-                    placeholder="TriageFlow"
-                  />
-                </Field>
-                {/* display name / description / max turns (collapsible) */}
-                <div className="rounded-md border">
-                  <button
-                    type="button"
-                    onClick={() => setShowMeta((s) => !s)}
-                    className="flex w-full items-center justify-between px-2 py-1.5 text-[11px] font-medium text-muted-foreground hover:bg-accent">
-                    <span>Display name / description / max turns</span>
-                    <span className="text-[10px]">{showMeta ? 'Hide' : 'Show'}</span>
-                  </button>
-                  {showMeta && (
-                    <div className="space-y-3 border-t p-2">
-                      <Field label="Display name (optional)">
-                        <input
-                          className={CONTROL}
-                          value={doc.displayName ?? ''}
-                          onChange={(e) => patch({ displayName: e.target.value })}
-                          placeholder="Triage Flow"
-                        />
-                      </Field>
-                      <Field label="Description">
-                        <textarea
-                          className={cn(CONTROL, 'h-14 resize-none')}
-                          value={doc.description ?? ''}
-                          onChange={(e) => patch({ description: e.target.value })}
-                        />
-                      </Field>
-                      <Field label="Max turns (optional)">
-                        <input
-                          className={CONTROL}
-                          type="number"
-                          min={1}
-                          value={doc.maxTurns ?? ''}
-                          onChange={(e) => patch({ maxTurns: e.target.value ? Number(e.target.value) : null })}
-                        />
-                      </Field>
-                    </div>
-                  )}
-                </div>
-
-                {/* inputs / outputs (collapsible) */}
-                <div className="rounded-md border">
-                  <button
-                    type="button"
-                    onClick={() => setShowIO((s) => !s)}
-                    className="flex w-full items-center justify-between px-2 py-1.5 text-[11px] font-medium text-muted-foreground hover:bg-accent">
-                    <span>Inputs / outputs (optional)</span>
-                    <span className="text-[10px]">
-                      {Object.keys(doc.inputs ?? {}).length} in · {Object.keys(doc.outputs ?? {}).length} out
-                    </span>
-                  </button>
-                  {showIO && (
-                    <div className="space-y-3 border-t p-2">
-                      <IOEditor
-                        title="Inputs"
-                        seedKey={`${editId}:${loading}`}
-                        value={doc.inputs ?? {}}
-                        withDescription
-                        onChange={(v) => patch({ inputs: v })}
-                      />
-                      <IOEditor
-                        title="Outputs"
-                        seedKey={`${editId}:${loading}`}
-                        value={doc.outputs ?? {}}
-                        onChange={(v) => patch({ outputs: v })}
-                      />
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex items-center justify-between pt-1">
-                  <span className="text-[11px] font-medium text-muted-foreground">Actions</span>
-                </div>
-                <ActionList
-                  actions={doc.actions}
-                  pathKey="a"
-                  agentNames={agentNames}
-                  selected={selected}
-                  onSelect={setSelected}
-                  allowLoop={false}
-                  update={setActions}
-                />
-              </div>
-            </Panel>
-
-            <PanelResizeHandle className="w-1 bg-border data-[resize-handle-state=drag]:bg-primary" />
-
-            {/* CENTER: React Flow nested container graph */}
-            <Panel defaultSize={38} minSize={22}>
-              <div className="h-full">
-                <ReactFlowProvider>
-                  <ReactFlow
-                    nodes={nodes}
-                    edges={edges}
-                    nodeTypes={nodeTypes}
-                    edgeTypes={edgeTypes}
-                    onNodesChange={onNodesChange}
-                    nodesConnectable={false}
-                    nodesDraggable
-                    fitView
-                    minZoom={0.15}
-                    proOptions={{ hideAttribution: true }}>
-                    <Background gap={16} />
-                  </ReactFlow>
-                </ReactFlowProvider>
-              </div>
-            </Panel>
-
-            <PanelResizeHandle className="w-1 bg-border data-[resize-handle-state=drag]:bg-primary" />
-
-            {/* RIGHT: monaco YAML + warnings */}
-            <Panel defaultSize={26} minSize={16}>
-              <div className="flex h-full flex-col">
-                <div className="flex items-center justify-between border-b px-3 py-1.5 text-[11px] text-muted-foreground">
-                  <span>{rawMode ? 'YAML (editing)' : 'YAML (canonical preview)'}</span>
-                </div>
-                <div className="min-h-0 flex-1">
-                  <Editor
-                    language="yaml"
-                    theme="vs"
-                    value={rawMode ? rawYaml : (validation?.yaml ?? '')}
-                    onChange={(v) => {
-                      if (rawMode) {
-                        setRawYaml(v ?? '')
-                        setDirty(true)
-                      }
-                    }}
-                    options={{
-                      readOnly: !rawMode,
-                      minimap: { enabled: false },
-                      fontSize: 12,
-                      automaticLayout: true,
-                      scrollBeyondLastLine: false,
-                      tabSize: 2,
-                      wordWrap: 'on',
-                    }}
-                  />
-                </div>
-                {(validationError || warnings.length > 0) && (
-                  <div className="max-h-48 shrink-0 overflow-y-auto border-t bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-400">
-                    {validationError && (
-                      <div className="mb-1 flex items-start gap-1.5 font-medium">
-                        <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {validationError}
+          {loading ? (
+            <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+            </div>
+          ) : (
+            <PanelGroup direction="horizontal" className="min-h-0 flex-1">
+              {/* LEFT: workflow fields + inputs/outputs + recursive action tree */}
+              <Panel defaultSize={36} minSize={24}>
+                <div
+                  className={cn('h-full space-y-3 overflow-y-auto p-4', rawMode && 'pointer-events-none opacity-50')}>
+                  <Field label="Name (identifier)">
+                    <input
+                      className={CONTROL}
+                      value={doc.name}
+                      onChange={(e) => patch({ name: e.target.value })}
+                      placeholder="TriageFlow"
+                    />
+                  </Field>
+                  {/* display name / description / max turns (collapsible) */}
+                  <div className="rounded-md border">
+                    <button
+                      type="button"
+                      onClick={() => setShowMeta((s) => !s)}
+                      className="flex w-full items-center justify-between px-2 py-1.5 text-[11px] font-medium text-muted-foreground hover:bg-accent">
+                      <span>Display name / description / max turns</span>
+                      <span className="text-[10px]">{showMeta ? 'Hide' : 'Show'}</span>
+                    </button>
+                    {showMeta && (
+                      <div className="space-y-3 border-t p-2">
+                        <Field label="Display name (optional)">
+                          <input
+                            className={CONTROL}
+                            value={doc.displayName ?? ''}
+                            onChange={(e) => patch({ displayName: e.target.value })}
+                            placeholder="Triage Flow"
+                          />
+                        </Field>
+                        <Field label="Description">
+                          <textarea
+                            className={cn(CONTROL, 'h-14 resize-none')}
+                            value={doc.description ?? ''}
+                            onChange={(e) => patch({ description: e.target.value })}
+                          />
+                        </Field>
+                        <Field label="Max turns (optional)">
+                          <input
+                            className={CONTROL}
+                            type="number"
+                            min={1}
+                            value={doc.maxTurns ?? ''}
+                            onChange={(e) => patch({ maxTurns: e.target.value ? Number(e.target.value) : null })}
+                          />
+                        </Field>
                       </div>
                     )}
-                    {warnings.length > 0 && (
-                      <>
-                        <div className="mb-1 flex items-center gap-1.5 font-medium">
-                          <TriangleAlert className="h-3.5 w-3.5 shrink-0" /> Resolve before running:
-                        </div>
-                        <ul className="space-y-0.5 pl-5">
-                          {warnings.map((w) => (
-                            <li key={w} className="list-disc">
-                              {w}
-                            </li>
-                          ))}
-                        </ul>
-                      </>
+                  </div>
+
+                  {/* inputs / outputs (collapsible) */}
+                  <div className="rounded-md border">
+                    <button
+                      type="button"
+                      onClick={() => setShowIO((s) => !s)}
+                      className="flex w-full items-center justify-between px-2 py-1.5 text-[11px] font-medium text-muted-foreground hover:bg-accent">
+                      <span>Inputs / outputs (optional)</span>
+                      <span className="text-[10px]">
+                        {Object.keys(doc.inputs ?? {}).length} in · {Object.keys(doc.outputs ?? {}).length} out
+                      </span>
+                    </button>
+                    {showIO && (
+                      <div className="space-y-3 border-t p-2">
+                        <IOEditor
+                          title="Inputs"
+                          seedKey={`${editId}:${loading}`}
+                          value={doc.inputs ?? {}}
+                          withDescription
+                          onChange={(v) => patch({ inputs: v })}
+                        />
+                        <IOEditor
+                          title="Outputs"
+                          seedKey={`${editId}:${loading}`}
+                          value={doc.outputs ?? {}}
+                          onChange={(v) => patch({ outputs: v })}
+                        />
+                      </div>
                     )}
                   </div>
-                )}
-              </div>
-            </Panel>
-          </PanelGroup>
-        )}
 
-        {error && <div className="shrink-0 border-t bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
+                  <div className="flex items-center justify-between pt-1">
+                    <span className="text-[11px] font-medium text-muted-foreground">Actions</span>
+                  </div>
+                  <ActionList
+                    actions={doc.actions}
+                    pathKey="a"
+                    agentNames={agentNames}
+                    selected={selected}
+                    onSelect={setSelected}
+                    allowLoop={false}
+                    update={setActions}
+                  />
+                </div>
+              </Panel>
 
-        {leaveConfirm && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/80">
-            <div className="w-[360px] rounded-lg border bg-background p-4 shadow-lg">
-              <p className="text-sm font-medium">Discard unsaved changes?</p>
-              <p className="mt-1 text-xs text-muted-foreground">Your edits to this workflow have not been saved.</p>
-              <div className="mt-3 flex justify-end gap-2">
-                <Button variant="outline" size="sm" onClick={() => setLeaveConfirm(false)}>
-                  Keep editing
-                </Button>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={() => {
-                    setLeaveConfirm(false)
-                    onOpenChange(false)
-                  }}>
-                  Discard
-                </Button>
+              <PanelResizeHandle className="w-1 bg-border data-[resize-handle-state=drag]:bg-primary" />
+
+              {/* CENTER: React Flow nested container graph */}
+              <Panel defaultSize={38} minSize={22}>
+                <div className="h-full">
+                  <ReactFlowProvider>
+                    <ReactFlow
+                      nodes={nodes}
+                      edges={edges}
+                      nodeTypes={nodeTypes}
+                      edgeTypes={edgeTypes}
+                      onNodesChange={onNodesChange}
+                      nodesConnectable={false}
+                      nodesDraggable
+                      fitView
+                      minZoom={0.15}
+                      proOptions={{ hideAttribution: true }}>
+                      <Background gap={16} />
+                    </ReactFlow>
+                  </ReactFlowProvider>
+                </div>
+              </Panel>
+
+              <PanelResizeHandle className="w-1 bg-border data-[resize-handle-state=drag]:bg-primary" />
+
+              {/* RIGHT: monaco YAML + warnings */}
+              <Panel defaultSize={26} minSize={16}>
+                <div className="flex h-full flex-col">
+                  <div className="flex items-center justify-between border-b px-3 py-1.5 text-[11px] text-muted-foreground">
+                    <span>{rawMode ? 'YAML (editing)' : 'YAML (canonical preview)'}</span>
+                  </div>
+                  <div className="min-h-0 flex-1">
+                    <Editor
+                      language="yaml"
+                      theme="vs"
+                      value={rawMode ? rawYaml : (validation?.yaml ?? '')}
+                      onChange={(v) => {
+                        if (rawMode) {
+                          setRawYaml(v ?? '')
+                          setDirty(true)
+                        }
+                      }}
+                      options={{
+                        readOnly: !rawMode,
+                        minimap: { enabled: false },
+                        fontSize: 12,
+                        automaticLayout: true,
+                        scrollBeyondLastLine: false,
+                        tabSize: 2,
+                        wordWrap: 'on',
+                      }}
+                    />
+                  </div>
+                  {(validationError || warnings.length > 0) && (
+                    <div className="max-h-48 shrink-0 overflow-y-auto border-t bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-400">
+                      {validationError && (
+                        <div className="mb-1 flex items-start gap-1.5 font-medium">
+                          <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {validationError}
+                        </div>
+                      )}
+                      {warnings.length > 0 && (
+                        <>
+                          <div className="mb-1 flex items-center gap-1.5 font-medium">
+                            <TriangleAlert className="h-3.5 w-3.5 shrink-0" /> Resolve before running:
+                          </div>
+                          <ul className="space-y-0.5 pl-5">
+                            {warnings.map((w) => (
+                              <li key={w} className="list-disc">
+                                {w}
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </Panel>
+            </PanelGroup>
+          )}
+
+          {error && (
+            <div className="shrink-0 border-t bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>
+          )}
+
+          {leaveConfirm && (
+            <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/80">
+              <div className="w-[360px] rounded-lg border bg-background p-4 shadow-lg">
+                <p className="text-sm font-medium">Discard unsaved changes?</p>
+                <p className="mt-1 text-xs text-muted-foreground">Your edits to this workflow have not been saved.</p>
+                <div className="mt-3 flex justify-end gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setLeaveConfirm(false)}>
+                    Keep editing
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => {
+                      setLeaveConfirm(false)
+                      onOpenChange(false)
+                    }}>
+                    Discard
+                  </Button>
+                </div>
               </div>
             </div>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
+          )}
+        </DialogContent>
+      </Dialog>
+    </VariableCandidatesContext.Provider>
   )
 }
 
@@ -1294,14 +1427,26 @@ function ActionRow({
       </div>
       {selected === key && (
         <div className="space-y-2 border-t p-2">
-          <Field label="Action id (must be unique)">
-            <input
-              className={CONTROL}
-              value={str(a.id)}
-              onChange={(e) => patchAt(i, { id: e.target.value })}
-              placeholder="unique_id"
-            />
-          </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Action id (must be unique)">
+              <input
+                className={CONTROL}
+                value={str(a.id)}
+                onChange={(e) => patchAt(i, { id: e.target.value })}
+                placeholder="unique_id"
+              />
+            </Field>
+            {/* Shared across all action kinds (UDR-0105 D7): MAF ignores displayName,
+                ChatWalaʻau uses it to label the run-progress node. */}
+            <Field label="Display name (optional)">
+              <input
+                className={CONTROL}
+                value={str(a.displayName)}
+                onChange={(e) => patchAt(i, { displayName: e.target.value })}
+                placeholder="Shown while running"
+              />
+            </Field>
+          </div>
           <ActionForm action={a} agentNames={agentNames} onChange={(p) => patchAt(i, p)} />
         </div>
       )}
@@ -1380,105 +1525,125 @@ function ActionForm({
   const a = action
   switch (a.kind) {
     case 'SetVariable':
-    case 'SetTextVariable':
       return (
         <div className="space-y-2">
           <Field label="Variable">
-            <input
-              className={CONTROL}
-              value={str(a.variable)}
-              onChange={(e) => onChange({ variable: e.target.value })}
-              placeholder="topic.name"
-            />
+            <VariableInput value={str(a.variable)} onChange={(v) => onChange({ variable: v })} />
           </Field>
           <Field label="Value">
             <input className={CONTROL} value={str(a.value)} onChange={(e) => onChange({ value: e.target.value })} />
           </Field>
         </div>
       )
+    case 'SetTextVariable':
+      return (
+        <div className="space-y-2">
+          <Field label="Variable">
+            <VariableInput value={str(a.variable)} onChange={(v) => onChange({ variable: v })} />
+          </Field>
+          <Field label="Text">
+            <input
+              className={CONTROL}
+              value={str(a.text)}
+              onChange={(e) => onChange({ text: e.target.value })}
+              placeholder='=Concat("Hello ", Workflow.Inputs.name)'
+            />
+          </Field>
+        </div>
+      )
     case 'SetMultipleVariables':
       return (
-        <Field label="Variables (path = value)">
-          <KeyValueEditor
-            value={a.variables ?? {}}
-            onChange={(v) => onChange({ variables: v })}
-            keyPlaceholder="topic.x"
-            valuePlaceholder="=value"
-          />
+        <Field label="Assignments (variable = value)">
+          <AssignmentEditor value={a.assignments ?? []} onChange={(v) => onChange({ assignments: v })} />
         </Field>
       )
     case 'ResetVariable':
       return (
         <Field label="Variable">
-          <input
-            className={CONTROL}
-            value={str(a.variable)}
-            onChange={(e) => onChange({ variable: e.target.value })}
-            placeholder="topic.name"
-          />
+          <VariableInput value={str(a.variable)} onChange={(v) => onChange({ variable: v })} />
         </Field>
       )
     case 'ClearAllVariables':
-      return <p className="text-[11px] text-muted-foreground">Clears all workflow variables. No fields.</p>
+      return <p className="text-[11px] text-muted-foreground">Clears every Local.* variable. No fields.</p>
     case 'ParseValue':
       return (
         <div className="space-y-2">
-          <Field label="Source (expression)">
+          <Field label="Value (literal or expression)">
             <input
               className={CONTROL}
-              value={str(a.source)}
-              onChange={(e) => onChange({ source: e.target.value })}
-              placeholder="=lastMessage.text"
+              value={str(a.value)}
+              onChange={(e) => onChange({ value: e.target.value })}
+              placeholder="=Workflow.Inputs.customerJson"
             />
           </Field>
-          <Field label="Target variable">
-            <input
-              className={CONTROL}
-              value={str(a.variable)}
-              onChange={(e) => onChange({ variable: e.target.value })}
-              placeholder="topic.parsed"
-            />
-          </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Target variable">
+              <VariableInput value={str(a.variable)} onChange={(v) => onChange({ variable: v })} />
+            </Field>
+            <Field label="Value type (optional)">
+              <select
+                className={CONTROL}
+                value={str(a.valueType)}
+                onChange={(e) => onChange({ valueType: e.target.value })}>
+                <option value="">(auto)</option>
+                {PARSE_VALUE_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
         </div>
       )
     case 'EditTableV2':
       return (
         <div className="space-y-2">
           <Field label="Table (variable)">
-            <input
-              className={CONTROL}
+            <VariableInput
               value={str(a.table)}
-              onChange={(e) => onChange({ table: e.target.value })}
-              placeholder="topic.rows"
+              onChange={(v) => onChange({ table: v })}
+              placeholder="Local.customers"
             />
           </Field>
-          <Field label="Operation">
-            <select
-              className={CONTROL}
-              value={str(a.operation) || 'add'}
-              onChange={(e) => onChange({ operation: e.target.value })}>
-              <option value="add">add</option>
-              <option value="update">update</option>
-              <option value="remove">remove</option>
-              <option value="clear">clear</option>
-            </select>
-          </Field>
           <div className="grid grid-cols-2 gap-2">
-            <Field label="Row key">
-              <input
+            <Field label="Operation">
+              <select
                 className={CONTROL}
-                value={str(a.row?.key)}
-                onChange={(e) => onChange({ row: { ...(a.row ?? {}), key: e.target.value } })}
-              />
+                value={str(a.operation) || 'add'}
+                onChange={(e) => onChange({ operation: e.target.value })}>
+                {EDIT_TABLE_OPERATIONS.map((op) => (
+                  <option key={op} value={op}>
+                    {op}
+                  </option>
+                ))}
+              </select>
             </Field>
-            <Field label="Row value">
+            <Field label="Key field (optional)">
               <input
                 className={CONTROL}
-                value={str(a.row?.value)}
-                onChange={(e) => onChange({ row: { ...(a.row ?? {}), value: e.target.value } })}
+                value={str(a.key)}
+                onChange={(e) => onChange({ key: e.target.value })}
+                placeholder="id"
               />
             </Field>
           </div>
+          <Field label="Item (field = value)">
+            <KeyValueEditor
+              value={a.item && typeof a.item === 'object' ? (a.item as Record<string, unknown>) : {}}
+              onChange={(v) => onChange({ item: v })}
+              keyPlaceholder="id"
+              valuePlaceholder="100"
+            />
+          </Field>
+          <Field label="Index (optional)">
+            <input
+              className={CONTROL}
+              value={str(a.index)}
+              onChange={(e) => onChange({ index: e.target.value })}
+              placeholder="0"
+            />
+          </Field>
         </div>
       )
     case 'If':
@@ -1580,17 +1745,49 @@ function ActionForm({
               className={CONTROL}
               value={str(a.input?.messages)}
               onChange={(e) => onChange({ input: { ...(a.input ?? {}), messages: e.target.value } })}
-              placeholder="=conversation.messages"
+              placeholder="=System.LastMessage"
             />
           </Field>
-          <Field label="Output response variable (optional)">
+          <Field label="Input arguments (name = value)">
+            <KeyValueEditor
+              value={a.input?.arguments ?? {}}
+              onChange={(v) => onChange({ input: { ...(a.input ?? {}), arguments: v } })}
+              keyPlaceholder="topic"
+              valuePlaceholder="=Workflow.Inputs.topic"
+            />
+          </Field>
+          <Field label="External loop condition (optional)">
             <input
               className={CONTROL}
-              value={str(a.output?.responseObject)}
-              onChange={(e) => onChange({ output: { ...(a.output ?? {}), responseObject: e.target.value } })}
-              placeholder="topic.reply"
+              value={str(a.input?.externalLoop?.when)}
+              onChange={(e) => onChange({ input: { ...(a.input ?? {}), externalLoop: { when: e.target.value } } })}
+              placeholder="=Local.needsMore"
             />
           </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Output response variable (optional)">
+              <VariableInput
+                value={str(a.output?.responseObject)}
+                onChange={(v) => onChange({ output: { ...(a.output ?? {}), responseObject: v } })}
+                placeholder="Local.reply"
+              />
+            </Field>
+            <Field label="Output messages variable (optional)">
+              <VariableInput
+                value={str(a.output?.messages)}
+                onChange={(v) => onChange({ output: { ...(a.output ?? {}), messages: v } })}
+                placeholder="Local.replyMessages"
+              />
+            </Field>
+          </div>
+          <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={a.output?.autoSend !== false}
+              onChange={(e) => onChange({ output: { ...(a.output ?? {}), autoSend: e.target.checked } })}
+            />
+            Send the agent response as workflow output
+          </label>
         </div>
       )
     case 'InvokeFunctionTool':
@@ -1618,15 +1815,14 @@ function ActionForm({
               value={a.arguments ?? {}}
               onChange={(v) => onChange({ arguments: v })}
               keyPlaceholder="city"
-              valuePlaceholder="=topic.city"
+              valuePlaceholder="=Local.city"
             />
           </Field>
           <Field label="Output result variable (optional)">
-            <input
-              className={CONTROL}
+            <VariableInput
               value={str(a.output?.result)}
-              onChange={(e) => onChange({ output: { ...(a.output ?? {}), result: e.target.value } })}
-              placeholder="topic.result"
+              onChange={(v) => onChange({ output: { ...(a.output ?? {}), result: v } })}
+              placeholder="Local.result"
             />
           </Field>
         </div>
@@ -1666,15 +1862,14 @@ function ActionForm({
               value={a.arguments ?? {}}
               onChange={(v) => onChange({ arguments: v })}
               keyPlaceholder="query"
-              valuePlaceholder="=topic.query"
+              valuePlaceholder="=Local.query"
             />
           </Field>
           <Field label="Output result variable (optional)">
-            <input
-              className={CONTROL}
+            <VariableInput
               value={str(a.output?.result)}
-              onChange={(e) => onChange({ output: { ...(a.output ?? {}), result: e.target.value } })}
-              placeholder="topic.result"
+              onChange={(v) => onChange({ output: { ...(a.output ?? {}), result: v } })}
+              placeholder="Local.result"
             />
           </Field>
         </div>
@@ -1718,24 +1913,42 @@ function ActionForm({
               value={a.queryParameters ?? {}}
               onChange={(v) => onChange({ queryParameters: v })}
               keyPlaceholder="q"
-              valuePlaceholder="=topic.q"
+              valuePlaceholder="=Local.q"
+            />
+          </Field>
+          <Field label="Body (optional)">
+            <textarea
+              className={cn(CONTROL, 'h-14 resize-none text-xs')}
+              value={str(a.body)}
+              onChange={(e) => onChange({ body: e.target.value })}
+              placeholder='{"key": "value"}'
+            />
+          </Field>
+          <Field label="Request timeout ms (optional)">
+            <input
+              className={CONTROL}
+              value={a.requestTimeoutInMilliseconds == null ? '' : String(a.requestTimeoutInMilliseconds)}
+              onChange={(e) =>
+                onChange({
+                  requestTimeoutInMilliseconds: e.target.value ? Number(e.target.value) : undefined,
+                })
+              }
+              placeholder="10000"
             />
           </Field>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Response variable (optional)">
-              <input
-                className={CONTROL}
+              <VariableInput
                 value={str(a.response)}
-                onChange={(e) => onChange({ response: e.target.value })}
-                placeholder="topic.response"
+                onChange={(v) => onChange({ response: v })}
+                placeholder="Local.response"
               />
             </Field>
             <Field label="Response headers var (optional)">
-              <input
-                className={CONTROL}
+              <VariableInput
                 value={str(a.responseHeaders)}
-                onChange={(e) => onChange({ responseHeaders: e.target.value })}
-                placeholder="topic.responseHeaders"
+                onChange={(v) => onChange({ responseHeaders: v })}
+                placeholder="Local.responseHeaders"
               />
             </Field>
           </div>
@@ -1753,11 +1966,10 @@ function ActionForm({
           </Field>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Answer variable">
-              <input
-                className={CONTROL}
+              <VariableInput
                 value={str(a.variable)}
-                onChange={(e) => onChange({ variable: e.target.value })}
-                placeholder="topic.answer"
+                onChange={(v) => onChange({ variable: v })}
+                placeholder="Local.answer"
               />
             </Field>
             <Field label="Default (optional)">
@@ -1768,6 +1980,17 @@ function ActionForm({
               />
             </Field>
           </div>
+          <Field label="Choices (value / label, optional)">
+            <ChoiceEditor value={a.choices ?? []} onChange={(v) => onChange({ choices: v })} />
+          </Field>
+          <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={a.allowFreeText !== false}
+              onChange={(e) => onChange({ allowFreeText: e.target.checked })}
+            />
+            Allow free text
+          </label>
         </div>
       )
     case 'RequestExternalInput':
@@ -1782,11 +2005,10 @@ function ActionForm({
           </Field>
           <div className="grid grid-cols-2 gap-2">
             <Field label="Result variable">
-              <input
-                className={CONTROL}
+              <VariableInput
                 value={str(a.variable)}
-                onChange={(e) => onChange({ variable: e.target.value })}
-                placeholder="topic.input"
+                onChange={(v) => onChange({ variable: v })}
+                placeholder="Local.input"
               />
             </Field>
             <Field label="Default (optional)">
@@ -1797,6 +2019,50 @@ function ActionForm({
               />
             </Field>
           </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Request type (optional)">
+              <input
+                className={CONTROL}
+                value={str(a.requestType)}
+                onChange={(e) => onChange({ requestType: e.target.value })}
+                placeholder="approval"
+              />
+            </Field>
+            <Field label="Timeout seconds (optional)">
+              <input
+                className={CONTROL}
+                value={a.timeout == null ? '' : String(a.timeout)}
+                onChange={(e) => onChange({ timeout: e.target.value ? Number(e.target.value) : undefined })}
+                placeholder="3600"
+              />
+            </Field>
+          </div>
+          <Field label="Required fields (comma separated, optional)">
+            <input
+              className={CONTROL}
+              value={(a.requiredFields ?? []).join(', ')}
+              onChange={(e) =>
+                onChange({
+                  requiredFields: e.target.value
+                    .split(',')
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                })
+              }
+              placeholder="approved, approver"
+            />
+          </Field>
+          <Field label="Metadata (name = value, optional)">
+            <KeyValueEditor
+              value={a.metadata ?? {}}
+              onChange={(v) => onChange({ metadata: v })}
+              keyPlaceholder="department"
+              valuePlaceholder="finance"
+            />
+          </Field>
+          <p className="rounded bg-muted/40 px-2 py-1 text-[10px] text-muted-foreground">
+            Never request secrets or credentials through a human-in-the-loop action (UDR-0104 D4).
+          </p>
         </div>
       )
     case 'EndWorkflow':
@@ -1806,11 +2072,10 @@ function ActionForm({
     case 'CreateConversation':
       return (
         <Field label="Conversation id (variable)">
-          <input
-            className={CONTROL}
+          <VariableInput
             value={str(a.conversationId)}
-            onChange={(e) => onChange({ conversationId: e.target.value })}
-            placeholder="topic.conversationId"
+            onChange={(v) => onChange({ conversationId: v })}
+            placeholder="Local.conversationId"
           />
         </Field>
       )
@@ -1879,6 +2144,120 @@ function KeyValueEditor({
         className="h-6 px-1.5 text-[10px]"
         onClick={() => commit([...rows, { uid: nextUid(), key: '', value: '' }])}>
         <Plus className="mr-0.5 h-3 w-3" /> Entry
+      </Button>
+    </div>
+  )
+}
+
+// ---- SetMultipleVariables assignment editor (CTR-0184 v3) -------------------
+// The executor reads an `assignments` LIST of {variable, value}; the previous map
+// editor emitted a `variables` map the executor never read (PRP-0122 FACT 2).
+interface AssignRow {
+  uid: string
+  variable: string
+  value: string
+}
+
+function AssignmentEditor({
+  value,
+  onChange,
+}: {
+  value: Array<{ variable?: string; value?: unknown }>
+  onChange: (v: Array<{ variable?: string; value?: unknown }>) => void
+}) {
+  const [rows, setRows] = useState<AssignRow[]>(() =>
+    value.map((a) => ({ uid: nextUid(), variable: str(a.variable), value: str(a.value) })),
+  )
+  const commit = (next: AssignRow[]) => {
+    setRows(next)
+    onChange(next.filter((r) => r.variable.trim()).map((r) => ({ variable: r.variable, value: r.value })))
+  }
+  return (
+    <div className="space-y-1">
+      {rows.map((r, i) => (
+        <div key={r.uid} className="flex items-center gap-1">
+          <VariableInput
+            value={r.variable}
+            onChange={(v) => commit(rows.map((rr, ii) => (ii === i ? { ...rr, variable: v } : rr)))}
+          />
+          <input
+            className={cn(CONTROL, 'text-xs')}
+            value={r.value}
+            placeholder="=value"
+            onChange={(e) => commit(rows.map((rr, ii) => (ii === i ? { ...rr, value: e.target.value } : rr)))}
+          />
+          <button
+            type="button"
+            aria-label="Remove assignment"
+            className="rounded p-1 text-muted-foreground hover:text-destructive"
+            onClick={() => commit(rows.filter((_, ii) => ii !== i))}>
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      ))}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-6 px-1.5 text-[10px]"
+        onClick={() => commit([...rows, { uid: nextUid(), variable: '', value: '' }])}>
+        <Plus className="mr-0.5 h-3 w-3" /> Assignment
+      </Button>
+    </div>
+  )
+}
+
+// ---- Question choice editor (CTR-0184 v3) ----------------------------------
+interface ChoiceRow {
+  uid: string
+  value: string
+  label: string
+}
+
+function ChoiceEditor({
+  value,
+  onChange,
+}: {
+  value: Array<{ value?: string; label?: string }>
+  onChange: (v: Array<{ value?: string; label?: string }>) => void
+}) {
+  const [rows, setRows] = useState<ChoiceRow[]>(() =>
+    value.map((c) => ({ uid: nextUid(), value: str(c.value), label: str(c.label) })),
+  )
+  const commit = (next: ChoiceRow[]) => {
+    setRows(next)
+    onChange(next.filter((r) => r.value.trim()).map((r) => ({ value: r.value, label: r.label || r.value })))
+  }
+  return (
+    <div className="space-y-1">
+      {rows.map((r, i) => (
+        <div key={r.uid} className="flex items-center gap-1">
+          <input
+            className={cn(CONTROL, 'text-xs')}
+            value={r.value}
+            placeholder="high"
+            onChange={(e) => commit(rows.map((rr, ii) => (ii === i ? { ...rr, value: e.target.value } : rr)))}
+          />
+          <input
+            className={cn(CONTROL, 'text-xs')}
+            value={r.label}
+            placeholder="High"
+            onChange={(e) => commit(rows.map((rr, ii) => (ii === i ? { ...rr, label: e.target.value } : rr)))}
+          />
+          <button
+            type="button"
+            aria-label="Remove choice"
+            className="rounded p-1 text-muted-foreground hover:text-destructive"
+            onClick={() => commit(rows.filter((_, ii) => ii !== i))}>
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      ))}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-6 px-1.5 text-[10px]"
+        onClick={() => commit([...rows, { uid: nextUid(), value: '', label: '' }])}>
+        <Plus className="mr-0.5 h-3 w-3" /> Choice
       </Button>
     </div>
   )

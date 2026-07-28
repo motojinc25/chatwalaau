@@ -20,26 +20,49 @@ import { useCallback, useMemo } from 'react'
 export interface WorkflowAction {
   kind: string
   id?: string
+  /**
+   * Optional human label. MAF reads this NOWHERE, so ChatWalaʻau owns its meaning: it
+   * labels the run-progress node (PRP-0122, UDR-0105 D7).
+   */
+  displayName?: string
   // SendActivity
   activity?: { text?: string }
   // InvokeAzureAgent
   agentName?: string
   agent?: { name?: string }
-  input?: { messages?: unknown; arguments?: Record<string, unknown> }
+  input?: {
+    messages?: unknown
+    arguments?: Record<string, unknown>
+    externalLoop?: { when?: string }
+  }
   output?: { responseObject?: unknown; messages?: unknown; autoSend?: boolean; result?: unknown }
   // SetValue / SetVariable / SetTextVariable / ResetVariable / ParseValue
   path?: string
   value?: unknown
   variable?: string
+  /** SetTextVariable: the executor reads `text` (NOT `value`). */
+  text?: string
+  /** SetMultipleVariables: the executor reads an `assignments` LIST (NOT a map). */
+  assignments?: Array<{ variable?: string; value?: unknown }>
+  /** ParseValue: target type (string / number / boolean / object / array / ...). */
+  valueType?: string
+  /** Superseded authoring key, migrated to `assignments` by the backend normalizer. */
   variables?: Record<string, unknown>
-  // ParseValue / Foreach
+  /**
+   * Foreach: the collection to iterate. Also the SUPERSEDED ParseValue authoring key,
+   * which the backend normalizer migrates to `value`.
+   */
   source?: string
   // Foreach
   itemName?: string
   indexName?: string
-  // EditTableV2
+  // EditTableV2 -- the executor reads `item` / `value` plus `key` / `index`
   table?: string
   operation?: string
+  item?: unknown
+  key?: string
+  index?: unknown
+  /** Superseded authoring key, migrated to `item` + `key` by the normalizer. */
   row?: { key?: string; value?: unknown }
   // If
   condition?: string
@@ -64,12 +87,22 @@ export interface WorkflowAction {
   url?: string
   headers?: Record<string, unknown>
   queryParameters?: Record<string, unknown>
+  body?: unknown
+  requestTimeoutInMilliseconds?: number
   response?: unknown
   responseHeaders?: unknown
   // Question / RequestExternalInput
   question?: { text?: string }
   prompt?: { text?: string }
   default?: unknown
+  // Question
+  choices?: Array<{ value?: string; label?: string }>
+  allowFreeText?: boolean
+  // RequestExternalInput
+  requestType?: string
+  timeout?: number
+  requiredFields?: string[]
+  metadata?: Record<string, unknown>
   // CreateConversation
   conversationId?: string
   [key: string]: unknown

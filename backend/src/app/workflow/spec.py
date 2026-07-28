@@ -45,6 +45,12 @@ class WorkflowSpec:
     # Action kinds present in the graph (for the node/edge summary CTR-0182 exposes).
     action_kinds: list[str] = field(default_factory=list)
 
+    # action id -> displayName, for the run-progress label (PRP-0122, UDR-0105 D7).
+    # MAF reads ``displayName`` nowhere, so ChatWalaʻau owns its meaning: the runtime
+    # attaches it to the workflow_node_* CUSTOM events as an ADDITIVE ``label`` field
+    # (falling back to the action id), so progress reads in the author's own words.
+    node_labels: dict[str, str] = field(default_factory=dict)
+
     # Non-fatal mapping / resolution notes. ANY warning blocks activation
     # (UDR-0101 D4/D6, the UDR-0072 D9 pattern); the loader appends resolution
     # warnings (unknown agent, non-Prompt reference, unmapped action).
