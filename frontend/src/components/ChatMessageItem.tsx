@@ -112,6 +112,8 @@ interface ChatMessageItemProps {
    * this is absent and the persisted `message.workflowCompleted` marker is used instead.
    */
   workflowRun?: WorkflowRunState
+  /** Opens the detached run canvas for this run (CTR-0187, PRP-0123). */
+  onOpenWorkflowCanvas?: () => void
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -319,6 +321,7 @@ function ChatMessageItemImpl({
   onToggleMemoryLike,
   memoryLikeStatus,
   workflowRun,
+  onOpenWorkflowCanvas,
 }: ChatMessageItemProps) {
   const isUser = message.role === 'user'
   const hasTextContent = message.content != null && message.content.trim().length > 0
@@ -555,7 +558,9 @@ function ChatMessageItemImpl({
             )}
             {/* Declarative workflow run: node progress (live) + completion indicator,
                 rendered inside the message (the standalone panel was removed, v0.115.1). */}
-            {workflowState && <WorkflowProgressPanel state={workflowState} className="mb-1" />}
+            {workflowState && (
+              <WorkflowProgressPanel state={workflowState} className="mb-1" onOpenCanvas={onOpenWorkflowCanvas} />
+            )}
             {message.content ? (
               // Structured output (CTR-0012 v11, PRP-0082, UDR-0058 D5): render the
               // JSON answer as a `json` code block (reuses CodeBlock copy/download)

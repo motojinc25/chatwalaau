@@ -16,7 +16,57 @@ interface AguiEvent {
   toolCallName?: string
   name?: string
   value?: Record<string, unknown>
+  // Standard AG-UI workflow-run events (PRP-0123, CTR-0009 v19, UDR-0106 D2).
+  stepName?: string
+  activityType?: string
+  outcome?: { type?: string; interrupts?: WorkflowInterrupt[] }
 }
+
+/** One pending human-in-the-loop request carried by RUN_FINISHED (UDR-0106 D5). */
+export interface WorkflowInterrupt {
+  id: string
+  reason?: string
+  message?: string | null
+  metadata?: {
+    request_id?: string
+    node?: string | null
+    label?: string | null
+    prompt?: string | null
+    request_type?: string | null
+    variable?: string | null
+    choices?: Array<{ value: string; label: string }> | null
+    allow_free_text?: boolean
+    default?: unknown
+    required_fields?: string[] | null
+  }
+}
+
+/** The per-node activity payload carried by ACTIVITY_SNAPSHOT (UDR-0106 D2/D9). */
+export interface WorkflowNodeActivity {
+  node?: string
+  label?: string
+  status?: 'running' | 'completed' | 'skipped' | 'failed' | 'awaiting_input'
+  iteration?: number | null
+  data?: unknown
+  details?: unknown
+  message?: string
+  prompt?: string
+  truncated?: boolean
+}
+
+/**
+ * A standard AG-UI event from a WORKFLOW run, normalized for the run canvas
+ * (CTR-0187) and the in-message indicator (CTR-0185). Emitted only by the workflow
+ * branch of CTR-0009 (UDR-0106 D1).
+ */
+export type WorkflowStreamEvent =
+  | { kind: 'run_started'; runId: string }
+  | { kind: 'step_started'; step: string }
+  | { kind: 'step_finished'; step: string }
+  | { kind: 'node'; activity: WorkflowNodeActivity }
+  | { kind: 'state'; snapshot: Record<string, unknown> }
+  | { kind: 'run_finished'; interrupts: WorkflowInterrupt[] }
+  | { kind: 'run_error'; message: string }
 
 interface UseChatOptions {
   threadId?: string
@@ -79,6 +129,14 @@ interface UseChatOptions {
    */
   onCustomEvent?: (name: string | undefined, value: Record<string, unknown> | undefined) => void
   /**
+   * Standard AG-UI workflow-run events (PRP-0123, CTR-0009 v19, UDR-0106 D2). Receives
+   * STEP_STARTED / STEP_FINISHED / ACTIVITY_SNAPSHOT and the RUN_FINISHED interrupt
+   * outcome for a workflow run, so the run canvas (CTR-0187) and the in-message
+   * indicator (CTR-0185) can paint node state without duplicating SSE parsing. Only
+   * the workflow branch of CTR-0009 emits these (UDR-0106 D1).
+   */
+  onWorkflowEvent?: (event: WorkflowStreamEvent) => void
+  /**
    * v0.77.1 (CTR-0009): transient/informational status during a run, e.g. a
    * `run_retry` event when the backend auto-resends after a temporary upstream
    * 5xx. Shown to the user as a brief notice; not persisted.
@@ -115,6 +173,7 @@ export function useChat(options?: UseChatOptions) {
   const selectedWorkflowIdRef = useRef(options?.selectedWorkflowId ?? '')
   const runTargetLabelRef = useRef(options?.runTargetLabel ?? '')
   const onCustomEventRef = useRef(options?.onCustomEvent)
+  const onWorkflowEventRef = useRef(options?.onWorkflowEvent)
   const onNoticeRef = useRef(options?.onNotice)
   const onConnectionRecoveredRef = useRef(options?.onConnectionRecovered)
 
@@ -186,6 +245,10 @@ export function useChat(options?: UseChatOptions) {
   }, [options?.onCustomEvent])
 
   useEffect(() => {
+    onWorkflowEventRef.current = options?.onWorkflowEvent
+  }, [options?.onWorkflowEvent])
+
+  useEffect(() => {
     onNoticeRef.current = options?.onNotice
   }, [options?.onNotice])
 
@@ -205,6 +268,13 @@ export function useChat(options?: UseChatOptions) {
         // to swap into the optimistic message (replacing local object URLs),
         // or null to abort the send with an error.
         prepare?: () => Promise<{ images?: ImageRef[] } | null>
+        /**
+         * Declarative Workflow human-in-the-loop resume (PRP-0123, CTR-0009 v19,
+         * UDR-0106 D5). Maps a pending request id to the operator's answer. Sent as
+         * AG-UI `state.workflow_resume`; such a turn carries no new user message and
+         * continues the workflow that paused, rather than starting a new run.
+         */
+        workflowResume?: Record<string, unknown>
       },
       // `committed` is true once the AG-UI stream emitted its first event (the turn
       // is live server-side); `success` is the pre-PRP-0110 stream-completed flag.
@@ -317,6 +387,10 @@ export function useChat(options?: UseChatOptions) {
         // model / options / structured-output state above is ignored server-side (each
         // node's model + options come from its referenced Prompt agent, UDR-0101 D7).
         if (selectedWorkflowIdRef.current) aguiState.workflow_id = selectedWorkflowIdRef.current
+        // HITL resume (PRP-0123, UDR-0106 D5): the answers to the requests the previous
+        // turn interrupted on. The backend routes them into workflow.run(responses=...).
+        if (options?.workflowResume && Object.keys(options.workflowResume).length > 0)
+          aguiState.workflow_resume = options.workflowResume
         if (options?.resumeToken) aguiState.continuation_token = options.resumeToken
 
         // PRP-0069 follow-up: for regenerate / resume / similar flows
@@ -373,6 +447,9 @@ export function useChat(options?: UseChatOptions) {
         // bubble -- so history + the session-list refresh (and title) still happen.
         let workflowCompleted = false
         let workflowSteps = 0
+        // A workflow run that paused on a human-in-the-loop request (UDR-0106 D5). The
+        // turn is a normal, successful end -- the run is not finished, but nothing failed.
+        let workflowInterrupted = false
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
@@ -549,8 +626,38 @@ export function useChat(options?: UseChatOptions) {
                   }
                   break
                 }
+                // ---- Standard AG-UI workflow-run events (PRP-0123, CTR-0009 v19) ----
+                // Workflow branch ONLY (UDR-0106 D1): a Prompt-agent turn never emits
+                // these, so the handlers below are inert for every other run.
+                case 'STEP_STARTED': {
+                  if (event.stepName) onWorkflowEventRef.current?.({ kind: 'step_started', step: event.stepName })
+                  break
+                }
+                case 'STEP_FINISHED': {
+                  if (event.stepName) onWorkflowEventRef.current?.({ kind: 'step_finished', step: event.stepName })
+                  break
+                }
+                case 'ACTIVITY_SNAPSHOT': {
+                  const content = ((event as { content?: unknown }).content ?? {}) as unknown
+                  if (event.activityType === 'workflow_node') {
+                    onWorkflowEventRef.current?.({ kind: 'node', activity: content as WorkflowNodeActivity })
+                  } else if (event.activityType === 'workflow_state') {
+                    onWorkflowEventRef.current?.({ kind: 'state', snapshot: content as Record<string, unknown> })
+                  }
+                  break
+                }
+                case 'RUN_FINISHED': {
+                  // A workflow paused on human-in-the-loop ends the turn with an
+                  // interrupt outcome (UDR-0106 D5); the canvas renders the input form
+                  // and the answer is sent on the next request as state.workflow_resume.
+                  const interrupts = event.outcome?.type === 'interrupt' ? (event.outcome.interrupts ?? []) : []
+                  if (interrupts.length > 0) workflowInterrupted = true
+                  onWorkflowEventRef.current?.({ kind: 'run_finished', interrupts })
+                  break
+                }
                 case 'RUN_ERROR': {
                   streamSuccess = false
+                  onWorkflowEventRef.current?.({ kind: 'run_error', message: event.message ?? 'An error occurred' })
                   const errorMsg = event.message ?? 'An error occurred'
                   setMessages((prev) =>
                     prev.map((msg) => (msg.id === assistantId ? { ...msg, content: `Error: ${errorMsg}` } : msg)),
@@ -641,6 +748,7 @@ export function useChat(options?: UseChatOptions) {
         // produced no chat reply (workflowCompleted, no body) is ALSO saved so the turn
         // finalizes (history + session-list refresh + title); it persists as a compact
         // "Workflow complete" indicator, not an empty bubble (v0.115.1).
+        const workflowEnded = workflowCompleted || workflowInterrupted
         const silentWorkflow = !assistantContent && workflowCompleted
         if (silentWorkflow) {
           // Render the live (empty) assistant bubble as the completion indicator.
@@ -648,7 +756,7 @@ export function useChat(options?: UseChatOptions) {
             prev.map((msg) => (msg.id === assistantId ? { ...msg, workflowCompleted: { steps: workflowSteps } } : msg)),
           )
         }
-        if (assistantContent || workflowCompleted) {
+        if (assistantContent || workflowEnded) {
           // Persist the message ids so identity is STABLE across reload (the
           // backend stores them as `message_id`; the loader restores them). Keeps
           // id-keyed state such as the Agent Memory per-turn like (CTR-0165) intact.
@@ -682,16 +790,26 @@ export function useChat(options?: UseChatOptions) {
           if (dispatchImages && dispatchImages.length > 0) {
             userMsg.images = dispatchImages
           }
+          // A run PAUSED on human-in-the-loop (UDR-0106 D5) has not finished: persisting an
+          // empty assistant turn would reload as a blank bubble claiming nothing happened.
+          // Keep the user message so history is correct; the resume turn saves the answer.
+          const dropEmptyAssistant = workflowInterrupted && !workflowCompleted && !assistantContent
           const saveMessages: Record<string, unknown>[] = options?.skipUserMessage
-            ? [assistantMsg]
-            : [userMsg, assistantMsg]
-          fetch(`/api/sessions/${threadIdRef.current}/messages`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ messages: saveMessages }),
-          })
-            .then(() => onStreamCompleteRef.current?.())
-            .catch(() => {})
+            ? dropEmptyAssistant
+              ? []
+              : [assistantMsg]
+            : dropEmptyAssistant
+              ? [userMsg]
+              : [userMsg, assistantMsg]
+          if (saveMessages.length > 0) {
+            fetch(`/api/sessions/${threadIdRef.current}/messages`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ messages: saveMessages }),
+            })
+              .then(() => onStreamCompleteRef.current?.())
+              .catch(() => {})
+          }
         }
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
@@ -768,14 +886,21 @@ export function useChat(options?: UseChatOptions) {
     async (
       content: string,
       images?: ImageRef[],
-      opts?: { prepare?: () => Promise<{ images?: ImageRef[] } | null> },
+      opts?: {
+        prepare?: () => Promise<{ images?: ImageRef[] } | null>
+        /** Workflow HITL resume (PRP-0123, UDR-0106 D5): continue a paused run. */
+        skipUserMessage?: boolean
+        workflowResume?: Record<string, unknown>
+      },
     ): Promise<boolean> => {
       // Nothing to send -> report "committed" so the composer does not try to
-      // restore an empty string.
-      if (!content.trim() && (!images || images.length === 0) && !opts?.prepare) return true
+      // restore an empty string. A workflow resume legitimately carries no text.
+      if (!content.trim() && (!images || images.length === 0) && !opts?.prepare && !opts?.workflowResume) return true
       const { committed } = await streamResponse(content.trim(), messagesRef.current, {
         images,
         prepare: opts?.prepare,
+        skipUserMessage: opts?.skipUserMessage,
+        workflowResume: opts?.workflowResume,
       })
       if (!committed) {
         hadPrecommitFailureRef.current = true

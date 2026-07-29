@@ -1,4 +1,4 @@
-import { CircleAlert, CircleCheck, Loader2, Workflow as WorkflowIcon } from 'lucide-react'
+import { CircleAlert, CircleCheck, Loader2, Maximize2, SkipForward, Workflow as WorkflowIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /**
@@ -19,7 +19,11 @@ export interface WorkflowNodeState {
    * backend still renders.
    */
   label?: string
-  status: 'running' | 'done' | 'failed'
+  /**
+   * `skipped` (PRP-0123, UDR-0106 D3) is a node MAF BYPASSED -- a conditional branch that
+   * was not taken. It is not a success and is not counted as a completed step.
+   */
+  status: 'running' | 'done' | 'skipped' | 'failed'
   index: number
 }
 
@@ -52,9 +56,11 @@ export function reduceWorkflowEvent(
     }
     case 'workflow_node_completed': {
       const node = String(value?.node ?? '')
+      // UDR-0106 D3: a bypassed node reports `skipped: true` and must not read as a success.
+      const settled = value?.skipped === true ? ('skipped' as const) : ('done' as const)
       return {
         ...state,
-        nodes: state.nodes.map((n) => (n.node === node && n.status === 'running' ? { ...n, status: 'done' } : n)),
+        nodes: state.nodes.map((n) => (n.node === node && n.status === 'running' ? { ...n, status: settled } : n)),
       }
     }
     case 'workflow_node_failed': {
@@ -97,7 +103,16 @@ export const EMPTY_WORKFLOW_RUN: WorkflowRunState = { active: false, completed: 
  * completion marker (v0.115.1). There is no longer a standalone panel above the
  * composer; `className` lets the host place it in the message flow.
  */
-export function WorkflowProgressPanel({ state, className }: { state: WorkflowRunState; className?: string }) {
+export function WorkflowProgressPanel({
+  state,
+  className,
+  onOpenCanvas,
+}: {
+  state: WorkflowRunState
+  className?: string
+  /** Opens the detached run canvas (CTR-0187). Absent = no control is rendered. */
+  onOpenCanvas?: () => void
+}) {
   if (!state.active && !state.completed && !state.failed) return null
   return (
     <div
@@ -124,6 +139,16 @@ export function WorkflowProgressPanel({ state, className }: { state: WorkflowRun
           : state.completed
             ? `Workflow complete${state.steps ? ` (${state.steps} step${state.steps === 1 ? '' : 's'})` : ''}`
             : 'Workflow running'}
+        {onOpenCanvas && (
+          <button
+            type="button"
+            onClick={onOpenCanvas}
+            title="Open the workflow diagram"
+            className="ml-auto inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground">
+            <Maximize2 className="h-3 w-3" />
+            Diagram
+          </button>
+        )}
       </div>
       {state.failed && state.error && <p className="mb-1 text-[11px] text-destructive">{state.error}</p>}
       {state.nodes.length > 0 && (
@@ -132,6 +157,8 @@ export function WorkflowProgressPanel({ state, className }: { state: WorkflowRun
             <li key={`${n.node}-${n.index}`} className="flex items-center gap-1.5">
               {n.status === 'failed' ? (
                 <CircleAlert className="h-3 w-3 text-destructive" />
+              ) : n.status === 'skipped' ? (
+                <SkipForward className="h-3 w-3 text-muted-foreground/70" />
               ) : n.status === 'done' ? (
                 <CircleCheck className="h-3 w-3 text-primary" />
               ) : (
@@ -141,6 +168,7 @@ export function WorkflowProgressPanel({ state, className }: { state: WorkflowRun
                 className={cn(
                   'truncate',
                   n.status === 'done' && 'text-muted-foreground',
+                  n.status === 'skipped' && 'text-muted-foreground/70 line-through',
                   n.status === 'failed' && 'text-destructive',
                 )}>
                 {n.label || n.node}

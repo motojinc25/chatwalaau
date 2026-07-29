@@ -620,10 +620,20 @@ async def _stream_with_reasoning(
     if _workflow_id:
         from app.workflow.runtime import stream_workflow
 
-        _wf_input = _latest_user_text(request_body.messages)
+        # PRP-0123 / UDR-0106 D5: a human-in-the-loop answer arrives as `state.workflow_resume`
+        # ({request_id: answer}) on the NEXT request rather than over a held connection. Such a
+        # request carries no new user message and must not be treated as one.
+        _wf_resume_raw = (request_body.state or {}).get("workflow_resume")
+        _wf_resume = _wf_resume_raw if isinstance(_wf_resume_raw, dict) and _wf_resume_raw else None
+        _wf_input = "" if _wf_resume else _latest_user_text(request_body.messages)
         _wf_result: dict[str, Any] = {}
         async for _chunk in stream_workflow(
-            str(_workflow_id), _wf_input, encoder, thread_id=thread_id, result=_wf_result
+            str(_workflow_id),
+            _wf_input,
+            encoder,
+            thread_id=thread_id,
+            result=_wf_result,
+            resume=_wf_resume,
         ):
             yield _chunk
         # Auto Session Title (PRP-0077, CTR-0109, UDR-0053 D17): the workflow branch

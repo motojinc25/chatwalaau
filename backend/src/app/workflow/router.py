@@ -60,11 +60,19 @@ def register_workflows(app: FastAPI) -> None:
 
         directory, writable = authoring.authoring_status()
         if is_demo_mode():
-            raise HTTPException(status_code=409, detail={"error": "read_only", "message": "Authoring is disabled in demo mode."})
+            raise HTTPException(
+                status_code=409, detail={"error": "read_only", "message": "Authoring is disabled in demo mode."}
+            )
         if directory is None:
-            raise HTTPException(status_code=403, detail={"error": "authoring_unavailable", "message": "DECLARATIVE_AGENTS_DIR is not configured."})
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "authoring_unavailable", "message": "DECLARATIVE_AGENTS_DIR is not configured."},
+            )
         if not writable:
-            raise HTTPException(status_code=403, detail={"error": "read_only", "message": "The declarative agents directory is not writable."})
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "read_only", "message": "The declarative agents directory is not writable."},
+            )
 
     @router.get("/authoring/status", dependencies=[Depends(verify_api_key)])
     async def authoring_status_endpoint() -> dict:
@@ -142,6 +150,16 @@ def register_workflows(app: FastAPI) -> None:
             spec = resolve_workflow(workflow_id)
         except WorkflowError as exc:
             raise HTTPException(status_code=404, detail={"error": "not_found", "message": str(exc)}) from None
+        # PRP-0123 / UDR-0106 D10: the run canvas (CTR-0187) lays its graph out from the
+        # DOCUMENT, before the first node event arrives, so an untaken branch is visible.
+        # Served here rather than from the authoring API so the run surface never depends
+        # on the authoring surface. Best-effort and ADDITIVE: an unreadable source yields
+        # `document: null` and the canvas degrades to event-only rendering.
+        document: dict | None = None
+        try:
+            document = authoring.document_from_yaml(authoring.read_source(workflow_id))
+        except Exception:
+            document = None
         return {
             "id": spec.id,
             "name": spec.name,
@@ -151,6 +169,7 @@ def register_workflows(app: FastAPI) -> None:
             "referenced_agents": spec.referenced_agents,
             "action_kinds": spec.action_kinds,
             "warnings": spec.warnings,
+            "document": document,
         }
 
     @router.post("/{workflow_id:path}/validate", dependencies=[Depends(verify_api_key)])

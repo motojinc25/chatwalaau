@@ -20,6 +20,7 @@ import { ToolApprovalList } from '@/components/ToolApprovalCard'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { EMPTY_WORKFLOW_RUN, reduceWorkflowEvent, type WorkflowRunState } from '@/components/WorkflowProgressPanel'
+import { WorkflowRunCanvas } from '@/components/WorkflowRunCanvas'
 import { useChat } from '@/hooks/useChat'
 import { useChatScroll } from '@/hooks/useChatScroll'
 import { type ImageAttachment, useImageAttachment } from '@/hooks/useImageAttachment'
@@ -29,6 +30,7 @@ import { useMessageStepNav } from '@/hooks/useMessageStepNav'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useToolApproval } from '@/hooks/useToolApproval'
 import { useTTS } from '@/hooks/useTTS'
+import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
@@ -118,6 +120,8 @@ export function ChatPanel({
   const [wfTarget, setWfTarget] = useState(getWorkflowRunTarget)
   const [activeAgent, setActiveAgent] = useState<{ id: string; name: string }>({ id: '', name: '' })
   const [workflowRun, setWorkflowRun] = useState<WorkflowRunState>(EMPTY_WORKFLOW_RUN)
+  // Detached per-run canvases (CTR-0187, PRP-0123). Ephemeral; never persisted.
+  const canvas = useWorkflowRunCanvas()
   const selectedWorkflowId = wfTarget?.id ?? ''
   // Label stamped on the assistant message: the workflow name, or the active agent's
   // name -- including the Built-in agent (v0.112.2), so a reloaded chat can always say
@@ -249,6 +253,9 @@ export function ChatPanel({
       },
       [approvalApi],
     ),
+    // Standard AG-UI workflow-run events (PRP-0123, CTR-0009 v19). Workflow branch only;
+    // a Prompt-agent turn never emits them, so this is inert for every other run.
+    onWorkflowEvent: canvas.ingest,
     // v0.77.1: transient upstream 5xx auto-retry status (CTR-0009). Shown as a
     // brief amber banner so the user knows the run is being resent, not stalled.
     onNotice: useCallback((message: string) => setNotification({ type: 'info', message }), []),
@@ -527,6 +534,9 @@ export function ChatPanel({
       // Kick off the send, then clear/scroll immediately -- the commit flag is
       // awaited afterwards so ChatInput can restore the text on a pre-commit
       // failure (CTR-0004 v2, PRP-0110).
+      // A workflow send opens its own run canvas (CTR-0187, UDR-0106 D12); the graph is
+      // fetched from the document so it renders before the first node event arrives.
+      if (selectedWorkflowId) canvas.beginRun(selectedWorkflowId, wfTarget?.name ?? selectedWorkflowId)
       const pending = sendMessage(content, images)
       clearAttachments()
       // PRP-0058 UX-2: user-send is the strongest "follow output" intent.
@@ -536,7 +546,17 @@ export function ChatPanel({
       scrollToBottom()
       return await pending
     },
-    [sendMessage, clearAttachments, scrollToBottom],
+    [sendMessage, clearAttachments, scrollToBottom, selectedWorkflowId, wfTarget?.name, canvas],
+  )
+
+  // Human-in-the-loop answers (CTR-0187 -> CTR-0009 v19, UDR-0106 D5). The paused run
+  // continues on a NEW turn carrying state.workflow_resume and no user message; the
+  // canvas keeps painting because the run id is unchanged.
+  const handleWorkflowInput = useCallback(
+    (answers: Record<string, { user_input: string; value: unknown }>) => {
+      void sendMessage('', undefined, { skipUserMessage: true, workflowResume: answers })
+    },
+    [sendMessage],
   )
 
   // PRP-0110 / UDR-0088 D3: re-send a user turn that failed before committing.
@@ -631,6 +651,14 @@ export function ChatPanel({
                 memoryLikeStatus={turn ? memory.states[turn.turnKey] : undefined}
                 workflowRun={
                   selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant' ? workflowRun : undefined
+                }
+                onOpenWorkflowCanvas={
+                  // Offered only while a canvas actually exists for the latest run, so the
+                  // control is never a dead button (e.g. after a reload, where run state is
+                  // gone). Re-opening a CLOSED canvas is the point: closing hides it.
+                  selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant' && canvas.hasCurrent()
+                    ? canvas.openCurrent
+                    : undefined
                 }
               />
             )
@@ -850,6 +878,23 @@ export function ChatPanel({
           />
         </Suspense>
       )}
+
+      {/* Detached workflow run canvases (CTR-0187, PRP-0123, UDR-0106 D12). One per run,
+          movable and resizable. Closing one HIDES it -- the run's state is retained so the
+          in-message indicator's "Diagram" control can re-open it -- and never affects the
+          run itself. */}
+      {canvas.instances
+        .filter((i) => i.open)
+        .map((instance, idx) => (
+          <WorkflowRunCanvas
+            key={instance.run.runId}
+            run={instance.run}
+            actions={instance.actions}
+            index={idx}
+            onClose={() => canvas.close(instance.run.runId)}
+            onSubmitInput={handleWorkflowInput}
+          />
+        ))}
     </div>
   )
 }
