@@ -25,22 +25,38 @@ logger = logging.getLogger(__name__)
 
 _engine: Any = None
 _engine_unavailable = False
+_engine_error: str = ""
 
 
 def _get_engine() -> Any:
     """Return a cached Power Fx ``Engine`` (loads .NET once), or None if unavailable."""
-    global _engine, _engine_unavailable
+    global _engine, _engine_unavailable, _engine_error
     if _engine is not None or _engine_unavailable:
         return _engine
     try:
         import powerfx
 
         _engine = powerfx.Engine()
-    except Exception:
+    except Exception as exc:
         # No .NET runtime / powerfx not importable -> skip Power Fx validation entirely.
-        logger.info("Power Fx engine unavailable; skipping expression validation", exc_info=True)
+        # The reason is KEPT (v0.116.2): "the engine is unavailable" alone sent an operator
+        # looking at the wrong thing when the real cause was a DOTNET_ROOT pointing at a
+        # directory that does not exist. It is logged at WARNING and quoted in the
+        # blocking warning so the deployment problem is self-describing.
+        _engine_error = f"{type(exc).__name__}: {exc}".strip().splitlines()[0][:200]
+        logger.warning(
+            "Power Fx engine unavailable (%s); workflows using '=' expressions cannot run. "
+            "Check that a .NET runtime is installed and that DOTNET_ROOT points at it.",
+            _engine_error,
+            exc_info=True,
+        )
         _engine_unavailable = True
     return _engine
+
+
+def powerfx_unavailable_reason() -> str:
+    """Return the recorded engine-load failure (empty when it loaded or was not tried)."""
+    return _engine_error
 
 
 def _syntax_error(engine: Any, expr: str) -> str | None:
@@ -105,10 +121,16 @@ def powerfx_availability_warnings(actions: Any) -> list[str]:
         return []
     sample = ", ".join(repr(e) for e in expressions[:3])
     more = f" (and {len(expressions) - 3} more)" if len(expressions) > 3 else ""
+    # Probing our own engine records WHY it could not load, which is the part an operator
+    # actually needs (v0.116.2).
+    _get_engine()
+    reason = powerfx_unavailable_reason()
+    detail = f" The engine failed to load with: {reason}." if reason else ""
     return [
         f"this workflow uses {len(expressions)} Power Fx expression(s) ({sample}{more}) but the Power Fx "
-        "engine is unavailable on this deployment: install the .NET runtime (the container image ships "
-        "it) or replace the '=' expressions with literal values."
+        f"engine is unavailable on this deployment.{detail} Check that a .NET runtime is installed and "
+        "that DOTNET_ROOT points at it (the container image installs it under /usr/share/dotnet), or "
+        "replace the '=' expressions with literal values."
     ]
 
 
@@ -132,4 +154,9 @@ def powerfx_warnings(actions: Any) -> list[str]:
     return warnings
 
 
-__all__ = ["powerfx_availability_warnings", "powerfx_available", "powerfx_warnings"]
+__all__ = [
+    "powerfx_availability_warnings",
+    "powerfx_available",
+    "powerfx_unavailable_reason",
+    "powerfx_warnings",
+]
