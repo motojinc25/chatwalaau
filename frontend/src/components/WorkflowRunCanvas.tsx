@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react'
 import { memo, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { Button } from '@/components/ui/button'
 import type { WorkflowAction } from '@/hooks/useWorkflowAuthoring'
 import { cn } from '@/lib/utils'
@@ -226,8 +227,17 @@ export function WorkflowRunCanvas({ run, actions, onClose, onSubmitInput, index 
         },
       }
     })
+    // v0.117.1: "outside the diagram" means the BACKEND could not attribute the executor to
+    // an authored action (`origin: unmapped`) -- hand-written YAML whose action carries no
+    // `id`, so MAF named it. Framework plumbing (`_workflow_entry`) never reaches the client
+    // any more, and an `If`'s condition evaluator is reported under the `If` itself, so this
+    // list is empty for every workflow authored in the editor. It used to be a permanent,
+    // meaningless "_workflow_entry" row.
     const known = new Set(graph.byActionId.keys())
-    return { nodes: painted, unmapped: Object.values(run.nodes).filter((s) => !known.has(s.node)) }
+    return {
+      nodes: painted,
+      unmapped: Object.values(run.nodes).filter((s) => s.origin === 'unmapped' && !known.has(s.node)),
+    }
   }, [graph, run.nodes, selected])
 
   const selectedState: WorkflowNodeRunState | undefined = useMemo(() => {
@@ -259,9 +269,9 @@ export function WorkflowRunCanvas({ run, actions, onClose, onSubmitInput, index 
         </Button>
       </div>
 
-      <div className="flex min-h-0 flex-1">
+      <PanelGroup direction="horizontal" className="flex min-h-0 flex-1">
         {/* graph */}
-        <div className="min-w-0 flex-1 border-r">
+        <Panel defaultSize={68} minSize={25} className="min-w-0">
           {graph ? (
             <ReactFlowProvider>
               <ReactFlow
@@ -293,10 +303,13 @@ export function WorkflowRunCanvas({ run, actions, onClose, onSubmitInput, index 
               </ol>
             </div>
           )}
-        </div>
+        </Panel>
+
+        {/* draggable pane boundary (v0.117.1) */}
+        <PanelResizeHandle className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/60 data-[resize-handle-state=drag]:bg-primary" />
 
         {/* detail + variables */}
-        <div className="flex w-[280px] shrink-0 flex-col overflow-hidden">
+        <Panel defaultSize={32} minSize={15} className="flex flex-col overflow-hidden">
           <div className="min-h-0 flex-1 overflow-auto p-2 text-xs">
             {selectedState ? (
               <>
@@ -324,6 +337,9 @@ export function WorkflowRunCanvas({ run, actions, onClose, onSubmitInput, index 
               </>
             ) : (
               <p className="text-muted-foreground">Select a step to see its log.</p>
+            )}
+            {selectedState && selectedState.log.length === 0 && (
+              <p className="text-[11px] text-muted-foreground">No log was recorded for this step.</p>
             )}
 
             {unmapped.length > 0 && (
@@ -370,8 +386,8 @@ export function WorkflowRunCanvas({ run, actions, onClose, onSubmitInput, index 
               ) : null}
             </div>
           )}
-        </div>
-      </div>
+        </Panel>
+      </PanelGroup>
 
       {/* Human-in-the-loop input (UDR-0106 D5) */}
       {run.interrupts.length > 0 && (
@@ -415,16 +431,17 @@ export function WorkflowRunCanvas({ run, actions, onClose, onSubmitInput, index 
               size="sm"
               className="h-6 px-3 text-[11px]"
               disabled={run.interrupts.some((it) => !(answers[it.id] ?? String(it.metadata?.default ?? '')).trim())}
-              onClick={() =>
-                onSubmitInput(
-                  Object.fromEntries(
-                    run.interrupts.map((it) => {
-                      const answer = answers[it.id] ?? String(it.metadata?.default ?? '')
-                      return [it.id, { user_input: answer, value: answer }]
-                    }),
-                  ),
+              onClick={() => {
+                const collected = Object.fromEntries(
+                  run.interrupts.map((it) => {
+                    const answer = answers[it.id] ?? String(it.metadata?.default ?? '')
+                    return [it.id, { user_input: answer, value: answer }]
+                  }),
                 )
-              }>
+                // Drop the local drafts with the form; the next question starts blank.
+                setAnswers({})
+                onSubmitInput(collected)
+              }}>
               Submit
             </Button>
           </div>

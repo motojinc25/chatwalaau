@@ -953,6 +953,53 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
+/**
+ * A comma-separated list bound to a string[] field (v0.117.1).
+ *
+ * The naive binding -- value={list.join(', ')} with onChange splitting and filtering --
+ * cannot be typed in: the keystroke that adds the separator produces a trailing empty
+ * item, the filter drops it, the join puts the value back WITHOUT the comma, and the
+ * character the operator just typed disappears. The same happens to the space after it.
+ *
+ * So the input owns the RAW TEXT while it is being edited and publishes the parsed array
+ * upward on every keystroke. The text is re-seeded from the model only when the value
+ * arrives from elsewhere (a different action selected, a YAML edit), never from the array
+ * this component itself just produced -- otherwise the round trip reappears.
+ */
+function CsvInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string[]
+  onChange: (next: string[]) => void
+  placeholder?: string
+}) {
+  const parse = (text: string) =>
+    text
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  const [text, setText] = useState(() => value.join(', '))
+  // Re-seed only when the incoming list differs from what the current text parses to.
+  useEffect(() => {
+    const mine = parse(text)
+    if (mine.length !== value.length || mine.some((v, i) => v !== value[i])) setText(value.join(', '))
+    // biome-ignore lint/correctness/useExhaustiveDependencies: re-seed on external change only
+  }, [value])
+  return (
+    <input
+      className={CONTROL}
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value)
+        onChange(parse(e.target.value))
+      }}
+      placeholder={placeholder}
+    />
+  )
+}
+
 // ---- Add-action palette dropdown (grouped by category) ---------------------
 function AddActionMenu({ onAdd, allowLoop }: { onAdd: (kind: string) => void; allowLoop: boolean }) {
   const [open, setOpen] = useState(false)
@@ -1782,17 +1829,9 @@ function ActionForm({
             </Field>
           </div>
           <Field label="Required fields (comma separated, optional)">
-            <input
-              className={CONTROL}
-              value={(a.requiredFields ?? []).join(', ')}
-              onChange={(e) =>
-                onChange({
-                  requiredFields: e.target.value
-                    .split(',')
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                })
-              }
+            <CsvInput
+              value={a.requiredFields ?? []}
+              onChange={(requiredFields) => onChange({ requiredFields })}
               placeholder="approved, approver"
             />
           </Field>

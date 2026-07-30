@@ -18,10 +18,14 @@ export interface WorkflowLogEntry {
   iteration?: number | null
 }
 
+export type WorkflowNodeOrigin = 'action' | 'derived' | 'unmapped' | 'internal'
+
 export interface WorkflowNodeRunState {
   node: string
   label: string
   status: WorkflowNodeStatus
+  /** Where the executor came from; `unmapped` is the only one shown outside the diagram. */
+  origin: WorkflowNodeOrigin
   iteration?: number | null
   message?: string
   log: WorkflowLogEntry[]
@@ -81,6 +85,7 @@ function foldNode(run: WorkflowRunModel, activity: WorkflowNodeActivity): Workfl
     node,
     label: activity.label || prev?.label || node,
     status,
+    origin: activity.origin ?? prev?.origin ?? 'action',
     iteration: activity.iteration ?? prev?.iteration,
     message: activity.message ?? prev?.message,
     log: [...(prev?.log ?? []), entry],

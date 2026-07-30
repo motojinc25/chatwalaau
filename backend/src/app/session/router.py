@@ -557,6 +557,15 @@ class UsageItem(BaseModel):
     # it, model_dump dropped the label and a reloaded chat could not show WHICH agent or
     # workflow answered. Absent on legacy messages.
     run_target: str | None = None
+    # Declarative workflow run state (v0.117.1; the completion marker dates to v0.115.1).
+    # These MUST be declared: UsageItem is a strict model, so an undeclared key is dropped
+    # at parse time -- which is exactly why the v0.115.1 `workflow_completed` marker never
+    # actually reached disk and a silent workflow turn reloaded as an empty bubble.
+    # `workflow_completed` is the compact legacy marker; `workflow_run` is the full run
+    # (identity + every step's final state) the indicator and the diagram are rebuilt from.
+    # Per-action payload logs are deliberately NOT persisted -- unbounded in aggregate.
+    workflow_completed: dict[str, Any] | None = None
+    workflow_run: dict[str, Any] | None = None
 
 
 class SaveMessageItem(BaseModel):

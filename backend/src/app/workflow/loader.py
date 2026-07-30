@@ -526,12 +526,14 @@ def map_workflow_document(
     )
 
 
-def node_labels_for(workflow_id: str) -> dict[str, str]:
-    """Return ``action id -> displayName`` for a workflow (progress labels, UDR-0105 D7).
+def node_index_for(workflow_id: str) -> tuple[dict[str, str], set[str]]:
+    """Return ``(action id -> displayName, every author action id)`` for a workflow.
 
-    A parse-only read (no compile, no agent build) used by the run lanes to label
-    progress events in the author's own words. Never raises: an unreadable or malformed
-    file simply yields no labels and the runtime falls back to the action id.
+    A parse-only read (no compile, no agent build) used by the run lanes to label progress
+    events in the author's own words (UDR-0105 D7) and -- since v0.117.1 -- to tell the
+    author's own actions apart from the executors the Microsoft Agent Framework generates
+    for itself (``_workflow_entry``, ``<action id>_eval``). Never raises: an unreadable or
+    malformed file simply yields nothing and the runtime falls back to the raw executor id.
     """
     for wid, path, _gp in _discover_workflow_files():
         if wid != workflow_id:
@@ -539,17 +541,26 @@ def node_labels_for(workflow_id: str) -> dict[str, str]:
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, yaml.YAMLError):
-            return {}
+            return {}, set()
         if not isinstance(data, dict):
-            return {}
+            return {}, set()
         labels: dict[str, str] = {}
+        ids: set[str] = set()
         for action in _walk_actions(data.get("actions")):
             aid = action.get("id")
+            if not (isinstance(aid, str) and aid.strip()):
+                continue
+            ids.add(aid.strip())
             label = action.get("displayName")
-            if isinstance(aid, str) and aid.strip() and isinstance(label, str) and label.strip():
+            if isinstance(label, str) and label.strip():
                 labels[aid.strip()] = label.strip()
-        return labels
-    return {}
+        return labels, ids
+    return {}, set()
+
+
+def node_labels_for(workflow_id: str) -> dict[str, str]:
+    """Return ``action id -> displayName`` for a workflow (progress labels, UDR-0105 D7)."""
+    return node_index_for(workflow_id)[0]
 
 
 def _prompt_agent_lookup() -> dict[str, str]:
@@ -723,6 +734,7 @@ __all__ = [
     "compile_for_run",
     "load_workflow_inventory",
     "map_workflow_document",
+    "node_index_for",
     "node_labels_for",
     "normalize_workflow_actions",
     "resolve_workflow",

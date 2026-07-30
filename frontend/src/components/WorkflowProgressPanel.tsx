@@ -46,12 +46,21 @@ export function reduceWorkflowEvent(
   value: Record<string, unknown> | undefined,
 ): WorkflowRunState {
   switch (name) {
-    case 'workflow_started':
+    case 'workflow_started': {
+      // A RESUMED turn continues the same run (v0.117.1): keep every step already shown.
+      // Resetting here is what made earlier actions vanish each time a workflow asked a
+      // human-in-the-loop question -- one run must read as one list, not one per answer.
+      if (value?.resumed === true) return { ...state, active: true, completed: false, failed: false }
       return { active: true, completed: false, nodes: [] }
+    }
     case 'workflow_node_started': {
       const node = String(value?.node ?? 'step')
       const label = value?.label ? String(value.label) : undefined
       if (state.nodes.some((n) => n.node === node && n.status === 'running')) return state
+      // On a resume the step may already be listed (it was awaiting input); revive it in
+      // place rather than appending a duplicate.
+      if (state.nodes.some((n) => n.node === node))
+        return { ...state, nodes: state.nodes.map((n) => (n.node === node ? { ...n, status: 'running' } : n)) }
       return { ...state, nodes: [...state.nodes, { node, label, status: 'running', index: state.nodes.length }] }
     }
     case 'workflow_node_completed': {

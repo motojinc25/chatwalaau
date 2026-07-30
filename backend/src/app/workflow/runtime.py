@@ -29,7 +29,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from app.workflow.loader import compile_for_run, node_labels_for
+from app.workflow.loader import compile_for_run, node_index_for
 from app.workflow.spec import WorkflowError
 
 if TYPE_CHECKING:
@@ -55,6 +55,18 @@ STATUS_SKIPPED = "skipped"
 STATUS_FAILED = "failed"
 STATUS_AWAITING_INPUT = "awaiting_input"
 
+# Where an executor came from (v0.117.1). MAF generates executors the author never wrote:
+# a ``_workflow_entry`` join, and an ``<action id>_eval`` condition evaluator for every
+# If / ConditionGroup. They are real executors -- STEP_STARTED / STEP_FINISHED still report
+# them for protocol fidelity -- but they are PLUMBING, not steps the author can point at.
+# The display channel (ACTIVITY_SNAPSHOT + the legacy CUSTOM events) therefore omits
+# INTERNAL executors entirely and attributes a DERIVED one to the action it belongs to, so
+# an `If` node finally lights up instead of a phantom "gate_eval" appearing beside it.
+ORIGIN_ACTION = "action"  # an id the author wrote
+ORIGIN_DERIVED = "derived"  # framework executor belonging to an authored action
+ORIGIN_INTERNAL = "internal"  # framework plumbing with no author counterpart
+ORIGIN_UNMAPPED = "unmapped"  # real work whose id is absent from the document
+
 # The per-node activity payload budget (UDR-0106 D9). A fixed constant rather than a
 # configuration key: it protects the SSE transport (an agent node's whole answer, or an
 # HTTP action's whole response body, would otherwise travel twice) rather than
@@ -68,22 +80,43 @@ _PENDING_RUNS: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _PENDING_RUNS_MAX = 32
 
 
-def _retain_pending_run(thread_id: str, workflow_id: str, workflow: Any, interrupts: list[dict[str, Any]]) -> None:
-    """Retain a paused workflow against its thread so the next request can resume it."""
+def _retain_pending_run(
+    thread_id: str,
+    workflow_id: str,
+    workflow: Any,
+    interrupts: list[dict[str, Any]],
+    steps: int = 0,
+) -> None:
+    """Retain a paused workflow against its thread so the next request can resume it.
+
+    ``steps`` carries the RUN's completed-step count across the pause. A run is one thing
+    the operator watches, so its step count belongs to the run, not to the HTTP turn that
+    happened to carry part of it -- without this the count restarts at zero after every
+    answer and the progress indicator appears to forget everything before the question.
+    """
     _PENDING_RUNS.pop(thread_id, None)
-    _PENDING_RUNS[thread_id] = {"workflow_id": workflow_id, "workflow": workflow, "interrupts": interrupts}
+    _PENDING_RUNS[thread_id] = {
+        "workflow_id": workflow_id,
+        "workflow": workflow,
+        "interrupts": interrupts,
+        "steps": steps,
+    }
     while len(_PENDING_RUNS) > _PENDING_RUNS_MAX:
         evicted, _ = _PENDING_RUNS.popitem(last=False)
         logger.info("Evicted a paused workflow run for thread %s (retention cap reached)", evicted)
 
 
-def _take_pending_run(thread_id: str, workflow_id: str) -> Any | None:
-    """Pop the retained workflow for ``thread_id`` when it matches ``workflow_id``."""
+def _take_pending_run(thread_id: str, workflow_id: str) -> dict[str, Any] | None:
+    """Pop the retained run for ``thread_id`` when it matches ``workflow_id``.
+
+    Returns the whole entry -- the compiled workflow AND the step count accumulated before
+    the pause -- because the resume needs both and the entry is consumed once.
+    """
     entry = _PENDING_RUNS.get(thread_id)
     if not entry or entry.get("workflow_id") != workflow_id:
         return None
     _PENDING_RUNS.pop(thread_id, None)
-    return entry.get("workflow")
+    return entry
 
 
 def _request_prompt(event: Any) -> str | None:
@@ -267,8 +300,14 @@ async def stream_workflow(
     yield encoder.encode(RunStartedEvent(type=EventType.RUN_STARTED, thread_id=thread, run_id=run_id))
 
     workflow: Any = None
+    # Steps already completed by this RUN before it paused for input; a resumed turn keeps
+    # counting from there instead of restarting at zero.
+    prior_steps = 0
     if resume:
-        workflow = _take_pending_run(thread, workflow_id)
+        pending = _take_pending_run(thread, workflow_id)
+        if pending is not None:
+            workflow = pending.get("workflow")
+            prior_steps = int(pending.get("steps") or 0)
         if workflow is None:
             # UDR-0106 D6: never silently start a fresh run -- the paused run's Local.
             # state is gone, so the answer would be applied to the wrong context.
@@ -291,20 +330,50 @@ async def stream_workflow(
             yield encoder.encode(RunErrorEvent(type=EventType.RUN_ERROR, message=str(exc)))
             return
 
+    # `resumed` tells the SPA this turn CONTINUES a run rather than starting one, so the
+    # in-message indicator keeps every step it has already shown instead of resetting to an
+    # empty list (v0.117.1). Without it a workflow with two Question steps shows only the
+    # actions since the last answer, and the earlier ones appear to have vanished.
     yield encoder.encode(
-        CustomEvent(type=EventType.CUSTOM, name="workflow_started", value={"workflow_id": workflow_id})
+        CustomEvent(
+            type=EventType.CUSTOM,
+            name="workflow_started",
+            value={"workflow_id": workflow_id, "resumed": bool(resume)},
+        )
     )
 
-    # Action id -> displayName, so a progress node reads in the author's own words
-    # instead of the generated executor id (PRP-0122, UDR-0105 D7).
-    node_labels = node_labels_for(workflow_id)
+    # Action id -> displayName (progress labels, UDR-0105 D7) plus the set of ids the
+    # author actually wrote, used to tell their actions from MAF's own executors.
+    node_labels, action_ids = node_index_for(workflow_id)
 
     def _label(node: Any) -> str:
         return node_labels.get(str(node)) or str(node)
 
-    def _activity(node: Any, status: str, **extra: Any) -> Any:
+    def _classify(executor: Any) -> tuple[str, str]:
+        """Return ``(origin, owning node id)`` for a raw executor id (v0.117.1).
+
+        MAF names its own executors ``_workflow_entry`` and ``<action id>_eval``. A derived
+        executor is attributed to the action it belongs to, so an ``If`` reports progress
+        under its own id instead of a phantom ``gate_eval`` node appearing beside it.
+        """
+        raw = str(executor)
+        if raw in action_ids:
+            return ORIGIN_ACTION, raw
+        if raw.endswith("_eval") and raw[: -len("_eval")] in action_ids:
+            return ORIGIN_DERIVED, raw[: -len("_eval")]
+        if raw.startswith("_"):
+            return ORIGIN_INTERNAL, raw
+        # A real executor whose id is not in the document: hand-written YAML with no `id`,
+        # so MAF generated one. It IS the author's work, so it is reported, not hidden.
+        return ORIGIN_UNMAPPED, raw
+
+    def _activity(node: Any, status: str, *, executor: Any = None, origin: str = ORIGIN_ACTION, **extra: Any) -> Any:
         """One ACTIVITY_SNAPSHOT per node; message_id is stable so it REPLACES."""
-        content: dict[str, Any] = {"node": node, "label": _label(node), "status": status}
+        content: dict[str, Any] = {"node": node, "label": _label(node), "status": status, "origin": origin}
+        if executor is not None and str(executor) != str(node):
+            # Keep the raw executor id for fidelity when it differs from the node it is
+            # attributed to (a derived evaluator).
+            content["executor"] = str(executor)
         content.update({k: v for k, v in extra.items() if v is not None})
         return ActivitySnapshotEvent(
             type=EventType.ACTIVITY_SNAPSHOT,
@@ -317,7 +386,7 @@ async def stream_workflow(
 
     msg_id: str | None = None
     last_text_node: str | None = None
-    nodes_completed = 0
+    nodes_completed = prior_steps
     assistant_parts: list[str] = []
     interrupts: list[dict[str, Any]] = []
     awaiting_nodes: set[str] = set()
@@ -329,13 +398,20 @@ async def stream_workflow(
 
             if etype in ("executor_invoked", "executor_started"):
                 iteration = getattr(event, "iteration", None)
+                # STEP_* stays faithful to the runtime: every executor is reported, plumbing
+                # included. Only the DISPLAY channel below filters (v0.117.1).
                 yield encoder.encode(StepStartedEvent(type=EventType.STEP_STARTED, step_name=str(executor_id)))
-                yield encoder.encode(_activity(executor_id, STATUS_RUNNING, iteration=iteration))
+                origin, node = _classify(executor_id)
+                if origin == ORIGIN_INTERNAL:
+                    continue
+                yield encoder.encode(
+                    _activity(node, STATUS_RUNNING, executor=executor_id, origin=origin, iteration=iteration)
+                )
                 yield encoder.encode(
                     CustomEvent(
                         type=EventType.CUSTOM,
                         name="workflow_node_started",
-                        value={"node": executor_id, "label": _label(executor_id), "iteration": iteration},
+                        value={"node": node, "label": _label(node), "origin": origin, "iteration": iteration},
                     )
                 )
                 continue
@@ -346,55 +422,76 @@ async def stream_workflow(
                 # in fact paused on it. Keep the awaiting_input state (the snapshot would
                 # otherwise REPLACE it) and do not count a paused node as a step; the real
                 # completion arrives on the resume turn.
-                if str(executor_id) in awaiting_nodes:
+                origin, node = _classify(executor_id)
+                if node in awaiting_nodes:
                     continue
-                # UDR-0106 D3: a bypassed node was NOT executed. It gets its own status
-                # and is excluded from the completed-step count (this corrects the count
-                # for every workflow containing an untaken branch).
+                # UDR-0106 D3: a bypassed node was NOT executed. It gets its own status and
+                # is excluded from the completed-step count.
                 skipped = etype == "executor_bypassed"
-                if not skipped:
+                # v0.117.1: framework plumbing (the entry join) is not a step the author can
+                # point at, so it no longer inflates the count. A DERIVED executor IS counted,
+                # because it is attributed to an authored action which the diagram lights up --
+                # a count that disagreed with the diagram would be worse than either alone.
+                if not skipped and origin != ORIGIN_INTERNAL:
                     nodes_completed += 1
-                payload, truncated = bounded_payload(getattr(event, "data", None))
                 yield encoder.encode(StepFinishedEvent(type=EventType.STEP_FINISHED, step_name=str(executor_id)))
-                yield encoder.encode(
-                    _activity(
-                        executor_id,
-                        STATUS_SKIPPED if skipped else STATUS_COMPLETED,
-                        data=payload,
-                        truncated=truncated or None,
+                if origin != ORIGIN_INTERNAL:
+                    payload, truncated = bounded_payload(getattr(event, "data", None))
+                    yield encoder.encode(
+                        _activity(
+                            node,
+                            STATUS_SKIPPED if skipped else STATUS_COMPLETED,
+                            executor=executor_id,
+                            origin=origin,
+                            data=payload,
+                            truncated=truncated or None,
+                        )
                     )
-                )
-                yield encoder.encode(
-                    CustomEvent(
-                        type=EventType.CUSTOM,
-                        name="workflow_node_completed",
-                        value={"node": executor_id, "label": _label(executor_id), "skipped": skipped},
+                    yield encoder.encode(
+                        CustomEvent(
+                            type=EventType.CUSTOM,
+                            name="workflow_node_completed",
+                            value={"node": node, "label": _label(node), "origin": origin, "skipped": skipped},
+                        )
                     )
-                )
                 # fall through so any text payload is still surfaced
 
             if etype == "request_info":
                 # Human-in-the-Loop (Question / RequestExternalInput, UDR-0104 D4). The
                 # turn does NOT park on the SSE connection: the request is collected and
                 # surfaced as an AG-UI interrupt when the stream ends (UDR-0106 D5).
-                node = executor_id or getattr(event, "source_executor_id", None)
+                raw_node = executor_id or getattr(event, "source_executor_id", None)
+                origin, node = _classify(raw_node) if raw_node is not None else (ORIGIN_ACTION, None)
                 payload = _hitl_payload(event, node, _label(node) if node else None)
                 if payload.get("request_id"):
                     interrupts.append(payload)
                 if node is not None:
                     awaiting_nodes.add(str(node))
-                yield encoder.encode(_activity(node, STATUS_AWAITING_INPUT, prompt=payload.get("prompt")))
+                yield encoder.encode(
+                    _activity(
+                        node,
+                        STATUS_AWAITING_INPUT,
+                        executor=raw_node,
+                        origin=origin,
+                        prompt=payload.get("prompt"),
+                    )
+                )
                 yield encoder.encode(CustomEvent(type=EventType.CUSTOM, name="workflow_input_request", value=payload))
                 continue
 
             if etype == "executor_failed":
                 failure = _failure_message(getattr(event, "details", None))
                 details, truncated = bounded_payload(getattr(event, "details", None))
+                origin, node = _classify(executor_id)
                 yield encoder.encode(StepFinishedEvent(type=EventType.STEP_FINISHED, step_name=str(executor_id)))
+                # A failure is ALWAYS shown, even from framework plumbing: hiding the only
+                # report of why a run died would be worse than showing an internal id.
                 yield encoder.encode(
                     _activity(
-                        executor_id,
+                        node,
                         STATUS_FAILED,
+                        executor=executor_id,
+                        origin=origin,
                         message=failure,
                         details=details,
                         truncated=truncated or None,
@@ -404,7 +501,7 @@ async def stream_workflow(
                     CustomEvent(
                         type=EventType.CUSTOM,
                         name="workflow_node_failed",
-                        value={"node": executor_id, "label": _label(executor_id), "message": failure},
+                        value={"node": node, "label": _label(node), "origin": origin, "message": failure},
                     )
                 )
                 continue
@@ -472,7 +569,7 @@ async def stream_workflow(
         if interrupts:
             # UDR-0106 D5: the run pauses as an AG-UI interrupt. Retain the compiled
             # workflow so the next request can resume it with the collected answers.
-            _retain_pending_run(thread, workflow_id, workflow, interrupts)
+            _retain_pending_run(thread, workflow_id, workflow, interrupts, nodes_completed)
             yield encoder.encode(
                 CustomEvent(
                     type=EventType.CUSTOM,

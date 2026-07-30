@@ -34,7 +34,7 @@ import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
-import type { ChatMessage, ImageRef } from '@/types/chat'
+import type { ChatMessage, ImageRef, PersistedWorkflowRun } from '@/types/chat'
 
 const BG_STORAGE_KEY = 'chatwalaau-bg-enabled'
 
@@ -256,6 +256,8 @@ export function ChatPanel({
     // Standard AG-UI workflow-run events (PRP-0123, CTR-0009 v19). Workflow branch only;
     // a Prompt-agent turn never emits them, so this is inert for every other run.
     onWorkflowEvent: canvas.ingest,
+    // v0.117.1: save the run with the message so a reloaded chat can rebuild it.
+    getWorkflowRunSnapshot: canvas.snapshotCurrent,
     // v0.77.1: transient upstream 5xx auto-retry status (CTR-0009). Shown as a
     // brief amber banner so the user knows the run is being resent, not stalled.
     onNotice: useCallback((message: string) => setNotification({ type: 'info', message }), []),
@@ -553,10 +555,13 @@ export function ChatPanel({
   // continues on a NEW turn carrying state.workflow_resume and no user message; the
   // canvas keeps painting because the run id is unchanged.
   const handleWorkflowInput = useCallback(
-    (answers: Record<string, { user_input: string; value: unknown }>) => {
+    (runId: string, answers: Record<string, { user_input: string; value: unknown }>) => {
+      // Close the request FIRST so the input form disappears on Submit rather than staying
+      // on screen for the whole resumed run, inviting an answer to a closed question.
+      canvas.submitInput(runId)
       void sendMessage('', undefined, { skipUserMessage: true, workflowResume: answers })
     },
-    [sendMessage],
+    [sendMessage, canvas],
   )
 
   // PRP-0110 / UDR-0088 D3: re-send a user turn that failed before committing.
@@ -653,12 +658,14 @@ export function ChatPanel({
                   selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant' ? workflowRun : undefined
                 }
                 onOpenWorkflowCanvas={
-                  // Offered only while a canvas actually exists for the latest run, so the
-                  // control is never a dead button (e.g. after a reload, where run state is
-                  // gone). Re-opening a CLOSED canvas is the point: closing hides it.
+                  // Live run: re-open the canvas for the latest run (closing only hides it).
+                  // Reloaded chat: rebuild the canvas from the run persisted with THAT message,
+                  // so any past workflow turn can be inspected again (v0.117.1).
                   selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant' && canvas.hasCurrent()
                     ? canvas.openCurrent
-                    : undefined
+                    : msg.workflowRun
+                      ? () => canvas.openRestored(msg.workflowRun as PersistedWorkflowRun)
+                      : undefined
                 }
               />
             )
@@ -892,7 +899,7 @@ export function ChatPanel({
             actions={instance.actions}
             index={idx}
             onClose={() => canvas.close(instance.run.runId)}
-            onSubmitInput={handleWorkflowInput}
+            onSubmitInput={(answers) => handleWorkflowInput(instance.run.runId, answers)}
           />
         ))}
     </div>

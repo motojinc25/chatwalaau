@@ -331,9 +331,32 @@ function ChatMessageItemImpl({
   const workflowState: WorkflowRunState | undefined =
     workflowRun && (workflowRun.active || workflowRun.completed || workflowRun.failed)
       ? workflowRun
-      : message.workflowCompleted
-        ? { active: false, completed: true, nodes: [], steps: message.workflowCompleted.steps }
-        : undefined
+      : message.workflowRun
+        ? // v0.117.1: a reloaded chat rebuilds the SAME step list it showed live, from the
+          // run persisted with the message -- not just a "complete (N steps)" line.
+          {
+            active: false,
+            completed: message.workflowRun.status !== 'failed',
+            failed: message.workflowRun.status === 'failed',
+            ...(message.workflowRun.error ? { error: message.workflowRun.error } : {}),
+            steps: message.workflowRun.steps,
+            nodes: message.workflowRun.nodes.map((n, index) => ({
+              node: n.node,
+              label: n.label,
+              status:
+                n.status === 'completed'
+                  ? ('done' as const)
+                  : n.status === 'skipped'
+                    ? ('skipped' as const)
+                    : n.status === 'failed'
+                      ? ('failed' as const)
+                      : ('done' as const),
+              index,
+            })),
+          }
+        : message.workflowCompleted
+          ? { active: false, completed: true, nodes: [], steps: message.workflowCompleted.steps }
+          : undefined
   const isWaiting = !isUser && isLoading && !hasTextContent && !workflowState
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState('')

@@ -7,16 +7,20 @@ the Microsoft Agent Framework shared ``State`` under the key
 That ``State`` is owned by the workflow's runner and reachable as ``Workflow._runner.state``
 -- a PUBLIC ``state`` property on a PRIVATE ``_runner`` attribute.
 
-Four rules govern this module, all normative (UDR-0106 D7):
+Three rules govern this module, all normative (UDR-0106 D7, amended by v0.117.1):
 
-1. OFF by default. Without ``WORKFLOW_STATE_INSPECTOR`` nothing is read, serialized, or
-   returned.
-2. SUPERSTEP granularity only. MAF commits pending state at the superstep boundary
+1. SUPERSTEP granularity only. MAF commits pending state at the superstep boundary
    (``_runner.py``), so a reading taken mid-superstep is not guaranteed to be committed.
    The caller (CTR-0181) invokes this only on ``superstep_completed``.
-3. Redacted and bounded before it leaves the process.
-4. DIAGNOSTIC ONLY. Nothing in ChatWalaʻau may branch on the result, so turning the key
-   off can never change what a workflow does.
+2. Redacted and bounded before it leaves the process. Since the inspector is now ALWAYS
+   active these are the only protections left, so they are load-bearing rather than
+   defence in depth: redaction runs at every nesting depth and both budgets are enforced.
+3. DIAGNOSTIC ONLY. Nothing in ChatWalaʻau may branch on the result, so the snapshot can
+   never change what a workflow does.
+
+v0.117.1 removed the ``WORKFLOW_STATE_INSPECTOR`` gate: the variable pane is part of
+watching a run, not an opt-in debug mode. Operators who must not surface workflow
+variables at all should not expose the run canvas.
 
 UDR-0106 D8: this is the ONE function in CAP-002 permitted to traverse the private
 framework path, it never raises, and an architecture invariant test pins the path against
@@ -137,16 +141,11 @@ def _clip(value: Any, budget: list[int]) -> Any:
 def snapshot_workflow_state(workflow: Any, iteration: Any = None) -> dict[str, Any] | None:
     """Return a redacted, bounded namespace snapshot, or ``None`` when unavailable.
 
-    ``None`` is returned when the inspector is disabled (the default), when the workflow
-    state has not been initialized yet, or when the framework path no longer resolves.
-    Never raises: a failure to inspect MUST NOT fail the run (CTR-0189).
+    ``None`` is returned when the workflow state has not been initialized yet, or when the
+    framework path no longer resolves. Never raises: a failure to inspect MUST NOT fail the
+    run (CTR-0189).
     """
     try:
-        from app.core.config import settings
-
-        if not getattr(settings, "workflow_state_inspector", False):
-            return None
-
         data = declarative_state_of(workflow)
         if not data:
             return None

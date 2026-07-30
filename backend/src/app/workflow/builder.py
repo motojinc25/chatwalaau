@@ -34,9 +34,7 @@ def _pick_model(spec: DeclarativeAgentSpec) -> str:
         return preferred or (models[0] if models else "")
     configured = [m for m, _ in providers.resolve_models()]
     if not configured:
-        raise DeclarativeAgentError(
-            "No chat model is configured; author a 'chat' offering before running a workflow."
-        )
+        raise DeclarativeAgentError("No chat model is configured; author a 'chat' offering before running a workflow.")
     default = providers.resolve_default_model()
     if default not in configured:
         default = configured[0]
@@ -59,9 +57,7 @@ def build_prompt_agent(agent_id: str, spec: DeclarativeAgentSpec | None = None) 
     if spec is None:
         spec = resolve_spec(agent_id)
     if spec.warnings:
-        raise DeclarativeAgentError(
-            f"Referenced agent {agent_id!r} has unresolved warnings: {spec.warnings}"
-        )
+        raise DeclarativeAgentError(f"Referenced agent {agent_id!r} has unresolved warnings: {spec.warnings}")
 
     # Local import avoids the agent_factory <-> workflow import cycle.
     from app.agui.agent_factory import _build_tools_and_instructions

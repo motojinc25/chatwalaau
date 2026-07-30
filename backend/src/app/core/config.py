@@ -401,16 +401,6 @@ class Settings(BaseSettings):
     # Per-request timeout (ms) for HttpRequestAction.
     workflow_http_timeout_ms: int = 10000
 
-    # Declarative Workflow variable inspector (CTR-0189, PRP-0123, UDR-0106 D7). When
-    # true, the interactive lane emits a redacted, bounded snapshot of the workflow's
-    # Local. / Workflow.* / System. / Agent. namespaces at each SUPERSTEP boundary (the
-    # only point at which MAF has committed pending state), for the run canvas's debug
-    # pane. OFF by default: workflow variables are the most likely place for a credential
-    # or a customer record to sit in plaintext, and redaction is a key-name heuristic.
-    # Diagnostic only -- no ChatWalaʻau behavior other than the display depends on it, so
-    # toggling this can never change what a workflow does.
-    workflow_state_inspector: bool = False
-
     # Prompt Templates (CTR-0046, PRP-0026)
     templates_dir: str = ".templates"
 

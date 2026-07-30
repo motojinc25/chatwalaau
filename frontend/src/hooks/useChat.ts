@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ChatMessage, ImageRef, McpAppEvent, UsageInfo } from '@/types/chat'
+import type { ChatMessage, ImageRef, McpAppEvent, PersistedWorkflowRun, UsageInfo } from '@/types/chat'
 
 /**
  * AG-UI protocol event types (CTR-0009).
@@ -46,6 +46,15 @@ export interface WorkflowNodeActivity {
   node?: string
   label?: string
   status?: 'running' | 'completed' | 'skipped' | 'failed' | 'awaiting_input'
+  /**
+   * Where the executor came from (v0.117.1). `action` = an id the author wrote,
+   * `derived` = a framework executor attributed to an authored action (an `If`'s
+   * condition evaluator), `unmapped` = real work whose id is absent from the document.
+   * Framework plumbing (`internal`) never reaches this channel at all.
+   */
+  origin?: 'action' | 'derived' | 'unmapped' | 'internal'
+  /** The raw executor id, present only when it differs from `node`. */
+  executor?: string
   iteration?: number | null
   data?: unknown
   details?: unknown
@@ -137,6 +146,12 @@ interface UseChatOptions {
    */
   onWorkflowEvent?: (event: WorkflowStreamEvent) => void
   /**
+   * Snapshot of the workflow run that just finished, saved with the assistant message so a
+   * reloaded chat can rebuild the indicator and the diagram (v0.117.1). Returns null when
+   * the turn was not a workflow run. Supplied by the canvas host, which owns the run model.
+   */
+  getWorkflowRunSnapshot?: () => PersistedWorkflowRun | null
+  /**
    * v0.77.1 (CTR-0009): transient/informational status during a run, e.g. a
    * `run_retry` event when the backend auto-resends after a temporary upstream
    * 5xx. Shown to the user as a brief notice; not persisted.
@@ -174,6 +189,7 @@ export function useChat(options?: UseChatOptions) {
   const runTargetLabelRef = useRef(options?.runTargetLabel ?? '')
   const onCustomEventRef = useRef(options?.onCustomEvent)
   const onWorkflowEventRef = useRef(options?.onWorkflowEvent)
+  const getWorkflowRunSnapshotRef = useRef(options?.getWorkflowRunSnapshot)
   const onNoticeRef = useRef(options?.onNotice)
   const onConnectionRecoveredRef = useRef(options?.onConnectionRecovered)
 
@@ -249,6 +265,10 @@ export function useChat(options?: UseChatOptions) {
   }, [options?.onWorkflowEvent])
 
   useEffect(() => {
+    getWorkflowRunSnapshotRef.current = options?.getWorkflowRunSnapshot
+  }, [options?.getWorkflowRunSnapshot])
+
+  useEffect(() => {
     onNoticeRef.current = options?.onNotice
   }, [options?.onNotice])
 
@@ -288,8 +308,15 @@ export function useChat(options?: UseChatOptions) {
         ...(options?.images && options.images.length > 0 ? { images: options.images } : {}),
       }
 
-      const assistantId = crypto.randomUUID()
-      const assistantMessage: ChatMessage = {
+      // A human-in-the-loop answer CONTINUES the run that paused (v0.117.1), so it continues
+      // the SAME assistant turn: its id is reused, its text is kept, and the actions that run
+      // after the answer append to it. Otherwise one workflow's output is split across a
+      // bubble per question -- the part before the question in one, the part after in
+      // another -- when it is a single run producing a single reply.
+      const resumeTarget = options?.workflowResume ? currentMessages.at(-1) : undefined
+      const continued = resumeTarget?.role === 'assistant' ? resumeTarget : undefined
+      const assistantId = continued?.id ?? crypto.randomUUID()
+      const assistantMessage: ChatMessage = continued ?? {
         id: assistantId,
         role: 'assistant',
         content: '',
@@ -305,7 +332,10 @@ export function useChat(options?: UseChatOptions) {
       // instead of leaving it destroyed.
       let committed = false
 
-      if (options?.skipUserMessage) {
+      if (continued) {
+        // The paused turn's message stays exactly where it is; the stream appends to it.
+        setMessages(currentMessages)
+      } else if (options?.skipUserMessage) {
         setMessages([...currentMessages, assistantMessage])
       } else {
         setMessages([...currentMessages, userMessage, assistantMessage])
@@ -434,7 +464,7 @@ export function useChat(options?: UseChatOptions) {
 
         const decoder = new TextDecoder()
         let buffer = ''
-        let assistantContent = ''
+        let assistantContent = continued?.content ?? ''
         const completedReasoning: { id: string; content: string }[] = []
         const completedToolCalls: { id: string; name: string; status: string; args?: string; result?: string }[] = []
         const completedActivityLog: { type: string; id: string }[] = []
@@ -445,6 +475,9 @@ export function useChat(options?: UseChatOptions) {
         // message. Track it so a SILENT run (no SendActivity / agent reply) still saves
         // the turn -- rendered as a compact "Workflow complete" indicator, not an empty
         // bubble -- so history + the session-list refresh (and title) still happen.
+        // Continue the paused turn's text rather than starting from empty, so the saved
+        // message holds the WHOLE run's output and not just the part after the last answer.
+        let pendingResumeSeparator = Boolean(continued?.content)
         let workflowCompleted = false
         let workflowSteps = 0
         // A workflow run that paused on a human-in-the-loop request (UDR-0106 D5). The
@@ -477,7 +510,11 @@ export function useChat(options?: UseChatOptions) {
 
               switch (eventType || event.type) {
                 case 'TEXT_MESSAGE_CONTENT': {
-                  const delta = event.delta ?? ''
+                  // The backend already separates one node's output from the next with a
+                  // blank line; do the same across the human-in-the-loop pause, which is a
+                  // node boundary the backend cannot see (its stream restarts).
+                  const delta = (pendingResumeSeparator ? '\n\n' : '') + (event.delta ?? '')
+                  pendingResumeSeparator = false
                   assistantContent += delta
                   setMessages((prev) =>
                     prev.map((msg) => (msg.id === assistantId ? { ...msg, content: msg.content + delta } : msg)),
@@ -779,26 +816,36 @@ export function useChat(options?: UseChatOptions) {
           // Built-in / Prompt agent or Workflow answered (v0.112.2). A workflow run emits
           // no usage event, so the object is created when only the label exists. A silent
           // workflow also stores its completion marker (steps) for reload rendering.
-          if (completedUsage || runTargetLabelRef.current || workflowCompleted) {
+          // v0.117.1: persist the whole run, not just a completion count, so a reloaded
+          // chat rebuilds the same step list and can re-open the diagram.
+          const workflowSnapshot = workflowEnded ? (getWorkflowRunSnapshotRef.current?.() ?? null) : null
+          if (completedUsage || runTargetLabelRef.current || workflowCompleted || workflowSnapshot) {
             assistantMsg.usage = {
               ...(completedUsage ?? {}),
               ...(runTargetLabelRef.current ? { run_target: runTargetLabelRef.current } : {}),
               ...(workflowCompleted ? { workflow_completed: { steps: workflowSteps } } : {}),
+              ...(workflowSnapshot ? { workflow_run: workflowSnapshot } : {}),
             }
           }
           const userMsg: Record<string, unknown> = { role: 'user', content: userContent, id: userMessage.id }
           if (dispatchImages && dispatchImages.length > 0) {
             userMsg.images = dispatchImages
           }
-          // A run PAUSED on human-in-the-loop (UDR-0106 D5) has not finished: persisting an
-          // empty assistant turn would reload as a blank bubble claiming nothing happened.
-          // Keep the user message so history is correct; the resume turn saves the answer.
-          const dropEmptyAssistant = workflowInterrupted && !workflowCompleted && !assistantContent
+          // A run PAUSED on human-in-the-loop (UDR-0106 D5) has NOT finished, so its assistant
+          // turn is not saved AT ALL -- not even when it has already produced text. Saving it
+          // wrote a partial message that the resume turn then saved AGAIN under the same id,
+          // so a reloaded chat showed the run split in two; and the save fired the
+          // stream-complete callback mid-run, whose session refresh reset the live progress
+          // indicator back to zero steps. The user message is kept so history is correct, and
+          // the turn that COMPLETES the run saves the whole reply and the whole run record.
+          // A run abandoned unanswered leaves no assistant turn, which is truthful: the paused
+          // workflow lives in server memory and cannot be resumed after a reload either.
+          const runStillPaused = workflowInterrupted && !workflowCompleted
           const saveMessages: Record<string, unknown>[] = options?.skipUserMessage
-            ? dropEmptyAssistant
+            ? runStillPaused
               ? []
               : [assistantMsg]
-            : dropEmptyAssistant
+            : runStillPaused
               ? [userMsg]
               : [userMsg, assistantMsg]
           if (saveMessages.length > 0) {
