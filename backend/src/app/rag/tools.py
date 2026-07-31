@@ -43,6 +43,15 @@ def init_rag_search(chroma_dir: str, collection_name: str, top_k: int) -> None:
     ChromaDB PersistentClient already constructed re-uses it instead of opening a
     new SQLite-backed client to the same directory. The cheap config values
     (collection / top_k) are still refreshed.
+
+    v0.117.2: only the ChromaDB client construction is skipped on re-entry. The
+    embedding model name and the embedding client are ALWAYS re-resolved from the
+    catalog. Previously the whole function returned early once the Chroma client
+    existed, so changing the ``embeddings`` offering through the operator-facing
+    catalog -- which hot-reloads in-process (CTR-0175, UDR-0090 / PRP-0115) --
+    left the QUERY embedder pinned to the model resolved at first build while the
+    rag-ingest job already wrote vectors with the NEW model. The dimension
+    mismatch made every search fail until the process was restarted.
     """
     from app import models_catalog
     from app.demo import is_demo_mode
@@ -50,9 +59,8 @@ def init_rag_search(chroma_dir: str, collection_name: str, top_k: int) -> None:
     global _chroma_client, _openai_client, _embedding_model, _default_collection, _default_top_k
     _default_collection = collection_name
     _default_top_k = top_k
-    if _chroma_client is not None:
-        return
-    _chroma_client = chromadb.PersistentClient(path=chroma_dir)
+    if _chroma_client is None:
+        _chroma_client = chromadb.PersistentClient(path=chroma_dir)
 
     # Model Offering Catalog (PRP-0114, UDR-0095 D1): the single ``embeddings``
     # offering is the SOLE source of the query embedding model (non-demo). The query
@@ -63,6 +71,11 @@ def init_rag_search(chroma_dir: str, collection_name: str, top_k: int) -> None:
     config = models_catalog.embedding_config()
     _embedding_model = config.deployment if config is not None else "demo-embedder"
 
+    # Rebuilt on every call so an offering edit (endpoint / api_version / key /
+    # deployment) takes effect on the next agent rebuild. Reset first so a
+    # catalog change that REMOVES the offering cannot leave the previous client
+    # live and silently embedding against the old deployment.
+    _openai_client = None
     if not is_demo_mode() and config is not None:
         if config.base_url:
             from openai import OpenAI

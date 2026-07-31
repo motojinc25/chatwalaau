@@ -222,6 +222,24 @@ _MSG_TRANSIENT = (
     "please resend your message. On a very long conversation it can "
     "also help to start a new chat."
 )
+_MSG_CONTEXT_LENGTH = (
+    "The request exceeded the model's context window. This turn carried more "
+    "input than the model accepts -- a long conversation, a large attached "
+    "document, or a big tool result (e.g. many rag_search chunks) are the usual "
+    "causes. Start a new chat, remove a large attachment, or lower RAG_TOP_K / "
+    "RAG_CHUNK_SIZE so the search result is smaller, then resend."
+)
+_MSG_CONTENT_FILTER = (
+    "The model provider's content filter rejected this turn. When it fires right "
+    "after a document search, the trigger is usually the retrieved document text "
+    "sent back to the model, not your question. Rephrase the question so it "
+    "matches different passages, narrow the search, or have the operator adjust "
+    "the content-filter policy for the deployment."
+)
+# Fallback for a cause we do not recognize. The exception TYPE is appended by
+# _classify_run_error (v0.117.2) so an operator can correlate the chat message
+# with the `AG-UI stream error` traceback in the server log; the message text
+# itself is never echoed (it can carry request content).
 _MSG_GENERIC = "An internal error occurred during agent execution."
 
 # Markers that identify an out-of-credits / quota-exhausted condition (as
@@ -262,6 +280,57 @@ def _is_billing_or_quota_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_context_length_error(exc: BaseException) -> bool:
+    """Detect a context-window overflow anywhere in the exception chain (v0.117.2).
+
+    A turn that calls ``rag_search`` (CTR-0077) feeds the retrieved chunks back
+    to the model on the FOLLOW-UP request, so a conversation that fit before the
+    tool call can exceed the window right after it -- which surfaced as the
+    unclassified generic error. OpenAI / Azure OpenAI report it as a 400 with
+    code ``context_length_exceeded`` (Responses API: ``string_above_max_length``
+    on the input), Anthropic as a 400 "prompt is too long". agent-framework wraps
+    them in ChatClientException, hence the chain walk.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if getattr(cur, "code", None) in {"context_length_exceeded", "string_above_max_length"}:
+            return True
+        text = str(cur).lower()
+        if (
+            "context_length_exceeded" in text
+            or "maximum context length" in text
+            or "prompt is too long" in text
+            or "reduce the length of the messages" in text
+        ):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _is_content_filter_error(exc: BaseException) -> bool:
+    """Detect an Azure OpenAI content-filter rejection in the exception chain (v0.117.2).
+
+    Azure raises a 400 with code ``content_filter`` /
+    ``ResponsibleAIPolicyViolation`` when the PROMPT trips the policy. On a
+    ``rag_search`` turn the prompt includes the retrieved document text, so a
+    corpus passage -- not the user's question -- can trip it; the operator needs
+    to be told that, rather than shown the generic message.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if getattr(cur, "code", None) in {"content_filter", "ResponsibleAIPolicyViolation"}:
+            return True
+        text = str(cur).lower()
+        if "content_filter" in text or "responsibleaipolicyviolation" in text or "content management policy" in text:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def _classify_run_error(exc: BaseException, *, continuation_token: bool) -> tuple[str, bool]:
     """Return (user-facing RUN_ERROR message, is_known) for a mid-stream error.
 
@@ -277,11 +346,19 @@ def _classify_run_error(exc: BaseException, *, continuation_token: bool) -> tupl
         return _MSG_PREV_RESPONSE, True
     if _is_billing_or_quota_error(exc):
         return _MSG_BILLING, True
+    if _is_context_length_error(exc):
+        return _MSG_CONTEXT_LENGTH, True
+    if _is_content_filter_error(exc):
+        return _MSG_CONTENT_FILTER, True
     if _is_rate_limit_error(exc):
         return _MSG_RATE_LIMIT, True
     if _is_transient_upstream_error(exc):
         return _MSG_TRANSIENT, True
-    return _MSG_GENERIC, False
+    # v0.117.2: name the exception TYPE so an opaque report ("the chat just says
+    # an internal error") can be matched to the logged traceback without asking
+    # the operator to reproduce. Type name only -- the message can echo request
+    # content, which must not reach the chat surface.
+    return f"{_MSG_GENERIC} ({type(exc).__name__})", False
 
 
 # --- Transient upstream auto-retry (CTR-0009, v0.77.1) ------------------------
