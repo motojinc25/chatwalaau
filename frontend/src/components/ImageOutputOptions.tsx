@@ -1,5 +1,5 @@
 import { Check, ImagePlus } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 /**
@@ -13,9 +13,18 @@ import { cn } from '@/lib/utils'
  * fields are sent, so an untouched control changes nothing.
  *
  * Per-session selection persists in localStorage (the CTR-0071 / CTR-0118 pattern).
- * Compression is offered only for jpeg / webp. When image generation is not
+ * Compression is offered only for jpeg. When image generation is not
  * configured or in DEMO_MODE the selection is simply ignored on the backend
  * (no-op, UDR-0063 D6).
+ *
+ * v0.117.6: the values are GATED by the configured image model. These options are
+ * not uniformly supported, and the control used to offer every value
+ * unconditionally, so a user could pick one that failed the turn. `transparent` and
+ * `webp` are withdrawn outright (gpt-image-2 rejects both); for anything else, the
+ * backend reports what the deployment has been observed to reject
+ * (GET /api/model `image_output`, learned from the provider's own 400s, never
+ * guessed); an unsupported value is disabled here with the reason shown, and a value
+ * already selected when it turns out to be unsupported is cleared.
  */
 
 export type ImageOptions = Record<string, string>
@@ -27,10 +36,22 @@ interface ImageOutputOptionsProps {
 
 const STORAGE_PREFIX = 'chatwalaau-image-'
 
-const SIZE_CHOICES = ['auto', '1024x1024', '1024x1536', '1536x1024']
+// v0.117.6: 2K / 4K sizes were missing entirely, so they could not be chosen.
+// Mirrors app/image_gen/capabilities.py OPTION_VALUES -- the backend validates
+// against the same surface, so the two must not drift.
+const SIZE_CHOICES = [
+  'auto',
+  '1024x1024',
+  '1536x1024',
+  '1024x1536',
+  '2048x2048',
+  '2048x1152',
+  '3840x2160',
+  '2160x3840',
+]
 const QUALITY_CHOICES = ['auto', 'low', 'medium', 'high']
-const FORMAT_CHOICES = ['png', 'jpeg', 'webp']
-const BACKGROUND_CHOICES = ['auto', 'transparent', 'opaque']
+const FORMAT_CHOICES = ['png', 'jpeg']
+const BACKGROUND_CHOICES = ['auto', 'opaque']
 const FIELDS = ['size', 'quality', 'format', 'compression', 'background'] as const
 
 function storageKey(threadId: string): string {
@@ -48,14 +69,40 @@ function load(threadId: string): ImageOptions {
   }
 }
 
+/** Image output capabilities advertised by GET /api/model (CTR-0069, v0.117.6). */
+interface ImageOutputCapability {
+  deployment: string
+  values: Record<string, string[]>
+  /** option key -> values this deployment has been observed to reject. */
+  unsupported: Record<string, string[]>
+}
+
 export function ImageOutputOptions({ threadId, onChange }: ImageOutputOptionsProps) {
   const [opts, setOpts] = useState<ImageOptions>({})
   const [open, setOpen] = useState(false)
+  const [capability, setCapability] = useState<ImageOutputCapability | null>(null)
 
   // Restore the per-session selection on mount / thread change.
   useEffect(() => {
     setOpts(load(threadId))
   }, [threadId])
+
+  // Which values the configured image model has been observed to reject. Re-read
+  // when the panel is opened so a restriction learned during this session (the
+  // backend records the first rejection) is reflected without a page reload.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    fetch('/api/model')
+      .then((res) => res.json())
+      .then((data: { image_output?: ImageOutputCapability | null }) => {
+        if (!cancelled) setCapability(data?.image_output ?? null)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [open])
 
   // Report only non-empty (chosen) fields to ChatPanel.
   useEffect(() => {
@@ -73,8 +120,8 @@ export function ImageOutputOptions({ threadId, onChange }: ImageOutputOptionsPro
         const next = { ...prev }
         if (value) next[key] = value
         else delete next[key]
-        // Compression only applies to jpeg / webp.
-        if (key === 'format' && value !== 'jpeg' && value !== 'webp') delete next.compression
+        // Compression only applies to the lossy format (jpeg).
+        if (key === 'format' && value !== 'jpeg') delete next.compression
         localStorage.setItem(storageKey(threadId), JSON.stringify(next))
         return next
       })
@@ -82,10 +129,47 @@ export function ImageOutputOptions({ threadId, onChange }: ImageOutputOptionsPro
     [threadId],
   )
 
+  const unsupported = useMemo(() => capability?.unsupported ?? {}, [capability])
+  const isUnsupported = useCallback(
+    (field: string, value: string) => (unsupported[field] ?? []).includes(value),
+    [unsupported],
+  )
+
+  // A value the model turns out to reject must not stay selected: it would fail the
+  // next turn exactly as before. Clearing it falls back to that model's own default.
+  useEffect(() => {
+    for (const field of FIELDS) {
+      const value = opts[field]
+      if (value && (unsupported[field] ?? []).includes(value)) {
+        setField(field, '')
+        return
+      }
+    }
+  }, [unsupported, opts, setField])
+
   const activeCount = FIELDS.filter((k) => opts[k]).length
-  const compressionEligible = opts.format === 'jpeg' || opts.format === 'webp'
+  const compressionEligible = opts.format === 'jpeg'
+  const anyUnsupported = Object.values(unsupported).some((values) => values.length > 0)
+  // v0.117.6: the compression box accepted anything the browser would let through
+  // (a non-integer, out of range), which reached the API as an opaque 400. The
+  // backend validates the same rule; this just makes it visible before sending.
+  const compressionInvalid = (() => {
+    const raw = opts.compression
+    if (!raw) return false
+    const value = Number(raw)
+    return !Number.isInteger(value) || value < 0 || value > 100
+  })()
 
   const selectClass = 'h-6 rounded-md border bg-background px-1 text-[11px] outline-none focus:ring-1 focus:ring-ring'
+
+  /** Options for one field, disabling what the deployed model cannot produce. */
+  const renderChoices = (field: string, choices: string[]) =>
+    choices.map((c) => (
+      <option key={c} value={c} disabled={isUnsupported(field, c)}>
+        {c}
+        {isUnsupported(field, c) ? ' — not supported' : ''}
+      </option>
+    ))
 
   return (
     <div className="relative">
@@ -130,11 +214,7 @@ export function ImageOutputOptions({ threadId, onChange }: ImageOutputOptionsPro
                   onChange={(e) => setField('size', e.target.value)}
                   className={selectClass}>
                   <option value="">Default</option>
-                  {SIZE_CHOICES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
+                  {renderChoices('size', SIZE_CHOICES)}
                 </select>
               </label>
               <label className="flex items-center justify-between gap-2">
@@ -144,11 +224,7 @@ export function ImageOutputOptions({ threadId, onChange }: ImageOutputOptionsPro
                   onChange={(e) => setField('quality', e.target.value)}
                   className={selectClass}>
                   <option value="">Default</option>
-                  {QUALITY_CHOICES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
+                  {renderChoices('quality', QUALITY_CHOICES)}
                 </select>
               </label>
               <label className="flex items-center justify-between gap-2">
@@ -158,11 +234,7 @@ export function ImageOutputOptions({ threadId, onChange }: ImageOutputOptionsPro
                   onChange={(e) => setField('format', e.target.value)}
                   className={selectClass}>
                   <option value="">Default</option>
-                  {FORMAT_CHOICES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
+                  {renderChoices('format', FORMAT_CHOICES)}
                 </select>
               </label>
               {compressionEligible && (
@@ -172,10 +244,15 @@ export function ImageOutputOptions({ threadId, onChange }: ImageOutputOptionsPro
                     type="number"
                     min={0}
                     max={100}
+                    step={1}
                     value={opts.compression ?? ''}
                     placeholder="0-100"
                     onChange={(e) => setField('compression', e.target.value)}
-                    className="h-6 w-[72px] rounded-md border bg-background px-1 text-[11px] outline-none focus:ring-1 focus:ring-ring"
+                    aria-invalid={compressionInvalid || undefined}
+                    className={cn(
+                      'h-6 w-[72px] rounded-md border bg-background px-1 text-[11px] outline-none focus:ring-1 focus:ring-ring',
+                      compressionInvalid && 'border-destructive focus:ring-destructive',
+                    )}
                   />
                 </label>
               )}
@@ -186,17 +263,24 @@ export function ImageOutputOptions({ threadId, onChange }: ImageOutputOptionsPro
                   onChange={(e) => setField('background', e.target.value)}
                   className={selectClass}>
                   <option value="">Default</option>
-                  {BACKGROUND_CHOICES.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
+                  {renderChoices('background', BACKGROUND_CHOICES)}
                 </select>
               </label>
             </div>
             <p className="mt-1.5 text-[10px] text-muted-foreground">
               Defaults apply when image generation runs. The model may override a field when needed.
             </p>
+            {compressionInvalid && (
+              <p className="mt-1 text-[10px] leading-snug text-destructive">
+                Compression must be a whole number between 0 and 100.
+              </p>
+            )}
+            {anyUnsupported && (
+              <p className="mt-1 text-[10px] leading-snug text-amber-700 dark:text-amber-500">
+                Values marked "not supported" were rejected by the configured image model
+                {capability?.deployment ? ` (${capability.deployment})` : ''} and are disabled.
+              </p>
+            )}
           </div>
         </>
       )}

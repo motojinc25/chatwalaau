@@ -70,6 +70,7 @@ from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_pat
 from app.agent.user_memory import session_user_profile_snapshot
 from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key
+from app.core import provider_errors
 from app.core.config import settings
 from app.demo import is_demo_mode
 from app.image_gen.tools import current_image_options as _image_gen_options
@@ -240,6 +241,15 @@ _MSG_CONTENT_FILTER = (
 # _classify_run_error (v0.117.2) so an operator can correlate the chat message
 # with the `AG-UI stream error` traceback in the server log; the message text
 # itself is never echoed (it can carry request content).
+_MSG_INVALID_SCHEMA_PREFIX = (
+    "The JSON Schema set for Structured Output was rejected by the model provider"
+)
+_MSG_INVALID_SCHEMA_HELP = (
+    "Fix it in the JSON Schema editor next to the composer, or turn Structured Output "
+    "off. An explicit schema is sent in STRICT mode, which requires: every array "
+    "declares `items`; every object declares `properties` and `additionalProperties: "
+    "false`; and every key in `properties` is listed in `required`."
+)
 _MSG_GENERIC = "An internal error occurred during agent execution."
 
 # Markers that identify an out-of-credits / quota-exhausted condition (as
@@ -331,6 +341,50 @@ def _is_content_filter_error(exc: BaseException) -> bool:
     return False
 
 
+def _provider_error_message(exc: BaseException) -> str | None:
+    """Pull the provider's own ``error.message`` out of the exception chain (v0.117.5).
+
+    For a schema rejection the provider's message holds the single most useful fact
+    there is -- the exact path at fault, e.g. "In context=('properties', 'steps'),
+    array schema missing items." Echoing it is safe for THIS class of error only: it
+    describes the schema the operator authored, never the conversation content.
+
+    v0.117.6: delegated to ``app.core.provider_errors``. This used to read
+    ``exc.body["error"]["message"]``, but the OpenAI SDK unwraps the ``error`` key
+    before constructing the exception, so the lookup always missed and the actionable
+    message lost the provider's diagnosis.
+    """
+    return provider_errors.error_message(exc)
+
+
+def _is_invalid_schema_error(exc: BaseException) -> bool:
+    """Detect a provider rejection of the structured-output JSON Schema (v0.117.5).
+
+    An explicit schema (CTR-0118) is forwarded verbatim and sent with
+    ``strict: true``, whose requirements are stricter than plain JSON Schema -- an
+    array without ``items``, or an object whose ``required`` omits a declared
+    property, is rejected with a 400 ``invalid_json_schema`` on ``text.format.schema``
+    (OpenAI / Azure OpenAI). This is a CONFIGURATION error the operator can fix, not
+    a defect, and it previously collapsed to the generic "internal error".
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        # The SDK exposes `.code` directly; provider_errors additionally covers the
+        # body in either the wrapped or the unwrapped shape (v0.117.6).
+        if getattr(cur, "code", None) == "invalid_json_schema":
+            return True
+        detail = provider_errors.error_detail(cur)
+        if detail is not None and detail.get("code") == "invalid_json_schema":
+            return True
+        text = str(cur).lower()
+        if "invalid_json_schema" in text or "invalid schema for response_format" in text:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def _classify_run_error(exc: BaseException, *, continuation_token: bool) -> tuple[str, bool]:
     """Return (user-facing RUN_ERROR message, is_known) for a mid-stream error.
 
@@ -346,6 +400,12 @@ def _classify_run_error(exc: BaseException, *, continuation_token: bool) -> tupl
         return _MSG_PREV_RESPONSE, True
     if _is_billing_or_quota_error(exc):
         return _MSG_BILLING, True
+    # Before context-length: a schema rejection is also a 400 and must not be
+    # mistaken for one (v0.117.5).
+    if _is_invalid_schema_error(exc):
+        provider_reason = _provider_error_message(exc)
+        detail = f": {provider_reason}" if provider_reason else "."
+        return f"{_MSG_INVALID_SCHEMA_PREFIX}{detail} {_MSG_INVALID_SCHEMA_HELP}", True
     if _is_context_length_error(exc):
         return _MSG_CONTEXT_LENGTH, True
     if _is_content_filter_error(exc):

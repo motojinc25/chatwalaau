@@ -53,6 +53,49 @@ function formatJson(raw: string): string {
   }
 }
 
+/** Tools whose effective options are worth showing on the collapsed line. */
+const PARAMETER_TOOLS = new Set(['generate_image', 'edit_image'])
+
+/**
+ * Compact "size=1024x1024 · quality=high · format=png" summary for an image call
+ * (CTR-0049 / CTR-0120, v0.117.6).
+ *
+ * While the call is running the request arguments are all we have; once it returns,
+ * the result carries `parameters` -- the options that were actually USED, which can
+ * differ from the request when a capability retry dropped one. Showing them inline
+ * is what makes it possible to tell a display problem from a resolution problem:
+ * previously the indicator said only "Generated image" and the selected options were
+ * nowhere to be seen.
+ */
+function imageParameterSummary(toolCall: ToolCall): string | null {
+  if (!PARAMETER_TOOLS.has(toolCall.name)) return null
+  let source: Record<string, unknown> | null = null
+  if (toolCall.result) {
+    try {
+      const parsed = JSON.parse(toolCall.result)
+      if (parsed && typeof parsed.parameters === 'object' && parsed.parameters) source = parsed.parameters
+    } catch {
+      // streaming / non-JSON result -> fall back to the arguments below
+    }
+  }
+  if (!source && toolCall.args) {
+    try {
+      const parsed = JSON.parse(toolCall.args)
+      if (parsed && typeof parsed === 'object') {
+        const { prompt: _prompt, image_filename: _image, ...rest } = parsed as Record<string, unknown>
+        source = rest
+      }
+    } catch {
+      return null
+    }
+  }
+  if (!source) return null
+  const parts = Object.entries(source)
+    .filter(([, v]) => v !== null && v !== undefined && v !== '')
+    .map(([k, v]) => `${k}=${v}`)
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
 export function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
   const [expanded, setExpanded] = useState(false)
   const isRunning = toolCall.status === 'running'
@@ -64,6 +107,7 @@ export function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
   const Icon = display.icon
   const label = isRunning ? display.label : display.doneLabel
   const hasDetails = toolCall.args || toolCall.result
+  const parameters = imageParameterSummary(toolCall)
 
   return (
     <div className="mb-1">
@@ -71,9 +115,18 @@ export function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
         type="button"
         className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
         onClick={() => hasDetails && setExpanded(!expanded)}>
-        <Icon className={`h-3.5 w-3.5 ${isRunning ? 'animate-pulse' : ''}`} />
+        <Icon className={`h-3.5 w-3.5 shrink-0 ${isRunning ? 'animate-pulse' : ''}`} />
         <span>{label}</span>
-        {hasDetails && <ChevronRight className={`h-3 w-3 transition-transform ${expanded ? 'rotate-90' : ''}`} />}
+        {/* v0.117.6: the effective image options, so what was asked for and what was
+            used are both visible without expanding the call. */}
+        {parameters && (
+          <span className="truncate font-mono text-[0.7rem] text-muted-foreground/70" title={parameters}>
+            {parameters}
+          </span>
+        )}
+        {hasDetails && (
+          <ChevronRight className={`h-3 w-3 shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+        )}
       </button>
       {expanded && hasDetails && (
         <div className="mt-1 ml-5 max-h-60 overflow-y-auto rounded-md bg-muted/50 p-2.5 text-xs leading-relaxed text-muted-foreground">

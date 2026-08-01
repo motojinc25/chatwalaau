@@ -697,7 +697,21 @@ export function useChat(options?: UseChatOptions) {
                   onWorkflowEventRef.current?.({ kind: 'run_error', message: event.message ?? 'An error occurred' })
                   const errorMsg = event.message ?? 'An error occurred'
                   setMessages((prev) =>
-                    prev.map((msg) => (msg.id === assistantId ? { ...msg, content: `Error: ${errorMsg}` } : msg)),
+                    prev.map((msg) =>
+                      msg.id === assistantId
+                        ? {
+                            ...msg,
+                            content: `Error: ${errorMsg}`,
+                            // v0.117.5: drop the structured flag. It is set from the
+                            // structured_output event, which fires BEFORE the model call,
+                            // so a turn that then failed still rendered as a structured
+                            // answer -- and CTR-0012 wraps a structured message in a ```json
+                            // fence, so the error text was displayed as if it were the JSON
+                            // result. A failed turn is not a structured answer.
+                            structured: false,
+                          }
+                        : msg,
+                    ),
                   )
                   break
                 }

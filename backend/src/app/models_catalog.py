@@ -146,21 +146,24 @@ DEFAULT_CONTEXT_WINDOW = 128000
 # ``IMAGE_API_VERSION`` Settings field and the hardcoded RAG embedder literal,
 # mirroring the ``DEFAULT_CONTEXT_WINDOW`` pattern above so a minimal offering
 # keeps the same verified-working versions it had on the retired env lane.
-DEFAULT_IMAGE_API_VERSION = "2025-04-01-preview"
+# v0.117.6: "preview" (the rolling alias) replaces the pinned 2025-04-01-preview.
+DEFAULT_IMAGE_API_VERSION = "preview"
 DEFAULT_EMBEDDING_API_VERSION = "2024-10-21"
 
 # Allowed values for the image offering's optional ``image_defaults`` block
-# (PRP-0114, UDR-0095 D3). These mirror the enums of the removed IMAGE_* Settings
-# fields; ``compression`` is a 0-100 integer (jpeg/webp only) and is validated
-# separately. Values are the operator DEFAULTS -- the per-session
+# (PRP-0114, UDR-0095 D3). Values are the operator DEFAULTS -- the per-session
 # ``state.image_options`` and an explicit LLM tool argument still override them.
-_IMAGE_DEFAULT_ENUMS: dict[str, frozenset[str]] = {
-    "size": frozenset({"auto", "1024x1024", "1024x1536", "1536x1024"}),
-    "quality": frozenset({"auto", "low", "medium", "high"}),
-    "format": frozenset({"png", "jpeg", "webp"}),
-    "background": frozenset({"auto", "transparent", "opaque"}),
-}
-_IMAGE_DEFAULT_KEYS = frozenset({*_IMAGE_DEFAULT_ENUMS, "compression"})
+#
+# v0.117.6: DERIVED from app.image_gen.capabilities.OPTION_VALUES instead of being a
+# second hand-maintained copy. The two lists had already drifted -- the catalog still
+# offered webp / transparent and lacked the 2K / 4K sizes -- so the Model Settings
+# screen accepted values the tools would reject. Imported lazily: models_catalog is a
+# low-level module and must not gain an import-time dependency on a feature package.
+def _image_default_enums() -> dict[str, frozenset[str]]:
+    from app.image_gen.capabilities import OPTION_VALUES
+
+    return {option: frozenset(values) for option, values in OPTION_VALUES.items()}
+_IMAGE_DEFAULT_KEYS = frozenset({"size", "quality", "format", "background", "compression"})
 
 # Keys that would embed a raw secret in the catalog file; rejected at load so
 # an operator is steered to api_key_env / auth_profiles (UDR-0087 D4).
@@ -369,7 +372,7 @@ def _parse_image_defaults(raw: Any, offering_id: str, operations: list[str]) -> 
                 raise CatalogError(f"offering '{offering_id}': image_defaults.compression must be an integer 0-100")
             out[key] = value
             continue
-        allowed = _IMAGE_DEFAULT_ENUMS[key]
+        allowed = _image_default_enums()[key]
         if not isinstance(value, str) or value not in allowed:
             raise CatalogError(
                 f"offering '{offering_id}': image_defaults.{key} must be one of {sorted(allowed)}, got {value!r}"

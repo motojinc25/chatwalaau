@@ -605,6 +605,14 @@ async def get_model_info():
         # PRP-0082): model -> {supported, native, fallback}. The UI enables /
         # annotates the structured-output control per model (UDR-0058 D6).
         "structured_output": providers.structured_output_map(agent_registry.available_models),
+        # Image output option capabilities (CTR-0069 / CTR-0120, v0.117.6):
+        # {deployment, values, unsupported}. The output options are not uniformly
+        # supported across image models, and the control used to offer every value
+        # unconditionally -- so a user could pick one the deployed model rejects and
+        # the turn failed with a raw provider error. `unsupported` is LEARNED from the
+        # provider's own rejections (never guessed), so the SPA disables a value only
+        # after this deployment has actually refused it.
+        "image_output": _image_output_capabilities(),
         # Active declarative agent (CTR-0142 / CTR-0144, PRP-0094, UDR-0072): its
         # mapped option defaults + structured-output default, so the SPA reflects the
         # active agent's effort / verbosity / structured output and refreshes them when
@@ -612,6 +620,28 @@ async def get_model_info():
         # endpoint applies these as defaults); this is for the UI to display.
         "active_agent": _active_agent_info(),
     }
+
+
+def _image_output_capabilities() -> dict | None:
+    """Image output option capabilities for the SPA control (CTR-0120, v0.117.6).
+
+    None when no image offering is configured -- the control has nothing to gate and
+    the tools are not registered anyway (CTR-0050). Never raises: a capability lookup
+    must not be able to break the model endpoint.
+    """
+    try:
+        from app import models_catalog
+        from app.image_gen import capabilities
+
+        config = models_catalog.image_config()
+        if config is None:
+            return None
+        return capabilities.capability_map(config.deployment)
+    except Exception:  # pragma: no cover - defensive
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning("Could not resolve image output capabilities", exc_info=True)
+        return None
 
 
 def _active_agent_info() -> dict:

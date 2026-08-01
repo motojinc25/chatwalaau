@@ -132,13 +132,26 @@ const FAMILIES: Family[] = ['openai-reasoning', 'anthropic-adaptive', 'bare']
 const HOSTINGS: Hosting[] = ['direct', 'foundry']
 const ALL_OPERATIONS: Operation[] = ['chat', 'embeddings', 'image']
 
-// Image output-default enums (PRP-0114); mirror models_catalog._IMAGE_DEFAULT_ENUMS.
-const IMAGE_SIZES = ['auto', '1024x1024', '1024x1536', '1536x1024']
+// Image output-default enums. v0.117.6: kept in step with the backend surface
+// (app/image_gen/capabilities.py OPTION_VALUES), which the catalog loader now derives
+// its validation from. They had drifted -- this screen still offered webp / transparent
+// and lacked the 2K / 4K sizes, so it accepted defaults the image tools reject.
+// An invariant test asserts all three lists stay identical.
+const IMAGE_SIZES = [
+  'auto',
+  '1024x1024',
+  '1536x1024',
+  '1024x1536',
+  '2048x2048',
+  '2048x1152',
+  '3840x2160',
+  '2160x3840',
+]
 const IMAGE_QUALITIES = ['auto', 'low', 'medium', 'high']
-const IMAGE_FORMATS = ['png', 'jpeg', 'webp']
-const IMAGE_BACKGROUNDS = ['auto', 'transparent', 'opaque']
+const IMAGE_FORMATS = ['png', 'jpeg']
+const IMAGE_BACKGROUNDS = ['auto', 'opaque']
 const IMAGE_DEFAULTS_HELP =
-  'Operator defaults for image generation output. Each is overridable per session (the Image button in the chat input) and per call (the model). Leave "API default" to send nothing. Compression applies to jpeg/webp only.'
+  'Operator defaults for image generation output. Each is overridable per session (the Image button in the chat input) and per call (the model). Leave "API default" to send nothing. Compression applies to jpeg only.'
 
 /** Keep only the set image_defaults fields; returns undefined when empty. */
 function cleanImageDefaults(d: ImageDefaults | undefined): ImageDefaults | undefined {
