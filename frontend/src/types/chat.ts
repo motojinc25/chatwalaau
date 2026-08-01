@@ -223,3 +223,16 @@ export interface ImportResult {
   error?: string
   warnings?: string[]
 }
+
+/**
+ * Result of a session-list action that can fail server-side (CTR-0015 / CTR-0016 v6,
+ * v0.117.4). Archiving writes to a directory derived from SESSIONS_DIR, so it can
+ * fail for reasons only the server knows (read-only or unmounted volume). `error`
+ * carries the server's human-readable reason so the sidebar can show it -- the
+ * failure used to be swallowed, leaving a bare 500 in the browser console as the
+ * only sign that the click did nothing.
+ */
+export interface SessionActionResult {
+  ok: boolean
+  error?: string
+}

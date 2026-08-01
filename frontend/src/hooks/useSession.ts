@@ -9,6 +9,7 @@ import {
   type ImageRef,
   type ImportResult,
   type ReasoningBlock,
+  type SessionActionResult,
   type SessionFolder,
   type SessionSummary,
   type ToolCall,
@@ -557,18 +558,32 @@ export function useSession() {
     }
   }, [])
 
+  // Archive (CTR-0015 / CTR-0016 v6, v0.117.4). Surfaces the server's reason
+  // instead of swallowing it: the archive directory follows SESSIONS_DIR, so a
+  // deployment whose session store is read-only or unmounted fails here for a
+  // reason the operator can fix -- but the UI used to do nothing at all, leaving
+  // an unexplained 500 in the browser console as the only symptom.
   const archiveSession = useCallback(
-    async (targetThreadId: string) => {
+    async (targetThreadId: string): Promise<SessionActionResult> => {
       try {
         const res = await fetch(`/api/sessions/${targetThreadId}/archive`, { method: 'POST' })
-        if (res.ok) {
-          setSessions((prev) => prev.filter((s) => s.thread_id !== targetThreadId))
-          if (targetThreadId === threadId) {
-            createSession()
+        if (!res.ok) {
+          let error = `Archive failed (HTTP ${res.status}).`
+          try {
+            const body = (await res.json()) as { detail?: unknown }
+            if (typeof body?.detail === 'string' && body.detail) error = body.detail
+          } catch {
+            // non-JSON error body -> keep the generic message
           }
+          return { ok: false, error }
         }
+        setSessions((prev) => prev.filter((s) => s.thread_id !== targetThreadId))
+        if (targetThreadId === threadId) {
+          createSession()
+        }
+        return { ok: true }
       } catch {
-        // ignore
+        return { ok: false, error: 'Archive failed (network error).' }
       }
     },
     [threadId, createSession],

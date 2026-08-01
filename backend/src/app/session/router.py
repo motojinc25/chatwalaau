@@ -76,7 +76,27 @@ def _count_images(messages: list[dict[str, Any]]) -> int:
 
 
 def _archived_dir() -> Path:
-    return Path(".archived")
+    """Return the archive directory: a SIBLING of the configured session directory.
+
+    v0.117.4: this was a hardcoded, CWD-relative ``Path(".archived")`` while the
+    sessions themselves live under ``settings.sessions_dir`` (CTR-0006
+    SESSIONS_DIR). With the DEFAULT ``SESSIONS_DIR=".sessions"`` the two resolve
+    identically -- ``Path(".sessions").parent / ".archived"`` IS ``.archived`` --
+    which is why archiving worked on a developer box and failed only on a
+    deployment that sets SESSIONS_DIR. There it broke twice over:
+
+    - the archive landed outside the session store entirely (relative to the
+      process CWD), so archived chats were separated from the data they belong to
+      and were not carried by a volume backup; and
+    - when the session store is a MOUNTED volume, the destination is on a
+      different filesystem than the source, so the ``os.rename`` that used to
+      perform the move failed with ``EXDEV`` / ``[WinError 17]`` -> HTTP 500.
+
+    Deriving it from ``sessions_dir()`` keeps the default layout byte-identical
+    (so an existing ``.archived/`` is still found) while making the archive
+    follow SESSIONS_DIR onto the same filesystem wherever it is configured.
+    """
+    return sessions_dir().parent / ".archived"
 
 
 # The metadata projection moved to app.session.index_store (CTR-0014 v2), which
@@ -799,29 +819,72 @@ async def rename_session(thread_id: str, body: RenameRequest) -> dict[str, Any]:
 
 @router.post("/{thread_id}/archive", dependencies=[Depends(verify_api_key)])
 async def archive_session(thread_id: str) -> dict[str, str]:
-    """Archive a session by moving it from .sessions/ to .archived/."""
+    """Archive a session by moving it out of the session directory into ``.archived/``.
+
+    v0.117.4: the two ways this failed on a configured deployment are fixed, and
+    the remaining failures report a reason the operator can act on instead of the
+    bare "Failed to archive session" that reached the browser as an opaque 500.
+    """
     path = session_path(thread_id)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Session not found")
 
+    archived_path = _archived_dir()
     try:
-        archived_path = _archived_dir()
         archived_path.mkdir(parents=True, exist_ok=True)
-        dest = archived_path / f"{thread_id}.json"
-        path.rename(dest)
+    except OSError as e:
+        # Read-only root, a non-writable mount, or a missing parent. Name the
+        # resolved path AND the setting that determines it -- the directory is
+        # derived from SESSIONS_DIR, which is not obvious from the UI.
+        logger.exception("Cannot create the archive directory %s", archived_path)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Cannot create the archive directory '{archived_path}' ({type(e).__name__}). "
+                "It is created next to the session directory, so it follows the SESSIONS_DIR "
+                "setting. Make sure that location is writable by the server process (a "
+                "read-only or unmounted volume is the usual cause), then try again."
+            ),
+        ) from e
 
-        # Move uploaded files to .archived_uploads/ if they exist
+    dest = archived_path / f"{thread_id}.json"
+    try:
+        # shutil.move, NOT Path.rename: rename cannot cross filesystems, and the
+        # session directory is commonly a mounted volume. shutil.move falls back
+        # to copy + delete when source and destination are on different devices.
+        shutil.move(str(path), str(dest))
+    except OSError as e:
+        logger.exception("Failed to archive session %s (%s -> %s)", thread_id, path, dest)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Could not move the chat into the archive directory '{archived_path}' "
+                f"({type(e).__name__}). The session file itself was left untouched. Check that "
+                "the archive location is writable and has free space, then try again."
+            ),
+        ) from e
+
+    # Uploads are best-effort: the chat is ALREADY archived at this point, so a
+    # failure here must not fail the request -- doing so would report an error for
+    # an action that in fact happened and leave the sidebar row in place.
+    try:
         upload_dir = Path(settings.upload_dir) / thread_id
         if upload_dir.is_dir():
             archived_uploads = Path(settings.upload_dir).parent / ".archived_uploads" / thread_id
             archived_uploads.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(upload_dir), str(archived_uploads))
             logger.info("Archived upload directory: %s -> %s", upload_dir, archived_uploads)
+    except OSError:
+        logger.warning(
+            "Archived session %s but could not move its uploads out of %s; "
+            "the attachments were left in place.",
+            thread_id,
+            settings.upload_dir,
+            exc_info=True,
+        )
 
-        logger.info("Archived session: %s", thread_id)
-        return {"status": "archived", "thread_id": thread_id}
-    except OSError as e:
-        raise HTTPException(status_code=500, detail="Failed to archive session") from e
+    logger.info("Archived session %s -> %s", thread_id, dest)
+    return {"status": "archived", "thread_id": thread_id}
 
 
 class ContinuationTokenRequest(BaseModel):

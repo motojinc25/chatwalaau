@@ -101,6 +101,7 @@ import {
   FOLDER_COLORS,
   type FolderColor,
   type ImportResult,
+  type SessionActionResult,
   type SessionFolder,
   type SessionSummary,
 } from '@/types/chat'
@@ -124,7 +125,7 @@ interface SessionSidebarProps {
   onReorderFolders: (orderedIds: string[]) => Promise<boolean>
   onMoveToFolder: (threadId: string, folderId: string | null) => Promise<boolean>
   onRename: (threadId: string, title: string) => void
-  onArchive: (threadId: string) => void
+  onArchive: (threadId: string) => Promise<SessionActionResult>
   onPin: (threadId: string, pinned: boolean) => void
   onCreate: () => void
   onClose: () => void
@@ -303,7 +304,7 @@ interface SessionRowProps {
   rename?: RenameEditor
   onSwitch: (threadId: string) => void
   onPin: (threadId: string, pinned: boolean) => void
-  onArchive: (threadId: string) => void
+  onArchive: (threadId: string) => Promise<SessionActionResult>
   onExport: (threadId: string) => void
   onMoveToFolder: (threadId: string, folderId: string | null) => Promise<boolean>
   onStartRename: (session: SessionSummary) => void
@@ -815,10 +816,15 @@ export function SessionSidebar({
   const folderNameRef = useRef<HTMLInputElement>(null)
   // Session Import file picker (PRP-0084, CTR-0016 v4).
   const importInputRef = useRef<HTMLInputElement>(null)
-  // Import outcome notice (CTR-0016 v5): a hard failure or a partial-import
-  // warning is shown in a dialog instead of being silently swallowed.
-  const [importNotice, setImportNotice] = useState<{
+  // Action outcome notice (CTR-0016 v5; generalized in v0.117.4): a hard failure
+  // or a partial-import warning is shown in a dialog instead of being silently
+  // swallowed. `title` / `description` default to the import wording, so any other
+  // list action that can fail server-side (Archive, CTR-0015) reuses this dialog
+  // rather than adding a second one.
+  const [actionNotice, setActionNotice] = useState<{
     kind: 'error' | 'warning'
+    title?: string
+    description?: string
     messages: string[]
   } | null>(null)
 
@@ -830,12 +836,32 @@ export function SessionSidebar({
       if (!file) return
       const result = await onImport(file)
       if (!result.ok) {
-        setImportNotice({ kind: 'error', messages: [result.error ?? 'Import failed.'] })
+        setActionNotice({ kind: 'error', messages: [result.error ?? 'Import failed.'] })
       } else if (result.warnings && result.warnings.length > 0) {
-        setImportNotice({ kind: 'warning', messages: result.warnings })
+        setActionNotice({ kind: 'warning', messages: result.warnings })
       }
     },
     [onImport],
+  )
+
+  // Archive (CTR-0015 / CTR-0016 v6, v0.117.4). The archive directory follows
+  // SESSIONS_DIR, so this can fail for a reason only the server knows (a
+  // read-only or unmounted session volume). Show that reason instead of letting
+  // the click do nothing but log a 500 in the browser console.
+  const handleArchive = useCallback(
+    async (threadId: string) => {
+      const result = await onArchive(threadId)
+      if (!result.ok) {
+        setActionNotice({
+          kind: 'error',
+          title: 'Archive failed',
+          description: 'The chat was not archived and is still in your list:',
+          messages: [result.error ?? 'Archive failed.'],
+        })
+      }
+      return result
+    },
+    [onArchive],
   )
 
   const sensors = useSensors(
@@ -1098,7 +1124,7 @@ export function SessionSidebar({
         rename={renamingId === session.thread_id ? renameEditor : undefined}
         onSwitch={onSwitch}
         onPin={onPin}
-        onArchive={onArchive}
+        onArchive={handleArchive}
         onExport={onExport}
         onMoveToFolder={onMoveToFolder}
         onStartRename={startRename}
@@ -1113,7 +1139,7 @@ export function SessionSidebar({
       handleSessionDragEnd,
       handleSessionDragStart,
       movingSessionId,
-      onArchive,
+      handleArchive,
       onExport,
       onMoveToFolder,
       onPin,
@@ -1408,29 +1434,30 @@ export function SessionSidebar({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Import outcome notice (CTR-0016 v5): a hard failure shows the server's
-          reason; a successful-but-partial import lists what was skipped or
-          carried with a caveat so the operator knows it may not be fully
-          faithful. Previously any failure was silent. */}
-      <AlertDialog open={importNotice !== null} onOpenChange={(open) => !open && setImportNotice(null)}>
+      {/* Action outcome notice (CTR-0016 v5, generalized in v0.117.4): a hard
+          failure shows the server's reason; a successful-but-partial import lists
+          what was skipped or carried with a caveat so the operator knows it may not
+          be fully faithful. Previously any failure was silent. */}
+      <AlertDialog open={actionNotice !== null} onOpenChange={(open) => !open && setActionNotice(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {importNotice?.kind === 'error' ? 'Import failed' : 'Imported with warnings'}
+              {actionNotice?.title ?? (actionNotice?.kind === 'error' ? 'Import failed' : 'Imported with warnings')}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {importNotice?.kind === 'error'
-                ? 'The chat could not be imported:'
-                : 'The chat was imported, but some attachments may not appear exactly as in the original:'}
+              {actionNotice?.description ??
+                (actionNotice?.kind === 'error'
+                  ? 'The chat could not be imported:'
+                  : 'The chat was imported, but some attachments may not appear exactly as in the original:')}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <ul className="max-h-60 list-disc space-y-1 overflow-y-auto pl-5 text-sm text-muted-foreground">
-            {importNotice?.messages.map((message) => (
+            {actionNotice?.messages.map((message) => (
               <li key={message}>{message}</li>
             ))}
           </ul>
           <AlertDialogFooter>
-            <AlertDialogAction onClick={() => setImportNotice(null)}>OK</AlertDialogAction>
+            <AlertDialogAction onClick={() => setActionNotice(null)}>OK</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
