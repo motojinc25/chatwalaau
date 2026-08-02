@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { NavTurn } from '@/hooks/useMessageNavigator'
+import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
 import { cn } from '@/lib/utils'
 
 interface MessageNavigatorProps {
@@ -22,6 +23,9 @@ interface MessageNavigatorProps {
 export function MessageNavigator({ turns, activeId, onJump }: MessageNavigatorProps) {
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
+  // turn.preview is buildPreview(userMessage.content) -- user message content by
+  // definition, so it redacts under Privacy Screen (CTR-0190, PRP-0124 FACT 2).
+  const { redact } = usePrivacyScreen()
 
   // Close on outside click / Escape (CTR-0103). pointerdown so the close beats
   // a click landing on a message behind the panel.
@@ -84,7 +88,7 @@ export function MessageNavigator({ turns, activeId, onJump }: MessageNavigatorPr
                 'flex w-full items-center rounded-md px-3 py-2 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground',
                 turn.messageId === activeId && 'bg-accent/60 font-medium',
               )}>
-              <span className="truncate">{turn.preview}</span>
+              <span className="truncate">{redact(turn.preview, `nav:${turn.messageId}`)}</span>
             </button>
           ))}
         </div>

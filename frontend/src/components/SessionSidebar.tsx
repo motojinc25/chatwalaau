@@ -94,6 +94,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useAuth } from '@/hooks/useAuth'
+import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
 import { formatSessionDateTime } from '@/lib/datetime'
 import { cn } from '@/lib/utils'
 import {
@@ -332,6 +333,12 @@ const SessionRow = memo(function SessionRow({
 }: SessionRowProps) {
   const isRenaming = rename !== undefined
   const availableFolders = folders.filter((folder) => folder.id !== session.folder_id)
+  // Privacy Screen (CTR-0190, PRP-0124). The session list is the single largest
+  // disclosure surface in a shared screen, so the title and every folder name in
+  // this row's menu redact. Reading the context does NOT defeat the UDR-0091 D5
+  // memoization: the context value changes only when the mode is toggled, never
+  // per keystroke, so non-renaming rows still bail out of re-render.
+  const { enabled: redacted, redact } = usePrivacyScreen()
 
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop requires drag events on the row container
@@ -377,7 +384,7 @@ const SessionRow = memo(function SessionRow({
           <>
             <p className="flex items-center gap-1 truncate text-sm leading-tight">
               {session.pinned_at && <Pin className="h-3 w-3 shrink-0 text-muted-foreground" />}
-              <span className="truncate">{session.title || 'New session'}</span>
+              <span className="truncate">{redact(session.title || 'New session', `session:${session.thread_id}`)}</span>
               {/* Auto Session Title in progress (PRP-0077, CTR-0109): a small
                   spinner until the background title task finalizes (cleared by
                   the CTR-0110 push). */}
@@ -481,7 +488,14 @@ const SessionRow = memo(function SessionRow({
                 </>
               )}
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onStartRename(session)}>
+            {/*
+              Rename is DISABLED, not redacted, while Privacy Screen is on
+              (CTR-0190 / UDR-0107 D6): the editor is an <Input> seeded with the
+              real title, so redacting it would let the user save the scramble as
+              their session title, and not redacting it would put the plaintext
+              back on the shared screen.
+            */}
+            <DropdownMenuItem disabled={redacted} onClick={() => onStartRename(session)}>
               <Pencil className="mr-2 h-3.5 w-3.5" />
               Rename
             </DropdownMenuItem>
@@ -504,7 +518,7 @@ const SessionRow = memo(function SessionRow({
                             (FOLDER_COLOR_CLASSES[folder.color] ?? FOLDER_COLOR_CLASSES[DEFAULT_FOLDER_COLOR]).icon,
                           )}
                         />
-                        {folder.name}
+                        {redact(folder.name, `folder:${folder.id}`)}
                       </DropdownMenuItem>
                     ))
                   ) : (
@@ -646,6 +660,10 @@ function FolderGroup({
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id })
   const colorClasses = FOLDER_COLOR_CLASSES[folder.color] ?? FOLDER_COLOR_CLASSES[DEFAULT_FOLDER_COLOR]
   const style = { transform: CSS.Transform.toString(transform), transition }
+  // A folder name is frequently a customer or project name (CTR-0190, PRP-0124).
+  // The session COUNT stays visible -- it is not private content, and it holds the
+  // row's layout.
+  const { redact } = usePrivacyScreen()
 
   return (
     <div
@@ -690,7 +708,7 @@ function FolderGroup({
             <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           )}
           <Folder className={cn('h-3.5 w-3.5 shrink-0', colorClasses.icon)} />
-          <span className="truncate text-sm font-medium">{folder.name}</span>
+          <span className="truncate text-sm font-medium">{redact(folder.name, `folder:${folder.id}`)}</span>
           {/* The count comes from the SERVER (folder.session_count), not from the loaded
               sessions. Since PRP-0112 a folder's chats are fetched only when it is expanded
               (UDR-0091 D4), so `groupedSessions.length` counts only what happens to be
@@ -789,6 +807,10 @@ export function SessionSidebar({
   ontologyAvailable,
   onOpenOntology,
 }: SessionSidebarProps) {
+  // Privacy Screen (CTR-0190, PRP-0124). Both delete confirmations quote the
+  // title / folder name they are about to remove, so they are session-title render
+  // sites in their own right and redact like the list itself.
+  const { redact } = usePrivacyScreen()
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
   const [deleteFolderTarget, setDeleteFolderTarget] = useState<SessionFolder | null>(null)
   const [colorTarget, setColorTarget] = useState<SessionFolder | null>(null)
@@ -1414,8 +1436,11 @@ export function SessionSidebar({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete session?</AlertDialogTitle>
             <AlertDialogDescription>
-              &quot;{deleteTarget?.title || 'New session'}&quot; will be permanently deleted. This action cannot be
-              undone.
+              &quot;
+              {deleteTarget
+                ? redact(deleteTarget.title || 'New session', `session:${deleteTarget.thread_id}`)
+                : 'New session'}
+              &quot; will be permanently deleted. This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1467,7 +1492,9 @@ export function SessionSidebar({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete folder?</AlertDialogTitle>
             <AlertDialogDescription>
-              &quot;{deleteFolderTarget?.name || 'Folder'}&quot; will be removed. The {deleteFolderSessionCount} session
+              &quot;
+              {deleteFolderTarget ? redact(deleteFolderTarget.name, `folder:${deleteFolderTarget.id}`) : 'Folder'}
+              &quot; will be removed. The {deleteFolderSessionCount} session
               {deleteFolderSessionCount === 1 ? '' : 's'} inside it will stay intact and return to the Chats section.
             </AlertDialogDescription>
           </AlertDialogHeader>

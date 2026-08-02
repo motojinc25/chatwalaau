@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
 import { formatSessionDateTime } from '@/lib/datetime'
 import type { SessionSummary } from '@/types/chat'
 
@@ -15,7 +16,17 @@ interface SessionSearchDialogProps {
   onSelect: (threadId: string) => void
 }
 
-function HighlightedText({ text, query }: { text: string; query: string }) {
+/**
+ * Highlights the query match inside `text`.
+ *
+ * `redacted` BYPASSES the highlight entirely (CTR-0190, UDR-0107 D7). This is
+ * not cosmetic: the highlight is placed at the true match offset, so wrapping a
+ * slice of already-scrambled text in <mark> would publish exactly WHERE the
+ * query matched inside otherwise-illegible content -- the one thing the
+ * redaction was meant to hide.
+ */
+function HighlightedText({ text, query, redacted }: { text: string; query: string; redacted: boolean }) {
+  if (redacted) return <>{text}</>
   if (!query.trim()) return <>{text}</>
 
   const lowerText = text.toLowerCase()
@@ -39,6 +50,10 @@ export function SessionSearchDialog({ sessions, open, onOpenChange, onSelect }: 
   const [isSearching, setIsSearching] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Result titles and snippets redact; the QUERY INPUT does not (UDR-0107 D8) --
+  // it is the presenter's live keystrokes, and a redacted field cannot be typed
+  // into usefully.
+  const { enabled: redacted, redact } = usePrivacyScreen()
 
   useEffect(() => {
     if (open) {
@@ -134,7 +149,11 @@ export function SessionSearchDialog({ sessions, open, onOpenChange, onSelect }: 
                 onClick={() => handleSelect(session.thread_id)}>
                 <div className="flex w-full items-center justify-between">
                   <span className="min-w-0 flex-1 truncate">
-                    <HighlightedText text={session.title || 'New session'} query={query} />
+                    <HighlightedText
+                      text={redact(session.title || 'New session', `search-title:${session.thread_id}`)}
+                      query={query}
+                      redacted={redacted}
+                    />
                   </span>
                   <span className="ml-2 flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
                     {formatSessionDateTime(session.updated_at)}
@@ -154,7 +173,11 @@ export function SessionSearchDialog({ sessions, open, onOpenChange, onSelect }: 
                 </div>
                 {session.snippet && (
                   <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                    <HighlightedText text={session.snippet} query={query} />
+                    <HighlightedText
+                      text={redact(session.snippet, `search-snippet:${session.thread_id}`)}
+                      query={query}
+                      redacted={redacted}
+                    />
                   </p>
                 )}
               </button>

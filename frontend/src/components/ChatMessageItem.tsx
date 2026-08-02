@@ -38,6 +38,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { WeatherToolResults } from '@/components/WeatherCard'
 import { WorkflowProgressPanel, type WorkflowRunState } from '@/components/WorkflowProgressPanel'
+import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
 import { openUploadFullSize } from '@/lib/uploads'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from '@/types/chat'
@@ -325,6 +326,11 @@ function ChatMessageItemImpl({
 }: ChatMessageItemProps) {
   const isUser = message.role === 'user'
   const hasTextContent = message.content != null && message.content.trim().length > 0
+  // Privacy Screen (CTR-0190, PRP-0124). Redacts the USER side only: the body,
+  // the attached filenames, and (via AuthedImage) the attachments themselves.
+  // Assistant output stays legible on purpose -- redacting it would make the
+  // product unshowable, which is the point of the demo (UDR-0107 D9).
+  const { enabled: redacted, redact } = usePrivacyScreen()
   // Workflow run indicator (v0.115.1): the LIVE state during a run (prop), else the
   // persisted completion marker on reload. Rendered inside the message; the standalone
   // WorkflowProgressPanel above the composer was removed.
@@ -411,8 +417,11 @@ function ChatMessageItemImpl({
   // relocated from a cramped inline textarea into an ~80% modal so long messages
   // are comfortable to edit. The edit DATA FLOW is unchanged: a user-message
   // edit truncates + re-requests; an assistant edit updates in place.
+  // The `!(isUser && redacted)` term also covers the RACE: if the modal is already
+  // open on a user message and Privacy Screen is switched on, the dialog closes
+  // rather than keeping the plaintext textarea on a now-shared screen (UDR-0107 D6).
   const renderEditForm = () => (
-    <Dialog open={editing} onOpenChange={(open) => !open && setEditing(false)}>
+    <Dialog open={editing && !(isUser && redacted)} onOpenChange={(open) => !open && setEditing(false)}>
       <DialogContent className="flex h-[80vh] w-[80vw] max-w-[80vw] flex-col gap-3 sm:max-w-[80vw]">
         <DialogHeader>
           <DialogTitle>{isUser ? 'Edit message' : 'Edit response'}</DialogTitle>
@@ -465,7 +474,12 @@ function ChatMessageItemImpl({
                     return (
                       <div key={img.uri} className="flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs">
                         <FileTextIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        <span className="truncate font-medium">{filename}</span>
+                        {/* A filename is often more revealing than the body it came
+                            with, so it redacts as text; the file-type icon stays
+                            (CTR-0190, PRP-0124 FACT 2). */}
+                        <span className="truncate font-medium">
+                          {redact(filename, `msg-file:${message.id}:${img.uri}`)}
+                        </span>
                       </div>
                     )
                   }
@@ -485,6 +499,19 @@ function ChatMessageItemImpl({
                       }
                     />
                   )
+                  // Privacy Screen (CTR-0190 / UDR-0107 D5): the placeholder is
+                  // NOT clickable. Every wrapper below opens the real asset --
+                  // openUploadFullSize puts it in a new tab, onPaintEdit loads it
+                  // into the editor -- so a stray click on a shared screen would
+                  // undo the redaction. Suppressing the fetch is not enough on its
+                  // own; the affordances have to go with it.
+                  if (redacted) {
+                    return (
+                      <span key={img.uri} className="inline-block">
+                        {imgEl}
+                      </span>
+                    )
+                  }
                   if (isPaint && onPaintEdit) {
                     return (
                       <div key={img.uri} className="group/paint relative inline-block">
@@ -519,7 +546,12 @@ function ChatMessageItemImpl({
                 })}
               </div>
             )}
-            <CollapsibleUserText content={message.content} />
+            {/*
+              Redaction preserves newlines and glyph width (UDR-0107 D3), so the
+              collapse threshold, the ResizeObserver measurement, and Show more /
+              Show less all behave identically on scrambled text.
+            */}
+            <CollapsibleUserText content={redact(message.content, `msg:${message.id}`)} />
             {/*
               Pre-commit send failure (CTR-0004 v2, PRP-0110 / UDR-0088 D3). The turn
               never reached the agent, so it is safe to re-send: nothing was persisted
@@ -609,13 +641,28 @@ function ChatMessageItemImpl({
 
         {!isLoading && !editing && message.content && (
           <div className="mt-0.5 flex gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100">
-            <CopyButton text={message.content} />
+            {/*
+              Copy what is DISPLAYED, not what is stored (CTR-0190 / UDR-0107 D2).
+              With Privacy Screen on, a user message on screen is scrambled, so
+              copying it must yield the scramble -- otherwise the plaintext lands
+              on the clipboard and reappears at the next paste, on the same shared
+              screen. Assistant messages are not redacted and copy unchanged.
+            */}
+            <CopyButton text={isUser ? redact(message.content, `msg:${message.id}`) : message.content} />
             {onToggleMemoryLike && (
               <MemoryLikeButton messageIndex={messageIndex} status={memoryLikeStatus} onToggle={onToggleMemoryLike} />
             )}
             {tts && <TTSPlayButton message={message} tts={tts} />}
             {tts && <TTSDownloadButton message={message} messageIndex={messageIndex} tts={tts} />}
-            {(isUser ? onEditUser : onEditAssistant) && (
+            {/*
+              The edit modal is DISABLED, not redacted, for a user message while
+              Privacy Screen is on (CTR-0190 / UDR-0107 D6). Redacting an editable
+              textarea would let the user save the scramble over their own message;
+              showing the plaintext would defeat the mode. Neither is acceptable, so
+              the affordance goes away for as long as the mode is on. An assistant
+              message is not redacted and stays editable.
+            */}
+            {(isUser ? onEditUser && !redacted : onEditAssistant) && (
               <Button
                 variant="ghost"
                 size="icon"

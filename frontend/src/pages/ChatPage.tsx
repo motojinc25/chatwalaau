@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
 import { CronManager } from '@/components/CronManager'
 import { PipelineManager } from '@/components/PipelineManager'
+import { PrivacyScreenToggle } from '@/components/PrivacyScreenToggle'
 import { SessionSidebar } from '@/components/SessionSidebar'
 import { TemporaryChatToggle } from '@/components/TemporaryChatToggle'
 import { Button } from '@/components/ui/button'
@@ -232,8 +233,14 @@ export function ChatPage() {
           </Button>
         )}
 
-        {/* Temporary Chat top-right toggle (CTR-0107, PRP-0076). */}
-        <div className="absolute right-3 top-3 z-20">
+        {/*
+          Top-right controls. Privacy Screen (CTR-0190, PRP-0124) sits to the LEFT
+          of Temporary Chat (CTR-0107, PRP-0076); both are the full-page /chat
+          surface only, and both may be active at once (their active pills use
+          distinct colors so they stay distinguishable -- UDR-0107 D11).
+        */}
+        <div className="absolute right-3 top-3 z-20 flex items-center gap-1">
+          <PrivacyScreenToggle />
           <TemporaryChatToggle isTemporary={temp.isTemporary} onEnter={temp.enter} onExit={temp.exit} />
         </div>
 
