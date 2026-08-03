@@ -338,6 +338,15 @@ function ChatMessageItemImpl({
   // Assistant output stays legible on purpose -- redacting it would make the
   // product unshowable, which is the point of the demo (UDR-0107 D9).
   const { enabled: redacted, redact } = usePrivacyScreen()
+  // Deleting a message does NOT delete its uploads -- the PNG and the editable
+  // paint scene (CTR-0161) stay on disk. But the message is the ONLY route to
+  // them: the re-edit affordance lives on it, so once it is gone the drawing is
+  // unreachable from the app forever. Deleting the whole chat is a genuine
+  // cascade delete of the files. Either way the user deserves to be told BEFORE
+  // confirming, not after.
+  const paintCount = (message.images ?? []).filter((img) =>
+    (img.uri.split('/').pop() ?? '').startsWith('paint_'),
+  ).length
   // Workflow run indicator (v0.115.1): the LIVE state during a run (prop), else the
   // persisted completion marker on reload. Rendered inside the message; the standalone
   // WorkflowProgressPanel above the composer was removed.
@@ -818,7 +827,18 @@ function ChatMessageItemImpl({
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>Delete this message?</AlertDialogTitle>
-              <AlertDialogDescription>This action cannot be undone.</AlertDialogDescription>
+              <AlertDialogDescription>
+                {paintCount > 0 ? (
+                  <>
+                    This message carries {paintCount === 1 ? 'a drawing' : `${paintCount} drawings`} you can still
+                    re-open and edit. Deleting the message removes the only way back to{' '}
+                    {paintCount === 1 ? 'it' : 'them'}. Attach {paintCount === 1 ? 'it' : 'them'} to a new message first
+                    if you want to keep editing. This action cannot be undone.
+                  </>
+                ) : (
+                  'This action cannot be undone.'
+                )}
+              </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>

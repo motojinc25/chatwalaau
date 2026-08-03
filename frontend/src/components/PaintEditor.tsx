@@ -206,6 +206,54 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
     applyCanvasSize(stage.clientWidth, stage.clientHeight)
   }, [applyCanvasSize])
 
+  /**
+   * Give a loaded scene an artboard big enough to actually show it.
+   *
+   * Object coordinates in a Fabric scene are ABSOLUTE, but `toJSON()` does not
+   * serialize the canvas dimensions. A paint drawn on a large screen (fit mode
+   * sizes the artboard to the stage, so easily 2600x1400) and re-opened on a
+   * smaller one got a smaller artboard, leaving most of the artwork outside it:
+   * fully intact in the file, entirely invisible on screen.
+   *
+   * Two cases:
+   *  - the scene records its size (saved by this version) -> restore it exactly;
+   *  - it does not (saved earlier) -> grow the artboard to the artwork's bounding
+   *    box, which recovers drawings already saved without a size.
+   *
+   * Either way fit mode is turned OFF, or the ResizeObserver would immediately
+   * shrink the artboard back to the stage and re-hide the drawing.
+   */
+  const restoreArtboardSize = useCallback(
+    (c: Canvas, scene: unknown) => {
+      const saved = scene as { width?: unknown; height?: unknown } | null
+      const savedW = typeof saved?.width === 'number' ? saved.width : 0
+      const savedH = typeof saved?.height === 'number' ? saved.height : 0
+      if (savedW > 0 && savedH > 0) {
+        setFitMode(false)
+        applyCanvasSize(savedW, savedH)
+        return
+      }
+
+      const objects = c.getObjects()
+      if (objects.length === 0) return
+      let right = 0
+      let bottom = 0
+      for (const o of objects) {
+        const r = o.getBoundingRect()
+        right = Math.max(right, r.left + r.width)
+        bottom = Math.max(bottom, r.top + r.height)
+      }
+      // A small margin so a stroke sitting exactly on the edge is not clipped.
+      right += 24
+      bottom += 24
+      if (right > c.getWidth() || bottom > c.getHeight()) {
+        setFitMode(false)
+        applyCanvasSize(Math.max(right, c.getWidth()), Math.max(bottom, c.getHeight()))
+      }
+    },
+    [applyCanvasSize],
+  )
+
   // ---- Canvas lifecycle ----
   // Initialize Fabric when the <canvas> node mounts (Radix renders the dialog
   // body only while open), and dispose when it unmounts.
@@ -324,6 +372,7 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
           try {
             await c.loadFromJSON(initialScene as object)
             if (fabricRef.current !== c) return // disposed while loading; the live canvas seeds itself
+            restoreArtboardSize(c, initialScene)
             c.requestRenderAll()
           } catch (err) {
             // A dispose mid-load is expected and harmless -- the surviving canvas
@@ -346,7 +395,7 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
       }
       void seed()
     },
-    [initialScene, snapshot, bumpLayers, fitToStage],
+    [initialScene, snapshot, bumpLayers, fitToStage, restoreArtboardSize],
   )
 
   // Apply tool changes to the live canvas (drawing mode + brush settings).
@@ -668,7 +717,11 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
     c.requestRenderAll()
     const dataUrl = c.toDataURL({ format: 'png', multiplier: 1 })
     const blob = await dataUrlToBlob(dataUrl)
-    const scene = c.toJSON()
+    // Fabric's toJSON() serializes the OBJECTS but not the canvas dimensions, and
+    // object coordinates are absolute. Without the artboard size, re-editing on a
+    // smaller stage rebuilt a smaller artboard and everything drawn beyond it fell
+    // outside the canvas -- the drawing was intact but invisible. Record it.
+    const scene = { ...c.toJSON(), width: c.getWidth(), height: c.getHeight() }
     onAttach(blob, scene)
     setDirty(false)
     onOpenChange(false)
