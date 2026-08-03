@@ -61,7 +61,14 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import '@/lib/monaco-setup'
@@ -1008,6 +1015,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         <DialogContent className="flex h-screen w-screen max-w-none flex-col gap-0 rounded-none border-0 bg-white p-0 text-zinc-900 sm:rounded-none">
           <DialogHeader className="flex shrink-0 flex-row items-center justify-between border-b px-3 py-2 text-left">
             <DialogTitle className="text-sm font-semibold text-zinc-900">Ontology</DialogTitle>
+            <DialogDescription className="sr-only">
+              Design concept models on a node canvas: add entities and relationships, search with SPARQL or natural
+              language, and import or export RDF.
+            </DialogDescription>
             <div className="mr-8 flex items-center gap-2">
               {error && <span className="max-w-[480px] truncate text-xs text-red-600">{error}</span>}
               {dirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
@@ -1175,6 +1186,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>New ontology</DialogTitle>
+            <DialogDescription className="sr-only">Enter a name for the new ontology.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div>
@@ -1219,6 +1231,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Rename ontology</DialogTitle>
+            <DialogDescription className="sr-only">Enter a new name for this ontology.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div>

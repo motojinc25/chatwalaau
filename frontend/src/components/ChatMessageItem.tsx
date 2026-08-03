@@ -35,7 +35,14 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { WeatherToolResults } from '@/components/WeatherCard'
 import { WorkflowProgressPanel, type WorkflowRunState } from '@/components/WorkflowProgressPanel'
 import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
@@ -425,6 +432,10 @@ function ChatMessageItemImpl({
       <DialogContent className="flex h-[80vh] w-[80vw] max-w-[80vw] flex-col gap-3 sm:max-w-[80vw]">
         <DialogHeader>
           <DialogTitle>{isUser ? 'Edit message' : 'Edit response'}</DialogTitle>
+          <DialogDescription className="sr-only">
+            Revise the message text. Saving a question re-runs the conversation from that point; saving an answer
+            updates it in place.
+          </DialogDescription>
         </DialogHeader>
         <textarea
           ref={editRef}

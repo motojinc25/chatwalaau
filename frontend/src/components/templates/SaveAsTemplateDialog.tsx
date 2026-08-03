@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 
 interface SaveAsTemplateDialogProps {
@@ -50,6 +57,9 @@ export function SaveAsTemplateDialog({ open, onOpenChange, initialBody, onSave, 
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Save as Template</DialogTitle>
+          <DialogDescription className="sr-only">
+            Give the template a name so you can reuse this prompt later.
+          </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1">

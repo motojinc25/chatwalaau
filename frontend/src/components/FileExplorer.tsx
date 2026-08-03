@@ -51,7 +51,14 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import '@/lib/monaco-setup'
@@ -1135,6 +1142,10 @@ export function FileExplorer({ open, onOpenChange, onAttach }: FileExplorerProps
         <DialogContent className="flex h-screen w-screen max-w-none flex-col gap-0 rounded-none border-0 bg-white p-0 text-zinc-900 sm:rounded-none">
           <DialogHeader className="flex shrink-0 flex-row items-center justify-between border-b px-3 py-2 text-left">
             <DialogTitle className="text-sm font-semibold text-zinc-900">File Explorer</DialogTitle>
+            <DialogDescription className="sr-only">
+              Browse and edit files in the coding workspace: open files in tabs, create, rename, move, upload, download,
+              and preview images and PDFs.
+            </DialogDescription>
           </DialogHeader>
 
           <PanelGroup direction="horizontal" className="min-h-0 flex-1">
@@ -1271,6 +1282,7 @@ export function FileExplorer({ open, onOpenChange, onAttach }: FileExplorerProps
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>New {createTarget?.kind === 'dir' ? 'Folder' : 'File'}</DialogTitle>
+            <DialogDescription className="sr-only">Enter a name for the new item.</DialogDescription>
           </DialogHeader>
           <Input
             autoFocus
@@ -1297,6 +1309,7 @@ export function FileExplorer({ open, onOpenChange, onAttach }: FileExplorerProps
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>Rename {renameTarget?.isDir ? 'folder' : 'file'}</DialogTitle>
+            <DialogDescription className="sr-only">Enter a new name for the selected item.</DialogDescription>
           </DialogHeader>
           <Input
             autoFocus

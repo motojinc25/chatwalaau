@@ -51,7 +51,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { WorkspaceImagePicker } from '@/components/WorkspaceImagePicker'
 import { useFileExplorerAvailable } from '@/hooks/useFileExplorerAvailable'
@@ -209,6 +209,13 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
   // ---- Canvas lifecycle ----
   // Initialize Fabric when the <canvas> node mounts (Radix renders the dialog
   // body only while open), and dispose when it unmounts.
+  //
+  // This callback runs MORE THAN ONCE per open. React StrictMode deliberately
+  // double-invokes ref callbacks in development: attach(node) -> detach(null) ->
+  // attach(node) on the same element. So the canvas built by the first attach is
+  // disposed while any async work it started is still in flight -- see `seed`
+  // below, which is why every step there is guarded on this instance still being
+  // the live one (`fabricRef.current === c`).
   const attachCanvas = useCallback(
     (node: HTMLCanvasElement | null) => {
       if (!node) {
@@ -301,14 +308,37 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
       })
 
       // Seed history, fit the artboard to the stage, then load any scene.
+      //
+      // `loadFromJSON` is the ONLY await in the init path, which is why re-editing
+      // a saved paint was the only case that broke: under StrictMode this canvas
+      // is disposed mid-await, and Fabric's own `clear()` at the end of the load
+      // then throws `Cannot read properties of undefined (reading 'clearRect')`
+      // off the disposed instance. That aborted the rest of `seed`, so the scene
+      // never landed (a blank editor) and `restoringRef` stayed true forever,
+      // which silently disables `snapshot()` -- no undo/redo and no dirty tracking
+      // for the rest of the session.
       const seed = async () => {
         if (fitModeRef.current) fitToStage()
         if (initialScene) {
           restoringRef.current = true
-          await c.loadFromJSON(initialScene as object)
-          c.requestRenderAll()
-          restoringRef.current = false
+          try {
+            await c.loadFromJSON(initialScene as object)
+            if (fabricRef.current !== c) return // disposed while loading; the live canvas seeds itself
+            c.requestRenderAll()
+          } catch (err) {
+            // A dispose mid-load is expected and harmless -- the surviving canvas
+            // runs its own seed. Anything else is a real failure worth seeing.
+            if (fabricRef.current === c) {
+              console.error('Paint: failed to load the saved scene', err)
+            }
+            return
+          } finally {
+            // MUST be reset on every path. Leaving it set makes the editor look
+            // fine while silently recording no history at all.
+            restoringRef.current = false
+          }
         }
+        if (fabricRef.current !== c) return
         historyRef.current = [JSON.stringify(c.toJSON())]
         histIdxRef.current = 0
         setDirty(false)
@@ -737,6 +767,12 @@ export function PaintEditor({ open, onOpenChange, initialScene, onAttach }: Pain
         <DialogContent className="flex h-screen w-screen max-w-none flex-col gap-0 rounded-none border-0 bg-zinc-50 p-0 text-zinc-900 sm:rounded-none">
           <DialogHeader className="flex shrink-0 flex-row items-center justify-between border-b bg-white px-3 py-2 pr-12 text-left">
             <DialogTitle className="text-sm font-semibold text-zinc-900">Paint</DialogTitle>
+            {/* Radix requires an accessible description on every DialogContent; without
+                one it warns and screen-reader users get no summary of the dialog. */}
+            <DialogDescription className="sr-only">
+              Compose an image on a canvas: draw shapes and freehand strokes, add text, import pictures, arrange layers,
+              then attach the result to your message.
+            </DialogDescription>
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" className="h-8" onClick={handleDownload}>
                 <Download className="mr-1.5 h-4 w-4" />

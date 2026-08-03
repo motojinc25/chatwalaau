@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { TemplateForm } from '@/components/templates/TemplateForm'
 import { TemplateList } from '@/components/templates/TemplateList'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { useTemplates } from '@/hooks/useTemplates'
 import type { PromptTemplate } from '@/types/chat'
@@ -84,6 +84,9 @@ export function PromptTemplatesModal({ open, onOpenChange, onInsert, onNotify }:
         <DialogHeader className="shrink-0 border-b px-6 py-4">
           <div className="flex items-center gap-3">
             <DialogTitle className="flex-1">Prompt Templates</DialogTitle>
+            <DialogDescription className="sr-only">
+              Create, edit, and delete reusable prompt templates, or insert one into the message box.
+            </DialogDescription>
             <Button size="sm" variant="outline" className="mr-8" onClick={handleNew}>
               <Plus className="mr-1 h-3.5 w-3.5" />
               New

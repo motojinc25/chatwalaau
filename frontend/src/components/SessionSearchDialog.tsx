@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
 import { formatSessionDateTime } from '@/lib/datetime'
@@ -127,6 +127,9 @@ export function SessionSearchDialog({ sessions, open, onOpenChange, onSelect }: 
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>Search sessions</DialogTitle>
+          <DialogDescription className="sr-only">
+            Search your chats by title or message content, then pick a result to open it.
+          </DialogDescription>
         </DialogHeader>
         <Input
           ref={inputRef}

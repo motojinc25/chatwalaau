@@ -1,6 +1,6 @@
 import { Search } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import type { CommandEntry, CommandsInventory } from '@/lib/slashCommands'
 
@@ -55,6 +55,9 @@ export function HelpPortal({ open, onOpenChange }: HelpPortalProps) {
       <DialogContent className="flex h-[80vh] max-w-2xl flex-col gap-0 p-0">
         <DialogHeader className="shrink-0 border-b px-6 py-4">
           <DialogTitle>Slash commands</DialogTitle>
+          <DialogDescription className="sr-only">
+            Search the available slash commands and pick one to insert into the message box.
+          </DialogDescription>
           <div className="relative mt-2">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
