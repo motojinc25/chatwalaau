@@ -72,6 +72,29 @@ function normalizeFolder(input: unknown): SessionFolder | null {
   }
 }
 
+/**
+ * Merge a single-folder response, keeping a known ``session_count`` when the payload
+ * omits it (v0.118.3 fix).
+ *
+ * ``session_count`` is DERIVED state that the stored folder record does not carry, so
+ * before v0.118.3 only ``GET /folders`` attached it -- every other folder endpoint
+ * returned the raw record. ``normalizeFolder`` turns that absence into 0, so renaming,
+ * recoloring, or reordering a folder made its chat count drop to zero while its chats
+ * sat untouched inside it. Nothing threw; the number was simply wrong until the next
+ * full refresh.
+ *
+ * The server now sends the count everywhere, and that value WINS when present (it is
+ * fresher than ours). This fallback only covers an older backend, where none of these
+ * operations can change membership anyway -- so the count we already hold is correct.
+ */
+function mergeFolderResponse(raw: unknown, known: SessionFolder | undefined): SessionFolder | null {
+  const folder = normalizeFolder(raw)
+  if (!folder) return null
+  const servedCount = (raw as { session_count?: unknown } | null)?.session_count
+  if (typeof servedCount === 'number' || !known) return folder
+  return { ...folder, session_count: known.session_count }
+}
+
 function normalizeFolders(data: unknown): SessionFolder[] {
   const items = Array.isArray(data)
     ? data
@@ -659,6 +682,47 @@ export function useSession() {
     [refreshFolders],
   )
 
+  /**
+   * Rename a folder (CTR-0015 v1.12 -- the backend PATCH already accepted `name`;
+   * only the UI was missing). Optimistic with rollback, mirroring
+   * updateFolderColor: the sidebar shows the new name immediately and reverts if
+   * the server rejects it, so a failed rename never leaves a name on screen that
+   * is not the stored one.
+   */
+  const renameFolder = useCallback(
+    async (folderId: string, name: string) => {
+      const trimmed = name.trim()
+      if (!trimmed) return false
+      const previousFolders = folders
+      setUpdatingFolderId(folderId)
+      setFolders((prev) => prev.map((folder) => (folder.id === folderId ? { ...folder, name: trimmed } : folder)))
+
+      try {
+        const res = await fetch(`/api/sessions/folders/${folderId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: trimmed }),
+        })
+        if (!res.ok) throw new Error('Failed to rename folder')
+
+        const payload = await res.json()
+        setFolders((prev) =>
+          prev.map((item) => {
+            if (item.id !== folderId) return item
+            return mergeFolderResponse(payload, item) ?? item
+          }),
+        )
+        return true
+      } catch {
+        setFolders(previousFolders)
+        return false
+      } finally {
+        setUpdatingFolderId(null)
+      }
+    },
+    [folders],
+  )
+
   const updateFolderColor = useCallback(
     async (folderId: string, color: FolderColor) => {
       const previousFolders = folders
@@ -673,10 +737,13 @@ export function useSession() {
         })
         if (!res.ok) throw new Error('Failed to update folder color')
 
-        const folder = normalizeFolder(await res.json())
-        if (folder) {
-          setFolders((prev) => prev.map((item) => (item.id === folderId ? folder : item)))
-        }
+        const payload = await res.json()
+        setFolders((prev) =>
+          prev.map((item) => {
+            if (item.id !== folderId) return item
+            return mergeFolderResponse(payload, item) ?? item
+          }),
+        )
         return true
       } catch {
         setFolders(previousFolders)
@@ -707,7 +774,13 @@ export function useSession() {
         })
         if (!res.ok) throw new Error('Failed to reorder folders')
 
-        setFolders(normalizeFolders(await res.json()))
+        const payload: unknown[] = await res.json()
+        setFolders((prev) => {
+          const known = new Map(prev.map((folder) => [folder.id, folder]))
+          return payload
+            .map((raw) => mergeFolderResponse(raw, known.get(normalizeFolder(raw)?.id ?? '')))
+            .filter((folder): folder is SessionFolder => folder !== null)
+        })
         return true
       } catch {
         setFolders(previousFolders)
@@ -854,6 +927,7 @@ export function useSession() {
     switchSession,
     deleteSession,
     deleteFolder,
+    renameFolder,
     updateFolderColor,
     reorderFolders,
     forkSession,

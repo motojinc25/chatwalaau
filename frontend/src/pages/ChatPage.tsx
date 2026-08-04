@@ -61,6 +61,7 @@ export function ChatPage() {
     switchSession,
     deleteSession,
     deleteFolder,
+    renameFolder,
     updateFolderColor,
     reorderFolders,
     forkSession,
@@ -171,6 +172,7 @@ export function ChatPage() {
           onImport={importSession}
           onDeleteFolder={deleteFolder}
           onCreateFolder={createFolder}
+          onRenameFolder={renameFolder}
           onUpdateFolderColor={updateFolderColor}
           onReorderFolders={reorderFolders}
           onMoveToFolder={moveSessionToFolder}

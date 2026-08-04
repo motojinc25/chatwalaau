@@ -220,13 +220,25 @@ async def list_folders() -> list[dict[str, Any]]:
     """
     folders = _read_folder_records()
     folders.sort(key=lambda folder: folder.get("order", 0))
+    return await _with_session_counts(folders)
 
+
+async def _with_session_counts(folders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach the derived ``session_count`` to folder records, in place.
+
+    EVERY endpoint that returns a folder must go through this, not just the list
+    (v0.118.3 fix). ``session_count`` is derived state the folder record itself does
+    not carry, so an endpoint that returns the raw record omits it -- and the SPA
+    normalizes an absent count to 0. The result was a folder whose chat count fell to
+    zero the moment it was renamed, recolored, or dragged into a new position, while
+    the chats inside it were untouched. Nothing errored; the number was simply wrong
+    until the next full list refresh.
+    """
     counts: dict[str, int] = {}
     for meta in await index_store.list_session_metadata():
         folder_id = meta.get("folder_id")
         if folder_id:
             counts[folder_id] = counts.get(folder_id, 0) + 1
-
     for folder in folders:
         folder["session_count"] = counts.get(folder["id"], 0)
     return folders
@@ -265,7 +277,7 @@ async def create_folder(body: CreateFolderRequest) -> dict[str, Any]:
     except OSError as e:
         raise HTTPException(status_code=500, detail="Failed to create folder") from e
     logger.info("Created folder %s", folder["id"])
-    return folder
+    return (await _with_session_counts([folder]))[0]
 
 
 @router.put("/folders/order", dependencies=[Depends(verify_api_key)])
@@ -276,7 +288,7 @@ async def reorder_folder_records(body: FolderOrderRequest) -> list[dict[str, Any
     except OSError as e:
         raise HTTPException(status_code=500, detail="Failed to reorder folders") from e
     logger.info("Reordered %d folders", len(folders))
-    return folders
+    return await _with_session_counts(folders)
 
 
 @router.patch("/folders/{folder_id}", dependencies=[Depends(verify_api_key)])
@@ -293,7 +305,7 @@ async def update_folder(folder_id: str, body: FolderUpdateRequest) -> dict[str, 
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found")
     logger.info("Updated folder %s", folder_id)
-    return folder
+    return (await _with_session_counts([folder]))[0]
 
 
 @router.delete("/folders/{folder_id}", dependencies=[Depends(verify_api_key)])
@@ -876,8 +888,7 @@ async def archive_session(thread_id: str) -> dict[str, str]:
             logger.info("Archived upload directory: %s -> %s", upload_dir, archived_uploads)
     except OSError:
         logger.warning(
-            "Archived session %s but could not move its uploads out of %s; "
-            "the attachments were left in place.",
+            "Archived session %s but could not move its uploads out of %s; the attachments were left in place.",
             thread_id,
             settings.upload_dir,
             exc_info=True,

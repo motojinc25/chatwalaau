@@ -122,6 +122,7 @@ interface SessionSidebarProps {
   onImport: (file: File) => Promise<ImportResult>
   onDeleteFolder: (folderId: string) => Promise<boolean>
   onCreateFolder: (name: string, color: FolderColor) => Promise<boolean>
+  onRenameFolder: (folderId: string, name: string) => Promise<boolean>
   onUpdateFolderColor: (folderId: string, color: FolderColor) => Promise<boolean>
   onReorderFolders: (orderedIds: string[]) => Promise<boolean>
   onMoveToFolder: (threadId: string, folderId: string | null) => Promise<boolean>
@@ -636,6 +637,7 @@ interface FolderGroupProps {
   onDragOverFolder: (folderId: string) => void
   onDragLeaveFolder: (folderId: string) => void
   onDropSession: (folderId: string) => void
+  onOpenRename: (folder: SessionFolder) => void
   onOpenColor: (folder: SessionFolder) => void
   onDeleteFolder: (folder: SessionFolder) => void
   renderSessionRow: (session: SessionSummary, nested?: boolean) => ReactNode
@@ -653,6 +655,7 @@ function FolderGroup({
   onDragOverFolder,
   onDragLeaveFolder,
   onDropSession,
+  onOpenRename,
   onOpenColor,
   onDeleteFolder,
   renderSessionRow,
@@ -663,7 +666,7 @@ function FolderGroup({
   // A folder name is frequently a customer or project name (CTR-0190, PRP-0124).
   // The session COUNT stays visible -- it is not private content, and it holds the
   // row's layout.
-  const { redact } = usePrivacyScreen()
+  const { enabled: redacted, redact } = usePrivacyScreen()
 
   return (
     <div
@@ -734,6 +737,16 @@ function FolderGroup({
             </span>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-40">
+            {/*
+              Disabled while Privacy Screen is on, for the same reason session rename
+              is (CTR-0190 / UDR-0107 D6): the editor is seeded with the REAL folder
+              name, so it would either put the name back on a shared screen or let the
+              user save the scramble over it.
+            */}
+            <DropdownMenuItem disabled={redacted} onClick={() => onOpenRename(folder)}>
+              <Pencil className="mr-2 h-3.5 w-3.5" />
+              Rename
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onOpenColor(folder)}>
               <Palette className="mr-2 h-3.5 w-3.5" />
               Change color
@@ -783,6 +796,7 @@ export function SessionSidebar({
   onImport,
   onDeleteFolder,
   onCreateFolder,
+  onRenameFolder,
   onUpdateFolderColor,
   onReorderFolders,
   onMoveToFolder,
@@ -814,6 +828,12 @@ export function SessionSidebar({
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null)
   const [deleteFolderTarget, setDeleteFolderTarget] = useState<SessionFolder | null>(null)
   const [colorTarget, setColorTarget] = useState<SessionFolder | null>(null)
+  // Folder rename target. A DIALOG, not an inline input like the session row:
+  // a folder header is both a @dnd-kit sortable handle and a native drop target for
+  // sessions, so swapping a text field into it fights both. It also matches the
+  // existing folder colour / create dialogs.
+  const [renameFolderTarget, setRenameFolderTarget] = useState<SessionFolder | null>(null)
+  const [renameFolderValue, setRenameFolderValue] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -1087,6 +1107,36 @@ export function SessionSidebar({
     [folderGroups, onReorderFolders],
   )
 
+  const handleOpenRenameFolder = useCallback((folder: SessionFolder) => {
+    setRenameFolderTarget(folder)
+    setRenameFolderValue(folder.name)
+  }, [])
+
+  const handleRenameFolder = useCallback(async () => {
+    if (!renameFolderTarget) return
+    const next = renameFolderValue.trim()
+    // Nothing to do for an empty or unchanged name; closing silently is the right
+    // outcome rather than a pointless round trip or an error.
+    if (!next || next === renameFolderTarget.name) {
+      setRenameFolderTarget(null)
+      return
+    }
+    const ok = await onRenameFolder(renameFolderTarget.id, next)
+    if (ok) setRenameFolderTarget(null)
+  }, [renameFolderTarget, renameFolderValue, onRenameFolder])
+
+  const handleRenameFolderKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLInputElement>) => {
+      // Skip while an IME composition is in progress (CJK conversion) -- otherwise
+      // the Enter that CONFIRMS a conversion would also submit the dialog.
+      if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+        event.preventDefault()
+        void handleRenameFolder()
+      }
+    },
+    [handleRenameFolder],
+  )
+
   const handleColorSelect = useCallback(
     async (color: FolderColor) => {
       if (!colorTarget) return
@@ -1261,6 +1311,7 @@ export function SessionSidebar({
                       onDragOverFolder={handleDragOverFolder}
                       onDragLeaveFolder={handleDragLeaveFolder}
                       onDropSession={handleDropSession}
+                      onOpenRename={handleOpenRenameFolder}
                       onOpenColor={setColorTarget}
                       onDeleteFolder={setDeleteFolderTarget}
                       renderSessionRow={renderSessionRow}
@@ -1559,6 +1610,53 @@ export function SessionSidebar({
                 </>
               ) : (
                 'Create folder'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={renameFolderTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRenameFolderTarget(null)
+            setRenameFolderValue('')
+          }
+        }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rename folder</DialogTitle>
+            <DialogDescription>
+              The chats inside this folder are not affected -- only its name changes.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            value={renameFolderValue}
+            onChange={(e) => setRenameFolderValue(e.target.value)}
+            onKeyDown={handleRenameFolderKeyDown}
+            placeholder="Folder name"
+            maxLength={100}
+            aria-label="Folder name"
+          />
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRenameFolderTarget(null)}
+              disabled={updatingFolderId === renameFolderTarget?.id}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleRenameFolder()}
+              disabled={updatingFolderId === renameFolderTarget?.id || !renameFolderValue.trim()}>
+              {updatingFolderId === renameFolderTarget?.id ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Renaming...
+                </>
+              ) : (
+                'Rename'
               )}
             </Button>
           </DialogFooter>
