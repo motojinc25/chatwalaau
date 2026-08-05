@@ -34,22 +34,53 @@ from app.skills.overrides import get_skills_override_store
 logger = logging.getLogger(__name__)
 
 _SKILL_FILE_NAME = "SKILL.md"
-# Mirror MAF's FileSkillsSource discovery depth (agent_framework MAX_SEARCH_DEPTH).
-_MAX_SEARCH_DEPTH = 2
+# Fallback depth, used ONLY when MAF's own discovery cannot be called (see below).
+# MAF 1.11 added a per-instance `search_depth` (default 2) alongside the module
+# constant; the default is pinned by an invariant test (PRP-0126 V9).
+_FALLBACK_SEARCH_DEPTH = 2
 
 
 def _discover_skill_dirs(root: Path) -> list[Path]:
-    """Return directories containing a SKILL.md, searched up to 2 levels deep.
+    """Return the directories MAF would treat as skill roots under ``root``.
 
-    Mirrors MAF ``FileSkillsSource._discover_skill_directories`` so the collision
-    scan sees exactly the same candidate set MAF discovers.
+    DELEGATES to MAF's own ``FileSkillsSource._discover_skill_directories`` rather
+    than reimplementing it. The collision scan's whole purpose is to see exactly the
+    candidate set MAF discovers, and a hand-written imitation only holds while the two
+    happen to agree -- which they stopped doing at MAF 1.11 (#6849): MAF now STOPS
+    descending once a directory has a ``SKILL.md``, because everything beneath a skill
+    boundary belongs to that skill instead of being an independent skill root. The
+    previous mirror kept descending and would have reported nested skills that the
+    runtime no longer discovers (PRP-0126 O4, UDR-0109 D4/D5).
+
+    The private symbol is a deliberate, enumerated dependency (UDR-0110 D2). If it
+    ever disappears the fallback below keeps the Skills Management inventory working
+    -- degraded to a local reimplementation of the same rule -- rather than failing
+    the whole endpoint, and says so in the log.
     """
+    if not root.is_dir():
+        return []
+
+    try:
+        from agent_framework import FileSkillsSource
+
+        return [Path(p) for p in FileSkillsSource._discover_skill_directories([str(root)])]
+    except (ImportError, AttributeError, TypeError):
+        logger.warning(
+            "MAF FileSkillsSource._discover_skill_directories unavailable; "
+            "falling back to the local skill-root scan. Skill collision detection "
+            "may diverge from what the agent actually loads.",
+            exc_info=True,
+        )
+
     out: list[Path] = []
 
     def _search(directory: Path, depth: int) -> None:
+        # Parent absorption (MAF 1.11 #6849): a directory with a SKILL.md IS the
+        # skill root; do not descend into it looking for more.
         if (directory / _SKILL_FILE_NAME).is_file():
             out.append(directory)
-        if depth >= _MAX_SEARCH_DEPTH:
+            return
+        if depth >= _FALLBACK_SEARCH_DEPTH:
             return
         try:
             entries = list(directory.iterdir())
@@ -59,8 +90,7 @@ def _discover_skill_dirs(root: Path) -> list[Path]:
             if entry.is_dir():
                 _search(entry, depth + 1)
 
-    if root.is_dir():
-        _search(root, 0)
+    _search(root, 0)
     return out
 
 
@@ -135,10 +165,10 @@ async def get_skills_inventory() -> dict[str, Any]:
     # -> provider). ``build_skill_source`` returns the UNFILTERED, deduplicated
     # file source, so names match exactly what the FilteringSkillsSource predicate
     # gates against.
-    from app.skills.provider import build_skill_source
+    from app.skills.provider import agentless_skills_context, build_skill_source
 
     source = build_skill_source()
-    skills = await source.get_skills()
+    skills = await source.get_skills(agentless_skills_context())
     store = get_skills_override_store()
     loaded = get_loaded_skills()
 

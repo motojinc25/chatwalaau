@@ -39,8 +39,13 @@ router = APIRouter(prefix="/v1", tags=["OpenAI API"])
 
 def _build_session_message(role: str, text: str) -> dict[str, Any]:
     """Build a session-compatible message dict."""
+    from app.session.provider import MESSAGE_TYPE_ID
+
     return {
-        "type": "chat_message",
+        # DERIVED from the installed MAF, never a literal: the id was renamed
+        # chat_message -> message between 1.10 and 1.13, and a literal here wrote
+        # sessions that Message.from_dict() rejected on the next turn (PRP-0126).
+        "type": MESSAGE_TYPE_ID,
         "role": role,
         "contents": [{"type": "text", "text": text}],
     }

@@ -314,6 +314,15 @@ def _new_factory(agents: dict[str, Any] | None = None):
         max_iterations=_max_iterations(),
         http_request_handler=handlers.build_http_request_handler(),
         mcp_tool_handler=handlers.build_mcp_tool_handler(),
+        # Stated explicitly, never inherited (UDR-0109 D8). MAF 1.11 added this
+        # parameter and defaults it to True; it governs whether a declarative
+        # workflow can read PROCESS environment variables, which is a boundary
+        # ChatWalaʻau owns. `True` restricts a workflow to the `configuration`
+        # mapping (empty here), so a workflow cannot reach API keys or connection
+        # strings out of the host environment. The value matches the upstream
+        # default today -- the point of writing it down is that a future upstream
+        # change of mind is then a merge conflict instead of a silent widening.
+        restrict_env_to_configuration=True,
     )
     handlers.register_function_tools(factory)
     return factory

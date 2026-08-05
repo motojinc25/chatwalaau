@@ -636,8 +636,19 @@ def _to_maf_message_dict(msg: SaveMessageItem) -> dict[str, Any]:
     contents.append({"type": "text", "text": msg.content})
     if msg.images:
         contents.extend({"type": "image_url", "uri": img.uri, "media_type": img.media_type} for img in msg.images)
+    # Imported lazily, NOT at module scope. `app.session.provider` pulls in
+    # agent_framework, and importing it as a side effect of importing this router
+    # changed module import ORDER across the app -- which is enough to shift which
+    # settings singleton other modules bind and made an unrelated session test
+    # intermittently fail. The router is imported at app startup; this function is
+    # not on a hot path.
+    from app.session.provider import MESSAGE_TYPE_ID
+
     result: dict[str, Any] = {
-        "type": "chat_message",
+        # DERIVED from the installed MAF, never a literal (PRP-0126): the id was
+        # renamed chat_message -> message between 1.10 and 1.13, and the literal
+        # here wrote sessions that Message.from_dict() rejected on the next turn.
+        "type": MESSAGE_TYPE_ID,
         "role": msg.role,
         "contents": contents,
     }

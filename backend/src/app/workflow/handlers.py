@@ -30,11 +30,13 @@ from urllib.parse import urlsplit
 from app.core.config import settings
 
 if TYPE_CHECKING:
-    from agent_framework_declarative._workflows._http_handler import (
+    # PUBLIC since the agent-framework-declarative 1.0.1 GA (PRP-0127, UDR-0110 D1).
+    # These are the SAME objects the package previously exposed only under
+    # `_workflows._http_handler` / `_workflows._mcp_handler`; an invariant test
+    # pins that identity, so the move carried no behavior delta.
+    from agent_framework_declarative import (
         HttpRequestInfo,
         HttpRequestResult,
-    )
-    from agent_framework_declarative._workflows._mcp_handler import (
         MCPToolInvocation,
         MCPToolResult,
     )
@@ -130,12 +132,16 @@ class _JailedHttpRequestHandler:
     """HttpRequestHandler that enforces opt-in + host allow-list + SSRF guard (UDR-0104 D2)."""
 
     def __init__(self) -> None:
-        from agent_framework_declarative._workflows._http_handler import DefaultHttpRequestHandler
+        from agent_framework_declarative import DefaultHttpRequestHandler
 
+        # Composition, NOT inheritance (UDR-0110 D5): the jail REPLACES the default
+        # handler and delegates to it only after every gate has passed. Subclassing
+        # would risk inheriting an unjailed code path through a method this class
+        # never thought to override.
         self._default = DefaultHttpRequestHandler()
 
     async def send(self, info: HttpRequestInfo) -> HttpRequestResult:
-        from agent_framework_declarative._workflows._http_handler import HttpRequestResult
+        from agent_framework_declarative import HttpRequestResult
 
         def _deny(message: str) -> HttpRequestResult:
             logger.warning("workflow HttpRequestAction denied: %s (%s)", message, info.url)
@@ -195,13 +201,14 @@ class _JailedMcpToolHandler:
     """
 
     def __init__(self) -> None:
-        from agent_framework_declarative._workflows._mcp_handler import DefaultMCPToolHandler
+        from agent_framework_declarative import DefaultMCPToolHandler
 
+        # Composition, NOT inheritance -- see _JailedHttpRequestHandler (UDR-0110 D5).
         self._default = DefaultMCPToolHandler()
 
     async def invoke_tool(self, invocation: MCPToolInvocation) -> MCPToolResult:
         from agent_framework import Content
-        from agent_framework_declarative._workflows._mcp_handler import MCPToolInvocation, MCPToolResult
+        from agent_framework_declarative import MCPToolInvocation, MCPToolResult
 
         def _error(message: str) -> MCPToolResult:
             logger.warning("workflow InvokeMcpTool denied: %s", message)

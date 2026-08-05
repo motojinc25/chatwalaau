@@ -48,13 +48,14 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any
+from typing import Any, cast
 
 from agent_framework import (
     DeduplicatingSkillsSource,
     FileSkillsSource,
     FilteringSkillsSource,
     SkillsProvider,
+    SkillsSourceContext,
     ToolApprovalMiddleware,
 )
 
@@ -200,6 +201,29 @@ def build_skill_source() -> DeduplicatingSkillsSource:
     )
 
 
+def agentless_skills_context() -> SkillsSourceContext:
+    """Build a ``SkillsSourceContext`` for reads that have no invoking agent.
+
+    MAF 1.11 (#6895) made ``SkillsSource.get_skills()`` take a context so that
+    context-aware sources can branch on the agent -- ``FilteringSkillsSource`` with a
+    context predicate, ``CachingSkillsSource`` with a per-agent isolation key. The
+    context is normally built by ``SkillsProvider`` from the invoking agent run.
+
+    ChatWalaʻau has two reads that legitimately have no agent: the Skills Management
+    inventory (CTR-0123) and the prompt-dump tool surface (CTR-0009 / UDR-0102 D5).
+    Both go against ``build_skill_source()`` -- the UNFILTERED, UNDECORATED file
+    source, whose ``get_skills`` documents that it "discovers the same skills
+    regardless of context". There is therefore no agent to supply and none is needed.
+
+    The agent slot is left empty deliberately rather than a fake agent being
+    constructed: a stand-in would be a lie that a future context-aware source could
+    act on, whereas an empty slot fails loudly the day one of these reads is pointed
+    at a source that actually consults it. An invariant test pins the "file source
+    ignores context" property this relies on.
+    """
+    return SkillsSourceContext(agent=cast("Any", None))
+
+
 def create_skills_provider(allowlist_names: set[str] | None = None) -> SkillsProvider | None:
     """Create SkillsProvider if SKILLS_DIR exists and is a directory.
 
@@ -250,7 +274,13 @@ def create_skills_provider(allowlist_names: set[str] | None = None) -> SkillsPro
     if disabled or allowlist_names is not None:
         allow = None if allowlist_names is None else frozenset(allowlist_names)
 
-        def _predicate(s: Any) -> bool:
+        def _predicate(s: Any, _context: Any = None) -> bool:
+            # MAF 1.11 (#6895) widened the predicate to (skill, context) so a source
+            # can filter per-agent. ChatWalaʻau's gate is global -- the override store
+            # and the active agent's allow-list are both resolved BEFORE the provider
+            # is built (UDR-0065 D2, UDR-0100 D3) -- so the context is accepted and
+            # ignored. The default keeps the one-argument form callable, which is what
+            # the unit tests exercise directly.
             name = s.frontmatter.name
             if name in disabled:
                 return False

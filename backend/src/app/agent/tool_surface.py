@@ -200,7 +200,9 @@ async def _actual_skill_names(provider: Any) -> set[str] | None:
     if source is None:
         return None
     try:
-        skills = await source.get_skills()
+        from app.skills.provider import agentless_skills_context
+
+        skills = await source.get_skills(agentless_skills_context())
     except Exception:
         logger.debug("Could not read skills from the provider source", exc_info=True)
         return None

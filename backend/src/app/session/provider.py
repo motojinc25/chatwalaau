@@ -25,6 +25,33 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _current_message_type_id() -> str:
+    """The serialization type id MAF's ``Message`` currently round-trips with.
+
+    DERIVED from the installed framework, never hardcoded. MAF renamed it from
+    ``chat_message`` to ``message`` between 1.10 and 1.13 (PRP-0126 field defect),
+    and a literal in our writers meant every message we persisted was rejected by
+    ``Message.from_dict()`` on the NEXT turn -- the first message of a chat saved
+    fine and the second one failed, because only the second one replays history.
+
+    Deriving it means the next rename costs nothing on the write side; the read
+    side is covered by ``LEGACY_MESSAGE_TYPE_IDS`` below.
+    """
+    try:
+        return str(Message(role="user", contents=[Content.from_text("")]).to_dict()["type"])
+    except Exception:  # pragma: no cover - upstream shape change
+        logger.warning("Could not derive the MAF Message type id; falling back to 'message'.")
+        return "message"
+
+
+MESSAGE_TYPE_ID = _current_message_type_id()
+
+# Type ids written by EARLIER ChatWalaʻau releases. Sessions on disk outlive the
+# framework version that wrote them, so every one of these must keep loading.
+# `chat_message` is what v0.119.0 and earlier wrote (MAF <= 1.10).
+LEGACY_MESSAGE_TYPE_IDS = frozenset({"chat_message"})
+
+
 class FileHistoryProvider(HistoryProvider):
     """Persists conversation history to JSON files."""
 
@@ -92,15 +119,26 @@ class FileHistoryProvider(HistoryProvider):
 
     @staticmethod
     def _normalize_content_types(raw_messages: list[dict[str, Any]]) -> None:
-        """Fix legacy content type names in-place.
+        """Fix legacy MESSAGE and CONTENT type names in-place.
 
-        v0.11.0 stored ``text_content`` and ``reasoning_content`` but MAF's
-        ContentType expects ``text`` and ``text_reasoning``.  Normalizing here
-        ensures ``Message.from_dict()`` produces Content objects that the
-        Azure OpenAI Responses client can serialise correctly.
+        Session files outlive the framework version that wrote them, so this is
+        the one place that reconciles what is ON DISK with what the INSTALLED MAF
+        will deserialize. Two migrations live here:
+
+        - v0.11.0 stored ``text_content`` / ``reasoning_content``; MAF's ContentType
+          expects ``text`` / ``text_reasoning``.
+        - v0.119.0 and earlier stored messages as ``chat_message``; MAF renamed the
+          Message type id to ``message`` (PRP-0126). Without this, EVERY session
+          written before v0.120.0 fails to load with
+          ``ValueError: Type mismatch: expected 'message', got 'chat_message'``.
+
+        Normalizing here ensures ``Message.from_dict()`` succeeds and produces
+        Content objects the provider clients can serialise correctly.
         """
         _TYPE_MAP = {"text_content": "text", "reasoning_content": "text_reasoning"}
         for msg in raw_messages:
+            if msg.get("type") in LEGACY_MESSAGE_TYPE_IDS:
+                msg["type"] = MESSAGE_TYPE_ID
             for content in msg.get("contents", []):
                 if isinstance(content, dict) and content.get("type") in _TYPE_MAP:
                     content["type"] = _TYPE_MAP[content["type"]]

@@ -36,9 +36,27 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# The MAF shared-state key holding the declarative namespaces (verified against
-# agent-framework-declarative 1.0.0rc2, _declarative_base.DECLARATIVE_STATE_KEY).
-DECLARATIVE_STATE_KEY = "_declarative_workflow_state"
+# The MAF shared-state key holding the declarative namespaces.
+#
+# IMPORTED, not duplicated (PRP-0127, UDR-0110 D3). A copied literal fails SILENTLY
+# when upstream renames the key -- the inspector would simply stop finding state and
+# every degradation test would keep passing -- whereas an import failure is loud and
+# lands on the fallback below with a log line. There is no public equivalent at
+# agent-framework-declarative 1.0.1, so this is an enumerated private reference.
+_FALLBACK_DECLARATIVE_STATE_KEY = "_declarative_workflow_state"
+
+try:
+    from agent_framework_declarative._workflows._declarative_base import (
+        DECLARATIVE_STATE_KEY,
+    )
+except (ImportError, AttributeError):  # pragma: no cover - upstream removal path
+    DECLARATIVE_STATE_KEY = _FALLBACK_DECLARATIVE_STATE_KEY
+    logging.getLogger(__name__).warning(
+        "Workflow state inspector: agent-framework-declarative no longer exposes "
+        "DECLARATIVE_STATE_KEY; falling back to the last known value %r. The variable "
+        "inspector may report nothing (CTR-0189).",
+        _FALLBACK_DECLARATIVE_STATE_KEY,
+    )
 
 # The namespaces surfaced to the operator, in display order.
 NAMESPACES = ("Inputs", "Outputs", "Local", "System", "Agent", "Conversation", "Custom")
@@ -75,6 +93,18 @@ def declarative_state_of(workflow: Any) -> dict[str, Any] | None:
     Returns ``None`` -- never raises -- when the runner, the ``state`` property, or the
     declarative key is absent, so an ``agent-framework`` upgrade degrades the inspector
     to silence instead of breaking runs.
+
+    PRP-0127 O1, resolved by measurement: the declarative GA's public ``WorkflowState``
+    CANNOT replace this traversal. They are different objects at different layers --
+    ``WorkflowState`` is the declarative namespace container, while the state this
+    reaches is the CORE workflow runner's, which is where the declarative container is
+    stored under ``DECLARATIVE_STATE_KEY``. Only the key constant moved to an import;
+    the traversal stays private and is an enumerated residue entry (UDR-0110 D2).
+
+    Upstream now raises a DeprecationWarning on ``agent_framework._workflows._runner``
+    ("intended for internal use only"), so this path is on notice: the degradation
+    branch above is the plan for the release that removes it, and UDR-0110 D4 requires
+    the next MAF bump to re-check for a public replacement.
     """
     runner = getattr(workflow, "_runner", None)
     if runner is None:
