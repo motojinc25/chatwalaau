@@ -392,7 +392,16 @@ export function ChatPanel({
       // verbatim) -- no need to wait for the upload response before showing
       // the bubble. The preview shows a local object URL instantly and is
       // swapped for the durable uploaded URI by the prepare() hook.
-      const compositedFilename = `mask_source_${Date.now()}.png`
+      // Both uploads MUST carry a unique name. They land in the session's shared
+      // upload directory (.uploads/<thread_id>/) and the endpoint overwrites by
+      // path, so a fixed name makes every mask edit in a thread collide on ONE
+      // file: the newest edit silently replaces the bytes of every earlier one,
+      // and export/import keeps a single copy for all of them (v0.121.1 defect).
+      // The pair shares one id so a source and its preview stay recognisably
+      // related on disk.
+      const editId = crypto.randomUUID().slice(0, 12)
+      const compositedFilename = `mask_source_${editId}.png`
+      const previewFilename = `mask_preview_${editId}.png`
       const instruction = `Edit the masked areas of the image "${compositedFilename}": ${prompt}`
       const previewObjectUrl = URL.createObjectURL(previewBlob)
 
@@ -404,7 +413,7 @@ export function ChatPanel({
             const compositedForm = new FormData()
             compositedForm.append('file', new File([compositedBlob], compositedFilename, { type: 'image/png' }))
             const previewForm = new FormData()
-            previewForm.append('file', new File([previewBlob], 'mask_preview.png', { type: 'image/png' }))
+            previewForm.append('file', new File([previewBlob], previewFilename, { type: 'image/png' }))
 
             const [compositedRes, previewRes] = await Promise.all([
               fetch(`/api/upload/${threadId}`, { method: 'POST', body: compositedForm }),
