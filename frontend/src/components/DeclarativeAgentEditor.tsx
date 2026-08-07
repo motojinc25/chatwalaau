@@ -232,6 +232,14 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
   const [dirty, setDirty] = useState(false)
   const [showAddTool, setShowAddTool] = useState(false)
   const [leaveConfirm, setLeaveConfirm] = useState(false)
+  // UDR-0111 D2: a create-mode editor ADOPTS the id its first successful save assigns,
+  // so every later save in the session is an UPDATE of that id. Without this, D1
+  // (save no longer closes) would let a second save create a second entity silently.
+  // Held only in the component instance -- the manager unmounts the editor on close.
+  const [savedId, setSavedId] = useState<string | null>(null)
+  // UDR-0111 D1: a successful save is reported INLINE (the editor stays open, so the
+  // dismissal that used to signal success is gone). Auto-dismissed below.
+  const [saveNotice, setSaveNotice] = useState<string | null>(null)
 
   // ---- initial load: inventory + models, plus source for edit ----
   useEffect(() => {
@@ -241,6 +249,8 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
     setError(null)
     setDirty(false)
     setRawMode(false)
+    setSavedId(null)
+    setSaveNotice(null)
     ;(async () => {
       try {
         const [inv, mi] = await Promise.all([api.loadInventory(), api.loadModels()])
@@ -345,21 +355,37 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
   const edges = useMemo(() => buildEdges(doc), [doc])
 
   // ---- save / delete / close ----
+  // The effective write target (UDR-0111 D2): the prop in edit mode, else the id
+  // adopted from the first successful save. `null` means "nothing exists yet".
+  const boundId = editId ?? savedId
+
   const handleSave = useCallback(async () => {
     setSaving(true)
     setError(null)
+    setSaveNotice(null)
     try {
       const body = rawMode ? { yaml: rawYaml } : { document: doc, name: doc.name }
-      const result = await api.save(body, editId)
+      const result = await api.save(body, boundId)
+      const id = result.id ?? boundId ?? undefined
       setDirty(false)
-      onSaved(result.id ?? editId ?? undefined)
-      onOpenChange(false)
+      // Adopt the identity BEFORE reporting, so a fast second click updates (D2).
+      if (id) setSavedId(id)
+      setSaveNotice('Saved. This editor stays open -- use Close when you are done.')
+      onSaved(id)
+      // UDR-0111 D1: no onOpenChange(false) here. Close is the only exit.
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save agent')
     } finally {
       setSaving(false)
     }
-  }, [rawMode, rawYaml, doc, editId, api, onSaved, onOpenChange])
+  }, [rawMode, rawYaml, doc, boundId, api, onSaved])
+
+  // Auto-dismiss the inline save notice (UDR-0111 D1).
+  useEffect(() => {
+    if (!saveNotice) return
+    const t = setTimeout(() => setSaveNotice(null), 4000)
+    return () => clearTimeout(t)
+  }, [saveNotice])
 
   const requestClose = useCallback(() => {
     if (dirty) {
@@ -381,7 +407,10 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
             of DialogContent); the header Close button is the single close affordance. */}
         {/* Radix requires an accessible title/description; the visible header below is
             custom, so these are screen-reader-only. */}
-        <DialogTitle className="sr-only">{editId ? 'Edit declarative agent' : 'Create declarative agent'}</DialogTitle>
+        {/* UDR-0111 D4: the VISIBLE title names the entity KIND (constant for the whole
+            session, which now spans create AND edit); the ACCESSIBLE name keeps the
+            operation, because a screen-reader user cannot see the primary button label. */}
+        <DialogTitle className="sr-only">{editId ? 'Edit Declarative Agent' : 'Create Declarative Agent'}</DialogTitle>
         <DialogDescription className="sr-only">
           Compose a single Prompt declarative agent: persona, model, tools, and output schema.
         </DialogDescription>
@@ -390,9 +419,7 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
           <div className="flex items-center gap-2">
             <Bot className="h-5 w-5 text-primary" />
             <div>
-              <div className="text-sm font-semibold">
-                {editId ? 'Edit declarative agent' : 'Create declarative agent'}
-              </div>
+              <div className="text-sm font-semibold">Declarative Agent</div>
               <div className="text-[11px] text-muted-foreground">
                 Compose a single Prompt agent. Provider, credentials, and sampling are resolved by ChatWalaʻau.
               </div>
@@ -408,7 +435,9 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
             </Button>
             <Button size="sm" onClick={handleSave} disabled={!canSave}>
               {saving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
-              {editId ? 'Save' : 'Create'}
+              {/* UDR-0111 D3: the label states the write it will perform -- Create while
+                  nothing exists, Save once an id is bound (prop or adopted). */}
+              {boundId ? 'Save' : 'Create'}
             </Button>
           </div>
         </div>
@@ -603,6 +632,11 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
         )}
 
         {error && <div className="shrink-0 border-t bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>}
+        {/* UDR-0111 D1: inline save acknowledgement, in the header-error position (a
+            global toast would render behind this full-screen overlay). */}
+        {!error && saveNotice && (
+          <output className="block shrink-0 border-t bg-primary/10 px-4 py-2 text-xs text-primary">{saveNotice}</output>
+        )}
 
         {/* Unsaved-changes guard */}
         {leaveConfirm && (

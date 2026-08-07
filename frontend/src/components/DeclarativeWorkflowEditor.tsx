@@ -218,26 +218,45 @@ const PARSE_VALUE_TYPES = [
 // EditTableV2 operations the executor implements (_executors_basic.py:379-).
 const EDIT_TABLE_OPERATIONS = ['add', 'addOrUpdate', 'update', 'remove', 'clear'] as const
 
-const WRITE_NAMESPACES = ['Local.', 'Workflow.Outputs.'] as const
-const READ_NAMESPACES = ['Local.', 'Workflow.Inputs.', 'Workflow.Outputs.', 'System.'] as const
-
+// v0.122.0 (operator feedback on UDR-0111 D7): the candidate list holds REAL variables
+// only -- never a bare namespace stub like `Local.`. A stub is not a value: picking one
+// leaves the field holding an incomplete path that the backend rejects, and it sat at the
+// top of every list ahead of the names the author actually wanted. The namespaces are
+// taught by the placeholders (`Local.name`) and by the docs, not by fake candidates.
 interface VariableCandidates {
-  /** Namespaces + known names valid as a WRITE destination (no Workflow.Inputs). */
+  /** Known names valid as a WRITE destination (no read-only Workflow.Inputs). */
   write: string[]
-  /** Namespaces + known names valid to READ in a value / condition / source. */
+  /** Known names valid to READ in a value / condition / source. */
   read: string[]
 }
 
-const VariableCandidatesContext = createContext<VariableCandidates>({
-  write: [...WRITE_NAMESPACES],
-  read: [...READ_NAMESPACES],
-})
+const VariableCandidatesContext = createContext<VariableCandidates>({ write: [], read: [] })
+
+/**
+ * Normalize a name into exactly ONE `Local.` prefix (UDR-0111 D7).
+ *
+ * Idempotent by construction: a value that already carries the prefix (however many
+ * times) yields a single one, and a bare name acquires one -- which is what the backend
+ * does on save / compile, so the candidate list mirrors that rule instead of
+ * re-inventing it per call site. A name in ANOTHER namespace is left alone, and an
+ * empty name yields '' (the caller drops it).
+ */
+function toLocalPath(value: unknown): string {
+  let s = str(value).trim()
+  if (!s) return ''
+  if (/^(Workflow|System)\./.test(s)) return s
+  while (s.startsWith('Local.')) s = s.slice('Local.'.length).trim()
+  return s ? `Local.${s}` : ''
+}
 
 /** Collect every `Local.*` name assigned anywhere in the document, recursively. */
 function collectLocalNames(actions: WorkflowAction[] | undefined, out: Set<string>): void {
   for (const a of actions ?? []) {
+    // UDR-0111 D7: ONE normalizer for both halves. Previously the general path admitted
+    // only already-prefixed names (so a bare `count` vanished) while the Foreach path
+    // prefixed unconditionally (so `Local.item` became `Local.Local.item`).
     const add = (v: unknown) => {
-      const s = str(v).trim()
+      const s = toLocalPath(v)
       if (s.startsWith('Local.')) out.add(s)
     }
     add(a.variable)
@@ -246,10 +265,7 @@ function collectLocalNames(actions: WorkflowAction[] | undefined, out: Set<strin
     for (const as of a.assignments ?? []) add(as.variable)
     for (const k of ['responseObject', 'messages', 'result'] as const) add(a.output?.[k])
     if (a.kind === 'Foreach') {
-      for (const n of [a.itemName, a.indexName]) {
-        const s = str(n).trim()
-        if (s) out.add(`Local.${s}`)
-      }
+      for (const n of [a.itemName, a.indexName]) add(n)
     }
     collectLocalNames(a.then, out)
     collectLocalNames(a.else, out)
@@ -259,7 +275,14 @@ function collectLocalNames(actions: WorkflowAction[] | undefined, out: Set<strin
   }
 }
 
-/** Derive the candidate lists from the document already in memory (no new endpoint). */
+/**
+ * Derive the candidate lists from the document already in memory (no new endpoint).
+ *
+ * Every candidate is a COMPLETE path that already exists in this document: a `Local.*`
+ * name assigned somewhere in the actions, or a name declared in `inputs:` / `outputs:`.
+ * No bare namespace stubs (v0.122.0) -- see VariableCandidates above. An empty document
+ * therefore offers nothing, which is correct: there is no variable to reuse yet.
+ */
 function buildVariableCandidates(doc: WorkflowDocument): VariableCandidates {
   const locals = new Set<string>()
   collectLocalNames(doc.actions, locals)
@@ -267,13 +290,15 @@ function buildVariableCandidates(doc: WorkflowDocument): VariableCandidates {
   const outputs = Object.keys(doc.outputs ?? {}).map((n) => `Workflow.Outputs.${n}`)
   const sorted = [...locals].sort()
   return {
-    write: [...WRITE_NAMESPACES, ...sorted, ...outputs],
-    read: [...READ_NAMESPACES, ...sorted, ...inputs, ...outputs],
+    write: [...sorted, ...outputs],
+    read: [...sorted, ...inputs, ...outputs],
   }
 }
 
 /**
- * A variable-path input with a namespace candidate list (CTR-0184 v3).
+ * A variable-path input suggesting the variables this document already has (CTR-0184 v3;
+ * namespace stubs dropped in v0.122.0). The placeholder teaches the syntax; the datalist
+ * offers only complete, existing paths, so picking one always yields a usable value.
  *
  * Purely an input aid: the backend remains the single validator (UDR-0101 D9), so a
  * value typed by hand is accepted here and judged server-side.
@@ -545,6 +570,14 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
   const [leaveConfirm, setLeaveConfirm] = useState(false)
   const [showIO, setShowIO] = useState(false)
   const [showMeta, setShowMeta] = useState(false)
+  // UDR-0111 D2: a create-mode editor ADOPTS the id its first successful save assigns,
+  // so every later save in the session is an UPDATE of that id. Without this, D1
+  // (save no longer closes) would let a second save create a second workflow silently.
+  // Held only in the component instance -- the manager unmounts the editor on close.
+  const [savedId, setSavedId] = useState<string | null>(null)
+  // UDR-0111 D1: a successful save is reported INLINE (the editor stays open, so the
+  // dismissal that used to signal success is gone). Auto-dismissed below.
+  const [saveNotice, setSaveNotice] = useState<string | null>(null)
 
   // ---- initial load: Prompt agent names + source for edit ----
   useEffect(() => {
@@ -555,6 +588,8 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
     setDirty(false)
     setRawMode(false)
     setSelected(null)
+    setSavedId(null)
+    setSaveNotice(null)
     ;(async () => {
       try {
         const agentsRes = await fetch('/api/agents').then((r) => (r.ok ? r.json() : { agents: [] }))
@@ -664,21 +699,37 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
   const variableCandidates = useMemo(() => buildVariableCandidates(doc), [doc])
 
   // ---- save / close ----
+  // The effective write target (UDR-0111 D2): the prop in edit mode, else the id
+  // adopted from the first successful save. `null` means "nothing exists yet".
+  const boundId = editId ?? savedId
+
   const handleSave = useCallback(async () => {
     setSaving(true)
     setError(null)
+    setSaveNotice(null)
     try {
       const body = rawMode ? { yaml: rawYaml } : { document: doc, name: doc.name }
-      const result = await api.save(body, editId)
+      const result = await api.save(body, boundId)
+      const id = result.id ?? boundId ?? undefined
       setDirty(false)
-      onSaved(result.id ?? editId ?? undefined)
-      onOpenChange(false)
+      // Adopt the identity BEFORE reporting, so a fast second click updates (D2).
+      if (id) setSavedId(id)
+      setSaveNotice('Saved. This editor stays open -- use Close when you are done.')
+      onSaved(id)
+      // UDR-0111 D1: no onOpenChange(false) here. Close is the only exit.
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save workflow')
     } finally {
       setSaving(false)
     }
-  }, [rawMode, rawYaml, doc, editId, api, onSaved, onOpenChange])
+  }, [rawMode, rawYaml, doc, boundId, api, onSaved])
+
+  // Auto-dismiss the inline save notice (UDR-0111 D1).
+  useEffect(() => {
+    if (!saveNotice) return
+    const t = setTimeout(() => setSaveNotice(null), 4000)
+    return () => clearTimeout(t)
+  }, [saveNotice])
 
   const requestClose = useCallback(() => {
     if (dirty) {
@@ -697,8 +748,11 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
     <VariableCandidatesContext.Provider value={variableCandidates}>
       <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : requestClose())}>
         <DialogContent className="flex h-screen w-screen max-w-none flex-col gap-0 rounded-none border-0 bg-background p-0 sm:rounded-none [&>button]:hidden">
+          {/* UDR-0111 D4: the VISIBLE title names the entity KIND (constant for the whole
+              session, which now spans create AND edit); the ACCESSIBLE name keeps the
+              operation, because a screen-reader user cannot see the primary button label. */}
           <DialogTitle className="sr-only">
-            {editId ? 'Edit declarative workflow' : 'Create declarative workflow'}
+            {editId ? 'Edit Declarative Workflow' : 'Create Declarative Workflow'}
           </DialogTitle>
           <DialogDescription className="sr-only">
             Compose a declarative workflow graph: sequential actions, control flow and agent invocations.
@@ -707,7 +761,7 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
             <div className="flex items-center gap-2">
               <WorkflowIcon className="h-5 w-5 text-primary" />
               <div>
-                <div className="text-sm font-semibold">{editId ? 'Edit workflow' : 'Create workflow'}</div>
+                <div className="text-sm font-semibold">Declarative Workflow</div>
                 <div className="text-[11px] text-muted-foreground">
                   A workflow orchestrates declarative Prompt agents. Credentials and sampling are resolved by
                   ChatWalaʻau.
@@ -724,7 +778,9 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
               </Button>
               <Button size="sm" onClick={handleSave} disabled={!canSave}>
                 {saving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
-                {editId ? 'Save' : 'Create'}
+                {/* UDR-0111 D3: the label states the write it will perform -- Create while
+                    nothing exists, Save once an id is bound (prop or adopted). */}
+                {boundId ? 'Save' : 'Create'}
               </Button>
             </div>
           </div>
@@ -914,6 +970,13 @@ export function DeclarativeWorkflowEditor({ open, onOpenChange, editId, onSaved 
 
           {error && (
             <div className="shrink-0 border-t bg-destructive/10 px-4 py-2 text-xs text-destructive">{error}</div>
+          )}
+          {/* UDR-0111 D1: inline save acknowledgement, in the header-error position (a
+              global toast would render behind this full-screen overlay). */}
+          {!error && saveNotice && (
+            <output className="block shrink-0 border-t bg-primary/10 px-4 py-2 text-xs text-primary">
+              {saveNotice}
+            </output>
           )}
 
           {leaveConfirm && (

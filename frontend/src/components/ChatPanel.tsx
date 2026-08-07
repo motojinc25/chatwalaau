@@ -4,7 +4,7 @@ import { BackgroundResponsesToggle } from '@/components/BackgroundResponsesToggl
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
-import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
+import { ACTIVE_AGENT_CHANGED_EVENT, OPEN_DECLARATIVE_MANAGER_EVENT } from '@/components/DeclarativeAgentManager'
 import { HelpPortal } from '@/components/HelpPortal'
 import { ImageOutputOptions } from '@/components/ImageOutputOptions'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
@@ -131,6 +131,25 @@ export function ChatPanel({
   // be misleading -- hide them for a custom Prompt agent exactly as for a workflow
   // (v0.112.2). The Built-in (CORE) agent keeps the controls, as before.
   const hideModelControls = Boolean(selectedWorkflowId) || (activeAgent.id !== '' && activeAgent.id !== 'core')
+
+  // UDR-0111 D5/D6: the run-target name is the entry point to its manager. A real
+  // button (keyboard-reachable) that dispatches the open request on the existing
+  // window seam -- the modal lives in the sidebar footer and takes no props.
+  const openDeclarativeManager = useCallback(() => {
+    window.dispatchEvent(new Event(OPEN_DECLARATIVE_MANAGER_EVENT))
+  }, [])
+  const runTargetName = selectedWorkflowId ? wfTarget?.name : activeAgent.name
+  const runTargetIndicator = (
+    <button
+      type="button"
+      onClick={openDeclarativeManager}
+      title="Open Declarative Agents & Workflows"
+      aria-label={`Run target: ${runTargetName ?? ''}. Open Declarative Agents & Workflows`}
+      className="flex items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary transition-colors hover:bg-primary/20">
+      {selectedWorkflowId ? <WorkflowIcon className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
+      {runTargetName}
+    </button>
+  )
 
   // Keep the run-target in sync with the modal (workflow selection + agent activation).
   useEffect(() => {
@@ -713,12 +732,7 @@ export function ChatPanel({
                 agent -- fix their own model + options, so the per-message model / options /
                 structured controls are hidden and the active run-target is named instead.
                 The Built-in agent keeps the controls. */}
-            {hideModelControls && (
-              <span className="flex items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary">
-                {selectedWorkflowId ? <WorkflowIcon className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
-                {selectedWorkflowId ? wfTarget?.name : activeAgent.name}
-              </span>
-            )}
+            {hideModelControls && runTargetIndicator}
             {!hideModelControls && (
               <>
                 <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
@@ -795,12 +809,7 @@ export function ChatPanel({
             <div className="mx-auto flex max-w-3xl items-center justify-end gap-1 px-4">
               {/* UDR-0101 D7 (extended v0.112.2): hidden under a workflow OR a custom
                   Prompt agent; the Built-in agent keeps the controls. */}
-              {hideModelControls && (
-                <span className="flex items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary">
-                  {selectedWorkflowId ? <WorkflowIcon className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
-                  {selectedWorkflowId ? wfTarget?.name : activeAgent.name}
-                </span>
-              )}
+              {hideModelControls && runTargetIndicator}
               {!hideModelControls && (
                 <>
                   <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />

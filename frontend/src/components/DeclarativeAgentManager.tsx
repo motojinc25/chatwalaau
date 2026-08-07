@@ -57,6 +57,12 @@ interface AgentEntry {
  * model selector / options panels re-read /api/model (CTR-0144, PRP-0094). */
 export const ACTIVE_AGENT_CHANGED_EVENT = 'chatwalaau:active-agent-changed'
 
+/** Dispatched on the window to REQUEST that the Declarative Agents & Workflows modal
+ * open (CTR-0144, PRP-0128, UDR-0111 D5/D6). The chat composer's run-target indicator
+ * (CTR-0185) is the only dispatcher today. Carries NO payload: opening must not stage a
+ * selection, which in this modal is a pending activation. */
+export const OPEN_DECLARATIVE_MANAGER_EVENT = 'chatwalaau:open-declarative-manager'
+
 const BUILTIN_LABEL = 'Built-in'
 const TOP_LEVEL_LABEL = 'Top level'
 
@@ -171,6 +177,19 @@ export function DeclarativeAgentManager() {
       setWfCanAuthor(s.available && s.writable)
     })()
   }, [fetchInventory, wfApi])
+
+  // UDR-0111 D5/D6: the chat composer's run-target name opens THIS modal. The manager
+  // owns its own trigger and mount point in the sidebar footer and takes no props, so
+  // the request travels on the same window seam ACTIVE_AGENT_CHANGED_EVENT already uses
+  // in the opposite direction -- no state lift through App. Open only: the event carries
+  // NO preselection, because a selected row here is a PENDING ACTIVATION with a discard
+  // guard, and an outside surface must not stage one on the operator's behalf.
+  useEffect(() => {
+    if (!available) return
+    const onOpenRequest = () => openModal()
+    window.addEventListener(OPEN_DECLARATIVE_MANAGER_EVENT, onOpenRequest)
+    return () => window.removeEventListener(OPEN_DECLARATIVE_MANAGER_EVENT, onOpenRequest)
+  }, [available, openModal])
 
   const handleOpenChange = useCallback(
     (next: boolean) => {
