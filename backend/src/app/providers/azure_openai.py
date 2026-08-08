@@ -15,6 +15,7 @@ from agent_framework_openai import OpenAIChatClient
 from app import models_catalog
 from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
+from app.providers.base import hosted_tool_withheld
 from app.providers.structured import (
     STRUCTURED_OUTPUT_NAME,
     effective_schema,
@@ -178,7 +179,11 @@ class AzureOpenAIProvider:
             options["text"] = {"verbosity": verbosity}
         return options
 
-    def web_search_tool(self, model: str) -> Any:
+    def web_search_tool(self, model: str) -> Any | None:
+        # PRP-0129 / UDR-0112 D1: an offering may declare that its deployment cannot
+        # serve the hosted tool. Undeclared is unchanged -- the tool is supplied.
+        if hosted_tool_withheld(model, "web_search"):
+            return None
         return openai_web_search_tool()
 
     def structured_output_support(self, model: str) -> dict[str, Any]:

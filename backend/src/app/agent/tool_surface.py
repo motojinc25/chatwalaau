@@ -57,6 +57,12 @@ REASON_ALLOWLIST = "allowlist"
 REASON_MCP_OVERRIDE = "mcp override"
 REASON_SKILLS_OVERRIDE = "skills override"
 REASON_NOT_CONNECTED = "not connected"
+# PRP-0129 / UDR-0112 D4 (amends the closed taxonomy of UDR-0102 D3): a hosted,
+# provider-supplied tool the active model's OFFERING declares its deployment cannot
+# serve. Distinct from `settings` (a ChatWalaʻau gate the operator can flip here) --
+# this one is a fact about the endpoint / workspace, so the operator is directed to
+# the model catalog rather than to the app settings.
+REASON_PROVIDER_CAPABILITY = "provider capability"
 
 # Per-tool detail for the ``settings`` reason, so the row names the gate the
 # operator has to flip rather than just asserting "unavailable".
@@ -217,6 +223,48 @@ async def _actual_skill_names(provider: Any) -> set[str] | None:
 # ---------------------------------------------------------------------------
 # Sections
 # ---------------------------------------------------------------------------
+def _agent_has_web_search(agent: Any) -> bool:
+    """True when the built agent carries a hosted web search tool.
+
+    Matched by SHAPE, not by name: a hosted web search is a plain dict on the
+    Anthropic lane and an SDK object on the OpenAI / Foundry lanes, so ``_tool_name``
+    (which reads ``.name`` / ``__name__``) cannot see all of them. ``is_web_search_tool``
+    is the same predicate the structured-output strip already uses.
+    """
+    from app.providers.structured import is_web_search_tool
+
+    options = getattr(agent, "default_options", None) or {}
+    try:
+        entries = options.get("tools") or []
+    except AttributeError:
+        return False
+    return any(is_web_search_tool(entry) for entry in entries)
+
+
+def _withheld_provider_rows(agent: Any, model: str) -> list[ToolRow]:
+    """PREDICTED rows for hosted tools the model's offering withholds (UDR-0112 D4).
+
+    Provider-supplied rows are otherwise derived from the BUILT agent alone, so a
+    withheld tool would leave no row and no reason -- an unexplained absence, which is
+    exactly what this report exists to prevent (UDR-0102). Withheld AND still present
+    is a genuine build-vs-configuration divergence and is reported as MISMATCH rather
+    than resolved in favour of either side (UDR-0102 D4).
+    """
+    from app.providers.base import hosted_tool_withheld
+
+    if not model or not hosted_tool_withheld(model, "web_search"):
+        return []
+    if _agent_has_web_search(agent):
+        return [
+            ToolRow(
+                "web_search",
+                STATUS_MISMATCH,
+                reason="withheld by the offering but present on the built agent",
+            )
+        ]
+    return [ToolRow("web_search", STATUS_EXCLUDED, reason=f"{REASON_PROVIDER_CAPABILITY} ({model})")]
+
+
 def _function_rows(agent: Any, allow: ResolvedAllowlist | None) -> tuple[list[ToolRow], list[ToolRow]]:
     """Build the built-in function rows and the provider-supplied rows."""
     actual = _actual_function_tools(agent)
@@ -442,6 +490,7 @@ async def describe_tool_surface(
         notes: list[str] = []
         report = ToolSurfaceReport(model=model)
         report.functions, report.provider_supplied = _function_rows(agent, allow)
+        report.provider_supplied.extend(_withheld_provider_rows(agent, model))
         report.mcp = _mcp_rows(agent, allow)
         report.skills = await _skill_rows(agent, allow, notes)
         report.notes = notes
@@ -464,6 +513,7 @@ __all__ = [
     "REASON_ALLOWLIST",
     "REASON_MCP_OVERRIDE",
     "REASON_NOT_CONNECTED",
+    "REASON_PROVIDER_CAPABILITY",
     "REASON_SETTINGS",
     "REASON_SKILLS_OVERRIDE",
     "STATUS_ACTIVE",

@@ -40,6 +40,7 @@ from typing import Any
 
 from app import models_catalog
 from app.core.config import settings
+from app.providers.base import hosted_tool_withheld
 from app.providers.structured import effective_schema, forced_tool_use_fragment, strip_web_search
 
 logger = logging.getLogger(__name__)
@@ -369,7 +370,17 @@ class AnthropicProvider:
         provider returns the shape its own connector expects, and the registry
         appends whichever non-None tool the active model's provider supplies.
         This supersedes the original UDR-0045 D5 deferral for Anthropic.
+
+        PRP-0129 / UDR-0112 D1/D3: the tool is Anthropic's SERVER tool, and on the
+        ``hosting: foundry`` lane it is the workspace -- not the provider -- that
+        decides whether server tools exist. An unenabled workspace answers
+        "web search not supported in your workspace" (service-side; the string is in
+        neither the SDK nor MAF). Since UDR-0094 put both hostings in this one class,
+        the answer cannot be a class constant, so the OFFERING declares it. Absent
+        declaration keeps the pre-PRP-0129 behavior exactly.
         """
+        if hosted_tool_withheld(model, "web_search"):
+            return None
         return anthropic_web_search_tool()
 
     def structured_output_support(self, model: str) -> dict[str, Any]:

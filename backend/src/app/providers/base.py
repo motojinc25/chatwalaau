@@ -16,7 +16,13 @@ No new in-house seam is introduced: the returned chat client is a MAF
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
+
+# One INFO line per (offering, capability) per process (UDR-0112 D5).
+_logged_withheld: set[str] = set()
 
 
 @runtime_checkable
@@ -77,7 +83,19 @@ class Provider(Protocol):
         ...
 
     def web_search_tool(self, model: str) -> Any | None:
-        """Provider-supplied hosted web search tool, or None when unsupplied."""
+        """Provider-supplied hosted web search tool, or None when unsupplied.
+
+        Returning None is the ONE gate for hosted web search (UDR-0112 D3): the
+        caller (``agui.agent_factory``) uses this single value both to attach the
+        tool AND to append ``WEB_SEARCH_INSTRUCTION`` to the system prompt. A tool
+        removed anywhere else would leave the agent instructed to search and cite
+        sources while holding no search tool.
+
+        An implementation that supplies a hosted tool MUST first consult
+        :func:`hosted_tool_withheld`: availability can depend on the DEPLOYMENT (its
+        endpoint / workspace), not only on the provider, and one provider class may
+        serve several (UDR-0112 D1).
+        """
         ...
 
     def structured_output_support(self, model: str) -> dict[str, Any]:
@@ -111,3 +129,51 @@ class Provider(Protocol):
         or oversized schema resolves to the generic object mode (UDR-0058 D2/D4).
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# Hosted-tool capability gate (PRP-0129, UDR-0112)
+# ---------------------------------------------------------------------------
+def hosted_tool_withheld(model: str, capability: str) -> bool:
+    """True when ``model``'s offering EXPLICITLY withholds hosted tool ``capability``.
+
+    Hosted-tool availability is a property of the deployment an offering names, not
+    of its provider (UDR-0112 D1): one provider class can serve two API surfaces
+    whose hosted-tool sets differ -- ``anthropic`` direct vs. ``anthropic`` on
+    Foundry, where the workspace must enable Anthropic's server tools.
+
+    Only an explicit ``false`` withholds. An absent catalog, an unknown model, an
+    offering without a ``capabilities`` block, and an undeclared key ALL return
+    False, so a deployment that declares nothing behaves exactly as it did before
+    this gate existed (UDR-0112 D2). Never raises: a capability lookup must not be
+    able to break agent construction.
+    """
+    try:
+        from app import models_catalog
+
+        offering = models_catalog.offering_for(model)
+    except Exception:  # pragma: no cover - defensive; catalog is optional
+        return False
+    if offering is None or offering.capability(capability) is not False:
+        return False
+    _log_withheld(offering.id, capability)
+    return True
+
+
+def _log_withheld(offering_id: str, capability: str) -> None:
+    """Announce a withheld hosted tool ONCE per offering+capability (UDR-0112 D5).
+
+    The logging lives here rather than at each call site so a provider cannot gate a
+    tool without announcing it. A capability that silently reduces function is
+    otherwise indistinguishable from a defect: the operator sees a model that stopped
+    searching and has nothing to read. Mirrors the ``_log_lane`` discipline (UDR-0034).
+    """
+    key = f"{offering_id}:{capability}"
+    if key in _logged_withheld:
+        return
+    _logged_withheld.add(key)
+    logger.info(
+        "Hosted tool '%s' is withheld for offering '%s' by its catalog capabilities declaration",
+        capability,
+        offering_id,
+    )

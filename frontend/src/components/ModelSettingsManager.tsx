@@ -70,6 +70,17 @@ interface ImageDefaults {
   background?: string
 }
 
+/**
+ * Hosted-tool capabilities of the DEPLOYMENT this offering names (PRP-0129,
+ * UDR-0112 D1/D2). Not a user preference and not a provider trait: whether a hosted
+ * tool can be served depends on the endpoint and, for a cloud lane, the workspace
+ * behind it. An UNSET field means "unchanged" -- the provider supplies whatever
+ * hosted tool it has; only an explicit `false` withholds one.
+ */
+interface OfferingCapabilities {
+  web_search?: boolean
+}
+
 interface Offering {
   id: string
   provider: Provider
@@ -84,6 +95,7 @@ interface Offering {
   default?: boolean
   api_key_env?: string
   image_defaults?: ImageDefaults
+  capabilities?: OfferingCapabilities
   metadata?: Record<string, unknown>
 }
 
@@ -137,16 +149,7 @@ const ALL_OPERATIONS: Operation[] = ['chat', 'embeddings', 'image']
 // its validation from. They had drifted -- this screen still offered webp / transparent
 // and lacked the 2K / 4K sizes, so it accepted defaults the image tools reject.
 // An invariant test asserts all three lists stay identical.
-const IMAGE_SIZES = [
-  'auto',
-  '1024x1024',
-  '1536x1024',
-  '1024x1536',
-  '2048x2048',
-  '2048x1152',
-  '3840x2160',
-  '2160x3840',
-]
+const IMAGE_SIZES = ['auto', '1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '3840x2160', '2160x3840']
 const IMAGE_QUALITIES = ['auto', 'low', 'medium', 'high']
 const IMAGE_FORMATS = ['png', 'jpeg']
 const IMAGE_BACKGROUNDS = ['auto', 'opaque']
@@ -186,6 +189,15 @@ const AUTH_HELP =
 const FAMILY_HELP =
   "Reasoning / option catalog override. 'openai-reasoning' exposes reasoning-effort options; 'anthropic-adaptive' exposes adaptive thinking; 'bare' exposes no extra options. Leave as Auto to infer from the provider/model."
 const HOSTING_HELP = "Anthropic only. 'direct' = Anthropic API; 'foundry' = served through Azure AI Foundry."
+
+const WEB_SEARCH_CAPABILITY_HELP =
+  'Whether THIS deployment can serve the provider-supplied web search tool. Leave on Default ' +
+  'unless a request fails because of it. Set it to "Not available" when the endpoint rejects ' +
+  'web search -- e.g. a Claude offering with hosting=foundry whose Foundry workspace has not ' +
+  'enabled Anthropic server tools, which answers "web search not supported in your workspace". ' +
+  'Withholding also removes the web-search guidance from the system prompt, so the agent will ' +
+  'not claim it can search. Not available on this deployment? A Claude model registered under ' +
+  'the native foundry provider uses the platform web search instead and is unaffected.'
 // The literal placeholder token is assembled from two quoted pieces so that the
 // sequence `${` never appears in any single string -- neither in the source (which
 // would trip biome's noTemplateCurlyInString) NOR in the minified output. A prior
@@ -229,6 +241,11 @@ function toWireOfferings(offerings: EditableOffering[]): Offering[] {
     if (ops.includes('image')) {
       const d = cleanImageDefaults(o.image_defaults)
       if (d) out.image_defaults = d
+    }
+    // UDR-0112 D2: "Default" writes NOTHING, so an offering the operator never
+    // touched serializes exactly as before this field existed.
+    if (typeof o.capabilities?.web_search === 'boolean') {
+      out.capabilities = { web_search: o.capabilities.web_search }
     }
     if (o.metadata) out.metadata = o.metadata
     return out
@@ -359,6 +376,10 @@ function OfferingCard({
   const ops = opsOf(offering)
   const isAnthropic = offering.provider === 'anthropic'
   const isImage = ops.includes('image')
+  // '' = undeclared (provider decides). Never coerced to a boolean: the three states
+  // are meaningfully different (UDR-0112 D2).
+  const webSearchCapability =
+    typeof offering.capabilities?.web_search === 'boolean' ? String(offering.capabilities.web_search) : ''
   const imgDefaults = offering.image_defaults ?? {}
   const setImgDefault = (patch: Partial<ImageDefaults>) =>
     onChange(index, { image_defaults: { ...imgDefaults, ...patch } })
@@ -583,6 +604,28 @@ function OfferingCard({
               ))}
             </div>
           </Field>
+
+          {/* Hosted web search (PRP-0129, UDR-0112 D6). Chat offerings only. Three
+              states, and "Default" writes NOTHING -- an untouched offering keeps its
+              exact previous serialization. */}
+          {isChat && (
+            <Field label="Hosted web search" hint={WEB_SEARCH_CAPABILITY_HELP}>
+              <select
+                className={CONTROL_CLASS}
+                value={webSearchCapability}
+                disabled={readOnly}
+                onChange={(e) => {
+                  const v = e.target.value
+                  onChange(index, {
+                    capabilities: v === '' ? undefined : { ...offering.capabilities, web_search: v === 'true' },
+                  })
+                }}>
+                <option value="">Default (provider decides)</option>
+                <option value="true">Available</option>
+                <option value="false">Not available on this deployment</option>
+              </select>
+            </Field>
+          )}
         </div>
       )}
 

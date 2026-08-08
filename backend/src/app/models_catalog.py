@@ -64,6 +64,24 @@ VALID_OPERATIONS = frozenset({"chat", "embeddings", "image"})
 VALID_FAMILIES = frozenset({"openai-reasoning", "anthropic-adaptive", "bare"})
 VALID_HOSTINGS = frozenset({"direct", "foundry"})
 
+# Hosted-tool capabilities an offering may DECLARE (PRP-0129, UDR-0112 D1/D2).
+#
+# These describe the DEPLOYMENT an offering names -- its endpoint and, for a cloud
+# lane, the workspace behind it -- not the provider. The motivating case: an
+# ``anthropic`` offering with ``hosting: foundry`` speaks the Anthropic Messages API
+# through Foundry, where Anthropic's server tools must be enabled on the workspace;
+# an unenabled workspace answers the web_search tool with
+# "web search not supported in your workspace". The DIRECT lane of the same provider
+# has no such restriction, so the answer cannot be a provider constant (UDR-0094 put
+# both lanes in one provider class).
+#
+# CLOSED set: an unknown key is a typo, and a typo in a gate silently keeps the tool
+# the operator meant to withhold. Undeclared (absent) always means "provider
+# decides", i.e. the pre-PRP-0129 behavior -- adding a key here must never change a
+# deployment that has not declared it. A new key is earned by MEASUREMENT against a
+# real deployment, never added defensively (UDR-0112 D7).
+CAPABILITY_KEYS = frozenset({"web_search"})
+
 
 # ---- Task-model role registry (PRP-0115, UDR-0096) ------------------------
 # The catalog's optional top-level ``roles`` block assigns a chat OFFERING to a
@@ -208,6 +226,13 @@ class Offering:
     # on an image offering; None on every other offering. Keys are a subset of
     # {size, quality, format, background, compression}.
     image_defaults: dict[str, Any] | None = None
+    # Optional hosted-tool capability declarations (PRP-0129, UDR-0112 D1/D2).
+    # Hosted-tool availability is a property of the DEPLOYMENT (endpoint + workspace)
+    # this offering names, not of its provider: one provider class can serve two API
+    # surfaces whose hosted-tool sets differ (anthropic direct vs. anthropic on
+    # Foundry, UDR-0094). An ABSENT block means UNCHANGED -- the provider supplies
+    # whatever hosted tool it has. Only an explicit ``false`` withholds one.
+    capabilities: dict[str, bool] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -221,6 +246,17 @@ class Offering:
     @property
     def is_image(self) -> bool:
         return "image" in self.operations
+
+    def capability(self, name: str) -> bool | None:
+        """Declared value of hosted-tool capability ``name``, or None when undeclared.
+
+        None is the ABSENT case and MUST be read as "unchanged / provider decides"
+        (UDR-0112 D2), never as False. Callers gate on ``is False`` so that an
+        undeclared capability keeps the pre-PRP-0129 behavior exactly.
+        """
+        if not self.capabilities:
+            return None
+        return self.capabilities.get(name)
 
     def api_key(self) -> str | None:
         """Resolve the referenced API key from the environment, or None."""
@@ -340,6 +376,34 @@ def _require_str(entry: dict[str, Any], key: str, offering_id: str) -> str:
     if not isinstance(val, str) or not val.strip():
         raise CatalogError(f"offering '{offering_id}': '{key}' is required and must be a non-empty string")
     return val.strip()
+
+
+def _parse_capabilities(raw: Any, offering_id: str) -> dict[str, bool] | None:
+    """Validate an offering's optional ``capabilities`` block (PRP-0129, UDR-0112 D2).
+
+    Returns a normalized dict (only the provided keys), or None when absent. The keys
+    are CLOSED -- an unknown one is a typo that would otherwise silently do nothing,
+    which for a capability gate means silently keeping a tool the operator meant to
+    withhold. Raises :class:`CatalogError` on a non-object block, an unknown key, or a
+    non-boolean value.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise CatalogError(f"offering '{offering_id}': 'capabilities' must be an object")
+    out: dict[str, bool] = {}
+    for key, value in raw.items():
+        if key not in CAPABILITY_KEYS:
+            raise CatalogError(
+                f"offering '{offering_id}': unknown capabilities key {key!r} "
+                f"(expected one of {sorted(CAPABILITY_KEYS)})"
+            )
+        if value is None:
+            continue
+        if not isinstance(value, bool):
+            raise CatalogError(f"offering '{offering_id}': capabilities.{key} must be a boolean")
+        out[key] = value
+    return out or None
 
 
 def _parse_image_defaults(raw: Any, offering_id: str, operations: list[str]) -> dict[str, Any] | None:
@@ -462,6 +526,7 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
     api_version = entry.get("api_version")
 
     image_defaults = _parse_image_defaults(entry.get("image_defaults"), offering_id, operations)
+    capabilities = _parse_capabilities(entry.get("capabilities"), offering_id)
 
     return Offering(
         id=offering_id,
@@ -477,6 +542,7 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
         default=default,
         api_key_env=(api_key_env or None),
         image_defaults=image_defaults,
+        capabilities=capabilities,
         metadata=entry.get("metadata", {}) if isinstance(entry.get("metadata"), dict) else {},
     )
 
@@ -861,6 +927,7 @@ _OFFERING_KEY_ORDER = (
     "api_key_env",
     "auth_profile",
     "image_defaults",
+    "capabilities",
     "metadata",
 )
 
@@ -945,6 +1012,11 @@ def detect_env(names: list[str]) -> dict[str, bool]:
     return {name: bool((os.environ.get(name) or "").strip()) for name in names}
 
 
+# Optional block-valued keys that are DROPPED when empty: an empty object carries no
+# information and only adds noise to the operator's file.
+_EMPTY_DROPPED_KEYS = ("metadata", "image_defaults", "capabilities")
+
+
 def _normalize_offering(entry: dict[str, Any]) -> dict[str, Any]:
     """Return an offering dict in canonical key order, dropping None / empty values."""
     out: dict[str, Any] = {}
@@ -954,13 +1026,21 @@ def _normalize_offering(entry: dict[str, Any]) -> dict[str, Any]:
         val = entry[key]
         if val is None:
             continue
-        if key in ("metadata", "image_defaults") and isinstance(val, dict) and not val:
+        if key in _EMPTY_DROPPED_KEYS and isinstance(val, dict) and not val:
             continue
         out[key] = val
     # Preserve any unknown-but-present keys (forward-compat) after the known ones.
+    #
+    # The empty-block skip above must be honored here too. Without the second
+    # condition this loop re-adds exactly what the first loop just dropped -- the key
+    # is missing from `out`, and `{}` is not None -- so `image_defaults: {}` and
+    # `metadata: {}` were written back out despite the documented intent (PRP-0129).
     for key, val in entry.items():
-        if key not in out and val is not None:
-            out[key] = val
+        if key in out or val is None:
+            continue
+        if key in _EMPTY_DROPPED_KEYS and isinstance(val, dict) and not val:
+            continue
+        out[key] = val
     return out
 
 

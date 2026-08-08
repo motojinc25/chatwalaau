@@ -12,9 +12,20 @@ reused 1:1 and ``AZURE_OPENAI_API_KEY`` never applies to this lane
 (UDR-0085 D4).
 
 NOTE: this is the NATIVE Foundry provider (``FOUNDRY_*`` namespace). It is
-unrelated to the ``anthropic`` provider's ``ANTHROPIC_HOSTING=foundry`` lane
-(Claude models hosted on Foundry, ``ANTHROPIC_FOUNDRY_*`` keys); Claude
-deployments are best served through that lane, not this provider.
+unrelated to the ``anthropic`` provider's ``hosting: foundry`` lane (Claude models
+hosted on Foundry); Claude deployments are generally best served through that lane,
+not this provider -- with ONE documented exception (PRP-0129, UDR-0112).
+
+WEB SEARCH DIFFERS BETWEEN THE TWO CLAUDE-ON-FOUNDRY ROUTES. The ``anthropic``
+lane speaks the Anthropic Messages API, so its web search is Anthropic's SERVER
+tool (``web_search_20250305``) and the Foundry workspace must have server tools
+enabled; an unenabled workspace answers "web search not supported in your
+workspace". THIS provider speaks the Foundry Responses project endpoint, whose
+hosted ``web_search`` is platform-supplied (UDR-0085 D8, verified live
+2026-07-05) and needs no such enablement. So a Claude deployment that must search
+may be registered here instead -- at the cost of the generation-option catalog:
+option detection below is by DEPLOYMENT NAME, so a non ``gpt-5*`` / ``o<digit>*``
+name (a Claude one) advertises NO generation options.
 
 Model-family-aware generation options (UDR-0085 D5 as amended by A1): the
 Foundry catalog spans many model families, and the OpenAI generation controls
@@ -62,6 +73,7 @@ from app import models_catalog
 from app.azure_credential import get_credential
 from app.core.config import settings
 from app.providers.azure_openai import AzureOpenAIProvider, _StructuredOutputMixin
+from app.providers.base import hosted_tool_withheld
 
 NAME = "foundry"
 
@@ -189,6 +201,11 @@ class FoundryProvider(AzureOpenAIProvider):
         # Deep-convert to plain JSON values: the wire shape is identical (the
         # azure-openai lane ships the same shape as a plain dict), and
         # is_web_search_tool() keeps matching via its dict branch.
+        #
+        # PRP-0129 / UDR-0112 D1: an offering may declare that its project /
+        # deployment cannot serve the hosted tool. Undeclared is unchanged.
+        if hosted_tool_withheld(model, "web_search"):
+            return None
         return _to_plain_json(
             FoundryChatClient.get_web_search_tool(
                 user_location={"type": "approximate", "country": settings.web_search_country},

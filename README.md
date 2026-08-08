@@ -61,6 +61,11 @@ Each offering self-describes its provider, `model_ref` (the connector's real
 model/deployment name), optional `endpoint` / `base_url` / `hosting` / `context_window`,
 and references any API key by env-var NAME via `api_key_env` (secrets stay in `.env`). An
 azure-openai offering may omit `endpoint`/`api_key_env` to reuse the shared Azure lanes above.
+An offering may also declare what its **deployment** can serve via an optional
+`capabilities` block (today `web_search`) -- use it when an endpoint rejects the hosted
+web search tool, e.g. a Claude offering with `hosting: foundry` whose Foundry workspace has
+not enabled Anthropic server tools ("web search not supported in your workspace"). Omit it
+and nothing changes; the same setting is editable in the Model Settings screen.
 
 Then start the server:
 
