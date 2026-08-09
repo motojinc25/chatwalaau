@@ -80,7 +80,19 @@ VALID_HOSTINGS = frozenset({"direct", "foundry"})
 # decides", i.e. the pre-PRP-0129 behavior -- adding a key here must never change a
 # deployment that has not declared it. A new key is earned by MEASUREMENT against a
 # real deployment, never added defensively (UDR-0112 D7).
-CAPABILITY_KEYS = frozenset({"web_search"})
+# v0.124.0 (PRP-0130, UDR-0112 D9/D10): `native_structured_output` joins the set on
+# the strength of Anthropic's published Foundry restriction -- a deployment created
+# with the "Hosted on Azure" hosting option supports neither server-side tools nor
+# structured outputs, and such requests return 400 BY DESIGN. A documented, by-design
+# rejection is evidence, so D7's measurement requirement is met (D9).
+#
+# Note the asymmetry the two keys encode (D10). `web_search: false` WITHHOLDS a tool
+# that has no substitute. `native_structured_output: false` DEGRADES: the provider
+# reports native=False and the request switches to the forced-tool-use fallback
+# (UDR-0058 D2), so Structured Output keeps working and still returns conforming
+# JSON. The key is named for the NATIVE path precisely so its `false` does not read
+# as "structured output off".
+CAPABILITY_KEYS = frozenset({"web_search", "native_structured_output"})
 
 
 # ---- Task-model role registry (PRP-0115, UDR-0096) ------------------------

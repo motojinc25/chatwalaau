@@ -79,6 +79,12 @@ interface ImageDefaults {
  */
 interface OfferingCapabilities {
   web_search?: boolean
+  /**
+   * `false` does NOT turn Structured Output off (PRP-0130, UDR-0112 D10): it selects
+   * the forced-tool-use fallback, which still returns schema-conforming JSON. Named
+   * for the NATIVE path so the declaration does not overstate its own effect.
+   */
+  native_structured_output?: boolean
 }
 
 interface Offering {
@@ -190,6 +196,18 @@ const FAMILY_HELP =
   "Reasoning / option catalog override. 'openai-reasoning' exposes reasoning-effort options; 'anthropic-adaptive' exposes adaptive thinking; 'bare' exposes no extra options. Leave as Auto to infer from the provider/model."
 const HOSTING_HELP = "Anthropic only. 'direct' = Anthropic API; 'foundry' = served through Azure AI Foundry."
 
+/** Keep in step with the backend's CAPABILITY_KEYS (an invariant test asserts it). */
+const CAPABILITY_KEYS = ['web_search', 'native_structured_output'] as const
+
+const NATIVE_STRUCTURED_OUTPUT_HELP =
+  "Whether THIS deployment supports the provider's native structured-output request " +
+  '(Anthropic output_config.format / OpenAI text.format). Leave on Default unless a ' +
+  'request fails because of it -- e.g. a Claude deployment created in Microsoft Foundry ' +
+  'with the "Hosted on Azure" hosting option, which supports no structured outputs. ' +
+  'Setting "Not available" REMOVES Structured Output for this model -- the composer ' +
+  'control disappears. There is no fallback: the one this project shipped was never ' +
+  'compatible with the agent framework and was removed (PRP-0131).'
+
 const WEB_SEARCH_CAPABILITY_HELP =
   'Whether THIS deployment can serve the provider-supplied web search tool. Leave on Default ' +
   'unless a request fails because of it. Set it to "Not available" when the endpoint rejects ' +
@@ -243,10 +261,14 @@ function toWireOfferings(offerings: EditableOffering[]): Offering[] {
       if (d) out.image_defaults = d
     }
     // UDR-0112 D2: "Default" writes NOTHING, so an offering the operator never
-    // touched serializes exactly as before this field existed.
-    if (typeof o.capabilities?.web_search === 'boolean') {
-      out.capabilities = { web_search: o.capabilities.web_search }
+    // touched serializes exactly as before these fields existed. Only explicitly
+    // chosen booleans are emitted, one key at a time.
+    const caps: OfferingCapabilities = {}
+    for (const key of CAPABILITY_KEYS) {
+      const v = o.capabilities?.[key]
+      if (typeof v === 'boolean') caps[key] = v
     }
+    if (Object.keys(caps).length) out.capabilities = caps
     if (o.metadata) out.metadata = o.metadata
     return out
   })
@@ -378,8 +400,16 @@ function OfferingCard({
   const isImage = ops.includes('image')
   // '' = undeclared (provider decides). Never coerced to a boolean: the three states
   // are meaningfully different (UDR-0112 D2).
-  const webSearchCapability =
-    typeof offering.capabilities?.web_search === 'boolean' ? String(offering.capabilities.web_search) : ''
+  const capabilityValue = (key: keyof OfferingCapabilities) =>
+    typeof offering.capabilities?.[key] === 'boolean' ? String(offering.capabilities[key]) : ''
+  // Returning to "Default" clears ONLY that key: with more than one capability,
+  // dropping the whole block would silently reset the others too.
+  const setCapability = (key: keyof OfferingCapabilities, raw: string) => {
+    const next: OfferingCapabilities = { ...offering.capabilities }
+    if (raw === '') delete next[key]
+    else next[key] = raw === 'true'
+    onChange(index, { capabilities: Object.keys(next).length ? next : undefined })
+  }
   const imgDefaults = offering.image_defaults ?? {}
   const setImgDefault = (patch: Partial<ImageDefaults>) =>
     onChange(index, { image_defaults: { ...imgDefaults, ...patch } })
@@ -605,26 +635,35 @@ function OfferingCard({
             </div>
           </Field>
 
-          {/* Hosted web search (PRP-0129, UDR-0112 D6). Chat offerings only. Three
-              states, and "Default" writes NOTHING -- an untouched offering keeps its
-              exact previous serialization. */}
+          {/* Deployment capabilities (PRP-0129 / PRP-0130, UDR-0112 D6). Chat
+              offerings only. Three states each, and "Default" writes NOTHING -- an
+              untouched offering keeps its exact previous serialization. */}
           {isChat && (
-            <Field label="Hosted web search" hint={WEB_SEARCH_CAPABILITY_HELP}>
-              <select
-                className={CONTROL_CLASS}
-                value={webSearchCapability}
-                disabled={readOnly}
-                onChange={(e) => {
-                  const v = e.target.value
-                  onChange(index, {
-                    capabilities: v === '' ? undefined : { ...offering.capabilities, web_search: v === 'true' },
-                  })
-                }}>
-                <option value="">Default (provider decides)</option>
-                <option value="true">Available</option>
-                <option value="false">Not available on this deployment</option>
-              </select>
-            </Field>
+            <>
+              <Field label="Hosted web search" hint={WEB_SEARCH_CAPABILITY_HELP}>
+                <select
+                  className={CONTROL_CLASS}
+                  value={capabilityValue('web_search')}
+                  disabled={readOnly}
+                  onChange={(e) => setCapability('web_search', e.target.value)}>
+                  <option value="">Default (provider decides)</option>
+                  <option value="true">Available</option>
+                  <option value="false">Not available on this deployment</option>
+                </select>
+              </Field>
+
+              <Field label="Native structured output" hint={NATIVE_STRUCTURED_OUTPUT_HELP}>
+                <select
+                  className={CONTROL_CLASS}
+                  value={capabilityValue('native_structured_output')}
+                  disabled={readOnly}
+                  onChange={(e) => setCapability('native_structured_output', e.target.value)}>
+                  <option value="">Default (provider decides)</option>
+                  <option value="true">Available</option>
+                  <option value="false">Not available (turns Structured Output off)</option>
+                </select>
+              </Field>
+            </>
           )}
         </div>
       )}

@@ -252,6 +252,34 @@ _MSG_INVALID_SCHEMA_HELP = (
 )
 _MSG_GENERIC = "An internal error occurred during agent execution."
 
+# PRP-0130 / UDR-0112 D8. A deployment can refuse a FEATURE the request used, which
+# is neither a bug nor anything the user can change from the chat. The motivating
+# case: a Claude deployment created in Microsoft Foundry with the "Hosted on Azure"
+# hosting option supports neither server-side tools (hosted web search) nor native
+# structured outputs, and such requests are rejected 400 BY DESIGN. Before this
+# message the turn failed with the generic text, so the operator had to read vendor
+# documentation to discover the cause -- which is the failure this classification
+# exists to prevent.
+_MSG_DEPLOYMENT_FEATURE = (
+    "This model deployment does not support a feature this turn used. Claude "
+    'deployments created in Microsoft Foundry with the "Hosted on Azure" hosting '
+    "option do not support server-side tools (hosted web search) or native structured "
+    "outputs; those requests are rejected by design. Either recreate the deployment "
+    'with the "Hosted on Anthropic" hosting option and point the offering\'s '
+    "model_ref at the new deployment name, or turn the affected capability off for "
+    "this offering in Model Settings (Hosted web search / Native structured output)."
+)
+
+# Markers that identify a DEPLOYMENT-level feature refusal. Deliberately narrow: a
+# miss degrades to the previous generic message, whereas a false positive would
+# mislabel an unrelated 400 as a configuration problem and suppress its traceback.
+_DEPLOYMENT_FEATURE_MARKERS = (
+    "not supported in your workspace",
+    "not supported for this deployment",
+    "hosted on azure",
+)
+
+
 # Markers that identify an out-of-credits / quota-exhausted condition (as
 # opposed to a transient 429). Anthropic: "Your credit balance is too low ...
 # Plans & Billing ... purchase credits". OpenAI: code "insufficient_quota" /
@@ -285,6 +313,26 @@ def _is_billing_or_quota_error(exc: BaseException) -> bool:
             return True
         text = str(cur).lower()
         if any(marker in text for marker in _BILLING_MARKERS):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _is_deployment_feature_unsupported(exc: BaseException) -> bool:
+    """Detect a DEPLOYMENT-level feature refusal anywhere in the chain (UDR-0112 D8).
+
+    A deployment can support the model but not a feature the request used. Anthropic
+    on Microsoft Foundry is the known case: a "Hosted on Azure" deployment rejects
+    server-side tools and structured outputs with a 400 by design. Retrying will not
+    help and no chat-surface control can fix it -- the remedy is the deployment or the
+    offering's capability declaration, so the message must say so.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        text = str(cur).lower()
+        if any(marker in text for marker in _DEPLOYMENT_FEATURE_MARKERS):
             return True
         cur = cur.__cause__ or cur.__context__
     return False
@@ -381,6 +429,15 @@ def _is_invalid_schema_error(exc: BaseException) -> bool:
         text = str(cur).lower()
         if "invalid_json_schema" in text or "invalid schema for response_format" in text:
             return True
+        # PRP-0131: the ANTHROPIC shape. It reports `invalid_request_error` with the
+        # offending path in the message ("output_config.format.schema: For 'object'
+        # type, 'additionalProperties: true' is not supported"), so none of the
+        # OpenAI-shaped matches above fire and the turn fell through to the generic
+        # message -- the third Anthropic path to do so. The existing help text (strict
+        # mode needs `additionalProperties: false` and a complete `required`) is
+        # exactly Anthropic's rule, so it is the right advice for both providers.
+        if "output_config.format.schema" in text or "'additionalproperties' to false" in text:
+            return True
         cur = cur.__cause__ or cur.__context__
     return False
 
@@ -406,6 +463,10 @@ def _classify_run_error(exc: BaseException, *, continuation_token: bool) -> tupl
         provider_reason = _provider_error_message(exc)
         detail = f": {provider_reason}" if provider_reason else "."
         return f"{_MSG_INVALID_SCHEMA_PREFIX}{detail} {_MSG_INVALID_SCHEMA_HELP}", True
+    # After the schema check (both are 400s and a schema rejection is the more
+    # specific diagnosis), before context length (PRP-0130, UDR-0112 D8).
+    if _is_deployment_feature_unsupported(exc):
+        return _MSG_DEPLOYMENT_FEATURE, True
     if _is_context_length_error(exc):
         return _MSG_CONTEXT_LENGTH, True
     if _is_content_filter_error(exc):
@@ -952,6 +1013,11 @@ async def _stream_with_reasoning(
             output_schema = spec.structured_output.get("schema")
             output_format = spec.structured_output.get("mode", "json_schema")
             structured_active = output_format != "none"
+
+        # PRP-0131 / UDR-0058 D9 removed the PRP-0131 pre-run guard: a request with no
+        # schema is no longer unsatisfiable, because each provider now supplies its own
+        # DEFAULT output schema (open where it can express one, a valid closed object
+        # where it cannot). There is nothing left to refuse.
 
         resolved_reasoning = resolved_options.get("effort", providers.resolve_effort(effective_model, None))
 

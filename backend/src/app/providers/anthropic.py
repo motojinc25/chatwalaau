@@ -41,7 +41,11 @@ from typing import Any
 from app import models_catalog
 from app.core.config import settings
 from app.providers.base import hosted_tool_withheld
-from app.providers.structured import effective_schema, forced_tool_use_fragment, strip_web_search
+from app.providers.structured import (
+    CLOSED_ANSWER_SCHEMA,
+    effective_schema,
+    strip_web_search,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -386,22 +390,67 @@ class AnthropicProvider:
     def structured_output_support(self, model: str) -> dict[str, Any]:
         # Structured output (PRP-0082, UDR-0058 D1/D6). Anthropic Opus 4.x supports
         # native structured output via `output_config.format` (the modern path that
-        # supersedes the deprecated `output_format` parameter). forced_tool_use is
-        # the declared universal fallback for a hypothetical non-native model
-        # (UDR-0058 D2). The exact connector passthrough is verified at integration
+        # supersedes the deprecated `output_format` parameter). There is NO fallback
+        # for a non-native model (PRP-0131, UDR-0058 D10): `supported` follows
+        # `native`. The exact connector passthrough is verified at integration
         # (see PRP-0082 Risk); if unavailable on the pinned connector, set
         # native=False here and the forced-tool-use branch engages with no other
         # change.
-        return {"supported": True, "native": True, "fallback": "forced_tool_use"}
+        #
+        # PRP-0130 / UDR-0112 D10 makes that edit per DEPLOYMENT rather than per
+        # provider. A Foundry deployment created "Hosted on Azure" supports no
+        # structured outputs (Anthropic's published restriction; such requests are
+        # rejected 400 BY DESIGN), while the same model "Hosted on Anthropic" does.
+        # Declaring `native_structured_output: false` on the offering therefore
+        # DEGRADES to the fallback instead of disabling the feature: Structured
+        # Output keeps working and still returns conforming JSON.
+        #
+        # PRP-0131 / UDR-0058 D9: Anthropic's structured outputs do NOT support open
+        # schemas. `additionalProperties` must be `false` for
+        # every object and may not be omitted, and there is no documented way to get
+        # free-form JSON (Anthropic docs, "Structured outputs"). The generic
+        # "any JSON object" default is therefore INEXPRESSIBLE here, and the OpenAI
+        # escape does not exist: `output_config.format` has no `strict` toggle to
+        # turn the closed-schema requirement off (see JSONOutputFormatParam). Unlike
+        # the UDR-0112 capabilities this is a PROVIDER constant, not a deployment
+        # property -- it comes from the Messages API specification, which every
+        # Anthropic endpoint speaks.
+        #
+        # PRP-0131 / UDR-0058 D9 supersedes PRP-0131's "require a schema": the model
+        # gets a valid CLOSED default instead of having the feature refused. The
+        # default is PUBLISHED so the surface can say what "no schema" means here --
+        # an object with one `answer` string, which is a real difference from the
+        # OpenAI family and must not be silent.
+        native = not hosted_tool_withheld(model, "native_structured_output")
+        return {
+            "supported": native,
+            "native": native,
+            "fallback": "none",
+            "default_schema": self.default_output_schema(model),
+        }
+
+    def default_output_schema(self, model: str) -> dict[str, Any]:
+        # Anthropic cannot express an open object (additionalProperties must be false
+        # and cannot be omitted), so the no-schema default is a minimal CLOSED one.
+        return CLOSED_ANSWER_SCHEMA
 
     def build_structured_output(self, model: str, schema: dict[str, Any] | None, mode: str) -> dict[str, Any]:
         # Native: Anthropic Messages API `output_config.format` (PRP-0082, UDR-0058
         # D2). Returned as a separate `output_config` fragment; the AG-UI endpoint
         # deep-merges it with the `output_config{effort}` from build_model_options so
         # adaptive-thinking effort and the output format coexist.
-        eff = effective_schema(schema, mode)
+        # PRP-0131 / UDR-0058 D9: the no-schema case resolves to THIS provider's
+        # default (a valid closed object), never the open one -- Anthropic rejects
+        # `additionalProperties: true` outright. Passing the default here also covers
+        # the paths that never reach the endpoint, notably a DECLARATIVE AGENT whose
+        # spec sets `output_format: json_object` (agui.agent_registry builds its
+        # fragment at agent-construction time).
+        eff = effective_schema(schema, mode, self.default_output_schema(model))
         if eff is None:
             return {}
+        # PRP-0131 / UDR-0058 D10: the forced-tool-use fallback is gone (it was never
+        # MAF-compatible). A withheld native path now reports supported=False, so this
+        # branch is unreachable from the UI; emit nothing rather than an invalid shape.
         if not self.structured_output_support(model)["native"]:
-            return forced_tool_use_fragment(eff)
+            return {}
         return {"output_config": {"format": {"type": "json_schema", "schema": eff}}}

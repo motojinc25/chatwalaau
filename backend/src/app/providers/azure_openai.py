@@ -17,9 +17,9 @@ from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
 from app.providers.base import hosted_tool_withheld
 from app.providers.structured import (
+    GENERIC_OBJECT_SCHEMA,
     STRUCTURED_OUTPUT_NAME,
     effective_schema,
-    forced_tool_use_fragment,
     strip_web_search,
 )
 
@@ -190,9 +190,26 @@ class AzureOpenAIProvider:
         # Structured output (PRP-0082, UDR-0058 D1/D6). gpt-5.x supports the OpenAI
         # Responses API `text.format` json_schema control with `strict: true`, which
         # the API GUARANTEES conforms to the schema (modulo truncation / refusal).
-        # forced_tool_use is the declared universal fallback for a hypothetical
-        # non-native model (UDR-0058 D2).
-        return {"supported": True, "native": True, "fallback": "forced_tool_use"}
+        # There is NO fallback for a non-native model (PRP-0131, UDR-0058 D10):
+        # `supported` follows `native`, so the surface omits the feature instead.
+        #
+        # PRP-0130 / UDR-0112 D10: an offering may declare that its DEPLOYMENT has no
+        # native structured output. That DEGRADES to the fallback rather than
+        # disabling the feature. Undeclared is unchanged.
+        #
+        # PRP-0131 / UDR-0058 D9: the default output schema is the OPEN object. It is
+        # expressible here because the Responses API takes `strict: false`, which
+        # lifts the closed-schema requirement -- the escape Anthropic does not have.
+        native = not hosted_tool_withheld(model, "native_structured_output")
+        return {
+            "supported": native,
+            "native": native,
+            "fallback": "none",
+            "default_schema": self.default_output_schema(model),
+        }
+
+    def default_output_schema(self, model: str) -> dict[str, Any]:
+        return GENERIC_OBJECT_SCHEMA
 
     def build_structured_output(self, model: str, schema: dict[str, Any] | None, mode: str) -> dict[str, Any]:
         # Native: OpenAI Responses API `text.format` (PRP-0082, UDR-0058 D2). Both
@@ -208,11 +225,14 @@ class AzureOpenAIProvider:
         # requirement, so the generic mode is expressed as a wide-open object schema
         # with strict=false -- functionally equivalent to json_object (any JSON
         # object) but without the prompt-content constraint.
-        eff = effective_schema(schema, mode)
+        eff = effective_schema(schema, mode, self.default_output_schema(model))
         if eff is None:
             return {}
+        # PRP-0131 / UDR-0058 D10: the forced-tool-use fallback is gone (it was never
+        # MAF-compatible). A withheld native path now reports supported=False, so this
+        # branch is unreachable from the UI; emit nothing rather than an invalid shape.
         if not self.structured_output_support(model)["native"]:
-            return forced_tool_use_fragment(eff)
+            return {}
         explicit = mode == "json_schema" and isinstance(schema, dict) and bool(schema)
         return {
             "text": {

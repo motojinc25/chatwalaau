@@ -33,6 +33,15 @@ interface StructuredCapability {
   supported: boolean
   native: boolean
   fallback: string
+  /**
+   * PRP-0131 / UDR-0058 D9: the schema used when structured output is on and no
+   * explicit schema was typed. It is a PROVIDER property: OpenAI-family models get an
+   * open object ("any JSON object"), while Anthropic -- which cannot express one
+   * (`additionalProperties` must be false and cannot be omitted) -- gets a valid
+   * CLOSED default. That is a real difference in what "no schema" produces, so the
+   * editor SHOWS it rather than leaving the operator to discover it in the answer.
+   */
+  default_schema?: Record<string, unknown>
 }
 
 interface ModelInfo {
@@ -149,10 +158,7 @@ export function StructuredOutputControl({ threadId, selectedModel, onChange }: S
   const parsed = useMemo(() => parseSchemaText(schemaText), [schemaText])
   const parsedSchema = parsed.schema
   const parseError = parsed.error
-  const schemaProblems = useMemo(
-    () => (parsedSchema ? validateStrictSchema(parsedSchema) : []),
-    [parsedSchema],
-  )
+  const schemaProblems = useMemo(() => (parsedSchema ? validateStrictSchema(parsedSchema) : []), [parsedSchema])
   // A schema was typed but is NOT the one being sent -- the turn would silently run
   // unconstrained. Surfaced on the toggle itself, not only inside the editor.
   const schemaDropped = format === 'json_schema' && schemaText.trim().length > 0 && parsedSchema === null
@@ -165,6 +171,10 @@ export function StructuredOutputControl({ threadId, selectedModel, onChange }: S
 
   const active = format !== 'none'
   const bestEffort = cap ? !cap.native : false
+  // UDR-0058 D9: a CLOSED default means "no schema" does not mean "any JSON object"
+  // on this model, so the editor says what it does mean.
+  const defaultSchema = cap?.default_schema
+  const closedDefault = defaultSchema !== undefined && defaultSchema.additionalProperties !== true
 
   return (
     <div className="relative">
@@ -312,8 +322,11 @@ export function StructuredOutputControl({ threadId, selectedModel, onChange }: S
             )}
             {parseError === null && (
               <p className="mt-1 text-[10px] text-muted-foreground">
-                Empty schema = generic JSON object. An explicit schema is sent in strict mode: every array needs
-                "items", every object needs "additionalProperties": false and must list every property in "required".
+                {closedDefault
+                  ? `Empty schema on this model = ${JSON.stringify(defaultSchema)} — it cannot express "any JSON object", so this is the default shape. `
+                  : 'Empty schema = generic JSON object. '}
+                An explicit schema is sent in strict mode: every array needs "items", every object needs
+                "additionalProperties": false and must list every property in "required".
                 {bestEffort && ' This model uses a best-effort fallback.'}
               </p>
             )}

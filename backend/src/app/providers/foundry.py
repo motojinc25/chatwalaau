@@ -107,6 +107,42 @@ def _effective_family(model: str) -> str:
 _structured_client_cls: type | None = None
 
 
+class _EncryptedReasoningMixin:
+    """Drop the connector's `include: reasoning.encrypted_content` for families that
+    reject it (PRP-0131, UDR-0085 D9).
+
+    The MAF OpenAI connector appends it UNCONDITIONALLY whenever a request does not
+    use service-side storage -- i.e. on every ordinary turn
+    (``agent_framework_openai/_chat_client.py:1413-1417``). That is correct for its
+    primary provider, but this lane also serves DeepSeek / Grok / Llama / Phi /
+    Mistral deployments, which answer::
+
+        400 'Encrypted content is not supported with this model.' (param: 'include')
+
+    So the failure was not occasional: every non-background turn on such a deployment
+    failed. Stripping is narrow by design -- one named parameter, and only for
+    deployments the existing OpenAI-reasoning name detector rejects -- so a request
+    that works today is never altered. Same pattern as the web-search strip: the
+    connector assembles for its primary provider and the seam corrects for the family
+    actually being addressed.
+    """
+
+    async def _prepare_options(self, messages: Any, options: Any, **kwargs: Any) -> dict[str, Any]:
+        run_options = await super()._prepare_options(messages, options, **kwargs)  # type: ignore[misc]
+        include = run_options.get("include")
+        if not isinstance(include, list) or "reasoning.encrypted_content" not in include:
+            return run_options
+        # The deployment name lands in run_options["model"] during the super() call.
+        if is_openai_reasoning_deployment(str(run_options.get("model") or "")):
+            return run_options
+        kept = [item for item in include if item != "reasoning.encrypted_content"]
+        if kept:
+            run_options["include"] = kept
+        else:
+            run_options.pop("include", None)
+        return run_options
+
+
 def _structured_foundry_client_class() -> type:
     """Structured-output wrapper over FoundryChatClient (PRP-0082, UDR-0085 D7).
 
@@ -118,7 +154,11 @@ def _structured_foundry_client_class() -> type:
     """
     global _structured_client_cls
     if _structured_client_cls is None:
-        _structured_client_cls = type("StructuredFoundryChatClient", (_StructuredOutputMixin, FoundryChatClient), {})
+        _structured_client_cls = type(
+            "StructuredFoundryChatClient",
+            (_EncryptedReasoningMixin, _StructuredOutputMixin, FoundryChatClient),
+            {},
+        )
     return _structured_client_cls
 
 

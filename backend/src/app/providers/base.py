@@ -101,13 +101,20 @@ class Provider(Protocol):
     def structured_output_support(self, model: str) -> dict[str, Any]:
         """Per-model structured-output capability (CTR-0102 v5, UDR-0058 D1/D6).
 
-        Returns ``{"supported": bool, "native": bool, "fallback": str}`` where
-        ``fallback`` is ``"forced_tool_use"`` or ``"none"``. ``native`` is True when
-        the model accepts the provider's first-class structured-output request
-        (OpenAI ``text.format`` json_schema / Anthropic ``output_config.format``);
-        when False the model still produces JSON via the forced-tool-use fallback
-        (UDR-0058 D2). Published per model by GET /api/model (CTR-0069 v5) so the UI
-        renders strictly what is advertised.
+        Returns ``{"supported": bool, "native": bool, "fallback": str,
+        "default_schema": dict}``. ``native`` is True when the model accepts the
+        provider's first-class structured-output request (OpenAI ``text.format``
+        json_schema / Anthropic ``output_config.format``).
+
+        ``supported`` FOLLOWS ``native`` and ``fallback`` is ``"none"`` (PRP-0131,
+        UDR-0058 D10): there is no fallback mechanism, so a model that cannot take the
+        native request cannot do structured output at all and the surface must omit
+        the feature rather than offer one whose first use raises.
+
+        ``default_schema`` is what a request with NO explicit schema resolves to on
+        this model (UDR-0058 D9) -- open where the provider can express one, a valid
+        closed object where it cannot. Published per model by GET /api/model
+        (CTR-0069 v5) so the UI renders, and explains, strictly what is advertised.
         """
         ...
 
@@ -121,12 +128,14 @@ class Provider(Protocol):
           - native models -> the provider's first-class shape (OpenAI
             ``{"text": {"format": {...}}}`` / Anthropic
             ``{"output_config": {"format": {...}}}``).
-          - non-native models -> a forced-tool-use fragment
-            (``{"tools": [...], "tool_choice": {...}}``) constraining the answer to
-            the schema (UDR-0058 D2).
+          - non-native models -> ``{}``. There is no fallback (PRP-0131, UDR-0058
+            D10): the forced-tool-use fragment UDR-0058 D2 declared universal was
+            never MAF-compatible and is removed. A provider that cannot constrain the
+            answer reports ``supported: False`` instead, so the surface omits the
+            feature rather than offering one whose first use raises.
 
         Returns ``{}`` when structured output is not requested. MUST NOT raise: a bad
-        or oversized schema resolves to the generic object mode (UDR-0058 D2/D4).
+        or oversized schema resolves to the provider's default schema (UDR-0058 D9).
         """
         ...
 

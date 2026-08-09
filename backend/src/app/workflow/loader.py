@@ -292,6 +292,54 @@ def _prepare_compile_text(text: str) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
+def demote_catch_all_handlers(workflow: Any) -> list[str]:
+    """Move each executor's catch-all ``Any`` handler to the END of its dispatch table.
+
+    Corrects an upstream dispatch defect (PRP-0132, UDR-0113 D1-D3). MAF resolves a
+    message to the FIRST registration-order handler whose type matches, with no
+    preference for the more specific type::
+
+        agent_framework/_workflows/_executor.py:513-518
+            for message_type in self._handlers:
+                if is_instance_of(message, message_type):
+                    return self._handlers[message_type]
+
+    ``_handlers`` is an insertion-ordered per-instance dict, so REGISTRATION ORDER IS
+    DISPATCH PRIORITY. An executor that registers ``typing.Any`` before a specific type
+    therefore makes the specific handler unreachable. That is exactly what happens to
+    the ``Foreach`` advance executor: it declares ``handle_action(trigger: Any)`` before
+    ``handle_loop_control(control: LoopControl)``, so ``LoopControl(action="break")``
+    lands in the ADVANCE-TO-NEXT-ITEM body and ``BreakLoop`` behaves as ``ContinueLoop``
+    -- indistinguishably, which is how it went unnoticed.
+
+    Stated as the general rule (UDR-0113 D2) rather than as a patch to that class: no
+    upstream class is named, subclassed, or copied, so an upstream rename does not break
+    this and an upstream change to either handler's LOGIC is not silently discarded --
+    upstream still owns both bodies; only the order they are asked in changes.
+
+    Narrow by construction: a table with fewer than two entries, or with no ``Any`` key,
+    or whose ``Any`` key is already last, is left untouched. On a representative Foreach
+    workflow exactly ONE executor is reordered. Returns the ids it reordered, for the
+    caller's log and for the guard tests.
+
+    Never raises: a workflow that compiled must stay runnable even if a future MAF
+    release changes the attribute's shape (the guard tests assert the post-condition,
+    so that regresses as a test failure rather than in production).
+    """
+    reordered: list[str] = []
+    for executor in getattr(workflow, "executors", {}).values():
+        table = getattr(executor, "_handlers", None)
+        if not isinstance(table, dict) or len(table) < 2 or Any not in table:
+            continue
+        if next(reversed(table)) is Any:
+            continue
+        table[Any] = table.pop(Any)
+        reordered.append(str(getattr(executor, "id", "?")))
+    if reordered:
+        logger.debug("Demoted catch-all handlers to last for executors: %s", reordered)
+    return reordered
+
+
 def _max_iterations() -> int:
     """Clamp the operator's WORKFLOW_MAX_ITERATIONS to a sane bound (UDR-0101 D10)."""
     return max(1, min(int(settings.workflow_max_iterations or 100), 100_000))
@@ -731,9 +779,16 @@ def compile_for_run(workflow_id: str):
         raise WorkflowError(f"Unknown workflow id: {workflow_id!r}")
 
     try:
-        return _new_factory(agents=agents).create_workflow_from_yaml(_prepare_compile_text(text))
+        workflow = _new_factory(agents=agents).create_workflow_from_yaml(_prepare_compile_text(text))
     except Exception as exc:
         raise WorkflowError(f"Workflow could not be compiled: {exc}") from exc
+
+    # The ONE seam that returns a runnable workflow (UDR-0113 D3), so the ONE place the
+    # upstream dispatch-order defect is corrected. The structural-validation compile
+    # above discards its graph and is deliberately left alone -- normalizing something
+    # nobody executes would make the guard assert on a code path with no consequence.
+    demote_catch_all_handlers(workflow)
+    return workflow
 
 
 __all__ = [
@@ -741,6 +796,7 @@ __all__ = [
     "all_yaml_stems",
     "annotate_agent_ref_warnings",
     "compile_for_run",
+    "demote_catch_all_handlers",
     "load_workflow_inventory",
     "map_workflow_document",
     "node_index_for",
