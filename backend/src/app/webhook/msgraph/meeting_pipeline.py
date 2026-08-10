@@ -105,6 +105,67 @@ class _MeetingAccess:
         return await graph_client.get_text(path)
 
 
+# ---------------------------------------------------------------------------
+# Graph refusal classification (PRP-0133, UDR-0114 D2)
+# ---------------------------------------------------------------------------
+#
+# Transcript access needs grants in TWO independent systems, and the 403 for each reads
+# almost the same. Microsoft's `Transcript API access` tenant control was enforced from
+# 2026-07-29, defaults to OFF, and -- in their own words -- blocks transcript reads
+# "regardless of app-level permissions". So a tenant with a perfect Entra grant and a
+# correct Application Access Policy still gets a 403, and the operator has no way to tell
+# the two causes apart from the raw error.
+#
+# The classification ADDS a sentence; it never replaces the service's text (UDR-0114 D2).
+# The `request-id` and timestamp in that text are the only currency in a vendor
+# escalation, and a "friendly" message that eats them just trades one dead end for
+# another.
+
+_TENANT_GATE_MARKER = "graphaccesstotranscriptsdisabled"
+
+_MSG_TENANT_GATE = (
+    "Microsoft Graph access to Teams transcripts is turned OFF for this tenant. "
+    "This is a TENANT setting and Entra API permissions do not override it -- "
+    "OnlineMeetingTranscript.Read.All and an Application Access Policy are necessary but "
+    "not sufficient. A Teams administrator must enable it: Teams admin center -> "
+    "Meetings -> Meeting settings -> Transcript API access -> turn 'Microsoft Graph "
+    "access' On (or run: Set-CsTeamsMeetingConfiguration -EnableGraphTranscriptAccess "
+    "$true -Identity Global). Microsoft began enforcing this control on 2026-07-29 with a "
+    "default of OFF, so an integration that worked before then can fail with no change on "
+    "either side. Also turn on 'Include speaker attribution' "
+    "(-EnableAttributedTranscripts), which is off by default -- without it the transcript "
+    "carries no speaker names and the summary's action-item owners and participants "
+    "cannot be determined."
+)
+
+_MSG_ACCESS_POLICY = (
+    "Graph refused the transcript read. On the app-only lane this is usually a missing "
+    "Teams Application Access Policy for the meeting organizer. Check BOTH grants: the "
+    "Entra permission (OnlineMeetingTranscript.Read.All + the policy) and the tenant "
+    "setting (Teams admin center -> Meetings -> Meeting settings -> Transcript API "
+    "access -> Microsoft Graph access)."
+)
+
+
+def classify_graph_failure(exc: Exception, *, auth_mode: str = "app_only") -> str:
+    """Return an operator-facing sentence PLUS the original error (UDR-0114 D2).
+
+    Narrow by design: only a 403 is classified, only the tenant-gate marker is matched
+    exactly, and everything else is returned verbatim. A false positive here would
+    misattribute a real failure to configuration AND bury its actual cause, which is the
+    failure mode this function exists to prevent.
+    """
+    detail = str(exc)
+    status = getattr(exc, "status_code", None)
+    if status != 403:
+        return detail
+    if _TENANT_GATE_MARKER in detail.lower():
+        return f"{_MSG_TENANT_GATE}\n\nGraph reported: {detail}"
+    if auth_mode == "app_only":
+        return f"{_MSG_ACCESS_POLICY}\n\nGraph reported: {detail}"
+    return detail
+
+
 def _fail(job: Job, storage: PipelineStore, phase: str, error: str) -> None:
     job.status = JobStatus.failed
     job.progress_message = f"failed:{phase}"
@@ -211,7 +272,15 @@ async def run_teams_meeting_job(job: Job, storage: PipelineStore, cancel_event: 
     except _Cancelled:
         return _set_cancelled(job, storage)
     except Exception as exc:
-        _fail(job, storage, "fetching_transcript", f"Failed to fetch transcript: {exc}")
+        # A 403 here has two very different causes that read almost identically; name
+        # which one it is instead of handing the operator the raw service JSON
+        # (PRP-0133, UDR-0114 D2).
+        _fail(
+            job,
+            storage,
+            "fetching_transcript",
+            f"Failed to fetch transcript: {classify_graph_failure(exc, auth_mode=auth_mode)}",
+        )
         return
     if not transcript_text.strip():
         _fail(
@@ -599,6 +668,7 @@ def register_meeting_job_type() -> None:
 
 __all__ = [
     "JOB_TYPE",
+    "classify_graph_failure",
     "fetch",
     "handle_notification",
     "register_meeting_job_type",
