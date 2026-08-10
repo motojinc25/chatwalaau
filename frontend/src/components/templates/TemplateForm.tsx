@@ -95,75 +95,82 @@ export function TemplateForm({ template, isNew, onSave, onDelete, onInsert }: Te
   }
 
   return (
-    <ScrollArea className="h-full">
-      <div className="flex flex-col gap-4 p-6">
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="tpl-name" className="text-sm font-medium">
-            Name <span className="text-destructive">*</span>
-          </label>
-          <Input id="tpl-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} />
-          {errors.name && <p className="text-xs text-destructive">{errors.name}</p>}
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="tpl-category" className="text-sm font-medium">
-            Category
-          </label>
-          <Input id="tpl-category" value={category} onChange={(e) => setCategory(e.target.value)} maxLength={50} />
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="tpl-desc" className="text-sm font-medium">
-            Description
-          </label>
-          <Input id="tpl-desc" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={500} />
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="tpl-slash" className="text-sm font-medium">
-            Slash command
-          </label>
-          <Input
-            id="tpl-slash"
-            value={slashCommand}
-            onChange={(e) => setSlashCommand(e.target.value)}
-            maxLength={50}
-            placeholder="(optional; defaults to the template name)"
-          />
-          <p className="text-xs text-muted-foreground">
-            Run this template from the chat input as <code>/{slashCommand.trim().replace(/^\/+/, '') || '<name>'}</code>
-            . Use placeholders like <code>$1</code>, <code>$2</code>, or <code>$ARGUMENTS</code> in the body.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="tpl-body" className="text-sm font-medium">
-            Body <span className="text-destructive">*</span>
-          </label>
-          <textarea
-            id="tpl-body"
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            rows={8}
-            className="min-h-[200px] w-full resize-y rounded-md border bg-background px-3 py-2 text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-          />
-          {errors.body && <p className="text-xs text-destructive">{errors.body}</p>}
-        </div>
-
-        <div className="flex gap-2">
-          <Button onClick={handleSave}>Save</Button>
-          {!isNew && template && (
-            <>
-              <Button variant="destructive" onClick={() => setDeleteConfirmOpen(true)}>
-                Delete
-              </Button>
-              <Button variant="outline" disabled={isDirty} onClick={() => onInsert(template)}>
-                Insert to Chat
-              </Button>
-            </>
-          )}
-        </div>
+    // PRP-0134: the action row is a HEADER, above the scroll region. It used to be the
+    // last child of the ScrollArea, below a resizable 200px-minimum Body field, so on a
+    // short or narrow viewport Save / Delete / Insert to Chat were simply off screen with
+    // nothing to indicate they existed. Their position must not depend on viewport
+    // height, body length, or how far the operator dragged the textarea.
+    <div className="flex h-full flex-col">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-background px-6 py-3">
+        <Button onClick={handleSave}>Save</Button>
+        {!isNew && template && (
+          <>
+            <Button variant="destructive" onClick={() => setDeleteConfirmOpen(true)}>
+              Delete
+            </Button>
+            <Button variant="outline" disabled={isDirty} onClick={() => onInsert(template)}>
+              Insert to Chat
+            </Button>
+          </>
+        )}
       </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="flex flex-col gap-4 p-6">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="tpl-name" className="text-sm font-medium">
+              Name <span className="text-destructive">*</span>
+            </label>
+            <Input id="tpl-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} />
+            {errors.name && <p className="text-xs text-destructive">{errors.name}</p>}
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="tpl-category" className="text-sm font-medium">
+              Category
+            </label>
+            <Input id="tpl-category" value={category} onChange={(e) => setCategory(e.target.value)} maxLength={50} />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="tpl-desc" className="text-sm font-medium">
+              Description
+            </label>
+            <Input id="tpl-desc" value={description} onChange={(e) => setDescription(e.target.value)} maxLength={500} />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="tpl-slash" className="text-sm font-medium">
+              Slash command
+            </label>
+            <Input
+              id="tpl-slash"
+              value={slashCommand}
+              onChange={(e) => setSlashCommand(e.target.value)}
+              maxLength={50}
+              placeholder="(optional; defaults to the template name)"
+            />
+            <p className="text-xs text-muted-foreground">
+              Run this template from the chat input as{' '}
+              <code>/{slashCommand.trim().replace(/^\/+/, '') || '<name>'}</code>. Use placeholders like <code>$1</code>
+              , <code>$2</code>, or <code>$ARGUMENTS</code> in the body.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="tpl-body" className="text-sm font-medium">
+              Body <span className="text-destructive">*</span>
+            </label>
+            <textarea
+              id="tpl-body"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={8}
+              className="min-h-[200px] w-full resize-y rounded-md border bg-background px-3 py-2 text-sm focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            {errors.body && <p className="text-xs text-destructive">{errors.body}</p>}
+          </div>
+        </div>
+      </ScrollArea>
 
       <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
         <AlertDialogContent>
@@ -184,6 +191,6 @@ export function TemplateForm({ template, isNew, onSave, onDelete, onInsert }: Te
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </ScrollArea>
+    </div>
   )
 }

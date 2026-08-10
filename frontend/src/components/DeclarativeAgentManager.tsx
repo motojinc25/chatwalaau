@@ -58,10 +58,20 @@ interface AgentEntry {
 export const ACTIVE_AGENT_CHANGED_EVENT = 'chatwalaau:active-agent-changed'
 
 /** Dispatched on the window to REQUEST that the Declarative Agents & Workflows modal
- * open (CTR-0144, PRP-0128, UDR-0111 D5/D6). The chat composer's run-target indicator
- * (CTR-0185) is the only dispatcher today. Carries NO payload: opening must not stage a
- * selection, which in this modal is a pending activation. */
+ * open (CTR-0144, PRP-0128, UDR-0111 D5/D6). Dispatchers: the chat composer's run-target
+ * indicator (CTR-0185) and the sidebar-footer trigger below. Carries NO payload: opening
+ * must not stage a selection, which in this modal is a pending activation.
+ *
+ * UDR-0115: this is a REQUEST, not a notification -- losing it loses the action, and a
+ * window event has no failure signal. Its listener therefore lives in
+ * `DeclarativeAgentManager`, which MUST be mounted somewhere no layout state can unmount
+ * (see ChatPage), and MUST NOT be gated on an availability probe. */
 export const OPEN_DECLARATIVE_MANAGER_EVENT = 'chatwalaau:open-declarative-manager'
+
+/** Request the modal from anywhere. One helper so no caller has to know the seam. */
+export function requestDeclarativeManager(): void {
+  window.dispatchEvent(new Event(OPEN_DECLARATIVE_MANAGER_EVENT))
+}
 
 const BUILTIN_LABEL = 'Built-in'
 const TOP_LEVEL_LABEL = 'Top level'
@@ -178,18 +188,26 @@ export function DeclarativeAgentManager() {
     })()
   }, [fetchInventory, wfApi])
 
-  // UDR-0111 D5/D6: the chat composer's run-target name opens THIS modal. The manager
-  // owns its own trigger and mount point in the sidebar footer and takes no props, so
-  // the request travels on the same window seam ACTIVE_AGENT_CHANGED_EVENT already uses
-  // in the opposite direction -- no state lift through App. Open only: the event carries
-  // NO preselection, because a selected row here is a PENDING ACTIVATION with a discard
-  // guard, and an outside surface must not stage one on the operator's behalf.
+  // UDR-0111 D5/D6: the chat composer's run-target name opens THIS modal, and the
+  // sidebar icon does too. The request travels on the same window seam
+  // ACTIVE_AGENT_CHANGED_EVENT already uses in the opposite direction -- no state lift
+  // through App. Open only: the event carries NO preselection, because a selected row
+  // here is a PENDING ACTIVATION with a discard guard, and an outside surface must not
+  // stage one on the operator's behalf.
+  //
+  // UDR-0115 D1/D2 (PRP-0134): this listener is NOT gated on `available`, and this
+  // component is mounted where nothing conditional can unmount it. Both were wrong
+  // before: the listener lived inside the collapsible sidebar, so closing the sidebar
+  // deleted it and the composer's click was delivered to nobody -- silently, since a
+  // window event has no failure signal. `available` gates the sidebar ICON (do not
+  // advertise a feature that cannot be served); it must not gate RECEIPT, because the
+  // composer has already shown a button and "nothing happened" teaches the operator
+  // nothing.
   useEffect(() => {
-    if (!available) return
     const onOpenRequest = () => openModal()
     window.addEventListener(OPEN_DECLARATIVE_MANAGER_EVENT, onOpenRequest)
     return () => window.removeEventListener(OPEN_DECLARATIVE_MANAGER_EVENT, onOpenRequest)
-  }, [available, openModal])
+  }, [openModal])
 
   const handleOpenChange = useCallback(
     (next: boolean) => {
@@ -347,7 +365,11 @@ export function DeclarativeAgentManager() {
     return out
   }, [agents, workflows])
 
-  if (!available) return null
+  // UDR-0115 D2: render nothing only while the modal is CLOSED and the feature is
+  // unavailable. Once a request has arrived the dialog must render, even if the
+  // availability probe has not resolved or failed -- an open modal that reports the
+  // truth beats a click that vanishes.
+  if (!available && !open) return null
 
   const current: Unified | null =
     sections.flatMap((s) => s.items).find((e) => selected && e.kind === selected.kind && e.id === selected.id) ?? null
@@ -361,16 +383,6 @@ export function DeclarativeAgentManager() {
 
   return (
     <>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="h-6 w-6 text-muted-foreground"
-        onClick={openModal}
-        aria-label="Declarative agents and workflows"
-        title="Declarative agents & workflows">
-        <Bot className="h-4 w-4" />
-      </Button>
-
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="flex h-[90vh] w-[90vw] max-w-[90vw] flex-col gap-0 p-0">
           <DialogHeader className="border-b px-6 py-4">
@@ -659,5 +671,51 @@ export function DeclarativeAgentManager() {
         </Suspense>
       )}
     </>
+  )
+}
+
+/**
+ * Sidebar-footer trigger for the Declarative Agents & Workflows modal (CTR-0144).
+ *
+ * Split out from the manager in PRP-0134 (UDR-0115 D1). The manager owns the modal AND
+ * the open-request listener, so it must be mounted where nothing conditional can unmount
+ * it -- and the sidebar is collapsible, which is exactly what deleted the listener and
+ * made the composer's button silently do nothing. What belongs in the sidebar is only
+ * the icon; it now asks on the same seam every other caller uses.
+ *
+ * The availability probe stays HERE, because UDR-0115 D2 puts it on the ADVERTISEMENT:
+ * an unconfigured deployment should not show an icon for a feature it cannot serve. It
+ * must not travel with the listener.
+ */
+export function DeclarativeAgentManagerTrigger() {
+  const [available, setAvailable] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/agents')
+        if (!cancelled && res.ok) setAvailable(true)
+      } catch {
+        // Silent: management is simply unavailable, so no icon is shown.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (!available) return null
+
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="h-6 w-6 text-muted-foreground"
+      onClick={requestDeclarativeManager}
+      aria-label="Declarative agents and workflows"
+      title="Declarative agents & workflows">
+      <Bot className="h-4 w-4" />
+    </Button>
   )
 }

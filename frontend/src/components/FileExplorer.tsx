@@ -329,23 +329,43 @@ export function FileExplorer({ open, onOpenChange, onAttach }: FileExplorerProps
 
   // ---- Tree data loading ----
 
-  const reloadDir = useCallback(async (dirPath: string) => {
-    try {
-      const res = await fetch(`/api/workspace/tree?dir=${encodeURIComponent(dirPath)}`)
-      if (!res.ok) return
-      const json = await res.json()
-      const children: FileNode[] = (json.entries ?? []).map(toNode)
-      loadedRef.current.add(dirPath)
-      if (dirPath === '') {
-        setData(children)
-        setRootLoaded(true)
-      } else {
-        setData((prev) => setChildrenById(prev, dirPath, children))
-      }
-    } catch {
-      // silent
+  // Drop the "already loaded" entries for everything BENEATH `dirPath` (PRP-0134).
+  //
+  // `loadedRef` memoizes which directories have had their children fetched, and
+  // `onToggle` refuses to fetch anything it lists. Replacing a directory's children
+  // discards every descendant's data -- so any descendant left in the memo becomes a
+  // claim about data that no longer exists, and the folder then expands to nothing.
+  // That is what made a folder unopenable until Refresh (the one path that cleared the
+  // whole memo). Invalidating here, where the discard happens, means create / rename /
+  // move / delete / upload all inherit it instead of each remembering to clean up.
+  const forgetDescendants = useCallback((dirPath: string) => {
+    const prefix = dirPath === '' ? '' : `${dirPath}/`
+    for (const loaded of Array.from(loadedRef.current)) {
+      if (loaded !== dirPath && loaded.startsWith(prefix)) loadedRef.current.delete(loaded)
     }
   }, [])
+
+  const reloadDir = useCallback(
+    async (dirPath: string) => {
+      try {
+        const res = await fetch(`/api/workspace/tree?dir=${encodeURIComponent(dirPath)}`)
+        if (!res.ok) return
+        const json = await res.json()
+        const children: FileNode[] = (json.entries ?? []).map(toNode)
+        forgetDescendants(dirPath)
+        loadedRef.current.add(dirPath)
+        if (dirPath === '') {
+          setData(children)
+          setRootLoaded(true)
+        } else {
+          setData((prev) => setChildrenById(prev, dirPath, children))
+        }
+      } catch {
+        // silent
+      }
+    },
+    [forgetDescendants],
+  )
 
   // Refresh the whole tree from the root, showing a spinning indicator until the
   // reload completes (v0.90.1). Collapses the lazy-loaded cache so every level is

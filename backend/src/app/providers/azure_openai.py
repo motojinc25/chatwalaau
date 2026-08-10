@@ -20,6 +20,7 @@ from app.providers.structured import (
     GENERIC_OBJECT_SCHEMA,
     STRUCTURED_OUTPUT_NAME,
     effective_schema,
+    strip_skill_tools,
     strip_web_search,
 )
 
@@ -56,6 +57,17 @@ class _StructuredOutputMixin:
         text_cfg = run_options.get("text")
         if isinstance(text_cfg, dict) and text_cfg.get("format") is not None:
             strip_web_search(run_options)
+        # Background and Agent Skills are mutually exclusive (PRP-0134, UDR-0116).
+        # A background turn that called a skill failed with "No tool call found for
+        # function call id call_..." -- the framework releases a background run's
+        # continuation token only on its non-streaming path, so after the tool ran the
+        # next step re-read the finished response instead of POSTing the result. The two
+        # features are separated instead of the framework being worked around: Background
+        # wins for the turn and the skill tools are dropped here, at the same request
+        # chokepoint the web-search strip uses (UDR-0058 D2 -- drop, never error). The UI
+        # says so before the turn, so this is not a silent removal.
+        if run_options.get("background"):
+            strip_skill_tools(run_options)
         return run_options
 
 
@@ -109,7 +121,9 @@ class AzureOpenAIProvider:
         # not in the catalog (defensive) resolves to model_ref=model + shared lane.
         offering = models_catalog.offering_for(model)
         model_ref = offering.model_ref if offering is not None else model
-        endpoint = (offering.endpoint if offering is not None and offering.endpoint else settings.azure_openai_endpoint) or None
+        endpoint = (
+            offering.endpoint if offering is not None and offering.endpoint else settings.azure_openai_endpoint
+        ) or None
         if offering is not None and offering.api_key_env:
             cred_kwargs: dict[str, Any] = {"api_key": offering.api_key() or ""}
         else:

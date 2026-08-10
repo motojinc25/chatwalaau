@@ -59,7 +59,7 @@ import {
   useState,
 } from 'react'
 import { AboutDialog } from '@/components/AboutDialog'
-import { DeclarativeAgentManager } from '@/components/DeclarativeAgentManager'
+import { DeclarativeAgentManagerTrigger } from '@/components/DeclarativeAgentManager'
 import { ModelSettingsManager } from '@/components/ModelSettingsManager'
 import { PermissionsDisabledBanner } from '@/components/PermissionsDisabledBanner'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
@@ -1403,8 +1403,12 @@ export function SessionSidebar({
             </Button>
           )}
           {/* Declarative Agents & Workflows management (CTR-0144 v3, PRP-0094 / PRP-0118):
-              ONE self-probing icon manages both Prompt agents and Workflows. */}
-          <DeclarativeAgentManager />
+              ONE self-probing icon opens the manager, which manages both Prompt agents
+              and Workflows. Only the ICON lives here (PRP-0134 / UDR-0115 D1): the modal
+              and its open-request listener are mounted in ChatPage, because this sidebar
+              is collapsible and unmounting it used to delete the listener -- which made
+              the chat composer's run-target button silently do nothing. */}
+          <DeclarativeAgentManagerTrigger />
           {/* Webhook gateway launcher (CTR-0157, PRP-0097): next to Declarative Agents;
               shown only when WEBHOOK_ENABLED. */}
           {webhookAvailable && (

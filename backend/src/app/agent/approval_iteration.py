@@ -328,11 +328,78 @@ class IterationContentAccumulator:
                     sorted(pending_call_ids),
                 )
 
+        # PAIRING INVARIANT (PRP-0134 follow-up, UDR-0117). Anthropic rejects the whole
+        # request when any tool_result names a tool_use that is not in the message before
+        # it, and the two lists above are assembled from independent observations -- the
+        # assistant side from streamed function_calls, the user side from results and
+        # from the operator's approval responses. Every producer above is *believed* to
+        # keep them in step; this enforces it, because the failure mode is a 400 that
+        # aborts the turn and names only an opaque id.
+        #
+        # An Anthropic run that used Agent Skills reached exactly that 400, and the
+        # producing path was not identifiable from the code alone -- so the unpaired
+        # content is dropped and LOGGED with its call id and kind, which turns a silent
+        # structural break into a named one the next occurrence can be traced from.
+        paired_ids = {
+            cid
+            for cid in (getattr(c, "call_id", None) for c in assistant_contents)
+            if cid  # text / reasoning contents carry no call_id
+        }
+        kept_user: list[Content] = []
+        dropped: list[str] = []
+        recovered: list[str] = []
+        for content in user_contents:
+            # The identifier that must pair is the TOOL CALL id, and only a
+            # function_result carries it directly. A function_approval_response's own
+            # ``id`` is the APPROVAL REQUEST id (``req_...``), a different namespace from
+            # the call id (``toolu_...``) -- reading it here would compare unrelated
+            # strings and discard perfectly valid approvals. Its call id lives on the
+            # wrapped function_call.
+            wrapped_call = getattr(content, "function_call", None)
+            call_id = getattr(content, "call_id", None) or getattr(wrapped_call, "call_id", None)
+            if call_id is None or call_id in paired_ids:
+                kept_user.append(content)
+                continue
+            # REPAIR before dropping. A function_approval_response carries the originating
+            # function_call, so an unpaired one is recoverable: adopt that call into the
+            # assistant message and the pair is complete. Dropping here would discard the
+            # operator's decision -- a worse outcome than the extra tool_use, and an
+            # avoidable one whenever the information is right there.
+            if wrapped_call is not None:
+                assistant_contents.append(wrapped_call)
+                paired_ids.add(call_id)
+                recovered.append(call_id)
+                kept_user.append(content)
+                continue
+            dropped.append(f"{getattr(content, 'type', type(content).__name__)}:{call_id}")
+        if recovered:
+            logger.info(
+                "Outer-loop iteration adopted the originating function_call for approval "
+                "response(s) whose call was not observed in this iteration's stream: %s",
+                sorted(recovered),
+            )
+        if dropped:
+            logger.warning(
+                "Outer-loop iteration produced tool content with no matching function_call in the "
+                "same assistant message; dropped to keep the request valid (Anthropic rejects an "
+                "unpaired tool_result with HTTP 400). Unpaired: %s. Observed call ids: %s",
+                sorted(dropped),
+                sorted(paired_ids),
+            )
+
         out: list[Message] = []
         if assistant_contents:
             out.append(Message(role="assistant", contents=assistant_contents))
-        if user_contents:
-            out.append(Message(role="user", contents=user_contents))
+        # NEVER emit the user message alone: its tool_results would have no preceding
+        # tool_use by construction, which is the 400 this module exists to prevent.
+        if kept_user and assistant_contents:
+            out.append(Message(role="user", contents=kept_user))
+        elif kept_user:
+            logger.warning(
+                "Outer-loop iteration had tool/approval content but no assistant content to pair "
+                "it with; the user message was NOT emitted (%d content item(s) dropped).",
+                len(kept_user),
+            )
         return out
 
 

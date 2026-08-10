@@ -14,11 +14,16 @@ interface BackgroundResponsesToggleProps {
 }
 
 export function BackgroundResponsesToggle({ enabled, onToggle, disabled = false }: BackgroundResponsesToggleProps) {
+  // Background and Agent Skills are mutually exclusive for a turn (PRP-0134, UDR-0116):
+  // a background run resumed by id cannot complete a skill's tool call, so the skill
+  // tools are not offered while BG is on. Said HERE, on the control that causes it and
+  // before the turn is sent, rather than letting the operator discover it from an
+  // answer that quietly never used a skill.
   const title = disabled
     ? 'Background Responses: not supported by this model'
     : enabled
-      ? 'Background Responses: ON'
-      : 'Background Responses: OFF'
+      ? 'Background Responses: ON -- Agent Skills are disabled for background turns'
+      : 'Background Responses: OFF (Agent Skills available)'
 
   return (
     <button
@@ -42,8 +47,8 @@ export function BackgroundResponsesToggle({ enabled, onToggle, disabled = false 
         disabled
           ? 'Background responses not supported by this model'
           : enabled
-            ? 'Disable background responses'
-            : 'Enable background responses'
+            ? 'Disable background responses. While on, Agent Skills are unavailable'
+            : 'Enable background responses. Agent Skills become unavailable while it is on'
       }>
       <Zap className="h-3 w-3" />
       <span>BG</span>

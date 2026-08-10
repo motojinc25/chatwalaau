@@ -348,6 +348,38 @@ class SessionTolerantToolApprovalMiddleware(ToolApprovalMiddleware):
         # Deviation 2: never hijack inbound approval responses (see class doc).
         return list(messages)
 
+    def _inject_collected_responses(self, messages: Any, state: Any) -> list[Any]:
+        """Deviation 4: APPEND the auto-approved responses, never PREPEND them.
+
+        The base class re-enters the loop with::
+
+            [Message(role="user", contents=collected_approval_responses), *messages]
+
+        (``_harness/_tool_approval.py:552-555``). A ``function_approval_response``
+        serializes to a ``tool_result``, so prepending puts the result BEFORE the
+        assistant message carrying its ``tool_use``. Anthropic rejects that outright::
+
+            400 messages.0.content.0: unexpected `tool_use_id` found in `tool_result`
+            blocks: toolu_...  Each `tool_result` block must have a corresponding
+            `tool_use` block in the previous message.
+
+        which made EVERY Agent Skill turn fail on an Anthropic model, because the
+        read-only skill tools are exactly the ones this middleware auto-approves.
+
+        This is the same upstream defect deviation 2 already documents on the INBOUND
+        path -- where the identical prepend produced the OpenAI mirror-image error
+        ("400 No tool output found for function call ..."). That one was fixed; the
+        AUTO-APPROVAL path was not, and it is the same one-line inversion. Appending
+        places each response after the assistant turn that requested it, which is the
+        order both APIs specify.
+        """
+        collected = getattr(state, "collected_approval_responses", None)
+        if not collected:
+            return list(messages)
+        from agent_framework import Message
+
+        return [*messages, Message(role="user", contents=list(collected))]
+
     async def _process_outbound_messages(self, messages: Any, state: Any) -> bool:
         # Deviation 3: ALL-OR-NOTHING auto-approval, and NEVER queue (see class
         # doc). The round is auto-approved only when EVERY pending request

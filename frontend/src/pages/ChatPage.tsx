@@ -3,6 +3,7 @@ import { Suspense, useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
 import { CronManager } from '@/components/CronManager'
+import { DeclarativeAgentManager } from '@/components/DeclarativeAgentManager'
 import { PipelineManager } from '@/components/PipelineManager'
 import { PrivacyScreenToggle } from '@/components/PrivacyScreenToggle'
 import { SessionSidebar } from '@/components/SessionSidebar'
@@ -268,6 +269,15 @@ export function ChatPage() {
           />
         )}
       </div>
+
+      {/* Declarative Agents & Workflows modal + its open-request listener (CTR-0144).
+          Mounted HERE, outside every conditional, because the request arrives on a
+          window event (UDR-0111 D6) and a window event has no failure signal: while
+          this lived inside the collapsible sidebar, closing the sidebar deleted the
+          listener and the composer's run-target button silently did nothing
+          (PRP-0134 / UDR-0115 D1/D3). Renders null until it is opened or its
+          availability probe succeeds, so an unconfigured deployment costs nothing. */}
+      <DeclarativeAgentManager />
     </div>
   )
 }

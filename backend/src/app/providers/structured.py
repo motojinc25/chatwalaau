@@ -124,6 +124,48 @@ def is_web_search_tool(tool: Any) -> bool:
     return isinstance(t, str) and t.startswith("web_search")
 
 
+# The tools MAF's SkillsProvider injects at run time (progressive disclosure:
+# load_skill / read_skill_resource / run_skill_script). They are NOT part of the agent's
+# static tool list -- the context provider merges them into the request's `tools` just
+# before the call (agent_framework/_agents.py:1550-1554), which is why the request
+# assembly is the one place that can see and gate them.
+SKILL_TOOL_NAMES = frozenset({"load_skill", "read_skill_resource", "run_skill_script"})
+
+
+def is_skill_tool(tool: Any) -> bool:
+    """True when ``tool`` is one of the Agent Skills progressive-disclosure tools."""
+    name = tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", None)
+    return isinstance(name, str) and name in SKILL_TOOL_NAMES
+
+
+def strip_skill_tools(run_options: dict[str, Any]) -> dict[str, Any]:
+    """Remove the Agent Skills tools from a request's ``tools`` list in place.
+
+    Skills are INCOMPATIBLE with a background run (PRP-0134, v0.127.0). A background
+    response is produced server-side and resumed later by id; the framework releases its
+    background continuation token only on its non-streaming path, so a resumed turn that
+    called a skill re-read the finished response instead of POSTing the tool result and
+    the service answered ``No tool call found for function call id call_...``.
+
+    Rather than work around that, the two features are made mutually exclusive: Background
+    takes precedence for the turn and the skill tools are dropped. This follows the
+    UDR-0058 D2 discipline the hosted web-search strip already uses -- an incompatible
+    tool is DROPPED, never allowed to error the turn -- and it is announced in the UI
+    rather than being a silent removal.
+
+    Drops the ``tools`` key entirely when nothing remains. Function tools, MCP tools and
+    hosted tools are unaffected. Mutates and returns ``run_options``.
+    """
+    tools = run_options.get("tools")
+    if isinstance(tools, list):
+        kept = [t for t in tools if not is_skill_tool(t)]
+        if kept:
+            run_options["tools"] = kept
+        else:
+            run_options.pop("tools", None)
+    return run_options
+
+
 def strip_web_search(run_options: dict[str, Any]) -> dict[str, Any]:
     """Remove the hosted web-search tool from a request's ``tools`` list in place.
 
