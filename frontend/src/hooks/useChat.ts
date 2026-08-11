@@ -126,6 +126,14 @@ interface UseChatOptions {
    */
   selectedWorkflowId?: string
   /**
+   * Harness Agent run-target (CTR-0197, PRP-0135, UDR-0119 D3). When set, the run is
+   * sent with AG-UI state.harness_id so the endpoint streams the cached
+   * per-conversation harness agent (its todo / mode / file / shell activity rides the
+   * existing TOOL_CALL / approval grammar) instead of the active Prompt agent.
+   * Mutually exclusive with selectedWorkflowId (one effective run-target axis).
+   */
+  selectedHarnessId?: string
+  /**
    * PRP-0118: label of the run-target (a workflow name, or a non-default active agent
    * name) stamped onto the assistant message so the action bar shows which agent /
    * workflow produced the turn.
@@ -186,6 +194,7 @@ export function useChat(options?: UseChatOptions) {
   const selectedImageOptionsRef = useRef<Record<string, string>>(options?.selectedImageOptions ?? {})
   const temporaryRef = useRef(options?.temporary ?? false)
   const selectedWorkflowIdRef = useRef(options?.selectedWorkflowId ?? '')
+  const selectedHarnessIdRef = useRef(options?.selectedHarnessId ?? '')
   const runTargetLabelRef = useRef(options?.runTargetLabel ?? '')
   const onCustomEventRef = useRef(options?.onCustomEvent)
   const onWorkflowEventRef = useRef(options?.onWorkflowEvent)
@@ -251,6 +260,10 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     selectedWorkflowIdRef.current = options?.selectedWorkflowId ?? ''
   }, [options?.selectedWorkflowId])
+
+  useEffect(() => {
+    selectedHarnessIdRef.current = options?.selectedHarnessId ?? ''
+  }, [options?.selectedHarnessId])
 
   useEffect(() => {
     runTargetLabelRef.current = options?.runTargetLabel ?? ''
@@ -417,6 +430,11 @@ export function useChat(options?: UseChatOptions) {
         // model / options / structured-output state above is ignored server-side (each
         // node's model + options come from its referenced Prompt agent, UDR-0101 D7).
         if (selectedWorkflowIdRef.current) aguiState.workflow_id = selectedWorkflowIdRef.current
+        // Harness Agent run-target (PRP-0135, CTR-0009 v-next, UDR-0119 D3). When set,
+        // the backend runs the cached per-conversation harness agent; the model /
+        // options / structured-output state above is ignored server-side (the harness
+        // YAML fixes them, CTR-0193). Mutually exclusive with workflow_id.
+        if (selectedHarnessIdRef.current) aguiState.harness_id = selectedHarnessIdRef.current
         // HITL resume (PRP-0123, UDR-0106 D5): the answers to the requests the previous
         // turn interrupted on. The backend routes them into workflow.run(responses=...).
         if (options?.workflowResume && Object.keys(options.workflowResume).length > 0)

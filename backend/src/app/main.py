@@ -481,6 +481,16 @@ from app.workflow.runtime import register_workflow_job_type
 register_workflows(app)
 register_workflow_job_type()
 
+# Harness Agents (CTR-0192..0197, PRP-0135, UDR-0119) -- a `kind: Harness` entity
+# in the SAME DECLARATIVE_AGENTS_DIR tree (three-way kind dispatch, UDR-0119 D1),
+# mapped by a ChatWalaʻau-owned schema and built by MAF create_harness_agent()
+# through the Harness Factory (client from CTR-0102, UDR-0119 D2). A harness agent
+# is a per-conversation run-target (AG-UI state.harness_id), never a persona
+# (UDR-0119 D3), so no agent_registry rebuild is needed here either.
+from app.agent.harness.router import register_harness_agents
+
+register_harness_agents(app)
+
 # Model Offering Catalog Management API (CTR-0175, PRP-0111, UDR-0090) -- read/write
 # the model_offerings.jsonc catalog (FEAT-0059 / CTR-0174) at runtime. PUT / reload
 # rewrite the file (structured JSON, comments dropped) and rebuild the registry

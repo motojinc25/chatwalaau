@@ -1,6 +1,7 @@
 import {
   Bot,
   CircleCheck,
+  Hammer,
   Loader2,
   Pencil,
   Plus,
@@ -12,30 +13,43 @@ import {
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { type HarnessEntry, type HarnessPolicy, useHarnessAuthoring } from '@/hooks/useHarnessAuthoring'
 import { useWorkflowAuthoring, type WorkflowEntry } from '@/hooks/useWorkflowAuthoring'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
-import { getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT, setWorkflowRunTarget } from '@/lib/runTarget'
+import {
+  getHarnessRunTarget,
+  getWorkflowRunTarget,
+  RUN_TARGET_CHANGED_EVENT,
+  setHarnessRunTarget,
+  setWorkflowRunTarget,
+} from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
 
 // Heavy editors (React Flow + monaco) are lazy so they stay out of the main bundle
-// until the operator opens Create / Edit (CTR-0179 / CTR-0184).
+// until the operator opens Create / Edit (CTR-0179 / CTR-0184 / CTR-0196).
 const DeclarativeAgentEditor = lazyWithReload(() =>
   import('@/components/DeclarativeAgentEditor').then((m) => ({ default: m.DeclarativeAgentEditor })),
 )
 const DeclarativeWorkflowEditor = lazyWithReload(() =>
   import('@/components/DeclarativeWorkflowEditor').then((m) => ({ default: m.DeclarativeWorkflowEditor })),
 )
+const HarnessAgentEditor = lazyWithReload(() =>
+  import('@/components/HarnessAgentEditor').then((m) => ({ default: m.HarnessAgentEditor })),
+)
 
 /**
- * Declarative Agents & Workflows management modal (CTR-0144 v3, FEAT-0051 / FEAT-0062,
- * UDR-0072 / UDR-0101 D2).
+ * Declarative Agents & Workflows management modal (CTR-0144 v4, FEAT-0051 /
+ * FEAT-0062 / FEAT-0064, UDR-0072 / UDR-0101 D2 / UDR-0119 D1/D3).
  *
- * ONE modal manages both declarative Prompt agents and declarative Workflows, told
- * apart by a Prompt / Workflow tag. A Prompt agent is ACTIVATED (server-side rebuild,
- * the existing flow); a Workflow is chosen as the chat RUN-TARGET (client-side). The
- * effective run-target -- the active agent, or a selected workflow -- drives the next
- * message, and the assistant message is labeled with its name. Create opens the
- * matching editor (Prompt vs Workflow) on a separate full-screen screen.
+ * ONE modal manages declarative Prompt agents, Harness agents (PRP-0135), and
+ * declarative Workflows, told apart by a Prompt / Harness / Workflow tag. Harness
+ * agents live in the AGENTS section with a HARNESS tag (management grouping only,
+ * UDR-0119 D3). A Prompt agent is ACTIVATED (server-side rebuild, the existing
+ * flow); a Workflow OR a Harness agent is chosen as the chat RUN-TARGET
+ * (client-side; at most one, mutually exclusive). The effective run-target drives
+ * the next message, and the assistant message is labeled with its name. Create
+ * opens the matching editor (Prompt vs Workflow vs Harness) on a separate
+ * full-screen screen.
  */
 
 interface AgentEntry {
@@ -76,7 +90,7 @@ export function requestDeclarativeManager(): void {
 const BUILTIN_LABEL = 'Built-in'
 const TOP_LEVEL_LABEL = 'Top level'
 
-type Kind = 'Prompt' | 'Workflow'
+type Kind = 'Prompt' | 'Workflow' | 'Harness'
 type ConfirmMode = 'activate' | 'reload' | 'delete' | null
 
 interface Unified {
@@ -97,6 +111,9 @@ interface Unified {
   // Workflow
   referenced_agents?: string[]
   action_kinds?: string[]
+  // Harness (CTR-0194, PRP-0135)
+  runnable?: boolean
+  policy?: HarnessPolicy | null
 }
 
 function agentGroup(entry: AgentEntry): string {
@@ -106,6 +123,7 @@ function agentGroup(entry: AgentEntry): string {
 
 export function DeclarativeAgentManager() {
   const wfApi = useWorkflowAuthoring()
+  const hApi = useHarnessAuthoring()
   const [available, setAvailable] = useState(false)
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -113,19 +131,26 @@ export function DeclarativeAgentManager() {
   const [error, setError] = useState<string | null>(null)
   const [agents, setAgents] = useState<AgentEntry[]>([])
   const [workflows, setWorkflows] = useState<WorkflowEntry[]>([])
+  const [harnesses, setHarnesses] = useState<HarnessEntry[]>([])
   const [activeId, setActiveId] = useState<string>('core')
   const [selected, setSelected] = useState<{ kind: Kind; id: string } | null>(null)
   const [confirmMode, setConfirmMode] = useState<ConfirmMode>(null)
   const [canAuthor, setCanAuthor] = useState(false)
   const [wfCanAuthor, setWfCanAuthor] = useState(false)
+  const [hCanAuthor, setHCanAuthor] = useState(false)
   const [createMenu, setCreateMenu] = useState(false)
   const [agentEditorOpen, setAgentEditorOpen] = useState(false)
   const [wfEditorOpen, setWfEditorOpen] = useState(false)
+  const [hEditorOpen, setHEditorOpen] = useState(false)
   const [editId, setEditId] = useState<string | null>(null)
   const [wfTarget, setWfTarget] = useState(() => getWorkflowRunTarget())
+  const [hTarget, setHTarget] = useState(() => getHarnessRunTarget())
 
   useEffect(() => {
-    const onRt = () => setWfTarget(getWorkflowRunTarget())
+    const onRt = () => {
+      setWfTarget(getWorkflowRunTarget())
+      setHTarget(getHarnessRunTarget())
+    }
     window.addEventListener(RUN_TARGET_CHANGED_EVENT, onRt)
     return () => window.removeEventListener(RUN_TARGET_CHANGED_EVENT, onRt)
   }, [])
@@ -155,23 +180,26 @@ export function DeclarativeAgentManager() {
     setLoading(true)
     setError(null)
     try {
-      const [aRes, wRes] = await Promise.all([
+      const [aRes, wRes, hRes] = await Promise.all([
         fetch('/api/agents').then((r) => (r.ok ? r.json() : { agents: [] })),
         fetch('/api/workflows').then((r) => (r.ok ? r.json() : { workflows: [] })),
+        hApi.list(),
       ])
       adoptAgents(aRes)
       setWorkflows((wRes.workflows ?? []) as WorkflowEntry[])
+      setHarnesses(hRes)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load')
     } finally {
       setLoading(false)
     }
-  }, [adoptAgents])
+  }, [adoptAgents, hApi])
 
   const openModal = useCallback(() => {
     setOpen(true)
     setConfirmMode(null)
     setWfTarget(getWorkflowRunTarget())
+    setHTarget(getHarnessRunTarget())
     void fetchInventory()
     void (async () => {
       try {
@@ -185,8 +213,10 @@ export function DeclarativeAgentManager() {
       }
       const s = await wfApi.authoringStatus()
       setWfCanAuthor(s.available && s.writable)
+      const h = await hApi.authoringStatus()
+      setHCanAuthor(h.available && h.writable)
     })()
-  }, [fetchInventory, wfApi])
+  }, [fetchInventory, wfApi, hApi])
 
   // UDR-0111 D5/D6: the chat composer's run-target name opens THIS modal, and the
   // sidebar icon does too. The request travels on the same window seam
@@ -246,10 +276,26 @@ export function DeclarativeAgentManager() {
         }
         adoptAgents(await res.json())
         // Activating a Prompt agent makes it the effective run-target -- clear any
-        // workflow run-target so chat runs the agent (operator-decided, UDR-0101 D5).
+        // workflow / harness run-target so chat runs the agent (UDR-0101 D5, UDR-0119 D3).
         setWorkflowRunTarget(null)
         setWfTarget(null)
+        setHarnessRunTarget(null)
+        setHTarget(null)
         window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
+      } else if (selected.kind === 'Harness') {
+        // Re-validate the STORED harness agent (map + factory preflight) before it
+        // becomes the run-target, so a non-runnable spec can never be selected
+        // (UDR-0119 D8; the workflow precedent).
+        const result = await hApi.validateStored(selected.id)
+        if (!result.valid) throw new Error(result.error || 'Harness agent failed validation')
+        if (result.warnings.length) throw new Error(`Resolve the warnings first: ${result.warnings[0]}`)
+        const h = harnesses.find((x) => x.id === selected.id)
+        if (h && h.runnable === false) throw new Error('This harness agent is not runnable (demo mode).')
+        const target = { id: selected.id, name: h?.name ?? selected.id }
+        // The store clears any workflow run-target (one effective axis, UDR-0119 D3).
+        setHarnessRunTarget(target)
+        setHTarget(target)
+        setWfTarget(getWorkflowRunTarget())
       } else {
         // Compile/validate the STORED workflow (the "build" step) before it goes live,
         // so an unrunnable workflow can never become the run-target.
@@ -263,15 +309,17 @@ export function DeclarativeAgentManager() {
         if (result.warnings.length) throw new Error(`Resolve the warnings first: ${result.warnings[0]}`)
         const w = workflows.find((x) => x.id === selected.id)
         const target = { id: selected.id, name: w?.name ?? selected.id }
+        // The store clears any harness run-target (one effective axis, UDR-0119 D3).
         setWorkflowRunTarget(target)
         setWfTarget(target)
+        setHTarget(null)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to activate')
     } finally {
       setBusy(false)
     }
-  }, [selected, adoptAgents, workflows])
+  }, [selected, adoptAgents, workflows, harnesses, hApi])
 
   const doReload = useCallback(async () => {
     setConfirmMode(null)
@@ -303,6 +351,9 @@ export function DeclarativeAgentManager() {
         }
         adoptAgents(await res.json())
         window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
+      } else if (selected.kind === 'Harness') {
+        await hApi.remove(selected.id)
+        if (hTarget?.id === selected.id) setHarnessRunTarget(null)
       } else {
         await wfApi.remove(selected.id)
         if (wfTarget?.id === selected.id) setWorkflowRunTarget(null)
@@ -314,7 +365,7 @@ export function DeclarativeAgentManager() {
     } finally {
       setBusy(false)
     }
-  }, [selected, adoptAgents, wfApi, wfTarget, fetchInventory])
+  }, [selected, adoptAgents, wfApi, wfTarget, hApi, hTarget, fetchInventory])
 
   const openAgentEditor = useCallback((id: string | null) => {
     setCreateMenu(false)
@@ -326,6 +377,11 @@ export function DeclarativeAgentManager() {
     setEditId(id)
     setWfEditorOpen(true)
   }, [])
+  const openHarnessEditor = useCallback((id: string | null) => {
+    setCreateMenu(false)
+    setEditId(id)
+    setHEditorOpen(true)
+  }, [])
 
   const onSaved = useCallback(() => {
     void fetchInventory()
@@ -334,7 +390,9 @@ export function DeclarativeAgentManager() {
 
   // ---- unified grouping: Built-in, Agents (+ nested folders), Workflows (+ nested) ----
   // The "Built-in", "Agents" and "Workflows" sections are ALWAYS rendered (even when
-  // empty) so the two kinds are discoverable before anything is authored (v0.112.1).
+  // empty) so the kinds are discoverable before anything is authored (v0.112.1).
+  // Harness agents (PRP-0135, UDR-0119 D3) live in the AGENTS section, told apart by
+  // their HARNESS tag -- management grouping only, not an execution-semantics change.
   const sections = useMemo(() => {
     const out: Array<{ header: string; kind: Kind; items: Unified[] }> = []
     const agentGroups = new Map<string, Unified[]>()
@@ -342,6 +400,12 @@ export function DeclarativeAgentManager() {
       const label = agentGroup(a)
       const arr = agentGroups.get(label) ?? []
       arr.push({ kind: 'Prompt', ...a })
+      agentGroups.set(label, arr)
+    }
+    for (const h of harnesses) {
+      const label = h.group_path.length ? h.group_path.join(' / ') : TOP_LEVEL_LABEL
+      const arr = agentGroups.get(label) ?? []
+      arr.push({ ...h, kind: 'Harness' })
       agentGroups.set(label, arr)
     }
     out.push({ header: 'Built-in', kind: 'Prompt', items: agentGroups.get(BUILTIN_LABEL) ?? [] })
@@ -363,7 +427,7 @@ export function DeclarativeAgentManager() {
       if (label !== TOP_LEVEL_LABEL) out.push({ header: `Workflows · ${label}`, kind: 'Workflow', items: arr })
     }
     return out
-  }, [agents, workflows])
+  }, [agents, workflows, harnesses])
 
   // UDR-0115 D2: render nothing only while the modal is CLOSED and the feature is
   // unavailable. Once a request has arrived the dialog must render, even if the
@@ -375,11 +439,24 @@ export function DeclarativeAgentManager() {
     sections.flatMap((s) => s.items).find((e) => selected && e.kind === selected.kind && e.id === selected.id) ?? null
 
   const hasWarnings = (current?.warnings?.length ?? 0) > 0
-  // The single effective run-target: a selected Workflow wins, else the active Prompt
-  // agent. Drives the "Active" state of BOTH kinds identically (v0.112.1).
+  // The single effective run-target: a selected Workflow OR Harness agent wins, else
+  // the active Prompt agent (one axis, UDR-0119 D3). Drives "Active" identically.
+  const anyTarget = Boolean(wfTarget) || Boolean(hTarget)
   const isCurrentActive =
-    current?.kind === 'Workflow' ? wfTarget?.id === current.id : current?.id === activeId && !wfTarget
-  const canActivate = current !== null && current.loaded === true && !current.error && !hasWarnings && !isCurrentActive
+    current?.kind === 'Workflow'
+      ? wfTarget?.id === current.id
+      : current?.kind === 'Harness'
+        ? hTarget?.id === current.id
+        : current?.id === activeId && !anyTarget
+  const canActivate =
+    current !== null &&
+    current.loaded === true &&
+    !current.error &&
+    !hasWarnings &&
+    !isCurrentActive &&
+    // A harness agent must be runnable (blocking warnings already excluded above;
+    // this is the DEMO_MODE read-only case, UDR-0119 D7).
+    (current.kind !== 'Harness' || current.runnable !== false)
 
   return (
     <>
@@ -416,7 +493,11 @@ export function DeclarativeAgentManager() {
                         const isSel = selected?.kind === e.kind && selected.id === e.id
                         const clean = e.loaded && (e.warnings?.length ?? 0) === 0
                         const isActive =
-                          e.kind === 'Prompt' ? e.active && !wfTarget : e.kind === 'Workflow' && wfTarget?.id === e.id
+                          e.kind === 'Prompt'
+                            ? e.active && !wfTarget && !hTarget
+                            : e.kind === 'Harness'
+                              ? hTarget?.id === e.id
+                              : wfTarget?.id === e.id
                         return (
                           <button
                             key={`${e.kind}:${e.id}`}
@@ -486,7 +567,7 @@ export function DeclarativeAgentManager() {
                         <div className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-400">
                           <div className="mb-1 flex items-center gap-1.5 font-medium">
                             <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
-                            {current.kind === 'Workflow' ? 'Resolve before running:' : 'Fix before activating:'}
+                            {current.kind === 'Prompt' ? 'Fix before activating:' : 'Resolve before running:'}
                           </div>
                           <ul className="space-y-1 pl-5">
                             {current.warnings?.map((w) => (
@@ -514,6 +595,30 @@ export function DeclarativeAgentManager() {
                           Steps: <span className="font-mono">{current.action_kinds?.join(' -> ')}</span>
                         </p>
                       )}
+                      {/* Harness resolved-policy summary (CTR-0194, UDR-0119 D5/D7). */}
+                      {current.kind === 'Harness' && current.policy && (
+                        <div className="mb-3 space-y-0.5 text-[11px] text-muted-foreground">
+                          <p>
+                            Model: <span className="font-mono">{current.policy.model || '-'}</span> · Web search:{' '}
+                            {current.policy.web_search} · Loop cap: {current.policy.loop_max_iterations}
+                          </p>
+                          <p>
+                            Workspace: file memory {current.policy.file_memory ? 'on' : 'off'} · file access{' '}
+                            {current.policy.file_access ? 'on' : 'off'} · shell {current.policy.shell ? 'on' : 'off'} ·
+                            skills {current.policy.skills ? 'on' : 'off'}
+                          </p>
+                          <p>
+                            Todo {current.policy.todo ? 'on' : 'off'} · Mode{' '}
+                            {current.policy.mode ? (current.policy.mode_initial ?? 'on') : 'off'} · Write approval{' '}
+                            {current.policy.write_tool_approval ? 'required' : 'OFF (opt-in)'}
+                          </p>
+                        </div>
+                      )}
+                      {current.kind === 'Harness' && current.runnable === false && !hasWarnings && current.loaded && (
+                        <p className="mb-3 text-[11px] text-amber-700 dark:text-amber-400">
+                          Read-only here: harness agents are not runnable in demo mode.
+                        </p>
+                      )}
 
                       <div className="flex flex-wrap items-center gap-2">
                         {/* ONE activation affordance for both kinds (v0.112.1): same label,
@@ -521,25 +626,34 @@ export function DeclarativeAgentManager() {
                         <Button size="sm" disabled={!canActivate} onClick={() => setConfirmMode('activate')}>
                           {isCurrentActive ? 'Active' : hasWarnings ? 'Resolve warnings to activate' : 'Activate'}
                         </Button>
-                        {current.editable && (current.kind === 'Workflow' ? wfCanAuthor : canAuthor) && (
-                          <>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() =>
-                                current.kind === 'Workflow' ? openWfEditor(current.id) : openAgentEditor(current.id)
-                              }>
-                              <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-destructive hover:text-destructive"
-                              onClick={() => setConfirmMode('delete')}>
-                              <Trash2 className="mr-1 h-3.5 w-3.5" /> Delete
-                            </Button>
-                          </>
-                        )}
+                        {current.editable &&
+                          (current.kind === 'Workflow'
+                            ? wfCanAuthor
+                            : current.kind === 'Harness'
+                              ? hCanAuthor
+                              : canAuthor) && (
+                            <>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() =>
+                                  current.kind === 'Workflow'
+                                    ? openWfEditor(current.id)
+                                    : current.kind === 'Harness'
+                                      ? openHarnessEditor(current.id)
+                                      : openAgentEditor(current.id)
+                                }>
+                                <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-destructive hover:text-destructive"
+                                onClick={() => setConfirmMode('delete')}>
+                                <Trash2 className="mr-1 h-3.5 w-3.5" /> Delete
+                              </Button>
+                            </>
+                          )}
                       </div>
                     </>
                   ) : (
@@ -558,22 +672,26 @@ export function DeclarativeAgentManager() {
                       ? 'Working...'
                       : current?.kind === 'Workflow'
                         ? 'Rebuilding workflows...'
-                        : 'Rebuilding agents...'}
+                        : current?.kind === 'Harness'
+                          ? 'Validating harness agent...'
+                          : 'Rebuilding agents...'}
                   </div>
                 ) : (
                   <div className="w-[360px] rounded-lg border bg-background p-4 shadow-lg">
                     <p className="text-sm font-medium">
                       {confirmMode === 'activate'
-                        ? `Activate this ${current?.kind === 'Workflow' ? 'workflow' : 'agent'}?`
+                        ? `Activate this ${current?.kind === 'Workflow' ? 'workflow' : current?.kind === 'Harness' ? 'harness agent' : 'agent'}?`
                         : confirmMode === 'delete'
-                          ? `Delete this ${current?.kind === 'Workflow' ? 'workflow' : 'agent'}?`
+                          ? `Delete this ${current?.kind === 'Workflow' ? 'workflow' : current?.kind === 'Harness' ? 'harness agent' : 'agent'}?`
                           : 'Reload from disk?'}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {confirmMode === 'activate'
                         ? current?.kind === 'Workflow'
                           ? 'This builds the workflow and makes it the run-target; your next message runs it instead of the active agent.'
-                          : 'This rebuilds the agents; the next message, the API, and Teams use the selected agent.'
+                          : current?.kind === 'Harness'
+                            ? 'This validates the harness agent and makes it the run-target; your next message runs it instead of the active agent. It can execute shell commands and write files in the workspace (with approval).'
+                            : 'This rebuilds the agents; the next message, the API, and Teams use the selected agent.'
                         : confirmMode === 'delete'
                           ? 'This permanently deletes the YAML file.'
                           : 'Re-scans the declarative directory.'}
@@ -605,7 +723,7 @@ export function DeclarativeAgentManager() {
           <div className="flex items-center justify-between gap-2 border-t px-6 py-3">
             <span className="truncate text-xs text-destructive">{error}</span>
             <div className="flex items-center gap-2">
-              {(canAuthor || wfCanAuthor) && (
+              {(canAuthor || wfCanAuthor || hCanAuthor) && (
                 <div className="relative">
                   <Button
                     variant="outline"
@@ -624,6 +742,14 @@ export function DeclarativeAgentManager() {
                             onClick={() => openAgentEditor(null)}
                             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent">
                             <Bot className="h-3.5 w-3.5 text-muted-foreground" /> New Prompt agent
+                          </button>
+                        )}
+                        {hCanAuthor && (
+                          <button
+                            type="button"
+                            onClick={() => openHarnessEditor(null)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent">
+                            <Hammer className="h-3.5 w-3.5 text-muted-foreground" /> New Harness agent
                           </button>
                         )}
                         {wfCanAuthor && (
@@ -668,6 +794,11 @@ export function DeclarativeAgentManager() {
             editId={editId}
             onSaved={onSaved}
           />
+        </Suspense>
+      )}
+      {hEditorOpen && (
+        <Suspense fallback={null}>
+          <HarnessAgentEditor open={hEditorOpen} onOpenChange={setHEditorOpen} editId={editId} onSaved={onSaved} />
         </Suspense>
       )}
     </>

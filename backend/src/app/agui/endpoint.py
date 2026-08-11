@@ -241,9 +241,7 @@ _MSG_CONTENT_FILTER = (
 # _classify_run_error (v0.117.2) so an operator can correlate the chat message
 # with the `AG-UI stream error` traceback in the server log; the message text
 # itself is never echoed (it can carry request content).
-_MSG_INVALID_SCHEMA_PREFIX = (
-    "The JSON Schema set for Structured Output was rejected by the model provider"
-)
+_MSG_INVALID_SCHEMA_PREFIX = "The JSON Schema set for Structured Output was rejected by the model provider"
 _MSG_INVALID_SCHEMA_HELP = (
     "Fix it in the JSON Schema editor next to the composer, or turn Structured Output "
     "off. An explicit schema is sent in STRICT mode, which requires: every array "
@@ -867,6 +865,36 @@ async def _stream_with_reasoning(
                 logger.warning("failed to dispatch workflow session title for %s", thread_id, exc_info=True)
         return
 
+    # Harness Agent run-target (PRP-0135, CTR-0009 v-next, UDR-0119 D3/D4). When the
+    # request selects a harness agent (state.harness_id), the run streams the cached
+    # per-conversation harness agent through the SAME loop below -- the harness returns
+    # a standard MAF Agent, so the existing TEXT/REASONING/TOOL_CALL translation and
+    # the FEAT-0028 approval handshake apply unchanged. Absent the flag (and absent
+    # state.workflow_id above) the endpoint runs the active Prompt agent byte-for-byte.
+    _harness_id = (request_body.state or {}).get("harness_id") if request_body.state else None
+    _harness_ctx: tuple[Any, Any, str] | None = None
+    if _harness_id:
+        from app.agent.harness.runtime import agent_for_thread as _harness_agent_for_thread
+        from app.agent.harness.spec import HarnessAgentError as _HarnessAgentError
+
+        try:
+            _harness_ctx = await _harness_agent_for_thread(str(_harness_id), thread_id)
+        except _HarnessAgentError as exc:
+            # Unknown id / blocking warnings / demo mode: a clean RUN_ERROR run.
+            yield encoder.encode(RunStartedEvent(type=EventType.RUN_STARTED, run_id=run_id, thread_id=thread_id))
+            yield encoder.encode(RunErrorEvent(type=EventType.RUN_ERROR, message=str(exc)))
+            yield encoder.encode(RunFinishedEvent(type=EventType.RUN_FINISHED, run_id=run_id, thread_id=thread_id))
+            return
+        except Exception:
+            logger.exception("Harness agent %s failed to build", _harness_id)
+            yield encoder.encode(RunStartedEvent(type=EventType.RUN_STARTED, run_id=run_id, thread_id=thread_id))
+            yield encoder.encode(
+                RunErrorEvent(type=EventType.RUN_ERROR, message="The harness agent could not be built.")
+            )
+            yield encoder.encode(RunFinishedEvent(type=EventType.RUN_FINISHED, run_id=run_id, thread_id=thread_id))
+            return
+    harness_run = _harness_ctx is not None
+
     yield encoder.encode(
         RunStartedEvent(
             type=EventType.RUN_STARTED,
@@ -928,8 +956,10 @@ async def _stream_with_reasoning(
         _pdf_model = request_body.state.get("model") if request_body.state else None
         _inject_image_content(messages, request_body.messages, pdf_native=_pdf_wants_native(_pdf_model))
 
-        # Create session with metadata (same as _agent_run.py:685-691)
-        session = AgentSession()
+        # Create session with metadata (same as _agent_run.py:685-691). A harness
+        # run reuses the per-conversation CACHED session instead, so its in-memory
+        # history / todo / mode / loop state survives across turns (UDR-0119 D4).
+        session = _harness_ctx[1] if harness_run else AgentSession()
         session.metadata = {
             "ag_ui_thread_id": thread_id,
             "ag_ui_run_id": run_id,
@@ -977,8 +1007,22 @@ async def _stream_with_reasoning(
         output_schema, output_format = resolve_structured_request(request_body.state)
         structured_active = output_format != "none"
 
-        # Select agent from registry based on model (CTR-0070, PRP-0035)
-        agent = agent_registry.get(selected_model)
+        # Harness run-target (PRP-0135, UDR-0119 D3): the per-message Model /
+        # options / Structured Output / Background controls do NOT apply -- the
+        # harness YAML fixes the model and the factory fixes the policies
+        # (CTR-0193). CTR-0197 hides the controls; ignoring the state here is
+        # defense-in-depth so a stale client value can never leak into the run.
+        if harness_run:
+            selected_model = None
+            requested_options = {}
+            background = False
+            continuation_token = None
+            output_schema, output_format = None, "none"
+            structured_active = False
+
+        # Select agent: the harness run-target's cached agent (CTR-0193, UDR-0119
+        # D3) or the registry agent for state.model (CTR-0070, PRP-0035).
+        agent = _harness_ctx[0] if harness_run else agent_registry.get(selected_model)
 
         # Resolve the per-message generation options against the owning provider's
         # catalog (PRP-0081, UDR-0057 D7). Every advertised option is resolved
@@ -988,8 +1032,11 @@ async def _stream_with_reasoning(
         # options are merged only for live (non-demo) agents -- DemoChatClient
         # ignores them. `resolved_reasoning` is kept as the effort alias used by
         # the usage event's back-compat `reasoning` field.
-        effective_model = selected_model or agent_registry.default_model
-        resolved_options = providers.resolve_options(effective_model, requested_options)
+        # A harness run reports the YAML-bound offering as the effective model
+        # (usage events, provider-aware approval reconstruction); the per-message
+        # option resolution below stays inert for it ({} everywhere).
+        effective_model = _harness_ctx[2] if harness_run else (selected_model or agent_registry.default_model)
+        resolved_options = {} if harness_run else providers.resolve_options(effective_model, requested_options)
 
         # Active declarative agent option DEFAULTS (PRP-0094, CTR-0142, UDR-0072 D5).
         # The agent's mapped options (effort / verbosity) are applied for any option the
@@ -999,7 +1046,7 @@ async def _stream_with_reasoning(
         # effect (the panel always reports a full selection, so they cannot ride on the
         # agent's startup default_options alone) while preserving per-message override.
         spec = active_spec()
-        spec_opts = spec.model_options_override or {}
+        spec_opts = {} if harness_run else (spec.model_options_override or {})
         if spec_opts:
             catalog_defaults = {
                 d["key"]: d.get("default") for d in providers.model_options_catalog(effective_model)["options"]
@@ -1009,7 +1056,8 @@ async def _stream_with_reasoning(
                     resolved_options[key] = value
         # The agent's default structured output applies when the chat has not explicitly
         # enabled structured output (UDR-0072 D5; per-message control still wins).
-        if not structured_active and spec.structured_output is not None:
+        # Never for a harness run (the active Prompt agent's defaults are not its own).
+        if not harness_run and not structured_active and spec.structured_output is not None:
             output_schema = spec.structured_output.get("schema")
             output_format = spec.structured_output.get("mode", "json_schema")
             structured_active = output_format != "none"
@@ -1072,24 +1120,29 @@ async def _stream_with_reasoning(
         set_temporary_run(temporary)
         profile_snapshot = None
         memory_snapshot = None
+        extra_instructions: str | None = None
         if temporary:
             # Opportunistic retention sweep when this temporary thread is new
             # (UDR-0052 D4). Fire-and-forget so the stream is never blocked.
             if not temporary_path(thread_id).exists():
                 schedule_sweep()
-        else:
+        elif not harness_run:
             profile_snapshot = session_user_profile_snapshot(thread_id)
             # Agent Curated Memory (PRP-0100, CTR-0162, UDR-0079 D6). Capture the
             # per-session FROZEN <agent-memory> snapshot (once at session start;
             # reused on reload; None when disabled or the memory is empty) and inject
             # it at slot #2b, after the User Profile.
             memory_snapshot = session_agent_memory_snapshot(thread_id)
-        extra_instructions = agent_registry.run_instructions(
-            effective_model,
-            user_profile_block=profile_snapshot,
-            agent_memory_block=memory_snapshot,
-            temporary=temporary,
-        )
+        # A harness run never receives the Identity / Memory / capability-guidance
+        # instructions: the harness OWNS its prompt assembly (UDR-0119 D2), and its
+        # own file memory + skills providers fill the equivalent roles.
+        if not harness_run:
+            extra_instructions = agent_registry.run_instructions(
+                effective_model,
+                user_profile_block=profile_snapshot,
+                agent_memory_block=memory_snapshot,
+                temporary=temporary,
+            )
         if extra_instructions:
             run_options["instructions"] = extra_instructions
 
@@ -1100,7 +1153,10 @@ async def _stream_with_reasoning(
         # Identity). Logs carry METADATA ONLY (sizes / injection flags); the full
         # prompt CONTENT is written to a per-run file under PROMPT_DUMP_DIR when
         # PROMPT_DUMP_ENABLED (default off), so it is inspectable without flooding logs.
-        _identity_text = load_identity()
+        # A harness run's system prompt is MAF-assembled inside the agent (UDR-0119
+        # D2), so the Identity-based observability below reports the ChatWalaʻau-
+        # injected remainder only (empty for harness; the dump is skipped too).
+        _identity_text = "" if harness_run else load_identity()
         _effective_system_prompt = (
             _identity_text if not extra_instructions else f"{_identity_text}\n\n{extra_instructions}"
         )
@@ -1115,7 +1171,7 @@ async def _stream_with_reasoning(
             memory_snapshot is not None,
             len(_effective_system_prompt),
         )
-        if settings.prompt_dump_enabled:
+        if settings.prompt_dump_enabled and not harness_run:
             # The SPA sends only the NEW message; prior turns live in the session
             # store and are injected by FileHistoryProvider. To make the dump show
             # the FULL flowing prompt (past history + the new message), read the
@@ -1202,9 +1258,10 @@ async def _stream_with_reasoning(
         total_rounds = 0
         approval_loop_exceeded = False
         logger.info(
-            "AG-UI run start: thread=%s model=%s input_msgs=%d",
+            "AG-UI run start: thread=%s model=%s harness=%s input_msgs=%d",
             thread_id,
-            selected_model or "<default>",
+            effective_model if harness_run else (selected_model or "<default>"),
+            _harness_id or "-",
             len(iteration_messages),
         )
         # Structured output marker (PRP-0082, CTR-0009 v14, UDR-0058 D5). Tell the
@@ -1635,6 +1692,13 @@ async def _stream_with_reasoning(
                 approval_response_contents,
                 include_reasoning=is_anthropic,
                 strip_function_call_ids=not is_anthropic,
+                # PRP-0135 / UDR-0119 D6: never fabricate an approval response for
+                # a harness call that issued no approval request. In this lane MAF
+                # does not absorb it (each harness loop iteration is a fresh agent
+                # run), so it reaches the provider as an mcp_approval_response with
+                # a dangling approval_request_id and 400s the turn. The Prompt lane
+                # keeps the PRP-0108 synthesis byte-for-byte.
+                drop_deferred_calls=harness_run,
             )
             iteration_messages = [*iteration_messages, *iter_synthetic_messages]
             # Reset server-side response chaining before the post-approval

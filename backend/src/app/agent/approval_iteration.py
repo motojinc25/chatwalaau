@@ -242,6 +242,7 @@ class IterationContentAccumulator:
         *,
         include_reasoning: bool = True,
         strip_function_call_ids: bool = False,
+        drop_deferred_calls: bool = False,
     ) -> list[Message]:
         """Build ``[synthetic_assistant, synthetic_user]`` for iter N+1's input.
 
@@ -264,6 +265,22 @@ class IterationContentAccumulator:
           without the provider server item id so the Responses API does not
           demand the matching reasoning item (see ``_resolved_function_call``).
           Anthropic passes False to keep the original ``tool_use`` Content.
+        - ``drop_deferred_calls`` (harness lane: True; PRP-0135): OMIT the
+          deferred calls instead of replaying-and-approving them. The synthesis
+          below fabricates a ``function_approval_response`` for a call that never
+          issued an approval REQUEST. MAF absorbs that only while it still holds
+          the deferred call as pending; in the harness lane each loop iteration is
+          a fresh agent run, so it does not, and the response reaches the OpenAI
+          connector, which serializes it as an ``mcp_approval_response`` whose
+          ``approval_request_id`` names a request that never existed::
+
+              400 The following MCP approval requests have approval responses
+                  but weren't passed as input: call_...
+
+          -- and the ids in that 400 are exactly the ids this block logs. The
+          calls never executed, so omitting them costs nothing but a re-issue;
+          the genuinely gated call keeps its real approval response. The Prompt
+          lane passes False and keeps the PRP-0108 behavior byte-for-byte.
 
         Empty assistant or user messages are skipped so a degenerate
         iteration (e.g., no observed content) does not inject a no-op Message
@@ -282,13 +299,27 @@ class IterationContentAccumulator:
         text = "".join(self._text_chunks)
         if text:
             assistant_contents.append(Content.from_text(text=text))
+
+        # Calls that neither executed nor asked for approval: MAF deferred them
+        # (see the synthesis block below). ``drop_deferred_calls`` decides whether
+        # they are replayed-and-approved or omitted entirely.
+        deferred_call_ids = [
+            call_id
+            for call_id in self._function_call_order
+            if call_id not in self._function_results and call_id not in self._function_call_from_approval
+        ]
+        replayed_call_ids = (
+            [cid for cid in self._function_call_order if cid not in deferred_call_ids]
+            if drop_deferred_calls
+            else list(self._function_call_order)
+        )
         assistant_contents.extend(
             self._resolved_function_call(cid, strip_server_item_ids=strip_function_call_ids)
-            for cid in self._function_call_order
+            for cid in replayed_call_ids
         )
 
         user_contents: list[Content] = []
-        for call_id in self._function_call_order:
+        for call_id in replayed_call_ids:
             result = self._function_results.get(call_id)
             if result is not None:
                 user_contents.append(result)
@@ -306,12 +337,8 @@ class IterationContentAccumulator:
         # tool is non-gated (it never asked for approval), so approving its
         # deferred execution restores the pre-1.10 semantics -- the tool runs
         # exactly once, on resume, and MAF emits the paired function_result.
-        if assistant_contents and self._function_call_order:
-            pending_call_ids = [
-                call_id
-                for call_id in self._function_call_order
-                if call_id not in self._function_results and call_id not in self._function_call_from_approval
-            ]
+        if assistant_contents and self._function_call_order and not drop_deferred_calls:
+            pending_call_ids = deferred_call_ids
             for call_id in pending_call_ids:
                 deferred_call = self._resolved_function_call(call_id, strip_server_item_ids=strip_function_call_ids)
                 user_contents.append(

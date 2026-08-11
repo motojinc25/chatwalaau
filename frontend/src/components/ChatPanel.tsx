@@ -1,4 +1,4 @@
-import { Bot, ImageIcon, Workflow as WorkflowIcon } from 'lucide-react'
+import { Bot, Hammer, ImageIcon, Workflow as WorkflowIcon } from 'lucide-react'
 import { type DragEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BackgroundResponsesToggle } from '@/components/BackgroundResponsesToggle'
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
@@ -32,7 +32,7 @@ import { useToolApproval } from '@/hooks/useToolApproval'
 import { useTTS } from '@/hooks/useTTS'
 import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
-import { getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
+import { getHarnessRunTarget, getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
 import type { ChatMessage, ImageRef, PersistedWorkflowRun } from '@/types/chat'
 
@@ -118,19 +118,25 @@ export function ChatPanel({
   // run-target store) streams the compiled workflow (state.workflow_id) and hides the
   // per-message model / options controls; otherwise the active Prompt agent runs.
   const [wfTarget, setWfTarget] = useState(getWorkflowRunTarget)
+  // Harness Agent run-target (CTR-0197, PRP-0135, UDR-0119 D3). Mutually exclusive
+  // with the workflow run-target -- the store enforces one effective axis.
+  const [hTarget, setHTarget] = useState(getHarnessRunTarget)
   const [activeAgent, setActiveAgent] = useState<{ id: string; name: string }>({ id: '', name: '' })
   const [workflowRun, setWorkflowRun] = useState<WorkflowRunState>(EMPTY_WORKFLOW_RUN)
   // Detached per-run canvases (CTR-0187, PRP-0123). Ephemeral; never persisted.
   const canvas = useWorkflowRunCanvas()
   const selectedWorkflowId = wfTarget?.id ?? ''
-  // Label stamped on the assistant message: the workflow name, or the active agent's
-  // name -- including the Built-in agent (v0.112.2), so a reloaded chat can always say
-  // which Built-in / Prompt / Workflow agent answered.
-  const runTargetLabel = wfTarget ? `⧉ ${wfTarget.name}` : activeAgent.name || undefined
+  const selectedHarnessId = hTarget?.id ?? ''
+  // Label stamped on the assistant message: the workflow / harness name, or the active
+  // agent's name -- including the Built-in agent (v0.112.2), so a reloaded chat can
+  // always say which Built-in / Prompt / Workflow / Harness agent answered.
+  const runTargetLabel = wfTarget ? `⧉ ${wfTarget.name}` : hTarget ? `⚙ ${hTarget.name}` : activeAgent.name || undefined
   // A declarative agent pins its own model + options, so the per-message controls would
   // be misleading -- hide them for a custom Prompt agent exactly as for a workflow
-  // (v0.112.2). The Built-in (CORE) agent keeps the controls, as before.
-  const hideModelControls = Boolean(selectedWorkflowId) || (activeAgent.id !== '' && activeAgent.id !== 'core')
+  // (v0.112.2) or a harness agent (PRP-0135: the harness YAML fixes model + policies).
+  // The Built-in (CORE) agent keeps the controls, as before.
+  const hideModelControls =
+    Boolean(selectedWorkflowId) || Boolean(selectedHarnessId) || (activeAgent.id !== '' && activeAgent.id !== 'core')
 
   // UDR-0111 D5/D6: the run-target name is the entry point to its manager. A real
   // button (keyboard-reachable) that dispatches the open request on the existing
@@ -138,7 +144,7 @@ export function ChatPanel({
   const openDeclarativeManager = useCallback(() => {
     window.dispatchEvent(new Event(OPEN_DECLARATIVE_MANAGER_EVENT))
   }, [])
-  const runTargetName = selectedWorkflowId ? wfTarget?.name : activeAgent.name
+  const runTargetName = selectedWorkflowId ? wfTarget?.name : selectedHarnessId ? hTarget?.name : activeAgent.name
   const runTargetIndicator = (
     <button
       type="button"
@@ -146,14 +152,23 @@ export function ChatPanel({
       title="Open Declarative Agents & Workflows"
       aria-label={`Run target: ${runTargetName ?? ''}. Open Declarative Agents & Workflows`}
       className="flex items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary transition-colors hover:bg-primary/20">
-      {selectedWorkflowId ? <WorkflowIcon className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
+      {selectedWorkflowId ? (
+        <WorkflowIcon className="h-3.5 w-3.5" />
+      ) : selectedHarnessId ? (
+        <Hammer className="h-3.5 w-3.5" />
+      ) : (
+        <Bot className="h-3.5 w-3.5" />
+      )}
       {runTargetName}
     </button>
   )
 
   // Keep the run-target in sync with the modal (workflow selection + agent activation).
   useEffect(() => {
-    const onRt = () => setWfTarget(getWorkflowRunTarget())
+    const onRt = () => {
+      setWfTarget(getWorkflowRunTarget())
+      setHTarget(getHarnessRunTarget())
+    }
     const onAgent = () => {
       fetch('/api/model')
         .then((r) => (r.ok ? r.json() : null))
@@ -262,6 +277,7 @@ export function ChatPanel({
     selectedImageOptions,
     temporary,
     selectedWorkflowId,
+    selectedHarnessId,
     runTargetLabel,
     // Fan the AG-UI CUSTOM events to the tool-approval consumer AND fold the additive
     // workflow_* progress events into the live workflow run state (PRP-0118, CTR-0185).
