@@ -60,7 +60,7 @@ import {
 } from 'react'
 import { AboutDialog } from '@/components/AboutDialog'
 import { DeclarativeAgentManagerTrigger } from '@/components/DeclarativeAgentManager'
-import { ModelSettingsManager } from '@/components/ModelSettingsManager'
+import { AppSettingsManager } from '@/components/AppSettingsManager'
 import { PermissionsDisabledBanner } from '@/components/PermissionsDisabledBanner'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
 import {
@@ -1473,7 +1473,7 @@ export function SessionSidebar({
           )}
           {/* Model Settings (CTR-0176, PRP-0111): self-probing icon next to About;
               shown when GET /api/model-offerings is reachable. */}
-          <ModelSettingsManager />
+          <AppSettingsManager />
           <Button
             variant="ghost"
             size="icon"

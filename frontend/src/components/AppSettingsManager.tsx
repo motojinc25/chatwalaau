@@ -28,6 +28,7 @@ import {
   TriangleAlert,
 } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { AppSettingsPanel, type AppSettingsStatus } from '@/components/AppSettingsPanel'
 import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -35,20 +36,29 @@ import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 
 /**
- * Model Settings modal (CTR-0176, PRP-0111, UDR-0090).
+ * App Settings modal (CTR-0176 v7, PRP-0111 / PRP-0136, UDR-0090 / UDR-0120).
  *
  * A sidebar-footer icon (next to the About icon) opens a ~90% modal -- the
  * Declarative Agents management shape -- with a left settings-item list and a
- * right detail pane. The single settings item today is the Model Offering
- * Catalog editor, which COMPOSES the chat/embeddings/image model offerings and
- * their auth references (CTR-0175). Auth is referenced only by environment-
- * variable NAME; secret values are never displayed or accepted here -- the
- * server reports whether each referenced name is set (checked live via
- * /env-status), rendered as a "set"/"not set" chip. Saving PUTs the composed
- * catalog, which rebuilds the per-model agents (a brief "Applying model
- * configuration..." overlay) and broadcasts ACTIVE_AGENT_CHANGED_EVENT so the
- * model selector / options controls refresh without a page reload. In DEMO mode
- * the whole editor is read-only.
+ * right detail pane.
+ *
+ * The list carries TWO kinds of item. The first is the Model Offering Catalog
+ * editor, which COMPOSES the chat/embeddings/image model offerings and their auth
+ * references (CTR-0175). Auth is referenced only by environment-variable NAME;
+ * secret values are never displayed or accepted here -- the server reports
+ * whether each referenced name is set (checked live via /env-status), rendered as
+ * a "set"/"not set" chip. Saving PUTs the composed catalog, which rebuilds the
+ * per-model agents (a brief "Applying model configuration..." overlay) and
+ * broadcasts ACTIVE_AGENT_CHANGED_EVENT so the model selector / options controls
+ * refresh without a page reload. In DEMO mode that editor is read-only.
+ *
+ * The rest are APPLICATION SETTINGS groups (PRP-0136), one per group the backend
+ * advertises at GET /api/app-settings. They are rendered by AppSettingsPanel
+ * purely from descriptors, so a settings key added in a later release needs NO
+ * change here (UDR-0120 D8) -- the property `role_registry` (UDR-0096 D6) already
+ * established for task-model rows. This file therefore names no individual
+ * setting; if you find yourself adding one, the descriptor belongs in
+ * app/app_settings/descriptors.py instead.
  */
 
 type Provider = 'azure-openai' | 'anthropic' | 'openai' | 'foundry'
@@ -176,13 +186,12 @@ function cleanImageDefaults(d: ImageDefaults | undefined): ImageDefaults | undef
   return Object.keys(out).length ? out : undefined
 }
 
-const SETTINGS_ITEMS: Array<{ id: string; label: string; description: string }> = [
-  {
-    id: 'catalog',
-    label: 'Model Offering Catalog',
-    description: 'Compose the chat, embeddings, and image model offerings and their auth references.',
-  },
-]
+/** The catalog item is code-owned; the settings groups come from the backend. */
+const CATALOG_ITEM = {
+  id: 'catalog',
+  label: 'Model Offering Catalog',
+  description: 'Compose the chat, embeddings, and image model offerings and their auth references.',
+} as const
 
 const SECTIONS: Array<{ op: Operation; title: string; hint: string }> = [
   { op: 'chat', title: 'Chat', hint: 'At least one chat offering; exactly one is the default.' },
@@ -761,7 +770,7 @@ function OfferingCard({
   )
 }
 
-export function ModelSettingsManager() {
+export function AppSettingsManager() {
   const [available, setAvailable] = useState(false)
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -782,7 +791,11 @@ export function ModelSettingsManager() {
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
   const [demoBlocked, setDemoBlocked] = useState(false)
   const [search, setSearch] = useState('')
-  const [selectedItem, setSelectedItem] = useState<string>(SETTINGS_ITEMS[0].id)
+  const [selectedItem, setSelectedItem] = useState<string>(CATALOG_ITEM.id)
+  // Application settings (CTR-0199). Fetched alongside the catalog when the modal
+  // opens; null means the endpoint has not answered yet, in which case only the
+  // catalog item is listed rather than a set of empty groups.
+  const [appSettings, setAppSettings] = useState<AppSettingsStatus | null>(null)
   const [liveEnv, setLiveEnv] = useState<Record<string, boolean>>({})
   const [scrollKey, setScrollKey] = useState<string | null>(null)
   const [pendingDiscard, setPendingDiscard] = useState<null | 'close' | 'refresh'>(null)
@@ -834,10 +847,21 @@ export function ModelSettingsManager() {
     }
   }, [adopt])
 
+  const fetchAppSettings = useCallback(async () => {
+    try {
+      const res = await fetch('/api/app-settings')
+      if (res.ok) setAppSettings((await res.json()) as AppSettingsStatus)
+    } catch {
+      // Silent: the catalog item still works, so a settings outage degrades to
+      // "the groups are not listed" rather than an unusable modal.
+    }
+  }, [])
+
   const openModal = useCallback(() => {
     setOpen(true)
     void fetchCatalog()
-  }, [fetchCatalog])
+    void fetchAppSettings()
+  }, [fetchCatalog, fetchAppSettings])
 
   const readOnly = demoBlocked
 
@@ -1076,15 +1100,31 @@ export function ModelSettingsManager() {
     setRoles((prev) => ({ ...prev, [key]: offeringId }))
   }, [])
 
+  // The item list = the code-owned catalog item plus one item per backend-declared
+  // settings group. Building it from `appSettings.groups` is what makes a new
+  // group appear here with no frontend change (UDR-0120 D8).
+  const items = useMemo(
+    () => [
+      { ...CATALOG_ITEM, kind: 'catalog' as const },
+      ...(appSettings?.groups ?? []).map((g) => ({
+        id: g.key,
+        label: g.label,
+        description: g.description,
+        kind: 'settings' as const,
+      })),
+    ],
+    [appSettings],
+  )
+
   const filteredItems = useMemo(() => {
     const q = search.trim().toLowerCase()
-    if (!q) return SETTINGS_ITEMS
-    return SETTINGS_ITEMS.filter((it) => it.label.toLowerCase().includes(q) || it.description.toLowerCase().includes(q))
-  }, [search])
+    if (!q) return items
+    return items.filter((it) => it.label.toLowerCase().includes(q) || it.description.toLowerCase().includes(q))
+  }, [search, items])
 
   if (!available) return null
 
-  const activeItem = SETTINGS_ITEMS.find((it) => it.id === selectedItem) ?? SETTINGS_ITEMS[0]
+  const activeItem = items.find((it) => it.id === selectedItem) ?? items[0]
 
   return (
     <>
@@ -1093,19 +1133,19 @@ export function ModelSettingsManager() {
         size="icon"
         className="h-6 w-6 text-muted-foreground"
         onClick={openModal}
-        aria-label="Model settings"
-        title="Model settings (compose model offerings)">
+        aria-label="App settings"
+        title="App settings (models and application configuration)">
         <SlidersHorizontal className="h-4 w-4" />
       </Button>
 
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="flex h-[90vh] w-[90vw] max-w-[90vw] flex-col gap-0 p-0">
           <DialogHeader className="border-b px-6 py-4">
-            <DialogTitle>Model Settings</DialogTitle>
+            <DialogTitle>App Settings</DialogTitle>
             <DialogDescription>
-              Compose the model offerings served to chat, embeddings, and image operations. Auth is referenced by
-              environment-variable name only -- secret values live in the server environment and are never shown here.
-              Saving rebuilds the per-model agents.
+              Configure the model offerings and the application's runtime settings. Secret values and feature gates stay
+              in the server environment and are never shown or edited here -- what you see is referenced by name only.
+              Each setting shows whether it applies immediately or needs a restart.
             </DialogDescription>
           </DialogHeader>
 
@@ -1147,203 +1187,220 @@ export function ModelSettingsManager() {
                   </div>
                 </div>
 
-                {/* Right: Model Offering Catalog editor */}
+                {/* Right: the selected item's detail pane. A settings group is
+                    rendered entirely from descriptors; only the catalog item has
+                    a hand-written editor. */}
                 <div className="flex min-w-0 flex-1 flex-col">
-                  <div className="flex items-center justify-between gap-2 border-b px-5 py-3">
-                    <div className="min-w-0">
-                      <h3 className="truncate text-base font-semibold">{activeItem.label}</h3>
-                      <p className="truncate text-[11px] text-muted-foreground">
-                        {status?.path ? status.path : 'Catalog path not set'}
-                        {status && !status.valid && ' -- catalog invalid'}
-                        {dirty && ' -- unsaved changes'}
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={requestRefresh}
-                        disabled={busy}
-                        title="Reload the catalog from the server (re-reads model_offerings.jsonc)">
-                        <RefreshCw className="mr-1 h-3.5 w-3.5" /> Refresh
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={() => void doSave()}
-                        disabled={busy || readOnly || issues.length > 0 || !dirty}
-                        title={
-                          readOnly
-                            ? 'Disabled in demo mode'
-                            : !dirty
-                              ? 'No changes to save'
-                              : issues.length > 0
-                                ? 'Resolve the highlighted issues before saving'
-                                : 'Apply the composed catalog (rebuilds agents)'
-                        }>
-                        Save
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div ref={bodyRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
-                    {readOnly && (
-                      <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[12px] text-amber-700 dark:text-amber-400">
-                        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-                        <span>Demo mode: the model catalog is read-only and cannot be changed.</span>
-                      </div>
-                    )}
-
-                    {saveError && (
-                      <div className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-2 text-[12px] text-destructive">
-                        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-                        <span className="whitespace-pre-wrap">{saveError}</span>
-                      </div>
-                    )}
-
-                    {status && status.errors.length > 0 && (
-                      <div className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-[12px] text-destructive">
-                        <div className="mb-1 font-medium">The stored catalog has validation errors:</div>
-                        <ul className="space-y-0.5 pl-5">
-                          {status.errors.map((e) => (
-                            <li key={e} className="list-disc whitespace-pre-wrap">
-                              {e}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {issues.length > 0 && !readOnly && (
-                      <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-400">
-                        <div className="mb-1 flex items-center gap-1.5 font-medium">
-                          <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
-                          Resolve these before saving:
+                  {activeItem.kind === 'settings' && appSettings ? (
+                    <AppSettingsPanel
+                      groupKey={activeItem.id}
+                      status={appSettings}
+                      onRefresh={() => void fetchAppSettings()}
+                      onSaved={setAppSettings}
+                    />
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between gap-2 border-b px-5 py-3">
+                        <div className="min-w-0">
+                          <h3 className="truncate text-base font-semibold">{activeItem.label}</h3>
+                          <p className="truncate text-[11px] text-muted-foreground">
+                            {status?.path ? status.path : 'Catalog path not set'}
+                            {status && !status.valid && ' -- catalog invalid'}
+                            {dirty && ' -- unsaved changes'}
+                          </p>
                         </div>
-                        <ul className="space-y-0.5 pl-5">
-                          {issues.map((i) => (
-                            <li key={i} className="list-disc">
-                              {i}
-                            </li>
-                          ))}
-                        </ul>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={requestRefresh}
+                            disabled={busy}
+                            title="Reload the catalog from the server (re-reads model_offerings.jsonc)">
+                            <RefreshCw className="mr-1 h-3.5 w-3.5" /> Refresh
+                          </Button>
+                          <Button
+                            size="sm"
+                            onClick={() => void doSave()}
+                            disabled={busy || readOnly || issues.length > 0 || !dirty}
+                            title={
+                              readOnly
+                                ? 'Disabled in demo mode'
+                                : !dirty
+                                  ? 'No changes to save'
+                                  : issues.length > 0
+                                    ? 'Resolve the highlighted issues before saving'
+                                    : 'Apply the composed catalog (rebuilds agents)'
+                            }>
+                            Save
+                          </Button>
+                        </div>
                       </div>
-                    )}
 
-                    <p className="rounded-md bg-muted/50 p-2 text-[11px] text-muted-foreground">{AUTH_HELP}</p>
+                      <div ref={bodyRef} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+                        {readOnly && (
+                          <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[12px] text-amber-700 dark:text-amber-400">
+                            <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                            <span>Demo mode: the model catalog is read-only and cannot be changed.</span>
+                          </div>
+                        )}
 
-                    {/* Offering composer, grouped by operation. Within a group the
+                        {saveError && (
+                          <div className="flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-2 text-[12px] text-destructive">
+                            <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                            <span className="whitespace-pre-wrap">{saveError}</span>
+                          </div>
+                        )}
+
+                        {status && status.errors.length > 0 && (
+                          <div className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-[12px] text-destructive">
+                            <div className="mb-1 font-medium">The stored catalog has validation errors:</div>
+                            <ul className="space-y-0.5 pl-5">
+                              {status.errors.map((e) => (
+                                <li key={e} className="list-disc whitespace-pre-wrap">
+                                  {e}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {issues.length > 0 && !readOnly && (
+                          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-400">
+                            <div className="mb-1 flex items-center gap-1.5 font-medium">
+                              <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+                              Resolve these before saving:
+                            </div>
+                            <ul className="space-y-0.5 pl-5">
+                              {issues.map((i) => (
+                                <li key={i} className="list-disc">
+                                  {i}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        <p className="rounded-md bg-muted/50 p-2 text-[11px] text-muted-foreground">{AUTH_HELP}</p>
+
+                        {/* Offering composer, grouped by operation. Within a group the
                         cards are drag-reorderable, and that order IS what the chat
                         model selector renders (UDR-0093 D1/D5). Dragging is scoped to
                         one section: a card's section is derived from its `operations`,
                         so a cross-section drag would be meaningless. */}
-                    {SECTIONS.map((section) => {
-                      const items = offerings.map((o, i) => ({ o, i })).filter(({ o }) => primaryOp(o) === section.op)
-                      return (
-                        <section key={section.op} className="space-y-2">
-                          <div className="flex items-center gap-2">
-                            <h4 className="text-sm font-semibold">{section.title}</h4>
-                            <span className="text-[11px] text-muted-foreground">{section.hint}</span>
-                          </div>
-                          {section.op === 'chat' && items.length > 1 && (
-                            <p className="text-[11px] text-muted-foreground">
-                              Drag to set the order models appear in the chat selector. The default model is
-                              preselected, not moved to the top.
-                            </p>
-                          )}
-                          {items.length === 0 && (
-                            <p className="text-[11px] text-muted-foreground">No {section.op} offerings.</p>
-                          )}
-                          <DndContext
-                            sensors={sensors}
-                            collisionDetection={closestCenter}
-                            onDragEnd={(event) => handleOfferingDragEnd(section.op, event)}>
-                            <SortableContext
-                              items={items.map(({ o }) => o._key)}
-                              strategy={verticalListSortingStrategy}>
-                              <div className="space-y-2">
-                                {items.map(({ o, i }) => (
-                                  <OfferingCard
-                                    key={o._key}
-                                    offering={o}
-                                    index={i}
-                                    readOnly={readOnly}
-                                    isChat={opsOf(o).includes('chat')}
-                                    envStatus={envStatus}
-                                    expanded={expandedKeys.has(o._key)}
-                                    onToggleExpand={toggleExpanded}
-                                    onChange={updateOffering}
-                                    onRemove={removeOffering}
-                                    onSetDefault={setDefaultOffering}
-                                  />
-                                ))}
+                        {SECTIONS.map((section) => {
+                          const items = offerings
+                            .map((o, i) => ({ o, i }))
+                            .filter(({ o }) => primaryOp(o) === section.op)
+                          return (
+                            <section key={section.op} className="space-y-2">
+                              <div className="flex items-center gap-2">
+                                <h4 className="text-sm font-semibold">{section.title}</h4>
+                                <span className="text-[11px] text-muted-foreground">{section.hint}</span>
                               </div>
-                            </SortableContext>
-                          </DndContext>
-                          {!readOnly && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => addOffering(section.op)}
-                              title={`Add a ${section.op} offering`}>
-                              <Plus className="mr-1 h-3.5 w-3.5" /> Add {section.op} offering
-                            </Button>
-                          )}
-                        </section>
-                      )
-                    })}
+                              {section.op === 'chat' && items.length > 1 && (
+                                <p className="text-[11px] text-muted-foreground">
+                                  Drag to set the order models appear in the chat selector. The default model is
+                                  preselected, not moved to the top.
+                                </p>
+                              )}
+                              {items.length === 0 && (
+                                <p className="text-[11px] text-muted-foreground">No {section.op} offerings.</p>
+                              )}
+                              <DndContext
+                                sensors={sensors}
+                                collisionDetection={closestCenter}
+                                onDragEnd={(event) => handleOfferingDragEnd(section.op, event)}>
+                                <SortableContext
+                                  items={items.map(({ o }) => o._key)}
+                                  strategy={verticalListSortingStrategy}>
+                                  <div className="space-y-2">
+                                    {items.map(({ o, i }) => (
+                                      <OfferingCard
+                                        key={o._key}
+                                        offering={o}
+                                        index={i}
+                                        readOnly={readOnly}
+                                        isChat={opsOf(o).includes('chat')}
+                                        envStatus={envStatus}
+                                        expanded={expandedKeys.has(o._key)}
+                                        onToggleExpand={toggleExpanded}
+                                        onChange={updateOffering}
+                                        onRemove={removeOffering}
+                                        onSetDefault={setDefaultOffering}
+                                      />
+                                    ))}
+                                  </div>
+                                </SortableContext>
+                              </DndContext>
+                              {!readOnly && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => addOffering(section.op)}
+                                  title={`Add a ${section.op} offering`}>
+                                  <Plus className="mr-1 h-3.5 w-3.5" /> Add {section.op} offering
+                                </Button>
+                              )}
+                            </section>
+                          )
+                        })}
 
-                    {/* Task model assignments (PRP-0115, UDR-0096). Assign a chat
+                        {/* Task model assignments (PRP-0115, UDR-0096). Assign a chat
                         offering to each background / internal task; an unset role
                         follows the session / default model. Registry-driven, so a
                         future task model needs no UI change (D6). */}
-                    {roleRegistry.length > 0 && (
-                      <section className="space-y-2 border-t pt-4">
-                        <div className="flex items-center gap-2">
-                          <h4 className="text-sm font-semibold">Task model assignments</h4>
-                          <span className="text-[11px] text-muted-foreground">
-                            Which model runs each background task. Leave "Follow session / default" to use the chat's
-                            own model.
-                          </span>
-                        </div>
-                        {(() => {
-                          const chatIds = chatOfferingIds(offerings)
-                          return roleRegistry.map((role) => {
-                            const bound = roles[role.key] ?? ''
-                            const dangling = bound !== '' && !chatIds.includes(bound)
-                            return (
-                              <div key={role.key} className="flex items-center gap-3 rounded-md border bg-card p-2">
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-[12px] font-medium">{role.label}</div>
-                                  <div className="truncate text-[11px] text-muted-foreground">{role.description}</div>
-                                </div>
-                                {dangling && (
-                                  <span
-                                    className="inline-flex shrink-0 items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-400"
-                                    title={`'${bound}' is not a current chat offering; this task will use the session / default model.`}>
-                                    <TriangleAlert className="h-3 w-3" /> unknown offering
-                                  </span>
-                                )}
-                                <select
-                                  className={cn(CONTROL_CLASS, 'w-56 shrink-0')}
-                                  value={bound}
-                                  disabled={readOnly}
-                                  aria-label={`Model for ${role.label}`}
-                                  onChange={(e) => setRole(role.key, e.target.value)}>
-                                  <option value="">Follow session / default</option>
-                                  {dangling && <option value={bound}>{bound} (missing)</option>}
-                                  {chatIds.map((id) => (
-                                    <option key={id} value={id}>
-                                      {id}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            )
-                          })
-                        })()}
-                      </section>
-                    )}
-                  </div>
+                        {roleRegistry.length > 0 && (
+                          <section className="space-y-2 border-t pt-4">
+                            <div className="flex items-center gap-2">
+                              <h4 className="text-sm font-semibold">Task model assignments</h4>
+                              <span className="text-[11px] text-muted-foreground">
+                                Which model runs each background task. Leave "Follow session / default" to use the
+                                chat's own model.
+                              </span>
+                            </div>
+                            {(() => {
+                              const chatIds = chatOfferingIds(offerings)
+                              return roleRegistry.map((role) => {
+                                const bound = roles[role.key] ?? ''
+                                const dangling = bound !== '' && !chatIds.includes(bound)
+                                return (
+                                  <div key={role.key} className="flex items-center gap-3 rounded-md border bg-card p-2">
+                                    <div className="min-w-0 flex-1">
+                                      <div className="text-[12px] font-medium">{role.label}</div>
+                                      <div className="truncate text-[11px] text-muted-foreground">
+                                        {role.description}
+                                      </div>
+                                    </div>
+                                    {dangling && (
+                                      <span
+                                        className="inline-flex shrink-0 items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-400"
+                                        title={`'${bound}' is not a current chat offering; this task will use the session / default model.`}>
+                                        <TriangleAlert className="h-3 w-3" /> unknown offering
+                                      </span>
+                                    )}
+                                    <select
+                                      className={cn(CONTROL_CLASS, 'w-56 shrink-0')}
+                                      value={bound}
+                                      disabled={readOnly}
+                                      aria-label={`Model for ${role.label}`}
+                                      onChange={(e) => setRole(role.key, e.target.value)}>
+                                      <option value="">Follow session / default</option>
+                                      {dangling && <option value={bound}>{bound} (missing)</option>}
+                                      {chatIds.map((id) => (
+                                        <option key={id} value={id}>
+                                          {id}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                )
+                              })
+                            })()}
+                          </section>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </div>
               </>
             )}

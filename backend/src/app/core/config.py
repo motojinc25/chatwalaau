@@ -15,6 +15,21 @@ class Settings(BaseSettings):
     frontend_dist: str = "../frontend/dist"
     cors_allowed_origins: str = "http://localhost:5173"
 
+    # ---- Application Settings Store (CTR-0198, PRP-0136, UDR-0120) ----
+    # Path to the operator-owned application settings file (JSONC), resolved
+    # against the working directory (mirroring MODEL_OFFERINGS_FILE /
+    # MCP_CONFIG_FILE). It carries the runtime tuning knobs that used to live in
+    # .env and is edited from the in-app App Settings screen (CTR-0176).
+    #
+    # It is the SOLE source for the keys it owns (UDR-0120 D2): a same-named
+    # variable left in an operator's .env is IGNORED and named once in a startup
+    # warning. Bootstrap paths, secrets, and feature gates are NOT eligible and
+    # stay here in the env namespace (UDR-0120 D1).
+    #
+    # Empty disables the store entirely (every owned key falls back to the field
+    # default below); a configured-but-missing file is NOT an error.
+    app_settings_file: str = "app_settings.jsonc"
+
     # TLS / HTTPS (CTR-0054, PRP-0029)
     app_ssl_certfile: str = ""
     app_ssl_keyfile: str = ""

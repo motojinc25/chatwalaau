@@ -82,6 +82,14 @@ backend/batch-server.log
 backend/model_offerings.jsonc
 backend/model_offerings.jsonc.*.tmp
 
+# Operator-owned Application Settings store (CTR-0198): same reasoning as the
+# catalog above. It belongs on persistent storage via APP_SETTINGS_FILE, and a
+# baked copy would be served whenever that path is unset/relative (CWD =
+# /app/backend), silently overriding the operator's real settings with whatever
+# happened to be on the build machine.
+backend/app_settings.jsonc
+backend/app_settings.jsonc.*.tmp
+
 # ---- IDE / OS ----
 .vscode/
 .idea/

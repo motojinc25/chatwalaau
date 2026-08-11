@@ -110,6 +110,68 @@ warnings.filterwarnings("ignore", category=UserWarning, module=r"pydantic\._inte
 _app_version = get_app_version()
 
 
+def _load_and_apply_app_settings() -> None:
+    """Apply app_settings.jsonc onto the Settings singleton (CTR-0198, UDR-0120).
+
+    Called at MODULE IMPORT time, deliberately -- not from ``lifespan``. The
+    ``restart``-scope keys are injected into services constructed further down
+    this very module (STT / TTS below; the agent registry for the ``rebuild``
+    keys), so an apply deferred to lifespan would run AFTER the objects that read
+    them were already built and the file would silently do nothing on a cold
+    boot. Scope only distinguishes what a LATER write through CTR-0199 can reach;
+    at startup every key applies.
+
+    Two advisories follow the apply, both log-only (an advisory must never block
+    startup, the established rule here):
+
+    - Residual migrated variables still in .env are NAMED, not counted (D2). The
+      store is the sole source, so those values no longer apply, and a count
+      would not tell the operator which rows to re-enter in App Settings.
+    - Unknown keys in the file are preserved, never dropped (D5), so the warning
+      is informational rather than a call to fix anything.
+    """
+    import logging as _logging
+
+    _logger = _logging.getLogger(__name__)
+
+    from app.app_settings import load_store, residual_env_keys
+    from app.app_settings.store import SettingsStoreError, apply_document
+
+    try:
+        doc = load_store()
+    except SettingsStoreError as exc:
+        # An unreadable store must not stop the process: every key simply keeps
+        # its Settings default, which is the pre-PRP-0136 behaviour.
+        _logger.warning("%s. Application settings were not applied; defaults are in effect.", exc)
+        return
+
+    apply_document(doc)
+
+    for warning in doc.warnings:
+        _logger.warning("Application settings: %s", warning)
+
+    if doc.unknown:
+        _logger.warning(
+            "Application settings contain %d unrecognized key(s), preserved as-is: %s. "
+            "Remove them from the Deprecated section of App Settings if they are no longer needed.",
+            len(doc.unknown),
+            ", ".join(sorted(doc.unknown)),
+        )
+
+    residual = residual_env_keys()
+    if residual:
+        _logger.warning(
+            "These variables moved to application settings and are NO LONGER READ from .env "
+            "(PRP-0136): %s. Their current values are not in effect. Re-enter them in App "
+            "Settings, or run `chatwalaau settings migrate` to copy them across in one step.",
+            ", ".join(residual),
+        )
+
+
+# Applied before any service below is constructed (see the docstring above).
+_load_and_apply_app_settings()
+
+
 def _warn_unconfigured_model_offerings() -> None:
     """Startup advisory for image / embedding features left unconfigured (PRP-0114).
 
@@ -498,6 +560,15 @@ register_harness_agents(app)
 from app.model_offerings import register_model_offerings
 
 register_model_offerings(app, agent_registry=agent_registry)
+
+# Application Settings Management API (CTR-0199, PRP-0136, UDR-0120) -- read/write
+# the app_settings.jsonc store (CTR-0198) at runtime. A `runtime`-scope key applies
+# on assignment, a `rebuild`-scope key additionally rebuilds the registry here
+# (CTR-0070), and a `restart`-scope key is persisted with restart_required reported
+# back -- the app never restarts itself (UDR-0120 D6).
+from app.app_settings.router import register_app_settings
+
+register_app_settings(app, agent_registry=agent_registry)
 
 # Slash Commands API (CTR-0126, PRP-0088) -- read-only merged command inventory
 # of built-ins plus prompt-template-derived and skill-derived commands. Dispatch

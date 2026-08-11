@@ -245,9 +245,7 @@ def main() -> None:
     init_parser = subparsers.add_parser("init", help="Initialize .env configuration from template")
     init_parser.add_argument("--output", "-o", default=".env", help="Output file path (default: .env)")
     init_parser.add_argument("--force", "-f", action="store_true", help="Overwrite existing file")
-    init_parser.add_argument(
-        "--no-model", action="store_true", help="Skip the optional first-model setup step"
-    )
+    init_parser.add_argument("--no-model", action="store_true", help="Skip the optional first-model setup step")
 
     # hash-password subcommand (CTR-0093, PRP-0057)
     from app.cli.hash_password import register_hash_password_parser
@@ -258,6 +256,11 @@ def main() -> None:
     from app.cli.env_tools import register_env_parser
 
     register_env_parser(subparsers)
+
+    # settings subcommand: application settings store (CTR-0198, PRP-0136)
+    from app.cli.app_settings_tools import register_settings_parser
+
+    register_settings_parser(subparsers)
 
     # --- Client subcommands (PRP-0041) ---
 
@@ -295,7 +298,17 @@ def main() -> None:
 
     if args.command == "init":
         _run_init(args)
-    elif args.command in ("chat", "sessions", "templates", "models", "tts", "upload", "hash-password", "env"):
+    elif args.command in (
+        "chat",
+        "sessions",
+        "templates",
+        "models",
+        "tts",
+        "upload",
+        "hash-password",
+        "env",
+        "settings",
+    ):
         # Client and utility subcommands
         args.func(args)
     else:

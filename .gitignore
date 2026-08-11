@@ -65,6 +65,14 @@ mcp_servers.json
 # Model Offering Catalog (PRP-0109: operator-owned; no bundled default)
 model_offerings.jsonc
 
+# Application Settings store (PRP-0136: operator-owned, created on first save from
+# the App Settings screen or `chatwalaau settings migrate --write`; no bundled
+# default -- an absent file means every setting uses its built-in default)
+app_settings.jsonc
+# The atomic-write sidecar (temp file + os.replace). Normally invisible; it only
+# survives a crash mid-write, and it must never be committed when it does.
+app_settings.jsonc.*.tmp
+
 # Pipeline Jobs store + run logs (PRP-0096; replaces .jobs)
 .pipeline/
 
