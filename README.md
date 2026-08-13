@@ -170,12 +170,13 @@ Japanese) built into the site.
 
 ```bash
 # Backend
-cd backend && cp .env.sample .env   # set AZURE_OPENAI_ENDPOINT
-uv sync --prerelease=allow
-uv run uvicorn app.main:app --reload --app-dir src   # http://localhost:8000
+cd backend && uv sync --prerelease=allow
+uv run chatwalaau init --no-model    # writes .env from the bundled template
+# edit .env and set AZURE_OPENAI_ENDPOINT
+uv run uvicorn app.main:app --reload --app-dir src    # http://localhost:8000
 
 # Frontend (separate terminal)
-cd frontend && pnpm install && pnpm dev               # http://localhost:5173
+cd frontend && pnpm install && pnpm dev    # http://localhost:5173
 ```
 
 Full prerequisites, Azure credential lanes, and the production build are in the

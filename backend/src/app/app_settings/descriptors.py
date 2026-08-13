@@ -403,6 +403,37 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         SCOPE_REBUILD,
         help="Number of chunks the rag_search tool returns per query.",
     ),
+    # Ingest chunking (PRP-0137 / UDR-0121 D3). `runtime` by measurement: the
+    # rag-ingest job reads them inside the job coroutine, so an assignment
+    # reaches the next job with no rebuild and no restart. Each is the operator
+    # DEFAULT -- an explicit job.params value still wins.
+    SettingDescriptor(
+        "rag_chunk_size",
+        "Ingest chunk size (characters)",
+        "rag",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "Target size of each chunk the ingest job writes. Lower it when a rag_search "
+            "result overflows the model context. A per-job chunk_size parameter overrides this."
+        ),
+    ),
+    SettingDescriptor(
+        "rag_chunk_overlap",
+        "Ingest chunk overlap (characters)",
+        "rag",
+        "int",
+        SCOPE_RUNTIME,
+        help="How much text consecutive chunks share, so a fact spanning a boundary stays retrievable.",
+    ),
+    SettingDescriptor(
+        "rag_chunk_min_size",
+        "Ingest minimum chunk size (characters)",
+        "rag",
+        "int",
+        SCOPE_RUNTIME,
+        help="Trailing chunks below this size are merged into the previous one. 0 disables the merge.",
+    ),
     # ---- Limits -----------------------------------------------------------
     SettingDescriptor(
         "coding_bash_timeout",

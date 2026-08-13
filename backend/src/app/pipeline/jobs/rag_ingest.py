@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 import logging
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -74,14 +73,23 @@ async def run_rag_ingest_job(
         storage: Persistence layer for saving progress.
         cancel_event: Set by the queue to request cancellation.
     """
+    # PRP-0137 / UDR-0121 D2+D3: resolve through `settings`, NEVER os.environ.
+    # These are Settings fields, and the application settings store assigns onto
+    # the singleton without touching os.environ -- so an os.environ read here
+    # cannot see an operator's App Settings value. That is not theoretical: it
+    # shipped in v0.129.0 as RAG_COLLECTION_NAME, where search read the singleton
+    # while ingest read os.environ, so ingest silently wrote to "default" while
+    # search queried the configured collection.
+    # An explicit job.params value still wins: the setting is the operator's
+    # DEFAULT for jobs that do not say otherwise, not a ceiling (D3).
     raw_file_path = str(job.params.get("file_path", ""))
-    collection_name = job.params.get("collection", os.environ.get("RAG_COLLECTION_NAME", "default"))
-    chunk_size = int(job.params.get("chunk_size", os.environ.get("RAG_CHUNK_SIZE", "1500")))
-    chunk_overlap = int(job.params.get("chunk_overlap", os.environ.get("RAG_CHUNK_OVERLAP", "300")))
+    collection_name = job.params.get("collection", settings.rag_collection_name)
+    chunk_size = int(job.params.get("chunk_size", settings.rag_chunk_size))
+    chunk_overlap = int(job.params.get("chunk_overlap", settings.rag_chunk_overlap))
     # PRP-0047: trailing-chunk merge threshold. None -> chunker derives default.
-    chunk_min_raw = job.params.get("chunk_min_size", os.environ.get("RAG_CHUNK_MIN_SIZE", "300"))
+    chunk_min_raw = job.params.get("chunk_min_size", settings.rag_chunk_min_size)
     chunk_min_size = int(chunk_min_raw) if chunk_min_raw not in (None, "") else None
-    chroma_dir = os.environ.get("CHROMA_DIR", ".chroma")
+    chroma_dir = settings.chroma_dir
 
     # Validate file exists. Resolve a bare filename against UPLOAD_DIR so an
     # operator (or the agent) can reference an uploaded PDF by name (PRP-0116).

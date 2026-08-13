@@ -52,9 +52,11 @@ site/backend/.leads/
 **/.env
 **/.env.local
 **/.env.*.local
-# Keep the templates so operators inside the image can `chatwalaau init`:
+# Keep the template so operators inside the image can `chatwalaau init`. It is the
+# SOLE env-layout artifact (PRP-0137 / UDR-0121 D1); the mirrored backend/.env.sample
+# was retired in v0.130.0 because a hand-maintained copy of an SSOT is kept honest
+# only by a CI failure that says nothing about the system.
 !backend/src/app/templates/.env.template
-!backend/.env.sample
 
 # ---- Runtime data (operator-side state) ----
 backend/.sessions/

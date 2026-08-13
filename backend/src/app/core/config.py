@@ -11,7 +11,7 @@ class Settings(BaseSettings):
 
     app_host: str = "127.0.0.1"
     app_port: int = 8000
-    app_debug: bool = False
+    app_debug: bool = False  # FastAPI docs/redoc/openapi debug mode
     frontend_dist: str = "../frontend/dist"
     cors_allowed_origins: str = "http://localhost:5173"
 
@@ -166,15 +166,21 @@ class Settings(BaseSettings):
     # conversation into durable user preferences and merges them into
     # .agent/USER.md through the EXISTING CTR-0105 guarded write (the same
     # secret/PII filter, USER_CHAR_LIMIT cap, and backup-on-write as the inline
-    # tool). USER_MEMORY_EXTRACTION (default false) gates the feature and ALSO
-    # requires USER_PROFILE_ENABLED=true; false is byte-for-byte pre-PRP-0079
-    # (Phase 1) behavior. The extraction model is the catalog
+    # tool). USER_MEMORY_EXTRACTION gates the feature and ALSO requires
+    # USER_PROFILE_ENABLED=true; false is byte-for-byte pre-PRP-0079 (Phase 1)
+    # behavior. PRP-0137 / UDR-0121 D4 changed the default false -> TRUE. It is
+    # accepted because the pass is bounded on axes that did not exist when
+    # UDR-0051 made it opt-in: the second gate above, the every-N-turns throttle
+    # below, the temp_ / DEMO_MODE exclusions, and an operator-chosen extraction
+    # model. It remains PRIVACY-RELEVANT -- it writes durable facts about the user
+    # to .agent/USER.md -- so the default change is announced as a behavioural
+    # change, never folded into a list of improvements (D4). The extraction model is the catalog
     # `roles.user_memory_extraction` binding (PRP-0115 / UDR-0096); the removed
     # USER_MEMORY_EXTRACTION_MODEL env var no longer applies. The pass runs at most
     # once every USER_MEMORY_EXTRACTION_EVERY_N_TURNS new user turns (default 4;
     # clamped to >= 1 at use time) -- below the threshold the task is a cheap
     # no-op (no LLM call). temp_ chats and DEMO_MODE never extract.
-    user_memory_extraction: bool = False
+    user_memory_extraction: bool = True
     user_memory_extraction_every_n_turns: int = 4
 
     # Agent Curated Memory (CTR-0162 / CTR-0163, CTR-0006, PRP-0100 / UDR-0079).
@@ -377,14 +383,20 @@ class Settings(BaseSettings):
 
     # Declarative Agents (CTR-0006, CTR-0142..0144, PRP-0094, UDR-0072)
     # Folder of CUSTOM declarative agent YAML files (*.yaml / *.yml, nested folders
-    # allowed) discovered through a realpath jail rooted here. Empty (default) =
-    # no custom agents; only the bundled CORE agent exists and the runtime is
-    # byte-for-byte the pre-PRP-0094 behavior (UDR-0072 D11/D13). The active
+    # allowed) discovered through a realpath jail rooted here. PRP-0137 / UDR-0121
+    # D5 changed the default from "" (discovery disabled) to ".agents": a
+    # DISCOVERY-SURFACE change, not a gate removal. Shell execution still requires
+    # CODING_ENABLED + CODING_WORKSPACE_DIR, tool calls still surface approval
+    # cards, and .agents/ is excluded from the Docker build context. An absent or
+    # empty directory remains a no-op -- byte-for-byte the pre-PRP-0094 behavior
+    # (UDR-0072 D11/D13) -- so only an operator who AUTHORED the directory but
+    # left the variable unset is affected, and for them the previous behavior was
+    # that their directory was silently ignored. Set to "" to disable. The active
     # selection is in-memory only (restart re-initializes to CORE, D7); there is no
     # env var for it. The YAML is a SPECIFICATION; ChatWalaʻau owns construction
     # (D1/D2): credentials / connection are never honored, and sampling params
     # (temperature / top_p / ...) are rejected at activation (D3/D5).
-    declarative_agents_dir: str = ""
+    declarative_agents_dir: str = ".agents"
 
     # Declarative Workflows (CTR-0006, CTR-0180..0185, PRP-0118, UDR-0101)
     # A `kind: Workflow` declarative entity is discovered from the SAME
@@ -558,6 +570,16 @@ class Settings(BaseSettings):
     chroma_dir: str = ".chroma"
     rag_collection_name: str = "default"
     rag_top_k: int = 5
+    # Ingest chunking defaults (CTR-0076, PRP-0137, UDR-0121 D3). Promoted from
+    # os.environ-direct reads to Settings fields so the rag-ingest job resolves
+    # them through the same singleton the store applies onto -- an os.environ read
+    # of a migrated key cannot see an App Settings value (UDR-0121 D2). Defaults
+    # equal the strings the previous os.environ.get fallbacks supplied, so an
+    # operator who never set them sees no change. A per-job `job.params` override
+    # still wins: these are the operator's DEFAULT, not a ceiling (D3).
+    rag_chunk_size: int = 1500
+    rag_chunk_overlap: int = 300
+    rag_chunk_min_size: int = 300
 
     # MCP Integration (CTR-0059, PRP-0031, PRP-0060)
     # PRP-0060: default is the operator override file (gitignored).
@@ -630,7 +652,7 @@ class Settings(BaseSettings):
     # demo_mode is true; populates AgentRegistry so the model selector
     # UI is non-trivially exercised. Comma-separated. Empty falls back
     # to a single "chatwalaau-demo" entry.
-    demo_models: str = "gpt-5.5,gpt-5.4"
+    demo_models: str = "gpt-5.6,claude-opus-5"
 
     # Demo per-token streaming delay in milliseconds (CTR-0006 v22,
     # PRP-0066). Used by DemoChatClient to pace ChatResponseUpdate
