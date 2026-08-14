@@ -79,8 +79,15 @@ BUILTIN_FUNCTION_TOOLS: tuple[BuiltinFunctionTool, ...] = (
         "manage_memory", "memory", "Curate durable agent memory.", lambda: settings.agent_memory_enabled
     ),
     BuiltinFunctionTool("manage_cron", "automation", "Schedule and manage cron jobs.", lambda: settings.cron_enabled),
+    # Availability mirrors agent_factory exactly (PRP-0138 / UDR-0122): the tool is a
+    # WRITE path into the pipeline, so DEMO_MODE closes it. Declarative agents are
+    # already blocked under demo, but a predicate that disagreed with the factory would
+    # advertise a tool the runtime refuses to register.
     BuiltinFunctionTool(
-        "manage_pipeline", "automation", "Submit and manage pipeline jobs.", lambda: settings.pipeline_enabled
+        "manage_pipeline",
+        "automation",
+        "Submit and manage pipeline jobs.",
+        lambda: settings.pipeline_enabled and not is_demo_mode(),
     ),
     BuiltinFunctionTool(
         "manage_webhook", "automation", "Manage webhook subscriptions and runs.", lambda: settings.webhook_enabled

@@ -1,4 +1,4 @@
-import { Ban, Loader2, Plus, RefreshCw, Trash2, Workflow } from 'lucide-react'
+import { Ban, Loader2, Plus, RefreshCw, Trash2, TriangleAlert, Workflow } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -104,6 +104,10 @@ export function PipelineManager({ open, onOpenChange }: PipelineManagerProps) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // Advertised by GET /api/pipeline/types (PRP-0138 / UDR-0122). Derived from the
+  // server payload rather than inferred client-side, so the notice can never claim a
+  // restriction the backend is not actually enforcing.
+  const [demoBlocked, setDemoBlocked] = useState(false)
 
   const selected = jobs.find((j) => j.id === selectedId) ?? null
 
@@ -114,6 +118,7 @@ export function PipelineManager({ open, onOpenChange }: PipelineManagerProps) {
       const data = await res.json()
       const list = (data.types ?? []) as JobType[]
       setTypes(list)
+      setDemoBlocked(data.demo_mode === true)
       setDraftType((prev) => prev || (list[0]?.name ?? ''))
     } catch {
       // ignore: types are best-effort
@@ -227,6 +232,10 @@ export function PipelineManager({ open, onOpenChange }: PipelineManagerProps) {
       })
       if (!res.ok) {
         const detail = await res.json().catch(() => null)
+        if (res.status === 409 && detail?.detail?.error === 'demo_mode') {
+          setDemoBlocked(true)
+          throw new Error(detail?.detail?.message ?? 'Submitting jobs is disabled in demo mode.')
+        }
         throw new Error(detail?.detail?.error ?? 'Failed to submit job')
       }
       const job = (await res.json()) as PipelineJob
@@ -284,6 +293,19 @@ export function PipelineManager({ open, onOpenChange }: PipelineManagerProps) {
             history. Distinct from the Cron Scheduler (scheduled scripts).
           </DialogDescription>
         </DialogHeader>
+
+        {/* Demo-mode notice (PRP-0138 / UDR-0122). Placed above both panes so it is
+            visible whether the operator is looking at the submit form or a job detail.
+            Reads stay available on purpose -- the feature is shown, not hidden. */}
+        {demoBlocked && (
+          <div className="flex items-start gap-2 border-b border-amber-500/40 bg-amber-500/10 px-6 py-2 text-[12px] text-amber-700 dark:text-amber-400">
+            <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              Demo mode: pipeline jobs are read-only. Submitting, cancelling and deleting are disabled, because every
+              job would write into the same vector collection the demo corpus is served from.
+            </span>
+          </div>
+        )}
 
         <div className="relative flex min-h-0 flex-1">
           {/* Left: job list */}
@@ -351,12 +373,22 @@ export function PipelineManager({ open, onOpenChange }: PipelineManagerProps) {
                   </div>
                   <div className="flex items-center gap-2">
                     {ACTIVE.has(selected.status) && (
-                      <Button variant="outline" size="sm" onClick={() => void cancel()} disabled={busy}>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void cancel()}
+                        disabled={busy || demoBlocked}
+                        title={demoBlocked ? 'Disabled in demo mode' : undefined}>
                         <Ban className="mr-1 h-3.5 w-3.5" /> Cancel
                       </Button>
                     )}
                     {!ACTIVE.has(selected.status) && (
-                      <Button variant="destructive" size="sm" onClick={() => setConfirmDelete(true)} disabled={busy}>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => setConfirmDelete(true)}
+                        disabled={busy || demoBlocked}
+                        title={demoBlocked ? 'Disabled in demo mode' : undefined}>
                         <Trash2 className="mr-1 h-3.5 w-3.5" /> Delete
                       </Button>
                     )}
@@ -476,7 +508,11 @@ export function PipelineManager({ open, onOpenChange }: PipelineManagerProps) {
                 ))}
 
                 <div>
-                  <Button size="sm" onClick={() => void submit()} disabled={busy || !draftType}>
+                  <Button
+                    size="sm"
+                    onClick={() => void submit()}
+                    disabled={busy || !draftType || demoBlocked}
+                    title={demoBlocked ? 'Disabled in demo mode' : undefined}>
                     Submit job
                   </Button>
                 </div>

@@ -369,7 +369,12 @@ def _build_tools_and_instructions(
     # (rag-ingest). Replaces the former batch MCP tools; writes through the same engine +
     # store as the REST API (CTR-0146). NOT in the approval require-set (curated job
     # types, no shell).
-    if settings.pipeline_enabled and _fn_ok("manage_pipeline"):
+    # NOT registered under DEMO_MODE (PRP-0138 / UDR-0122): the tool is the SECOND write
+    # path into the pipeline, and closing only the REST endpoint would leave "ingest this
+    # PDF for me" working in chat -- with no approval card, since this tool is outside the
+    # require-set. A capability is closed at the API AND at tool registration, never at
+    # the UI alone.
+    if settings.pipeline_enabled and not is_demo_mode() and _fn_ok("manage_pipeline"):
         from app.pipeline.tool import PIPELINE_TOOL_INSTRUCTION, manage_pipeline
 
         tools.append(manage_pipeline)
