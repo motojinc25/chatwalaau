@@ -44,6 +44,7 @@ import {
   Search,
   SendHorizontal,
   Trash2,
+  TriangleAlert,
   Upload,
   ZoomIn,
   ZoomOut,
@@ -473,6 +474,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
 
   // Unsaved-changes confirmation: the action to run once the user discards.
   const [pendingDiscard, setPendingDiscard] = useState<(() => void) | null>(null)
+  // Advertised by GET /api/ontology/catalog (PRP-0139 / UDR-0122 D4). Derived from
+  // the server payload, never inferred client-side, so the notice cannot claim a
+  // restriction the backend is not enforcing.
+  const [demoBlocked, setDemoBlocked] = useState(false)
 
   const fetchCatalog = useCallback(async () => {
     setError(null)
@@ -481,6 +486,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       if (!res.ok) throw new Error('Failed to load the ontology catalog')
       const data = await res.json()
       setCatalog((data.ontologies ?? []) as CatalogEntry[])
+      setDemoBlocked(data.demo_mode === true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load the ontology catalog')
     }
@@ -545,6 +551,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         body: JSON.stringify({ entities, relationships, extra_turtle: extraTurtle }),
       })
       if (!res.ok) {
+        const refused = await demoRefusal(res)
+        if (refused) {
+          setDemoBlocked(true)
+          throw new Error(refused)
+        }
         const detail = await res.json().catch(() => null)
         throw new Error(typeof detail?.detail === 'string' ? detail.detail : 'Failed to save the ontology')
       }
@@ -568,7 +579,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: createName, description: createDescription }),
       })
-      if (!res.ok) throw new Error('Failed to create the ontology')
+      if (!res.ok) {
+        const refused = await demoRefusal(res)
+        if (refused) setDemoBlocked(true)
+        throw new Error(refused ?? 'Failed to create the ontology')
+      }
       const entry = (await res.json()) as CatalogEntry
       setCreateOpen(false)
       setCreateName('')
@@ -592,7 +607,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: renameName, description: renameDescription }),
       })
-      if (!res.ok) throw new Error('Failed to rename the ontology')
+      if (!res.ok) {
+        const refused = await demoRefusal(res)
+        if (refused) setDemoBlocked(true)
+        throw new Error(refused ?? 'Failed to rename the ontology')
+      }
       setRenameTarget(null)
       await fetchCatalog()
     } catch (err) {
@@ -608,7 +627,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     setError(null)
     try {
       const res = await fetch(`/api/ontology/catalog/${deleteTarget.id}`, { method: 'DELETE' })
-      if (!res.ok) throw new Error('Failed to delete the ontology')
+      if (!res.ok) {
+        const refused = await demoRefusal(res)
+        if (refused) setDemoBlocked(true)
+        throw new Error(refused ?? 'Failed to delete the ontology')
+      }
       if (selectedId === deleteTarget.id) {
         setSelectedId(null)
         setEntities([])
@@ -636,6 +659,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         form.append('file', file)
         const res = await fetch('/api/ontology/import', { method: 'POST', body: form })
         if (!res.ok) {
+          const refused = await demoRefusal(res)
+          if (refused) {
+            setDemoBlocked(true)
+            throw new Error(refused)
+          }
           const detail = await res.json().catch(() => null)
           throw new Error(typeof detail?.detail === 'string' ? detail.detail : 'Failed to import the file')
         }
@@ -1022,12 +1050,30 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
             <div className="mr-8 flex items-center gap-2">
               {error && <span className="max-w-[480px] truncate text-xs text-red-600">{error}</span>}
               {dirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
-              <Button size="sm" className="h-7" onClick={() => void save()} disabled={!selectedId || !dirty || busy}>
+              <Button
+                size="sm"
+                className="h-7"
+                onClick={() => void save()}
+                disabled={!selectedId || !dirty || busy || demoBlocked}
+                title={demoBlocked ? 'Disabled in demo mode' : undefined}>
                 {saving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
                 Save
               </Button>
             </div>
           </DialogHeader>
+
+          {/* Demo-mode notice (PRP-0139 / UDR-0122 D2/D4). Reads stay available on
+              purpose -- the feature is shown, not hidden. */}
+          {demoBlocked && (
+            <div className="flex shrink-0 items-start gap-2 border-b border-amber-500/40 bg-amber-500/10 px-4 py-2 text-[12px] text-amber-700 dark:text-amber-400">
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                Demo mode: ontologies are read-only. Creating, importing, renaming, saving and deleting are disabled,
+                because this store is shared by everyone using the demo. Browsing, exporting and running SPARQL still
+                work.
+              </span>
+            </div>
+          )}
 
           <ReactFlowProvider>
             <div className="relative flex min-h-0 flex-1">
@@ -1047,6 +1093,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                       setRenameTarget(entry)
                     }}
                     onDelete={(entry) => setDeleteTarget(entry)}
+                    readOnly={demoBlocked}
                   />
                 }
                 center={
@@ -1344,6 +1391,24 @@ function PanelLayout(props: { left: React.ReactNode; center: React.ReactNode; ri
   )
 }
 
+/**
+ * Recognise the UDR-0122 typed 409 refusal (PRP-0139).
+ *
+ * The write buttons are already disabled when `demoBlocked` is set, so this path
+ * only runs when the guard engages AFTER the modal was opened -- another tab, or
+ * an operator flipping DEMO_MODE on a running server. Without it the operator
+ * would see the raw slug instead of the notice.
+ */
+async function demoRefusal(res: Response): Promise<string | null> {
+  if (res.status !== 409) return null
+  const body = await res
+    .clone()
+    .json()
+    .catch(() => null)
+  const detail = body?.detail
+  return detail?.error === 'demo_mode' ? (detail.message ?? 'Editing is disabled in demo mode.') : null
+}
+
 // ---- Left pane: the catalog ---------------------------------------------------
 
 function CatalogPane(props: {
@@ -1356,6 +1421,7 @@ function CatalogPane(props: {
   onExport: (entry: CatalogEntry) => void
   onRename: (entry: CatalogEntry) => void
   onDelete: (entry: CatalogEntry) => void
+  readOnly: boolean
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1367,8 +1433,9 @@ function CatalogPane(props: {
             size="icon"
             className="h-6 w-6 text-zinc-600"
             onClick={props.onCreate}
+            disabled={props.readOnly}
             aria-label="New ontology"
-            title="New ontology">
+            title={props.readOnly ? 'Disabled in demo mode' : 'New ontology'}>
             <Plus className="h-3.5 w-3.5" />
           </Button>
           <Button
@@ -1376,9 +1443,9 @@ function CatalogPane(props: {
             size="icon"
             className="h-6 w-6 text-zinc-600"
             onClick={props.onImportClick}
-            disabled={props.importing}
+            disabled={props.importing || props.readOnly}
             aria-label="Import RDF file"
-            title="Import (.ttl / .rdf / .owl)">
+            title={props.readOnly ? 'Disabled in demo mode' : 'Import (.ttl / .rdf / .owl)'}>
             {props.importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
           </Button>
         </div>
@@ -1405,6 +1472,7 @@ function CatalogPane(props: {
                   variant="ghost"
                   size="icon"
                   className="h-5 w-5 text-zinc-500"
+                  disabled={props.readOnly}
                   onClick={() => props.onRename(entry)}
                   aria-label={`Rename ${entry.name}`}
                   title="Rename">
@@ -1423,6 +1491,7 @@ function CatalogPane(props: {
                   variant="ghost"
                   size="icon"
                   className="h-5 w-5 text-zinc-500 hover:text-red-600"
+                  disabled={props.readOnly}
                   onClick={() => props.onDelete(entry)}
                   aria-label={`Delete ${entry.name}`}
                   title="Delete">

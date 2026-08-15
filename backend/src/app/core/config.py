@@ -542,10 +542,12 @@ class Settings(BaseSettings):
     # Ontology Concept Modeling (CTR-0006, CTR-0169..0173, PRP-0105, UDR-0084)
     # Rule-based concept models as RDF knowledge graphs (Turtle file SSOT +
     # catalog.json, pyoxigraph read-only SPARQL, NL -> SPARQL via the registry
-    # chokepoint, session-common query_ontology tool). The whole feature is OFF
-    # unless ONTOLOGY_ENABLED (UDR-0084 D12): when false the /api/ontology surface
-    # returns 404, the tool is not registered, and the sidebar icon is hidden.
-    ontology_enabled: bool = False
+    # chokepoint, session-common query_ontology tool). ONTOLOGY_ENABLED (UDR-0084
+    # D12) gates the whole feature: when FALSE the /api/ontology surface returns
+    # 404, the query_ontology tool is not registered, and the sidebar icon is
+    # hidden.
+    # PRP-0139 / UDR-0122 D6 changed the default false -> TRUE.
+    ontology_enabled: bool = True
     # Folder holding catalog.json + one Turtle file per ontology (created on demand).
     ontology_dir: str = ".ontologies"
     # Upload/import and save size cap in bytes (UDR-0084 D10).

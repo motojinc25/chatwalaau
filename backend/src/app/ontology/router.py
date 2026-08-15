@@ -16,6 +16,11 @@ the mutations and the query POSTs are gated per invariant 7, the GETs follow
 the read convention. The whole surface returns 404 unless ONTOLOGY_ENABLED so
 the SPA can gate its launcher icon by probing the catalog (UDR-0084 D12).
 
+Under DEMO_MODE the five WRITE endpoints (POST/PATCH/DELETE /catalog, POST /import,
+PUT /{id}) refuse with 409 ``demo_mode`` and the manager renders read-only
+(PRP-0139 / UDR-0122). Reads -- including the SPARQL query lanes, which cannot
+mutate -- are deliberately untouched.
+
 The frontend never parses RDF: GET/PUT carry the CTR-0169 JSON graph
 projection and this module delegates the codec to ``app.ontology.vocabulary``
 (UDR-0084 D6). Import is validate-then-commit (full pyoxigraph parse + the
@@ -43,6 +48,25 @@ router = APIRouter(prefix="/api/ontology", tags=["Ontology"])
 def _require_enabled() -> None:
     if not settings.ontology_enabled:
         raise HTTPException(status_code=404, detail={"error": "ontology_disabled"})
+
+
+def _guard_demo() -> None:
+    """Refuse a WRITE under DEMO_MODE (PRP-0139 / UDR-0122; the CTR-0146 shape).
+
+    `.ontologies/` is shared process-wide, and this surface hands its contents
+    out directly: GET /catalog lists every ontology by name and
+    GET /{id}/export downloads the whole Turtle. Left writable on a demo host,
+    one visitor's uploaded model is readable -- and deletable -- by the next.
+    Reads stay open (UDR-0122 D2).
+    """
+    if settings.demo_mode:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "demo_mode",
+                "message": "Creating, editing, importing and deleting ontologies is disabled under DEMO_MODE.",
+            },
+        )
 
 
 def _entry_or_404(ontology_id: str) -> dict[str, str]:
@@ -81,15 +105,20 @@ class ProjectionSave(BaseModel):
 
 @router.get("/catalog", dependencies=[Depends(verify_api_key)])
 async def list_catalog() -> dict:
-    """List the ontology catalog. 404 when the feature is disabled (SPA probe)."""
+    """List the ontology catalog. 404 when the feature is disabled (SPA probe).
+
+    Carries ``demo_mode`` so the manager renders its read-only notice from the
+    SAME payload it already fetches (UDR-0122 D4).
+    """
     _require_enabled()
-    return {"ontologies": store.read_catalog()}
+    return {"ontologies": store.read_catalog(), "demo_mode": bool(settings.demo_mode)}
 
 
 @router.post("/catalog", dependencies=[Depends(verify_api_key)])
 async def create_ontology(body: OntologyCreate) -> dict:
     """Create a new, empty ontology (consumes CTR-0083)."""
     _require_enabled()
+    _guard_demo()
     entry = store.create_ontology(body.name, body.description)
     return {**entry, "base_iri": base_iri_for(entry["id"])}
 
@@ -103,6 +132,7 @@ async def rename_ontology(ontology_id: str, body: OntologyRename) -> dict:
     mutating endpoint and consumes CTR-0083 (invariant 7).
     """
     _require_enabled()
+    _guard_demo()
     if body.name is None and body.description is None:
         raise HTTPException(status_code=422, detail="Provide name and/or description")
     _entry_or_404(ontology_id)
@@ -116,6 +146,7 @@ async def rename_ontology(ontology_id: str, body: OntologyRename) -> dict:
 async def delete_ontology(ontology_id: str) -> dict:
     """Delete an ontology: backup-then-remove + catalog entry removal (UDR-0084 D10)."""
     _require_enabled()
+    _guard_demo()
     _entry_or_404(ontology_id)
     store.delete_ontology(ontology_id)
     return {"deleted": True, "id": ontology_id}
@@ -135,6 +166,7 @@ async def import_ontology(
     import pyoxigraph as ox
 
     _require_enabled()
+    _guard_demo()
     data = await file.read()
     if len(data) > settings.ontology_max_file_bytes:
         raise HTTPException(
@@ -242,6 +274,7 @@ async def get_ontology(ontology_id: str) -> dict:
 async def save_ontology(ontology_id: str, body: ProjectionSave) -> dict:
     """Save the projection: validate -> canonical Turtle -> backup -> atomic replace."""
     _require_enabled()
+    _guard_demo()
     _entry_or_404(ontology_id)
     try:
         turtle = projection_to_turtle(body.model_dump(), base_iri=base_iri_for(ontology_id))
