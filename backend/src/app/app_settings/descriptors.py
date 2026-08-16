@@ -218,19 +218,54 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         SCOPE_RUNTIME,
         help="Quarantine retention for temporary chats. 0 or less disables the sweep.",
     ),
+    # Compaction (PRP-0140 / UDR-0120 D3 correction). All three are `rebuild`, NOT
+    # `runtime`: resolve_compaction_strategy() runs at AgentRegistry construction
+    # (agent_factory.py -> Agent(compaction_strategy=...)), and the per-model Agent
+    # objects are cached with the strategy instance baked in -- so assigning to the
+    # singleton cannot reach them. PRP-0136 shipped `compaction_strategy` as
+    # `runtime`, which badged a save "Applies immediately" while the running agents
+    # kept the old strategy. The CTR-0070 rebuild re-runs the resolver, so `rebuild`
+    # is correct and `restart` would be a needless demand.
     SettingDescriptor(
         "compaction_strategy",
         "History compaction strategy",
         "chat",
         "enum",
-        SCOPE_RUNTIME,
+        SCOPE_REBUILD,
         enum=("none", "sliding-window", "selective-tool-call", "tool-result"),
         help=(
             "In-memory only -- the on-disk session JSON is never mutated, so switching "
             "back to none fully restores the model's view of history."
         ),
     ),
-    # ---- Memory (runtime) -------------------------------------------------
+    SettingDescriptor(
+        "compaction_keep_last_groups",
+        "Compaction: message groups kept",
+        "chat",
+        "int",
+        SCOPE_REBUILD,
+        help=(
+            "How many recent message groups the sliding-window strategy keeps verbatim. "
+            "Values outside 1..32 fall back to the default with a warning."
+        ),
+    ),
+    SettingDescriptor(
+        "compaction_preserve_system",
+        "Compaction: keep the system prompt",
+        "chat",
+        "bool",
+        SCOPE_REBUILD,
+        help="Exempt the system prompt from compaction so the agent's instructions survive.",
+    ),
+    # ---- Memory ------------------------------------------------------------
+    # NOTE (PRP-0140): `user_profile_enabled` and `agent_memory_enabled` are
+    # `rebuild`, not `runtime`. Both gate TOOL REGISTRATION inside
+    # _build_tools_and_instructions() (agent_factory.py:339 / :351), which runs at
+    # AgentRegistry construction -- so toggling one by assignment leaves the
+    # already-built agents with their old tool list. Found by the strengthened
+    # UDR-0120 D3 guard, which follows main.py's module-level calls into app.*;
+    # the original literal-only scan could not see them. The CTR-0070 rebuild
+    # re-runs the factory, so `rebuild` is correct and `restart` unnecessary.
     SettingDescriptor(
         "identity_char_limit",
         "Identity character limit",
@@ -244,7 +279,7 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         "User profile memory",
         "memory",
         "bool",
-        SCOPE_RUNTIME,
+        SCOPE_REBUILD,
         help="Master toggle for the .agent/USER.md block, the inline memory tool, and snapshot capture.",
     ),
     SettingDescriptor(
@@ -276,7 +311,7 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         "Agent curated memory",
         "memory",
         "bool",
-        SCOPE_RUNTIME,
+        SCOPE_REBUILD,
         help="Master toggle for .agent/MEMORY.md, the manage_memory tool, and the per-turn like UI.",
     ),
     SettingDescriptor(
@@ -558,6 +593,38 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         "int",
         SCOPE_RUNTIME,
         help="Longest reply posted back to a Teams conversation before truncation.",
+    ),
+    # Teams meeting summarization bounds (PRP-0140). `runtime` by measurement: the
+    # meeting pipeline reads all three inside the job coroutine, so an assignment
+    # reaches the next run with no rebuild and no restart. They live in `limits`
+    # rather than an eighth group, next to teams_max_reply_chars.
+    SettingDescriptor(
+        "teams_meeting_output_dir",
+        "Meeting summary folder",
+        "limits",
+        "str",
+        SCOPE_RUNTIME,
+        help=(
+            "Folder for meeting summary JSON, RELATIVE to CODING_WORKSPACE_DIR. It is "
+            "resolved through the CTR-0031 realpath jail, so a value that would escape "
+            "the workspace fails the job rather than writing outside it."
+        ),
+    ),
+    SettingDescriptor(
+        "teams_meeting_transcript_max_wait_seconds",
+        "Transcript wait limit (seconds)",
+        "limits",
+        "int",
+        SCOPE_RUNTIME,
+        help="How long to keep polling for a transcript before giving up. Graph publishes it minutes after a meeting ends.",
+    ),
+    SettingDescriptor(
+        "teams_meeting_transcript_poll_seconds",
+        "Transcript poll interval (seconds)",
+        "limits",
+        "int",
+        SCOPE_RUNTIME,
+        help="Delay between transcript polls. Clamped to a 5 second floor at use time.",
     ),
     SettingDescriptor(
         "ontology_max_file_bytes",
