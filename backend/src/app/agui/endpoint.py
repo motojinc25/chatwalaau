@@ -62,7 +62,7 @@ from app.agent.approval import (
     approval_store,
     truncate_arguments_preview,
 )
-from app.agent.approval_iteration import IterationContentAccumulator
+from app.agent.approval_iteration import IterationContentAccumulator, maf_resumable_call_ids
 from app.agent.declarative import active_spec
 from app.agent.identity import load_identity
 from app.agent.prompt_dump import dump_prompt
@@ -1692,6 +1692,10 @@ async def _stream_with_reasoning(
                 approval_response_contents,
                 include_reasoning=is_anthropic,
                 strip_function_call_ids=not is_anthropic,
+                # PRP-0141 / UDR-0119 D6: replay the calls MAF deferred ONLY when
+                # MAF will resume them, and never answer for them. Read BEFORE the
+                # re-run below, which is where MAF pops the group.
+                resumable_call_ids=maf_resumable_call_ids(session),
             )
             iteration_messages = [*iteration_messages, *iter_synthetic_messages]
             # Reset server-side response chaining before the post-approval

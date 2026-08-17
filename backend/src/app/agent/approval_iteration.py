@@ -54,9 +54,18 @@ connector as an ``mcp_approval_response`` naming a request that never existed::
     400 The following MCP approval requests have approval responses but
         weren't passed as input: call_...
 
-Deferred calls are therefore OMITTED from the replay entirely (UDR-0119 D6 as
-amended). MAF's own restore executes them exactly once on resume; where MAF
-holds nothing, the model simply re-issues the call it never got a result for.
+A deferred call is therefore REPLAYED BUT NEVER ANSWERED -- and replayed only
+when MAF will actually resume it (UDR-0119 D6 as amended). The two halves are
+one rule with one criterion, ``maf_resumable_call_ids(session)``:
+
+- MAF holds the call -> its ``function_result`` WILL appear in the resumed turn,
+  so the ``function_call`` must be in the input beside it. Omitting it yields the
+  mirror-image rejection, ``400 No tool call found for function call output with
+  call_id call_...``, whenever the provider (not MAF) owns the history: with
+  ``STORES_BY_DEFAULT=True`` and ``service_session_id`` cleared for the resume,
+  this replay is the ONLY source of the assistant turn.
+- MAF does not hold it (a session-less run) -> nothing will produce its output,
+  so replaying it would strand the call. It is omitted and the model re-issues.
 
 The synthetic assistant preserves Anthropic's ``thinking`` block signature
 (stored on ``TextReasoningContent.protected_data``, round-tripped by the MAF
@@ -81,11 +90,76 @@ OpenAI reasoning models impose the OPPOSITE constraint from Anthropic:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_framework import Content, Message
 
+if TYPE_CHECKING:
+    from collections.abc import Collection
+
 logger = logging.getLogger(__name__)
+
+# MAF's private session-state location for the calls it deferred in a gated
+# round (agent_framework._tools._TOOL_APPROVAL_STATE_KEY /
+# _ALREADY_APPROVED_APPROVAL_REQUEST_GROUPS_KEY). Read-only, defensively: the
+# reader below returns an empty set on ANY shape it does not recognise, which
+# degrades to "MAF resumes nothing" -- deferred calls are then omitted and the
+# model re-issues them, rather than being stranded without an output.
+_MAF_TOOL_APPROVAL_STATE_KEY = "tool_approval"
+_MAF_DEFERRED_GROUPS_KEY = "already_approved_approval_request_groups"
+
+
+def maf_resumable_call_ids(session: Any) -> frozenset[str]:
+    """Return the call ids MAF will resume on its own for ``session``.
+
+    Since MAF 1.13 a round containing an approval-gated call hides its non-gated
+    siblings, stores them on the invocation ``AgentSession``, and restores them
+    as APPROVED responses once the gated decision arrives
+    (``_store_already_approved_approval_requests`` /
+    ``_pop_already_approved_approval_responses``). Those calls therefore produce
+    a ``function_result`` in the resumed turn, and their ``function_call`` must
+    be replayed beside it -- while a deferred call MAF does NOT hold produces
+    nothing and must not be replayed.
+
+    MUST be read BEFORE the resume run: MAF pops the group during it.
+
+    This reaches into upstream-private state deliberately. The alternative is to
+    GUESS which of the two shapes applies, and both guesses have now shipped as
+    a 400 (PRP-0135's fabricated response, PRP-0141's over-broad omission). The
+    key is pinned by an upstream canary test, and every failure mode here is a
+    quiet, correct empty set.
+    """
+    state = getattr(session, "state", None)
+    if not isinstance(state, dict):
+        return frozenset()
+    approval_state = state.get(_MAF_TOOL_APPROVAL_STATE_KEY)
+    # The harness ToolApprovalMiddleware may leave a typed state object here;
+    # MAF itself normalizes it to a dict on first access.
+    if not isinstance(approval_state, dict):
+        to_dict = getattr(approval_state, "to_dict", None)
+        approval_state = to_dict(exclude={"type"}) if callable(to_dict) else None
+    if not isinstance(approval_state, dict):
+        return frozenset()
+    groups = approval_state.get(_MAF_DEFERRED_GROUPS_KEY)
+    if not isinstance(groups, list):
+        return frozenset()
+
+    call_ids: set[str] = set()
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        requests = group.get("approval_requests")
+        if not isinstance(requests, list):
+            continue
+        for request in requests:
+            if not isinstance(request, dict):
+                continue
+            function_call = request.get("function_call")
+            call_id = function_call.get("call_id") if isinstance(function_call, dict) else None
+            call_id = call_id or request.get("id")
+            if isinstance(call_id, str) and call_id:
+                call_ids.add(call_id)
+    return frozenset(call_ids)
 
 
 class IterationContentAccumulator:
@@ -255,6 +329,7 @@ class IterationContentAccumulator:
         *,
         include_reasoning: bool = True,
         strip_function_call_ids: bool = False,
+        resumable_call_ids: Collection[str] = (),
     ) -> list[Message]:
         """Build ``[synthetic_assistant, synthetic_user]`` for iter N+1's input.
 
@@ -278,20 +353,17 @@ class IterationContentAccumulator:
           demand the matching reasoning item (see ``_resolved_function_call``).
           Anthropic passes False to keep the original ``tool_use`` Content.
 
-        DEFERRED calls (every lane; PRP-0135 for the harness lane, PRP-0141 for
-        the rest) are OMITTED from the replay and NEVER answered. Fabricating an
-        approval response for a call that issued no approval REQUEST is only
-        absorbed while MAF still holds that call as pending, and since MAF 1.13
-        MAF restores the deferred siblings itself from session state -- so the
-        fabricated copy survives into the model input and the OpenAI connector
-        serializes it as an ``mcp_approval_response`` whose
-        ``approval_request_id`` names a request that never existed::
-
-            400 The following MCP approval requests have approval responses
-                but weren't passed as input: call_...
-
-        The genuinely gated call keeps its real approval response; the deferred
-        ones are executed by MAF's own restore, or re-issued by the model.
+        - ``resumable_call_ids`` (PRP-0141): the call ids MAF will resume by
+          itself, from ``maf_resumable_call_ids(session)``, read BEFORE the resume
+          run. A DEFERRED call is replayed iff it is in this set, and is NEVER
+          answered either way. Both halves are load-bearing and each has shipped
+          as a 400 when got wrong: fabricating an approval response for a call
+          that issued no REQUEST collides with MAF's own restore (``400 ... MCP
+          approval requests have approval responses but weren't passed as
+          input``), while omitting a call MAF WILL resume leaves its result
+          unpaired (``400 No tool call found for function call output with
+          call_id ...``). The genuinely gated call always keeps its real
+          approval response.
 
         Empty assistant or user messages are skipped so a degenerate
         iteration (e.g., no observed content) does not inject a no-op Message
@@ -312,19 +384,22 @@ class IterationContentAccumulator:
             assistant_contents.append(Content.from_text(text=text))
 
         # Calls that neither executed nor asked for approval: MAF deferred them.
-        # They are omitted from the replay -- see the class docstring and
-        # UDR-0119 D6 (as amended by PRP-0141) for why answering them 400s.
+        # A deferred call is replayed only when MAF will resume it (its result
+        # then needs the matching call in the input) and is NEVER answered here.
+        # See the module docstring and UDR-0119 D6 (amended by PRP-0141).
         deferred_call_ids = {
             call_id
             for call_id in self._function_call_order
             if call_id not in self._function_results and call_id not in self._function_call_from_approval
         }
-        replayed_call_ids = [cid for cid in self._function_call_order if cid not in deferred_call_ids]
+        stranded_call_ids = deferred_call_ids - set(resumable_call_ids)
+        replayed_call_ids = [cid for cid in self._function_call_order if cid not in stranded_call_ids]
         if deferred_call_ids:
             logger.info(
-                "Outer-loop iteration omitted deferred function_call(s) from the replay; MAF resumes "
-                "them from its own session state, or the model re-issues them: %s",
-                sorted(deferred_call_ids),
+                "Outer-loop iteration deferred function_call(s): replayed unanswered (MAF resumes "
+                "them) %s; omitted (nothing will produce their result, the model re-issues) %s",
+                sorted(deferred_call_ids & set(resumable_call_ids)),
+                sorted(stranded_call_ids),
             )
         assistant_contents.extend(
             self._resolved_function_call(cid, strip_server_item_ids=strip_function_call_ids)
@@ -413,4 +488,4 @@ class IterationContentAccumulator:
         return out
 
 
-__all__ = ["IterationContentAccumulator"]
+__all__ = ["IterationContentAccumulator", "maf_resumable_call_ids"]

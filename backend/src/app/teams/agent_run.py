@@ -207,7 +207,9 @@ async def run_turn(
             iteration=interactive_rounds + 1,
             max_iterations=max_iterations,
         )
-        iter_messages = _build_iteration_messages(accumulator, approval_response_contents, effective_model)
+        iter_messages = _build_iteration_messages(
+            accumulator, approval_response_contents, effective_model, session=session
+        )
         iteration_messages = [*iteration_messages, *iter_messages]
         # The approval handshake interrupted the iter-N response stream; clear the
         # uncommitted server-side response id so the re-run relies on explicit
@@ -279,10 +281,11 @@ async def _resolve_pending(
 
 
 def _build_iteration_messages(
-    accumulator: Any, approval_response_contents: list[Any], effective_model: str
+    accumulator: Any, approval_response_contents: list[Any], effective_model: str, *, session: Any
 ) -> list[Any]:
     """Build the iter-N+1 [assistant, user] pair, provider-aware (matches AG-UI)."""
     from app import providers
+    from app.agent.approval_iteration import maf_resumable_call_ids
     from app.demo import is_demo_mode
 
     # Anthropic needs the signed reasoning + original tool_use Content replayed;
@@ -292,4 +295,6 @@ def _build_iteration_messages(
         approval_response_contents,
         include_reasoning=is_anthropic,
         strip_function_call_ids=not is_anthropic,
+        # PRP-0141: read BEFORE the resume run pops MAF's deferred group.
+        resumable_call_ids=maf_resumable_call_ids(session),
     )
