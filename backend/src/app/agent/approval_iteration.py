@@ -20,11 +20,11 @@ boundary, produces the iter-N+1 input pair::
 
     [..., iter_N_assistant_synthetic, iter_N_user_with_approval_responses]
 
-so MAF + Anthropic see a properly paired conversation with FULL iter-N tool
-history -- every ``tool_use`` from iter-N (gated and non-gated) is reflected
-in the synthetic assistant, and every executed ``tool_result`` from iter-N
-is in the synthetic user, alongside the operator's approval responses for
-the gated tools that paused::
+so MAF + Anthropic see a properly paired conversation with the iter-N tool
+history -- every ``tool_use`` from iter-N that EXECUTED or asked for approval
+(gated and non-gated alike) is reflected in the synthetic assistant, and every
+executed ``tool_result`` from iter-N is in the synthetic user, alongside the
+operator's approval responses for the gated tools that paused::
 
     assistant(reasoning_signed + text + tool_use_X + tool_use_Y + tool_use_W_gated)
     user(tool_result_X + tool_result_Y + tool_result_W_from_approval)
@@ -36,14 +36,27 @@ called the gated tool" and starts over (re-globbing, re-reading, re-writing),
 which compounds across iterations and quickly trips Anthropic's per-minute
 rate limit (429 Too Many Requests).
 
-MAF 1.10 deferral (PRP-0108): since agent-framework 1.10, a round that
-contains an approval-gated call DEFERS every other tool call of that round --
-non-gated tools no longer execute inline, their ``function_call`` streams
-bare (no ``function_result``, no approval request), and on resume MAF
-executes only calls carrying an approval response. ``build_iteration_messages``
-therefore synthesizes an APPROVED ``function_approval_response`` for each
-deferred call so it executes exactly once on resume (verified against the
-installed 1.10.0 FunctionInvocationLayer with a recording fake client).
+Deferral (PRP-0108 -> PRP-0141): a round that contains an approval-gated call
+DEFERS every other tool call of that round -- non-gated tools do not execute
+inline, their ``function_call`` streams bare (no ``function_result``, no
+approval request), and on resume MAF executes only calls carrying an approval
+response. Under MAF 1.10 the builder synthesized an APPROVED
+``function_approval_response`` for each deferred call so it executed once on
+resume. Since MAF 1.13 that synthesis is WRONG in every lane: MAF stores the
+deferred siblings itself, on the invocation ``AgentSession``
+(``state["tool_approval"]["already_approved_approval_request_groups"]``,
+``_tools._store_already_approved_approval_requests``), and restores them as
+approved responses the moment the genuinely gated response arrives. The
+synthesized copy is then a SECOND response for the same call id with only one
+execution result to consume it, so the survivor reaches the OpenAI Responses
+connector as an ``mcp_approval_response`` naming a request that never existed::
+
+    400 The following MCP approval requests have approval responses but
+        weren't passed as input: call_...
+
+Deferred calls are therefore OMITTED from the replay entirely (UDR-0119 D6 as
+amended). MAF's own restore executes them exactly once on resume; where MAF
+holds nothing, the model simply re-issues the call it never got a result for.
 
 The synthetic assistant preserves Anthropic's ``thinking`` block signature
 (stored on ``TextReasoningContent.protected_data``, round-tripped by the MAF
@@ -242,16 +255,15 @@ class IterationContentAccumulator:
         *,
         include_reasoning: bool = True,
         strip_function_call_ids: bool = False,
-        drop_deferred_calls: bool = False,
     ) -> list[Message]:
         """Build ``[synthetic_assistant, synthetic_user]`` for iter N+1's input.
 
         The synthetic assistant carries the accumulated reasoning (with the
-        captured signature), the accumulated text, and EVERY function_call
-        observed in this iteration (gated and non-gated), in observation order.
-        The synthetic user carries every executed function_result (matching
-        order) followed by the operator's function_approval_response contents
-        for the gated tools that paused.
+        captured signature), the accumulated text, and every function_call
+        observed in this iteration that either EXECUTED or asked for approval,
+        in observation order. The synthetic user carries every executed
+        function_result (matching order) followed by the operator's
+        function_approval_response contents for the gated tools that paused.
 
         Provider-aware reconstruction (defaults preserve the Anthropic path):
 
@@ -265,22 +277,21 @@ class IterationContentAccumulator:
           without the provider server item id so the Responses API does not
           demand the matching reasoning item (see ``_resolved_function_call``).
           Anthropic passes False to keep the original ``tool_use`` Content.
-        - ``drop_deferred_calls`` (harness lane: True; PRP-0135): OMIT the
-          deferred calls instead of replaying-and-approving them. The synthesis
-          below fabricates a ``function_approval_response`` for a call that never
-          issued an approval REQUEST. MAF absorbs that only while it still holds
-          the deferred call as pending; in the harness lane each loop iteration is
-          a fresh agent run, so it does not, and the response reaches the OpenAI
-          connector, which serializes it as an ``mcp_approval_response`` whose
-          ``approval_request_id`` names a request that never existed::
 
-              400 The following MCP approval requests have approval responses
-                  but weren't passed as input: call_...
+        DEFERRED calls (every lane; PRP-0135 for the harness lane, PRP-0141 for
+        the rest) are OMITTED from the replay and NEVER answered. Fabricating an
+        approval response for a call that issued no approval REQUEST is only
+        absorbed while MAF still holds that call as pending, and since MAF 1.13
+        MAF restores the deferred siblings itself from session state -- so the
+        fabricated copy survives into the model input and the OpenAI connector
+        serializes it as an ``mcp_approval_response`` whose
+        ``approval_request_id`` names a request that never existed::
 
-          -- and the ids in that 400 are exactly the ids this block logs. The
-          calls never executed, so omitting them costs nothing but a re-issue;
-          the genuinely gated call keeps its real approval response. The Prompt
-          lane passes False and keeps the PRP-0108 behavior byte-for-byte.
+            400 The following MCP approval requests have approval responses
+                but weren't passed as input: call_...
+
+        The genuinely gated call keeps its real approval response; the deferred
+        ones are executed by MAF's own restore, or re-issued by the model.
 
         Empty assistant or user messages are skipped so a degenerate
         iteration (e.g., no observed content) does not inject a no-op Message
@@ -300,19 +311,21 @@ class IterationContentAccumulator:
         if text:
             assistant_contents.append(Content.from_text(text=text))
 
-        # Calls that neither executed nor asked for approval: MAF deferred them
-        # (see the synthesis block below). ``drop_deferred_calls`` decides whether
-        # they are replayed-and-approved or omitted entirely.
-        deferred_call_ids = [
+        # Calls that neither executed nor asked for approval: MAF deferred them.
+        # They are omitted from the replay -- see the class docstring and
+        # UDR-0119 D6 (as amended by PRP-0141) for why answering them 400s.
+        deferred_call_ids = {
             call_id
             for call_id in self._function_call_order
             if call_id not in self._function_results and call_id not in self._function_call_from_approval
-        ]
-        replayed_call_ids = (
-            [cid for cid in self._function_call_order if cid not in deferred_call_ids]
-            if drop_deferred_calls
-            else list(self._function_call_order)
-        )
+        }
+        replayed_call_ids = [cid for cid in self._function_call_order if cid not in deferred_call_ids]
+        if deferred_call_ids:
+            logger.info(
+                "Outer-loop iteration omitted deferred function_call(s) from the replay; MAF resumes "
+                "them from its own session state, or the model re-issues them: %s",
+                sorted(deferred_call_ids),
+            )
         assistant_contents.extend(
             self._resolved_function_call(cid, strip_server_item_ids=strip_function_call_ids)
             for cid in replayed_call_ids
@@ -324,36 +337,6 @@ class IterationContentAccumulator:
             if result is not None:
                 user_contents.append(result)
         user_contents.extend(approval_response_contents)
-
-        # MAF 1.10 deferral handling (PRP-0108 defect fix #3): since 1.10 the
-        # FunctionInvocationLayer DEFERS every other tool call of a round that
-        # contains an approval-gated call -- a non-gated tool no longer executes
-        # inline, its function_call streams bare (no function_result, no
-        # approval request). On resume, MAF executes only the calls that carry
-        # an approval response, so a bare replayed function_call reaches the
-        # provider unpaired and the OpenAI Responses API rejects the request
-        # with "400 No tool output found for function call ...". Synthesize an
-        # APPROVED function_approval_response for each such deferred call: the
-        # tool is non-gated (it never asked for approval), so approving its
-        # deferred execution restores the pre-1.10 semantics -- the tool runs
-        # exactly once, on resume, and MAF emits the paired function_result.
-        if assistant_contents and self._function_call_order and not drop_deferred_calls:
-            pending_call_ids = deferred_call_ids
-            for call_id in pending_call_ids:
-                deferred_call = self._resolved_function_call(call_id, strip_server_item_ids=strip_function_call_ids)
-                user_contents.append(
-                    Content.from_function_approval_response(
-                        approved=True,
-                        function_call=deferred_call,
-                        id=call_id,
-                    )
-                )
-            if pending_call_ids:
-                logger.info(
-                    "Outer-loop iteration deferred non-gated function_call(s) (MAF 1.10 behavior); "
-                    "synthesized approved responses so they execute on resume: %s",
-                    sorted(pending_call_ids),
-                )
 
         # PAIRING INVARIANT (PRP-0134 follow-up, UDR-0117). Anthropic rejects the whole
         # request when any tool_result names a tool_use that is not in the message before

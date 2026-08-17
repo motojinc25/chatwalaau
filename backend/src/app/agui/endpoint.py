@@ -1692,13 +1692,6 @@ async def _stream_with_reasoning(
                 approval_response_contents,
                 include_reasoning=is_anthropic,
                 strip_function_call_ids=not is_anthropic,
-                # PRP-0135 / UDR-0119 D6: never fabricate an approval response for
-                # a harness call that issued no approval request. In this lane MAF
-                # does not absorb it (each harness loop iteration is a fresh agent
-                # run), so it reaches the provider as an mcp_approval_response with
-                # a dangling approval_request_id and 400s the turn. The Prompt lane
-                # keeps the PRP-0108 synthesis byte-for-byte.
-                drop_deferred_calls=harness_run,
             )
             iteration_messages = [*iteration_messages, *iter_synthetic_messages]
             # Reset server-side response chaining before the post-approval
