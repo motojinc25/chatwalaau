@@ -95,7 +95,7 @@ from typing import TYPE_CHECKING, Any
 from agent_framework import Content, Message
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,89 @@ def maf_resumable_call_ids(session: Any) -> frozenset[str]:
             if isinstance(call_id, str) and call_id:
                 call_ids.add(call_id)
     return frozenset(call_ids)
+
+
+def settle_pending_tool_content(messages: list[Message], results: Mapping[str, Content]) -> tuple[list[str], list[str]]:
+    """Write the results a resumed run produced back into the accumulated conversation.
+
+    ``build_iteration_messages`` can only describe what was known when the round
+    PAUSED: the operator's ``function_approval_response`` for the gated call, and
+    a bare ``function_call`` for each deferred sibling MAF will resume. Both are
+    promises about the run that is about to happen, and MAF keeps them -- but only
+    for that one run, on its own copy of the messages. The accumulated
+    ``iteration_messages`` this loop carries forward keeps the promises instead of
+    the outcome, and from the SECOND approval round on, the provider sees them:
+
+    - the deferred call's ``tool_use`` never gets its ``tool_result``::
+
+          400 messages.N: `tool_use` ids were found without `tool_result` blocks
+              immediately after: toolu_...
+
+      (Anthropic states it; the OpenAI Responses API rejects the same transcript
+      as a function_call with no output.)
+    - the still-unconverted approval response is collected AGAIN by MAF, so the
+      approved tool RE-EXECUTES once per subsequent round -- silently, since it
+      succeeds. For ``bash_execute`` that is the operator's command running again
+      without a second approval.
+
+    So once the results are known -- they arrive on the very next stream, because
+    a resumed run executes the approved and restored calls before it reaches the
+    model -- they REPLACE the promises: each ``function_approval_response`` becomes
+    its ``function_result``, and every unanswered ``function_call`` is paired with
+    the result it produced. The conversation we keep then says what happened rather
+    than what was expected to.
+
+    Returns ``(settled_call_ids, still_unanswered_call_ids)``; the second list is
+    an incomplete transcript this function could not repair and is worth logging.
+    """
+    if not messages:
+        return [], []
+    settled: list[str] = []
+
+    # 1. Promise -> outcome: an approval response whose call has a result becomes
+    #    that result. Anything still awaiting its result is left untouched.
+    for message in messages:
+        replaced: list[Content] = []
+        for content in message.contents:
+            if content.type != "function_approval_response":
+                replaced.append(content)
+                continue
+            wrapped = getattr(content, "function_call", None)
+            call_id = getattr(wrapped, "call_id", None) or getattr(content, "call_id", None)
+            result = results.get(call_id) if call_id else None
+            if result is None:
+                replaced.append(content)
+                continue
+            replaced.append(result)
+            settled.append(call_id)
+        if len(replaced) == len(message.contents):
+            message.contents = replaced
+
+    # 2. Pair every function_call with a result in the message that FOLLOWS it,
+    #    which is where both providers require it.
+    unanswered: list[str] = []
+    for index, message in enumerate(messages):
+        call_ids = [c.call_id for c in message.contents if c.type == "function_call" and c.call_id]
+        if not call_ids:
+            continue
+        follower = messages[index + 1] if index + 1 < len(messages) else None
+        if follower is None or follower.role == "assistant":
+            # No message to hold the results: only reachable for the round still
+            # in flight, whose results do not exist yet.
+            unanswered.extend(cid for cid in call_ids if cid not in results)
+            continue
+        answered = {
+            getattr(c, "call_id", None) or getattr(getattr(c, "function_call", None), "call_id", None)
+            for c in follower.contents
+        }
+        missing = [cid for cid in call_ids if cid not in answered]
+        recovered = [results[cid] for cid in missing if cid in results]
+        if recovered:
+            follower.contents = [*follower.contents, *recovered]
+            settled.extend(c.call_id for c in recovered if c.call_id)
+        unanswered.extend(cid for cid in missing if cid not in results)
+
+    return settled, unanswered
 
 
 class IterationContentAccumulator:
@@ -276,6 +359,17 @@ class IterationContentAccumulator:
     def has_pending_function_calls(self) -> bool:
         """True when at least one approval-gated function_call was observed."""
         return bool(self._function_call_from_approval)
+
+    def observed_results(self) -> dict[str, Content]:
+        """Every ``function_result`` seen this iteration, keyed by call id.
+
+        Includes results for calls issued in an EARLIER iteration: a resumed run
+        executes the previously approved call and the deferred ones it restored
+        before the model is called again, and those results are what
+        ``settle_pending_tool_content`` writes back into the accumulated
+        conversation.
+        """
+        return dict(self._function_results)
 
     # ---- iteration boundary ----
 
@@ -488,4 +582,8 @@ class IterationContentAccumulator:
         return out
 
 
-__all__ = ["IterationContentAccumulator", "maf_resumable_call_ids"]
+__all__ = [
+    "IterationContentAccumulator",
+    "maf_resumable_call_ids",
+    "settle_pending_tool_content",
+]

@@ -62,7 +62,11 @@ from app.agent.approval import (
     approval_store,
     truncate_arguments_preview,
 )
-from app.agent.approval_iteration import IterationContentAccumulator, maf_resumable_call_ids
+from app.agent.approval_iteration import (
+    IterationContentAccumulator,
+    maf_resumable_call_ids,
+    settle_pending_tool_content,
+)
 from app.agent.declarative import active_spec
 from app.agent.identity import load_identity
 from app.agent.prompt_dump import dump_prompt
@@ -1687,6 +1691,27 @@ async def _stream_with_reasoning(
             # drop the reasoning and rebuild function_calls without server item
             # ids (matched by call_id). Anthropic keeps the signed reasoning +
             # original tool_use Content the API requires.
+            # PRP-0141: the PREVIOUS round promised the provider two things -- that
+            # the operator's approval response would become a result, and that the
+            # calls MAF deferred would be answered. MAF keeps both, but only on its
+            # own copy of the messages for that one run. Write the outcomes into the
+            # conversation we carry forward, or the next round replays the promises:
+            # an unpaired tool_use (Anthropic 400 / OpenAI's equivalent) and an
+            # approval response MAF collects again, re-running an approved tool.
+            settled, unanswered = settle_pending_tool_content(iteration_messages, iter_accumulator.observed_results())
+            if settled:
+                logger.info(
+                    "Outer-loop settled %d tool call(s) from the resumed run into the conversation: %s",
+                    len(settled),
+                    sorted(settled),
+                )
+            if unanswered:
+                logger.warning(
+                    "Outer-loop could not pair tool call(s) with a result; the provider may reject the "
+                    "next request: %s",
+                    sorted(set(unanswered)),
+                )
+
             is_anthropic = providers.provider_for(effective_model).name == "anthropic"
             iter_synthetic_messages = iter_accumulator.build_iteration_messages(
                 approval_response_contents,

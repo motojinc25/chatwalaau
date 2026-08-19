@@ -106,7 +106,7 @@ async def run_turn(
     from agent_framework import AgentSession
 
     from app.agent.approval import approval_store, truncate_arguments_preview
-    from app.agent.approval_iteration import IterationContentAccumulator
+    from app.agent.approval_iteration import IterationContentAccumulator, settle_pending_tool_content
     from app.agui.endpoint import (  # type: ignore[attr-defined]
         _arguments_to_dict,
         _image_gen_thread_id,
@@ -207,6 +207,16 @@ async def run_turn(
             iteration=interactive_rounds + 1,
             max_iterations=max_iterations,
         )
+        # PRP-0141: replace the previous round's promises (approval responses, and
+        # deferred calls MAF answered on its own copy) with the results the resumed
+        # run actually produced -- otherwise the next round sends an unpaired
+        # tool_use and re-runs an already-approved tool.
+        settled, unanswered = settle_pending_tool_content(iteration_messages, accumulator.observed_results())
+        if settled:
+            logger.info("Teams approval loop settled %d tool call(s): %s", len(settled), sorted(settled))
+        if unanswered:
+            logger.warning("Teams approval loop left tool call(s) unpaired: %s", sorted(set(unanswered)))
+
         iter_messages = _build_iteration_messages(
             accumulator, approval_response_contents, effective_model, session=session
         )
