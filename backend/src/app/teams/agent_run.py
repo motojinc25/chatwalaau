@@ -103,10 +103,14 @@ async def run_turn(
     """
     import uuid
 
-    from agent_framework import AgentSession
+    from agent_framework import AgentSession, Message
 
     from app.agent.approval import approval_store, truncate_arguments_preview
-    from app.agent.approval_iteration import IterationContentAccumulator, settle_pending_tool_content
+    from app.agent.approval_iteration import (
+        IterationContentAccumulator,
+        maf_owns_conversation,
+        settle_pending_tool_content,
+    )
     from app.agui.endpoint import (  # type: ignore[attr-defined]
         _arguments_to_dict,
         _image_gen_thread_id,
@@ -207,20 +211,27 @@ async def run_turn(
             iteration=interactive_rounds + 1,
             max_iterations=max_iterations,
         )
-        # PRP-0141: replace the previous round's promises (approval responses, and
-        # deferred calls MAF answered on its own copy) with the results the resumed
-        # run actually produced -- otherwise the next round sends an unpaired
-        # tool_use and re-runs an already-approved tool.
-        settled, unanswered = settle_pending_tool_content(iteration_messages, accumulator.observed_results())
-        if settled:
-            logger.info("Teams approval loop settled %d tool call(s): %s", len(settled), sorted(settled))
-        if unanswered:
-            logger.warning("Teams approval loop left tool call(s) unpaired: %s", sorted(set(unanswered)))
+        # PRP-0141 / UDR-0119 D6-g: when MAF owns the conversation (Anthropic, or
+        # any store=False lane) it re-injects the paused turn and its results, so a
+        # reconstruction here is a duplicate that orphans the transcript. Send only
+        # the operator's decisions. Parity with the AG-UI loop.
+        if maf_owns_conversation(agent):
+            iteration_messages = [Message(role="user", contents=approval_response_contents)]
+        else:
+            # SERVICE-stored: replace the previous round's promises (approval
+            # responses, and deferred calls MAF answered on its own copy) with the
+            # results the resumed run produced -- otherwise the next round sends an
+            # unpaired tool_use and re-runs an already-approved tool.
+            settled, unanswered = settle_pending_tool_content(iteration_messages, accumulator.observed_results())
+            if settled:
+                logger.info("Teams approval loop settled %d tool call(s): %s", len(settled), sorted(settled))
+            if unanswered:
+                logger.warning("Teams approval loop left tool call(s) unpaired: %s", sorted(set(unanswered)))
 
-        iter_messages = _build_iteration_messages(
-            accumulator, approval_response_contents, effective_model, session=session
-        )
-        iteration_messages = [*iteration_messages, *iter_messages]
+            iter_messages = _build_iteration_messages(
+                accumulator, approval_response_contents, effective_model, session=session
+            )
+            iteration_messages = [*iteration_messages, *iter_messages]
         # The approval handshake interrupted the iter-N response stream; clear the
         # uncommitted server-side response id so the re-run relies on explicit
         # context (mirrors the AG-UI post-approval reset).

@@ -54,6 +54,15 @@ connector as an ``mcp_approval_response`` naming a request that never existed::
     400 The following MCP approval requests have approval responses but
         weren't passed as input: call_...
 
+WHO REPLAYS AT ALL is the prior question, and it is decided by who owns the
+conversation, not by the lane or the provider name (``maf_owns_conversation``).
+When MAF keeps the history client-side (Anthropic; anything with ``store=False``)
+it re-injects the paused assistant turn and the results itself, so this whole
+reconstruction is a DUPLICATE -- the endpoint sends only the operator's decisions
+and none of the machinery below runs. Everything that follows applies to a
+SERVICE-stored conversation, where the resume clears ``service_session_id`` and
+this module is the only source of the paused turn.
+
 A deferred call is therefore REPLAYED BUT NEVER ANSWERED -- and replayed only
 when MAF will actually resume it (UDR-0119 D6 as amended). The two halves are
 one rule with one criterion, ``maf_resumable_call_ids(session)``:
@@ -107,6 +116,42 @@ logger = logging.getLogger(__name__)
 # model re-issues them, rather than being stranded without an output.
 _MAF_TOOL_APPROVAL_STATE_KEY = "tool_approval"
 _MAF_DEFERRED_GROUPS_KEY = "already_approved_approval_request_groups"
+
+
+def maf_owns_conversation(agent: Any) -> bool:
+    """True when MAF keeps the conversation client-side, so the replay is a DUPLICATE.
+
+    Who reconstructs the paused turn is not ours to choose -- it follows the same
+    resolution MAF itself uses to decide whether to run its history providers
+    (``_agents.py``: the explicit ``store`` option, falling back to the client's
+    ``STORES_BY_DEFAULT``):
+
+    - **Service-stored** (Azure OpenAI; ``store`` unset, ``STORES_BY_DEFAULT`` True)
+      -- the resume clears ``service_session_id``, so NOTHING remembers the paused
+      turn. The accumulated ``iteration_messages`` is the only source and must be
+      sent in full.
+    - **Client-stored** (Anthropic, ``STORES_BY_DEFAULT`` False; and any lane
+      pinning ``store=False``, e.g. the harness) -- MAF already holds the assistant
+      turn AND the results it executed, and re-injects them. Sending our replay too
+      duplicates the assistant turn, which orphans the transcript in BOTH
+      directions at once::
+
+          400 messages.N: `tool_use` ids were found without `tool_result` blocks
+              immediately after: toolu_...
+          400 messages.0.content.0: unexpected `tool_use_id` found in `tool_result`
+              blocks: toolu_...
+
+      Only the operator's decisions are missing there, so only they are sent.
+
+    Returns False (send everything) for any agent shape this cannot read, which is
+    the pre-existing behavior rather than a new silence.
+    """
+    client = getattr(agent, "client", None)
+    default_options = getattr(agent, "default_options", None)
+    explicit_store = default_options.get("store") if isinstance(default_options, dict) else None
+    if explicit_store is not None:
+        return not bool(explicit_store)
+    return not bool(getattr(client, "STORES_BY_DEFAULT", True))
 
 
 def maf_resumable_call_ids(session: Any) -> frozenset[str]:
@@ -584,6 +629,7 @@ class IterationContentAccumulator:
 
 __all__ = [
     "IterationContentAccumulator",
+    "maf_owns_conversation",
     "maf_resumable_call_ids",
     "settle_pending_tool_content",
 ]

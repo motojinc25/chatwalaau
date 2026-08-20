@@ -46,7 +46,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 from ag_ui.encoder import EventEncoder
-from agent_framework import AgentSession, Content
+from agent_framework import AgentSession, Content, Message
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -64,6 +64,7 @@ from app.agent.approval import (
 )
 from app.agent.approval_iteration import (
     IterationContentAccumulator,
+    maf_owns_conversation,
     maf_resumable_call_ids,
     settle_pending_tool_content,
 )
@@ -1691,38 +1692,57 @@ async def _stream_with_reasoning(
             # drop the reasoning and rebuild function_calls without server item
             # ids (matched by call_id). Anthropic keeps the signed reasoning +
             # original tool_use Content the API requires.
-            # PRP-0141: the PREVIOUS round promised the provider two things -- that
-            # the operator's approval response would become a result, and that the
-            # calls MAF deferred would be answered. MAF keeps both, but only on its
-            # own copy of the messages for that one run. Write the outcomes into the
-            # conversation we carry forward, or the next round replays the promises:
-            # an unpaired tool_use (Anthropic 400 / OpenAI's equivalent) and an
-            # approval response MAF collects again, re-running an approved tool.
-            settled, unanswered = settle_pending_tool_content(iteration_messages, iter_accumulator.observed_results())
-            if settled:
+            # PRP-0141 / UDR-0119 D6-g: WHO reconstructs the paused turn follows who
+            # OWNS the conversation. When MAF keeps it client-side (Anthropic, or any
+            # store=False lane) it re-injects the assistant turn and the results it
+            # executed, so the reconstruction below is a duplicate assistant turn --
+            # which orphans the transcript in both directions at once and is what the
+            # Anthropic runs kept rejecting. Only the operator's decisions are
+            # missing there, so only they are sent.
+            if maf_owns_conversation(agent):
+                iteration_messages = [Message(role="user", contents=approval_response_contents)]
                 logger.info(
-                    "Outer-loop settled %d tool call(s) from the resumed run into the conversation: %s",
-                    len(settled),
-                    sorted(settled),
+                    "Outer-loop resuming on MAF's own conversation: sending %d approval decision(s) only",
+                    len(approval_response_contents),
                 )
-            if unanswered:
-                logger.warning(
-                    "Outer-loop could not pair tool call(s) with a result; the provider may reject the "
-                    "next request: %s",
-                    sorted(set(unanswered)),
+            else:
+                # SERVICE-stored: the resume clears service_session_id below, so this
+                # accumulated list is the only source of the paused turn.
+                #
+                # The PREVIOUS round promised the provider two things -- that the
+                # operator's approval response would become a result, and that the
+                # calls MAF deferred would be answered. MAF keeps both, but only on
+                # its own copy of the messages for that one run. Write the outcomes
+                # into the conversation we carry forward, or the next round replays
+                # the promises: an unpaired tool_use and an approval response MAF
+                # collects again, re-running an approved tool.
+                settled, unanswered = settle_pending_tool_content(
+                    iteration_messages, iter_accumulator.observed_results()
                 )
+                if settled:
+                    logger.info(
+                        "Outer-loop settled %d tool call(s) from the resumed run into the conversation: %s",
+                        len(settled),
+                        sorted(settled),
+                    )
+                if unanswered:
+                    logger.warning(
+                        "Outer-loop could not pair tool call(s) with a result; the provider may reject the "
+                        "next request: %s",
+                        sorted(set(unanswered)),
+                    )
 
-            is_anthropic = providers.provider_for(effective_model).name == "anthropic"
-            iter_synthetic_messages = iter_accumulator.build_iteration_messages(
-                approval_response_contents,
-                include_reasoning=is_anthropic,
-                strip_function_call_ids=not is_anthropic,
-                # PRP-0141 / UDR-0119 D6: replay the calls MAF deferred ONLY when
-                # MAF will resume them, and never answer for them. Read BEFORE the
-                # re-run below, which is where MAF pops the group.
-                resumable_call_ids=maf_resumable_call_ids(session),
-            )
-            iteration_messages = [*iteration_messages, *iter_synthetic_messages]
+                is_anthropic = providers.provider_for(effective_model).name == "anthropic"
+                iter_synthetic_messages = iter_accumulator.build_iteration_messages(
+                    approval_response_contents,
+                    include_reasoning=is_anthropic,
+                    strip_function_call_ids=not is_anthropic,
+                    # Replay the calls MAF deferred ONLY when MAF will resume them,
+                    # and never answer for them. Read BEFORE the re-run below, which
+                    # is where MAF pops the group.
+                    resumable_call_ids=maf_resumable_call_ids(session),
+                )
+                iteration_messages = [*iteration_messages, *iter_synthetic_messages]
             # Reset server-side response chaining before the post-approval
             # re-run. The approval handshake interrupts the iteration-N
             # response stream, so the resp_... id MAF stored on the session
