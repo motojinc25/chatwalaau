@@ -13,6 +13,7 @@ from typing import Any
 from agent_framework_openai import OpenAIChatClient
 
 from app import models_catalog
+from app.agent.approval_debug import log_wire_request
 from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
 from app.providers.base import hosted_tool_withheld
@@ -68,7 +69,39 @@ class _StructuredOutputMixin:
         # says so before the turn, so this is not a silent removal.
         if run_options.get("background"):
             strip_skill_tools(run_options)
+        # Approval-resume tracing (PRP-0141 follow-up): the request as it will go on
+        # the wire, ids only. This is the ground truth the three prior fixes lacked.
+        log_wire_request(messages=messages, run_options=run_options)
         return run_options
+
+    def _get_conversation_id(self, response: Any, store: Any) -> str | None:
+        """Never treat a response as a resumable server-side conversation unless a
+        background run explicitly asked for one (PRP-0142 follow-up, UDR-0123).
+
+        Root cause, reproduced against the installed framework: Azure's
+        ``api-version=preview`` Responses endpoint returns a response whose
+        conversation id is populated EVEN WHEN we send ``store=False``. MAF's base
+        ``_get_conversation_id`` only returns ``None`` when it *sees* ``store is
+        False``; when the flag does not reach this call it returns ``response.id``
+        instead. MAF then believes the conversation is server-managed and, in the
+        inner tool loop, trims the transcript to the last message
+        (``_prepare_messages_for_next_iteration``: ``prepared_messages[:] =
+        response.messages[-1:]``) -- so the follow-up request carries a bare
+        ``function_call_output`` with no preceding ``function_call`` and Azure
+        rejects it:
+
+            400 No tool call found for function call output with call_id call_...
+
+        This agent runs CLIENT-MANAGED (default_options ``store=False``, UDR-0123);
+        the ONLY server-managed path is a background run, which sets ``store=True``
+        explicitly (AG-UI endpoint). Anchoring on ``store is True`` -- rather than
+        on ``store is False`` -- makes the client-managed decision robust to the
+        flag not propagating: a lost/absent ``store`` degrades to client-managed
+        (no chaining, full transcript replayed) instead of to a broken chain.
+        """
+        if store is not True:
+            return None
+        return super()._get_conversation_id(response, store)  # type: ignore[misc]
 
 
 _structured_client_cls: type | None = None
@@ -100,6 +133,9 @@ class AzureOpenAIProvider:
     name = NAME
     # Azure OpenAI Responses API supports background runs + resume (CTR-0045).
     supports_background = True
+    # Responses API stores server-side by default and chains via previous_response_id
+    # (PRP-0142). Inherited by OpenAIProvider and FoundryProvider.
+    stores_responses_server_side = True
 
     def build_chat_client(self, model: str) -> Any:
         # Prompt caching (PRP-0080, FEAT-0038 / UDR-0056 D4): Azure/OpenAI prompt

@@ -103,14 +103,10 @@ async def run_turn(
     """
     import uuid
 
-    from agent_framework import AgentSession, Message
+    from agent_framework import AgentSession
 
     from app.agent.approval import approval_store, truncate_arguments_preview
-    from app.agent.approval_iteration import (
-        IterationContentAccumulator,
-        maf_owns_conversation,
-        settle_pending_tool_content,
-    )
+    from app.agent.approval_iteration import IterationContentAccumulator
     from app.agui.endpoint import (  # type: ignore[attr-defined]
         _arguments_to_dict,
         _image_gen_thread_id,
@@ -211,27 +207,10 @@ async def run_turn(
             iteration=interactive_rounds + 1,
             max_iterations=max_iterations,
         )
-        # PRP-0141 / UDR-0119 D6-g: when MAF owns the conversation (Anthropic, or
-        # any store=False lane) it re-injects the paused turn and its results, so a
-        # reconstruction here is a duplicate that orphans the transcript. Send only
-        # the operator's decisions. Parity with the AG-UI loop.
-        if maf_owns_conversation(agent):
-            iteration_messages = [Message(role="user", contents=approval_response_contents)]
-        else:
-            # SERVICE-stored: replace the previous round's promises (approval
-            # responses, and deferred calls MAF answered on its own copy) with the
-            # results the resumed run produced -- otherwise the next round sends an
-            # unpaired tool_use and re-runs an already-approved tool.
-            settled, unanswered = settle_pending_tool_content(iteration_messages, accumulator.observed_results())
-            if settled:
-                logger.info("Teams approval loop settled %d tool call(s): %s", len(settled), sorted(settled))
-            if unanswered:
-                logger.warning("Teams approval loop left tool call(s) unpaired: %s", sorted(set(unanswered)))
-
-            iter_messages = _build_iteration_messages(
-                accumulator, approval_response_contents, effective_model, session=session
-            )
-            iteration_messages = [*iteration_messages, *iter_messages]
+        iter_messages = _build_iteration_messages(
+            accumulator, approval_response_contents, effective_model, session=session
+        )
+        iteration_messages = [*iteration_messages, *iter_messages]
         # The approval handshake interrupted the iter-N response stream; clear the
         # uncommitted server-side response id so the re-run relies on explicit
         # context (mirrors the AG-UI post-approval reset).
@@ -306,16 +285,27 @@ def _build_iteration_messages(
 ) -> list[Any]:
     """Build the iter-N+1 [assistant, user] pair, provider-aware (matches AG-UI)."""
     from app import providers
+    from app.agent import approval_debug
     from app.agent.approval_iteration import maf_resumable_call_ids
     from app.demo import is_demo_mode
 
     # Anthropic needs the signed reasoning + original tool_use Content replayed;
     # OpenAI reasoning models need the function_call rebuilt without server ids.
     is_anthropic = (not is_demo_mode()) and providers.provider_for(effective_model).name == "anthropic"
-    return accumulator.build_iteration_messages(
+    resumable_ids = maf_resumable_call_ids(session)  # PRP-0141: read BEFORE the re-run pops the group
+    replay = accumulator.build_iteration_messages(
         approval_response_contents,
         include_reasoning=is_anthropic,
         strip_function_call_ids=not is_anthropic,
-        # PRP-0141: read BEFORE the resume run pops MAF's deferred group.
-        resumable_call_ids=maf_resumable_call_ids(session),
+        resumable_call_ids=resumable_ids,
     )
+    approval_debug.logger.info(
+        "[teams replay] provider=%s resumable_call_ids=%s %s\n  %s\n  responses: %s\n  replay: %s",
+        "anthropic" if is_anthropic else "openai-family",
+        sorted(resumable_ids),
+        approval_debug.describe_session_state(session),
+        accumulator.observation_summary(),
+        ", ".join(approval_debug.describe_content(c) for c in approval_response_contents),
+        " | ".join(approval_debug.describe_messages(replay)),
+    )
+    return replay

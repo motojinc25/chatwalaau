@@ -46,7 +46,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 from ag_ui.encoder import EventEncoder
-from agent_framework import AgentSession, Content, Message
+from agent_framework import AgentSession, Content
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -56,18 +56,14 @@ from openai import NotFoundError as OpenAINotFoundError
 from pydantic import AliasChoices, BaseModel, Field
 
 from app import providers
+from app.agent import approval_debug
 from app.agent.agent_memory import session_agent_memory_snapshot
 from app.agent.approval import (
     ApprovalRecord,
     approval_store,
     truncate_arguments_preview,
 )
-from app.agent.approval_iteration import (
-    IterationContentAccumulator,
-    maf_owns_conversation,
-    maf_resumable_call_ids,
-    settle_pending_tool_content,
-)
+from app.agent.approval_iteration import IterationContentAccumulator, maf_resumable_call_ids
 from app.agent.declarative import active_spec
 from app.agent.identity import load_identity
 from app.agent.prompt_dump import dump_prompt
@@ -222,6 +218,15 @@ _MSG_RATE_LIMIT = (
     "Please wait a moment and retry, lower the reasoning effort, or "
     "raise the deployment quota."
 )
+_MSG_CAPACITY = (
+    "The model provider is out of shared capacity right now. Azure OpenAI "
+    "rejected this turn under peak load because the request was too large for "
+    "the deployment's standard (pay-as-you-go) capacity pool -- it is a "
+    "provider-side condition, not a defect in the conversation. Wait a moment "
+    "and resend, start a new chat or remove a large attachment so the request "
+    "carries less input, switch to another configured model, or have the "
+    "operator move the deployment to Provisioned Throughput (PTU)."
+)
 _MSG_TRANSIENT = (
     "The model provider returned a temporary server error (HTTP 5xx) "
     "while generating the response. This is usually transient -- "
@@ -283,6 +288,16 @@ _DEPLOYMENT_FEATURE_MARKERS = (
 )
 
 
+# Markers that identify an Azure OpenAI PEAK-LOAD capacity refusal (v0.131.5).
+# Distinct from a 429 rate limit (the per-minute token budget) and from a 5xx: the
+# deployment's shared standard capacity cannot take a request of this size right now.
+_CAPACITY_MARKERS = (
+    "currently experiencing high demand",
+    "maximum usage size allowed during peak load",
+    "switching to provisioned throughput",
+)
+
+
 # Markers that identify an out-of-credits / quota-exhausted condition (as
 # opposed to a transient 429). Anthropic: "Your credit balance is too low ...
 # Plans & Billing ... purchase credits". OpenAI: code "insufficient_quota" /
@@ -336,6 +351,34 @@ def _is_deployment_feature_unsupported(exc: BaseException) -> bool:
         seen.add(id(cur))
         text = str(cur).lower()
         if any(marker in text for marker in _DEPLOYMENT_FEATURE_MARKERS):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _is_capacity_overload_error(exc: BaseException) -> bool:
+    """Detect an Azure OpenAI peak-load capacity refusal in the chain (v0.131.5).
+
+    A standard (pay-as-you-go) Azure OpenAI deployment can refuse a LARGE request
+    while the shared pool is saturated: "The system is currently experiencing high
+    demand and cannot process your request. Your request exceeds the maximum usage
+    size allowed during peak load. For improved capacity reliability, consider
+    switching to Provisioned Throughput."
+
+    It arrives MID-STREAM, after the POST already returned 200, so it is a plain
+    ``openai.APIError`` with no ``status_code`` and no ``code`` -- it matched no
+    detector and collapsed to the generic message. It is neither a 429 (no
+    "Too Many Requests" / rate-limit text) nor a 5xx, so neither existing branch
+    could name it. Markers are deliberately narrow: a miss degrades to the generic
+    message, whereas a false positive would mislabel an unrelated failure as a
+    provider capacity problem AND suppress its traceback.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        text = str(cur).lower()
+        if any(marker in text for marker in _CAPACITY_MARKERS):
             return True
         cur = cur.__cause__ or cur.__context__
     return False
@@ -474,6 +517,11 @@ def _classify_run_error(exc: BaseException, *, continuation_token: bool) -> tupl
         return _MSG_CONTEXT_LENGTH, True
     if _is_content_filter_error(exc):
         return _MSG_CONTENT_FILTER, True
+    # Before rate-limit and transient (v0.131.5): a peak-load capacity refusal is
+    # neither a 429 nor a 5xx, but if Azure ever returns it with a 429 status the
+    # capacity diagnosis is the more specific one and must win.
+    if _is_capacity_overload_error(exc):
+        return _MSG_CAPACITY, True
     if _is_rate_limit_error(exc):
         return _MSG_RATE_LIMIT, True
     if _is_transient_upstream_error(exc):
@@ -1086,6 +1134,12 @@ async def _stream_with_reasoning(
         # models, so this is defense-in-depth.
         if background and providers.background_supported(effective_model):
             run_options["background"] = True
+            # A background response is stored and polled server-side, so it needs
+            # store=True. The Prompt-lane agent is built CLIENT-MANAGED
+            # (default_options store=False, PRP-0142); this per-request override
+            # restores server-side storage for the background turn (run options win
+            # in MAF _merge_options). Non-background turns keep store=False.
+            run_options["store"] = True
         elif background:
             background = False
         if continuation_token:
@@ -1296,6 +1350,18 @@ async def _stream_with_reasoning(
             # role). Without it, MAF's Anthropic connector emits an orphan
             # tool_result -> HTTP 400. See app.agent.approval_iteration.
             iter_accumulator = IterationContentAccumulator()
+            # PRP-0141 tracing: the input this iteration hands to agent.run, and
+            # what MAF holds on the session going in.
+            approval_debug.logger.info(
+                "[iter %d/%d start] thread=%s input_msgs=%d service_session_id=%s %s\n  input: %s",
+                total_rounds,
+                interactive_rounds,
+                thread_id,
+                len(iteration_messages),
+                getattr(session, "service_session_id", None),
+                approval_debug.describe_session_state(session),
+                " | ".join(approval_debug.describe_messages(iteration_messages)),
+            )
 
             async for update in _resilient_run(agent, iteration_messages, session, run_options):
                 # v0.77.1: a transient upstream 5xx before any output triggers an
@@ -1626,6 +1692,14 @@ async def _stream_with_reasoning(
             # on each pending record, build approval-response contents, and
             # append a fresh "user" message so MAF resumes on the next
             # iteration (PRP-0067 / UDR-0043 D1).
+            approval_debug.logger.info(
+                "[iter %d end] thread=%s pending_approvals=%d %s\n  %s",
+                total_rounds,
+                thread_id,
+                len(pending_approvals),
+                approval_debug.describe_session_state(session),
+                iter_accumulator.observation_summary(),
+            )
             if not pending_approvals:
                 break
 
@@ -1692,57 +1766,45 @@ async def _stream_with_reasoning(
             # drop the reasoning and rebuild function_calls without server item
             # ids (matched by call_id). Anthropic keeps the signed reasoning +
             # original tool_use Content the API requires.
-            # PRP-0141 / UDR-0119 D6-g: WHO reconstructs the paused turn follows who
-            # OWNS the conversation. When MAF keeps it client-side (Anthropic, or any
-            # store=False lane) it re-injects the assistant turn and the results it
-            # executed, so the reconstruction below is a duplicate assistant turn --
-            # which orphans the transcript in both directions at once and is what the
-            # Anthropic runs kept rejecting. Only the operator's decisions are
-            # missing there, so only they are sent.
-            if maf_owns_conversation(agent):
-                iteration_messages = [Message(role="user", contents=approval_response_contents)]
-                logger.info(
-                    "Outer-loop resuming on MAF's own conversation: sending %d approval decision(s) only",
-                    len(approval_response_contents),
+            is_anthropic = providers.provider_for(effective_model).name == "anthropic"
+            iter_synthetic_messages = iter_accumulator.build_iteration_messages(
+                approval_response_contents,
+                include_reasoning=is_anthropic,
+                strip_function_call_ids=not is_anthropic,
+                # PRP-0141 / UDR-0119 D6: replay the calls MAF deferred ONLY when
+                # MAF will resume them, and never answer for them. Read BEFORE the
+                # re-run below, which is where MAF pops the group.
+                resumable_call_ids=(resumable_ids := maf_resumable_call_ids(session)),
+            )
+            approval_debug.logger.info(
+                "[iter %d replay] thread=%s provider=%s sources=%s resumable_call_ids=%s\n"
+                "  responses: %s\n  replay: %s",
+                total_rounds,
+                thread_id,
+                "anthropic" if is_anthropic else "openai-family",
+                round_sources,
+                sorted(resumable_ids),
+                ", ".join(approval_debug.describe_content(c) for c in approval_response_contents),
+                " | ".join(approval_debug.describe_messages(iter_synthetic_messages)),
+            )
+            iteration_messages = [*iteration_messages, *iter_synthetic_messages]
+            # PRP-0141 multi-iteration follow-up: a call MAF DEFERRED in an earlier
+            # round is resumed by MAF in the FOLLOWING iteration, which produces its
+            # result on that iteration's request but never streams it back -- so the
+            # accumulator cannot capture it and this replay leaves the function_call
+            # bare. A LATER iteration then re-sends it with no matching output and the
+            # provider rejects the turn (400 "No tool output found for function call
+            # ..."). Heal by appending the result captured from the wire, so every
+            # replayed function_call carries its output.
+            iteration_messages, healed_ids = approval_debug.heal_dangling_tool_calls(iteration_messages)
+            if healed_ids:
+                approval_debug.logger.info(
+                    "[iter %d heal] thread=%s appended captured results for deferred call(s) whose "
+                    "output MAF produced but never streamed: %s",
+                    total_rounds,
+                    thread_id,
+                    sorted(healed_ids),
                 )
-            else:
-                # SERVICE-stored: the resume clears service_session_id below, so this
-                # accumulated list is the only source of the paused turn.
-                #
-                # The PREVIOUS round promised the provider two things -- that the
-                # operator's approval response would become a result, and that the
-                # calls MAF deferred would be answered. MAF keeps both, but only on
-                # its own copy of the messages for that one run. Write the outcomes
-                # into the conversation we carry forward, or the next round replays
-                # the promises: an unpaired tool_use and an approval response MAF
-                # collects again, re-running an approved tool.
-                settled, unanswered = settle_pending_tool_content(
-                    iteration_messages, iter_accumulator.observed_results()
-                )
-                if settled:
-                    logger.info(
-                        "Outer-loop settled %d tool call(s) from the resumed run into the conversation: %s",
-                        len(settled),
-                        sorted(settled),
-                    )
-                if unanswered:
-                    logger.warning(
-                        "Outer-loop could not pair tool call(s) with a result; the provider may reject the "
-                        "next request: %s",
-                        sorted(set(unanswered)),
-                    )
-
-                is_anthropic = providers.provider_for(effective_model).name == "anthropic"
-                iter_synthetic_messages = iter_accumulator.build_iteration_messages(
-                    approval_response_contents,
-                    include_reasoning=is_anthropic,
-                    strip_function_call_ids=not is_anthropic,
-                    # Replay the calls MAF deferred ONLY when MAF will resume them,
-                    # and never answer for them. Read BEFORE the re-run below, which
-                    # is where MAF pops the group.
-                    resumable_call_ids=maf_resumable_call_ids(session),
-                )
-                iteration_messages = [*iteration_messages, *iter_synthetic_messages]
             # Reset server-side response chaining before the post-approval
             # re-run. The approval handshake interrupts the iteration-N
             # response stream, so the resp_... id MAF stored on the session
@@ -1800,6 +1862,15 @@ async def _stream_with_reasoning(
             logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:
             logger.exception("AG-UI stream error")
+        # PRP-0141 tracing: which approval iteration died. The preceding
+        # "[wire]" line from app.agent.approval_trace holds the request body shape.
+        approval_debug.logger.error(
+            "[run failed] thread=%s rounds total=%s interactive=%s error=%s -- see the last [wire] line above",
+            thread_id,
+            locals().get("total_rounds"),
+            locals().get("interactive_rounds"),
+            type(exc).__name__,
+        )
 
     except Exception as exc:
         # A RAW provider error not wrapped in the typed exceptions above (e.g.

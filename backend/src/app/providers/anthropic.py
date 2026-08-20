@@ -39,6 +39,7 @@ import logging
 from typing import Any
 
 from app import models_catalog
+from app.agent.approval_debug import record_wire_function_results
 from app.core.config import settings
 from app.providers.base import hosted_tool_withheld
 from app.providers.structured import (
@@ -204,6 +205,18 @@ class _PromptCacheMixin:
 
     def _prepare_options(self, messages: Any, options: Any, **kwargs: Any) -> dict[str, Any]:
         run_options = super()._prepare_options(messages, options, **kwargs)  # type: ignore[misc]
+        # Deferred-call wire capture (PRP-0141 multi-iteration follow-up, UDR-0123
+        # D8). MAF resumes a deferred function_call INSIDE the next outer-loop
+        # iteration and produces its function_result on THAT iteration's provider
+        # request -- here -- but never streams it back, so the accumulator misses it
+        # and the outer loop's replay leaves the call bare. The endpoint heals that
+        # gap from wire-captured results before the re-run, but the capture must run
+        # on THIS lane too: without it a resumed file_read stays unpaired and
+        # Anthropic rejects the follow-up turn ("tool_use ids ... without tool_result
+        # blocks"). This is the Anthropic mirror of the azure_openai capture; it must
+        # sit at the same request chokepoint the OpenAI family records at. Ids/shapes
+        # only, best-effort, never raises.
+        record_wire_function_results(messages)
         # Structured output vs hosted web search (PRP-0082, UDR-0058 D2): web search
         # is incompatible with a JSON output_config.format; drop it for that turn so
         # the request never fails. Inert when no structured format is set.
@@ -254,6 +267,9 @@ class AnthropicProvider:
     # Anthropic (incl. Opus 4.7/4.8) has no background-response equivalent;
     # background runs are an OpenAI Responses API feature (CTR-0045).
     supports_background = False
+    # Anthropic carries the conversation in the request (no server-side response
+    # chaining), so it is already client-managed (PRP-0142).
+    stores_responses_server_side = False
 
     def build_chat_client(self, model: str) -> Any:
         # Catalog routing (PRP-0113, UDR-0094): `model` is the offering id, so the
@@ -266,7 +282,7 @@ class AnthropicProvider:
         # credential (UDR-0094 D6, retained).
         offering = models_catalog.offering_for(model)
         model_ref = offering.model_ref if offering is not None else model
-        hosting = (offering.hosting if (offering is not None and offering.hosting) else "direct")
+        hosting = offering.hosting if (offering is not None and offering.hosting) else "direct"
         offering_api_key = offering.api_key() if (offering is not None and offering.api_key_env) else None
         offering_base_url = offering.base_url if offering is not None else None
 

@@ -39,6 +39,16 @@ class Provider(Protocol):
     # Background toggle for non-supporting models (PRP-0073).
     supports_background: bool
 
+    # Whether this provider's ChatClient stores responses SERVER-SIDE by default
+    # (OpenAIChatClient.STORES_BY_DEFAULT=True) and chains follow-up tool calls
+    # via previous_response_id. True for the OpenAI family (Azure OpenAI / OpenAI
+    # / Foundry, all on the Responses API); False for Anthropic. When True the
+    # Prompt-lane Agent is built CLIENT-MANAGED (default_options {"store": False},
+    # PRP-0142): otherwise an inner tool-loop follow-up can reference a resp_ id
+    # the service never committed -> 400 previous_response_not_found. Mirrors the
+    # harness-lane decision (UDR-0119 D4).
+    stores_responses_server_side: bool
+
     def build_chat_client(self, model: str) -> Any:
         """Construct the MAF ChatClient for ``model`` (credential owned here)."""
         ...

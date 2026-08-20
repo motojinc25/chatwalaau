@@ -355,13 +355,27 @@ class AgentRegistry:
                 )
                 model_options = providers.merge_generation_options(model_options, so)
 
+            # CLIENT-MANAGED CONVERSATION (PRP-0142). The OpenAI-family clients
+            # (Azure OpenAI / OpenAI / Foundry) store responses server-side by
+            # default and chain follow-up tool calls via previous_response_id.
+            # On Azure's Responses endpoint that resp_ id is not reliably
+            # retrievable on the IMMEDIATE follow-up, so an inner tool-loop step
+            # (e.g. after a file_glob) fails with 400 previous_response_not_found
+            # -- inside a single agent.run, before our outer approval loop or the
+            # first-update retry can intervene. store=False carries the whole
+            # conversation in the request instead, the same decision the harness
+            # lane made (UDR-0119 D4). A background run overrides this per-request
+            # (it REQUIRES server-side storage; see the AG-UI endpoint).
+            default_options = dict(model_options or {})
+            if providers.stores_responses_server_side(model):
+                default_options.setdefault("store", False)
             agent = Agent(
                 name=f"ChatWalaau-Agent-{model}",
                 instructions=self._bake_instructions(model_caps, spec),
                 client=client,
                 tools=model_tools,
                 context_providers=context_providers,
-                default_options=model_options or None,
+                default_options=default_options or None,
                 compaction_strategy=self._compaction_strategy,
                 middleware=model_middleware or None,
             )

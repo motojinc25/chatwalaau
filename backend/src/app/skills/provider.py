@@ -332,6 +332,15 @@ class SessionTolerantToolApprovalMiddleware(ToolApprovalMiddleware):
        accumulator. A round is auto-approved only when EVERY pending request
        matches a rule; otherwise the round is left completely untouched.
 
+    4. Rebuild the assistant turn on re-entry (v0.131.3, UDR-0123): the base resets
+       ``context.messages`` and re-enters with only the collected approval responses,
+       relying on server-side storage to carry the original ``function_call``. Under
+       client-managed OpenAI runs (store=False) with a cross-turn-only
+       ``FileHistoryProvider`` nothing does, so the re-run sent a bare
+       ``function_call_output`` and Azure rejected it (400 "No tool call found for
+       function call output"). ``_inject_collected_responses`` now emits the paired
+       ``function_call`` (server id stripped) ahead of the responses.
+
     What remains of the base behavior is exactly the intended scope: matching
     ``function_approval_request`` contents are auto-approved in-stream (the
     collected responses re-enter via the base loop) and everything else flows
@@ -372,13 +381,63 @@ class SessionTolerantToolApprovalMiddleware(ToolApprovalMiddleware):
         AUTO-APPROVAL path was not, and it is the same one-line inversion. Appending
         places each response after the assistant turn that requested it, which is the
         order both APIs specify.
+
+        Deviation 5 (v0.131.3 follow-up, UDR-0123): REBUILD the assistant turn that
+        issued the approved calls, ahead of the responses. The base ``_process_stream``
+        resets ``context.messages = []`` after an auto-approval and re-enters the loop
+        with only the collected responses, expecting SERVER-SIDE storage (or a
+        per-service-call history provider) to still carry the original
+        ``function_call``. This app runs the Prompt lane CLIENT-MANAGED (store=False,
+        UDR-0123), and its ``FileHistoryProvider`` loads cross-turn history only -- it
+        does NOT re-inject the in-flight assistant turn, and being ``load_messages=True``
+        it also blocks MAF from auto-appending an ``InMemoryHistoryProvider`` that
+        would. So the re-run reached the model as a bare ``function_call_output`` with
+        no preceding ``function_call``::
+
+            400 No tool call found for function call output with call_id call_...
+
+        reproduced against the installed framework with a skill tool auto-approved on a
+        reasoning model. Each collected ``function_approval_response`` still carries its
+        originating ``function_call``, so the pairing is recoverable: emit an assistant
+        message with those calls REBUILT WITHOUT the provider server item id (matched by
+        ``call_id`` only), the same shape ``app.agent.approval_iteration`` replays on the
+        OpenAI operator-approval path -- a fresh ``function_call`` needs no paired
+        reasoning item, so the Responses API accepts it.
         """
         collected = getattr(state, "collected_approval_responses", None)
         if not collected:
             return list(messages)
-        from agent_framework import Message
+        from agent_framework import Content, Message
 
-        return [*messages, Message(role="user", contents=list(collected))]
+        # Only rebuild calls the surviving messages do NOT already carry: under
+        # server-side storage (or when history still holds the assistant turn) the
+        # function_call is present and re-adding it would duplicate the tool_use. The
+        # rebuild is needed only when the base loop reset the transcript to bare
+        # approval responses (client-managed, see the method docstring).
+        present_call_ids = {
+            getattr(content, "call_id", None)
+            for message in messages
+            for content in getattr(message, "contents", [])
+            if getattr(content, "type", None) == "function_call"
+        }
+        assistant_calls: list[Any] = []
+        for response in collected:
+            function_call = getattr(response, "function_call", None)
+            call_id = getattr(function_call, "call_id", None)
+            if function_call is None or not call_id or call_id in present_call_ids:
+                continue
+            assistant_calls.append(
+                Content.from_function_call(
+                    call_id=call_id,
+                    name=getattr(function_call, "name", None),
+                    arguments=getattr(function_call, "arguments", None),
+                )
+            )
+        out = [*messages]
+        if assistant_calls:
+            out.append(Message(role="assistant", contents=assistant_calls))
+        out.append(Message(role="user", contents=list(collected)))
+        return out
 
     async def _process_outbound_messages(self, messages: Any, state: Any) -> bool:
         # Deviation 3: ALL-OR-NOTHING auto-approval, and NEVER queue (see class

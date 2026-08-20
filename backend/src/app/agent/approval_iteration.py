@@ -54,15 +54,6 @@ connector as an ``mcp_approval_response`` naming a request that never existed::
     400 The following MCP approval requests have approval responses but
         weren't passed as input: call_...
 
-WHO REPLAYS AT ALL is the prior question, and it is decided by who owns the
-conversation, not by the lane or the provider name (``maf_owns_conversation``).
-When MAF keeps the history client-side (Anthropic; anything with ``store=False``)
-it re-injects the paused assistant turn and the results itself, so this whole
-reconstruction is a DUPLICATE -- the endpoint sends only the operator's decisions
-and none of the machinery below runs. Everything that follows applies to a
-SERVICE-stored conversation, where the resume clears ``service_session_id`` and
-this module is the only source of the paused turn.
-
 A deferred call is therefore REPLAYED BUT NEVER ANSWERED -- and replayed only
 when MAF will actually resume it (UDR-0119 D6 as amended). The two halves are
 one rule with one criterion, ``maf_resumable_call_ids(session)``:
@@ -104,7 +95,7 @@ from typing import TYPE_CHECKING, Any
 from agent_framework import Content, Message
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Collection
 
 logger = logging.getLogger(__name__)
 
@@ -116,42 +107,6 @@ logger = logging.getLogger(__name__)
 # model re-issues them, rather than being stranded without an output.
 _MAF_TOOL_APPROVAL_STATE_KEY = "tool_approval"
 _MAF_DEFERRED_GROUPS_KEY = "already_approved_approval_request_groups"
-
-
-def maf_owns_conversation(agent: Any) -> bool:
-    """True when MAF keeps the conversation client-side, so the replay is a DUPLICATE.
-
-    Who reconstructs the paused turn is not ours to choose -- it follows the same
-    resolution MAF itself uses to decide whether to run its history providers
-    (``_agents.py``: the explicit ``store`` option, falling back to the client's
-    ``STORES_BY_DEFAULT``):
-
-    - **Service-stored** (Azure OpenAI; ``store`` unset, ``STORES_BY_DEFAULT`` True)
-      -- the resume clears ``service_session_id``, so NOTHING remembers the paused
-      turn. The accumulated ``iteration_messages`` is the only source and must be
-      sent in full.
-    - **Client-stored** (Anthropic, ``STORES_BY_DEFAULT`` False; and any lane
-      pinning ``store=False``, e.g. the harness) -- MAF already holds the assistant
-      turn AND the results it executed, and re-injects them. Sending our replay too
-      duplicates the assistant turn, which orphans the transcript in BOTH
-      directions at once::
-
-          400 messages.N: `tool_use` ids were found without `tool_result` blocks
-              immediately after: toolu_...
-          400 messages.0.content.0: unexpected `tool_use_id` found in `tool_result`
-              blocks: toolu_...
-
-      Only the operator's decisions are missing there, so only they are sent.
-
-    Returns False (send everything) for any agent shape this cannot read, which is
-    the pre-existing behavior rather than a new silence.
-    """
-    client = getattr(agent, "client", None)
-    default_options = getattr(agent, "default_options", None)
-    explicit_store = default_options.get("store") if isinstance(default_options, dict) else None
-    if explicit_store is not None:
-        return not bool(explicit_store)
-    return not bool(getattr(client, "STORES_BY_DEFAULT", True))
 
 
 def maf_resumable_call_ids(session: Any) -> frozenset[str]:
@@ -205,89 +160,6 @@ def maf_resumable_call_ids(session: Any) -> frozenset[str]:
             if isinstance(call_id, str) and call_id:
                 call_ids.add(call_id)
     return frozenset(call_ids)
-
-
-def settle_pending_tool_content(messages: list[Message], results: Mapping[str, Content]) -> tuple[list[str], list[str]]:
-    """Write the results a resumed run produced back into the accumulated conversation.
-
-    ``build_iteration_messages`` can only describe what was known when the round
-    PAUSED: the operator's ``function_approval_response`` for the gated call, and
-    a bare ``function_call`` for each deferred sibling MAF will resume. Both are
-    promises about the run that is about to happen, and MAF keeps them -- but only
-    for that one run, on its own copy of the messages. The accumulated
-    ``iteration_messages`` this loop carries forward keeps the promises instead of
-    the outcome, and from the SECOND approval round on, the provider sees them:
-
-    - the deferred call's ``tool_use`` never gets its ``tool_result``::
-
-          400 messages.N: `tool_use` ids were found without `tool_result` blocks
-              immediately after: toolu_...
-
-      (Anthropic states it; the OpenAI Responses API rejects the same transcript
-      as a function_call with no output.)
-    - the still-unconverted approval response is collected AGAIN by MAF, so the
-      approved tool RE-EXECUTES once per subsequent round -- silently, since it
-      succeeds. For ``bash_execute`` that is the operator's command running again
-      without a second approval.
-
-    So once the results are known -- they arrive on the very next stream, because
-    a resumed run executes the approved and restored calls before it reaches the
-    model -- they REPLACE the promises: each ``function_approval_response`` becomes
-    its ``function_result``, and every unanswered ``function_call`` is paired with
-    the result it produced. The conversation we keep then says what happened rather
-    than what was expected to.
-
-    Returns ``(settled_call_ids, still_unanswered_call_ids)``; the second list is
-    an incomplete transcript this function could not repair and is worth logging.
-    """
-    if not messages:
-        return [], []
-    settled: list[str] = []
-
-    # 1. Promise -> outcome: an approval response whose call has a result becomes
-    #    that result. Anything still awaiting its result is left untouched.
-    for message in messages:
-        replaced: list[Content] = []
-        for content in message.contents:
-            if content.type != "function_approval_response":
-                replaced.append(content)
-                continue
-            wrapped = getattr(content, "function_call", None)
-            call_id = getattr(wrapped, "call_id", None) or getattr(content, "call_id", None)
-            result = results.get(call_id) if call_id else None
-            if result is None:
-                replaced.append(content)
-                continue
-            replaced.append(result)
-            settled.append(call_id)
-        if len(replaced) == len(message.contents):
-            message.contents = replaced
-
-    # 2. Pair every function_call with a result in the message that FOLLOWS it,
-    #    which is where both providers require it.
-    unanswered: list[str] = []
-    for index, message in enumerate(messages):
-        call_ids = [c.call_id for c in message.contents if c.type == "function_call" and c.call_id]
-        if not call_ids:
-            continue
-        follower = messages[index + 1] if index + 1 < len(messages) else None
-        if follower is None or follower.role == "assistant":
-            # No message to hold the results: only reachable for the round still
-            # in flight, whose results do not exist yet.
-            unanswered.extend(cid for cid in call_ids if cid not in results)
-            continue
-        answered = {
-            getattr(c, "call_id", None) or getattr(getattr(c, "function_call", None), "call_id", None)
-            for c in follower.contents
-        }
-        missing = [cid for cid in call_ids if cid not in answered]
-        recovered = [results[cid] for cid in missing if cid in results]
-        if recovered:
-            follower.contents = [*follower.contents, *recovered]
-            settled.extend(c.call_id for c in recovered if c.call_id)
-        unanswered.extend(cid for cid in missing if cid not in results)
-
-    return settled, unanswered
 
 
 class IterationContentAccumulator:
@@ -401,20 +273,31 @@ class IterationContentAccumulator:
         if call_id:
             self._function_results[call_id] = content
 
+    def observation_summary(self) -> str:
+        """IDs only: what this iteration's stream showed, classified the way the
+        replay classifies it (PRP-0141 tracing)."""
+        executed = [c for c in self._function_call_order if c in self._function_results]
+        gated = [c for c in self._function_call_order if c in self._function_call_from_approval]
+        deferred = [
+            c
+            for c in self._function_call_order
+            if c not in self._function_results and c not in self._function_call_from_approval
+        ]
+        names = {
+            c: self._function_call_name.get(c) or getattr(self._function_call_from_approval.get(c), "name", "?")
+            for c in self._function_call_order
+        }
+        fmt = lambda ids: [f"{c}:{names.get(c)}" for c in ids]  # noqa: E731
+        return (
+            f"observed order={fmt(self._function_call_order)} executed={fmt(executed)} "
+            f"gated={fmt(gated)} deferred={fmt(deferred)} "
+            f"reasoning_chars={sum(len(t) for t in self._reasoning_text_chunks)} "
+            f"text_chars={sum(len(t) for t in self._text_chunks)}"
+        )
+
     def has_pending_function_calls(self) -> bool:
         """True when at least one approval-gated function_call was observed."""
         return bool(self._function_call_from_approval)
-
-    def observed_results(self) -> dict[str, Content]:
-        """Every ``function_result`` seen this iteration, keyed by call id.
-
-        Includes results for calls issued in an EARLIER iteration: a resumed run
-        executes the previously approved call and the deferred ones it restored
-        before the model is called again, and those results are what
-        ``settle_pending_tool_content`` writes back into the accumulated
-        conversation.
-        """
-        return dict(self._function_results)
 
     # ---- iteration boundary ----
 
@@ -627,9 +510,4 @@ class IterationContentAccumulator:
         return out
 
 
-__all__ = [
-    "IterationContentAccumulator",
-    "maf_owns_conversation",
-    "maf_resumable_call_ids",
-    "settle_pending_tool_content",
-]
+__all__ = ["IterationContentAccumulator", "maf_resumable_call_ids"]

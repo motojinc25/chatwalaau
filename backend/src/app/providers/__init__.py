@@ -202,6 +202,16 @@ def background_supported(model: str) -> bool:
     return bool(getattr(provider_for(model), "supports_background", False))
 
 
+def stores_responses_server_side(model: str) -> bool:
+    """Whether ``model``'s client stores responses server-side by default (PRP-0142).
+
+    True for the OpenAI family (Responses API, ``previous_response_id`` chaining);
+    False for Anthropic. Drives the Prompt-lane ``store=False`` client-managed
+    build. Unknown models resolve via ``provider_for`` (defaults to azure-openai).
+    """
+    return bool(getattr(provider_for(model), "stores_responses_server_side", False))
+
+
 def background_supported_map(models: list[str]) -> dict[str, bool]:
     """model -> background support flag for the GET /api/model selector (CTR-0041)."""
     return {model: background_supported(model) for model in models}
