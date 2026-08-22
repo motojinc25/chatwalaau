@@ -581,6 +581,38 @@ export function useSession() {
     }
   }, [])
 
+  // Explicit title regeneration (CTR-0015 / CTR-0109 v2, PRP-0143 / UDR-0124).
+  // ONE endpoint serves both title modes and the SPA deliberately does not read
+  // `session_title_mode` to decide anything (D6) -- the response's `status`
+  // discriminates:
+  //   applied   -> truncate mode computed it inline; patch the row now.
+  //   pending   -> llm mode dispatched the background task; raise the EXISTING
+  //                `auto_title_pending` spinner and let the CTR-0110
+  //                `session_title` listener above resolve it. No new WS handling.
+  //   unchanged -> nothing was scheduled (a regeneration for this thread is
+  //                already in flight). Deliberately NOT a spinner: raising one
+  //                here is exactly the stuck-spinner failure UDR-0124 D7 exists
+  //                to prevent.
+  const regenerateTitle = useCallback(async (targetThreadId: string) => {
+    try {
+      const res = await fetch(`/api/sessions/${targetThreadId}/title/regenerate`, { method: 'POST' })
+      if (!res.ok) return
+      const data = (await res.json()) as { status?: string; title?: string }
+      if (data.status === 'applied' && typeof data.title === 'string') {
+        const nextTitle = data.title
+        setSessions((prev) =>
+          prev.map((s) => (s.thread_id === targetThreadId ? { ...s, title: nextTitle, auto_title_pending: false } : s)),
+        )
+      } else if (data.status === 'pending') {
+        setSessions((prev) =>
+          prev.map((s) => (s.thread_id === targetThreadId ? { ...s, auto_title_pending: true } : s)),
+        )
+      }
+    } catch {
+      // ignore -- the current title stays, exactly as on a failed generation
+    }
+  }, [])
+
   // Archive (CTR-0015 / CTR-0016 v6, v0.117.4). Surfaces the server's reason
   // instead of swallowing it: the archive directory follows SESSIONS_DIR, so a
   // deployment whose session store is read-only or unmounted fails here for a
@@ -933,6 +965,7 @@ export function useSession() {
     forkSession,
     moveSessionToFolder,
     renameSession,
+    regenerateTitle,
     archiveSession,
     pinSession,
     refreshSessions,

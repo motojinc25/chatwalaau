@@ -23,6 +23,7 @@ import {
   ChevronRight,
   Clock,
   Download,
+  ExternalLink,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -40,6 +41,7 @@ import {
   Pin,
   PinOff,
   Plus,
+  RefreshCw,
   Search,
   Trash2,
   Upload,
@@ -127,6 +129,7 @@ interface SessionSidebarProps {
   onReorderFolders: (orderedIds: string[]) => Promise<boolean>
   onMoveToFolder: (threadId: string, folderId: string | null) => Promise<boolean>
   onRename: (threadId: string, title: string) => void
+  onRegenerateTitle: (threadId: string) => void
   onArchive: (threadId: string) => Promise<SessionActionResult>
   onPin: (threadId: string, pinned: boolean) => void
   onCreate: () => void
@@ -310,6 +313,7 @@ interface SessionRowProps {
   onExport: (threadId: string) => void
   onMoveToFolder: (threadId: string, folderId: string | null) => Promise<boolean>
   onStartRename: (session: SessionSummary) => void
+  onRegenerateTitle: (threadId: string) => void
   onRequestDelete: (session: SessionSummary) => void
   onDragStart: (threadId: string) => void
   onDragEnd: () => void
@@ -328,6 +332,7 @@ const SessionRow = memo(function SessionRow({
   onExport,
   onMoveToFolder,
   onStartRename,
+  onRegenerateTitle,
   onRequestDelete,
   onDragStart,
   onDragEnd,
@@ -476,6 +481,19 @@ const SessionRow = memo(function SessionRow({
             </span>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-44">
+            {/*
+              Open in new tab (PRP-0143, CTR-0016 / UDR-0124 D2). The URL is built
+              from the CTR-0003 `?session=` address -- the ONE address of a stored
+              session -- never a second, bespoke form. `noopener` is required: the
+              new tab must not receive a window.opener handle back into this one.
+              Temporary chats never reach this menu (they are not listed at all,
+              CTR-0106), so no temp_ guard is needed here.
+            */}
+            <DropdownMenuItem
+              onClick={() => window.open(`/chat?session=${session.thread_id}`, '_blank', 'noopener')}>
+              <ExternalLink className="mr-2 h-3.5 w-3.5" />
+              Open in new tab
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onPin(session.thread_id, !session.pinned_at)}>
               {session.pinned_at ? (
                 <>
@@ -499,6 +517,17 @@ const SessionRow = memo(function SessionRow({
             <DropdownMenuItem disabled={redacted} onClick={() => onStartRename(session)}>
               <Pencil className="mr-2 h-3.5 w-3.5" />
               Rename
+            </DropdownMenuItem>
+            {/*
+              Regenerate title (PRP-0143, CTR-0015 / UDR-0124 D4-D6). One endpoint
+              serves both title modes; the SPA deliberately does NOT read
+              session_title_mode to decide anything (D6). Disabled under Privacy
+              Screen for the same reason as Rename: the resulting title lands on a
+              shared screen.
+            */}
+            <DropdownMenuItem disabled={redacted} onClick={() => onRegenerateTitle(session.thread_id)}>
+              <RefreshCw className="mr-2 h-3.5 w-3.5" />
+              Regenerate title
             </DropdownMenuItem>
             {folders.length > 0 ? (
               <DropdownMenuSub>
@@ -801,6 +830,7 @@ export function SessionSidebar({
   onReorderFolders,
   onMoveToFolder,
   onRename,
+  onRegenerateTitle,
   onArchive,
   onPin,
   onCreate,
@@ -1200,6 +1230,7 @@ export function SessionSidebar({
         onExport={onExport}
         onMoveToFolder={onMoveToFolder}
         onStartRename={startRename}
+        onRegenerateTitle={onRegenerateTitle}
         onRequestDelete={setDeleteTarget}
         onDragStart={handleSessionDragStart}
         onDragEnd={handleSessionDragEnd}
@@ -1215,6 +1246,7 @@ export function SessionSidebar({
       onExport,
       onMoveToFolder,
       onPin,
+      onRegenerateTitle,
       onSwitch,
       renameEditor,
       renamingId,
@@ -1226,8 +1258,24 @@ export function SessionSidebar({
     <aside className="flex h-full w-[307px] shrink-0 flex-col border-r bg-muted/30">
       <div className="flex h-12 shrink-0 items-center justify-between border-b px-3">
         <div className="flex items-center gap-2">
-          <img src="/favicon.svg" alt="ChatWalaʻau" className="h-5 w-5" />
-          <span className="text-sm font-medium">ChatWalaʻau</span>
+          {/*
+            The branded header IS the home control (PRP-0143, CTR-0016 /
+            UDR-0124 D1). "Home" is a NEW CHAT -- the same action as the + button
+            beside it -- not a separate landing route: `/` redirects to `/chat`,
+            there is no home screen, and inventing one would put a click between
+            launch and the first keystroke. Like the + button this aborts an
+            in-flight stream (onCreate calls abortRef first); that is existing,
+            intended behaviour.
+          */}
+          <button
+            type="button"
+            onClick={onCreate}
+            aria-label="New chat"
+            title="New chat"
+            className="-ml-1 flex items-center gap-2 rounded-md px-1 py-0.5 transition-colors hover:bg-accent">
+            <img src="/favicon.svg" alt="" className="h-5 w-5" />
+            <span className="text-sm font-medium">ChatWalaʻau</span>
+          </button>
           {auth.demoMode && (
             <span
               className="rounded-sm bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-300"

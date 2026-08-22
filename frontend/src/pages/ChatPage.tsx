@@ -68,6 +68,7 @@ export function ChatPage() {
     forkSession,
     moveSessionToFolder,
     renameSession,
+    regenerateTitle,
     archiveSession,
     pinSession,
     refreshSessions,
@@ -178,6 +179,7 @@ export function ChatPage() {
           onReorderFolders={reorderFolders}
           onMoveToFolder={moveSessionToFolder}
           onRename={renameSession}
+          onRegenerateTitle={regenerateTitle}
           onArchive={archiveSession}
           onPin={pinSession}
           onCreate={handleCreate}

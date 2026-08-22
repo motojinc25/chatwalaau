@@ -840,6 +840,89 @@ async def rename_session(thread_id: str, body: RenameRequest) -> dict[str, Any]:
     return {"status": "renamed", "thread_id": thread_id, "title": data["title"]}
 
 
+def _session_model(data: dict[str, Any]) -> str | None:
+    """Model of the session's most recent assistant turn, if it recorded one.
+
+    Used as the regeneration hint for ``resolve_task_model("session_title", ...)``
+    (PRP-0115 / UDR-0096), mirroring what the AG-UI endpoint passes on the
+    automatic path. ``None`` is fine -- the catalog default is then used.
+    """
+    for message in reversed(data.get("messages") or []):
+        if message.get("role") != "assistant":
+            continue
+        usage = message.get("usage")
+        if isinstance(usage, dict) and usage.get("model"):
+            return str(usage["model"])
+    return None
+
+
+@router.post("/{thread_id}/title/regenerate", dependencies=[Depends(verify_api_key)])
+async def regenerate_session_title(thread_id: str) -> dict[str, Any]:
+    """Regenerate a chat's title on explicit operator request (CTR-0109 v2).
+
+    PRP-0143 / UDR-0124 D4. This is the ONLY path allowed to overwrite a title
+    that has already claimed the slot (including a manual rename); automatic
+    titling stays once-only and is untouched (D3).
+
+    One endpoint serves both modes -- the mode is a server concern and the SPA
+    must not branch on it (D6):
+
+    - ``truncate``: no model to call, so the work is done inline and the response
+      carries the final title. The source is the MOST RECENT user message with
+      text (D5), deliberately asymmetric with automatic truncation, which uses
+      the first: re-deriving from the first message would reproduce the very
+      title the operator just rejected.
+    - ``llm``: dispatches the CTR-0108 background task, whose per-thread dedup is
+      also what bounds click-spam. ``auto_title_pending`` is set ONLY when
+      dispatch actually scheduled (D7) -- otherwise the sidebar spinner would
+      run forever -- and the finished title arrives over CTR-0110.
+    """
+    from app.agent.temporary import is_temporary
+
+    if is_temporary(thread_id):
+        raise HTTPException(status_code=409, detail="temporary chats are not titled")
+
+    data = _read_session_or_404(thread_id)
+    messages = data.get("messages") or []
+
+    if settings.session_title_mode == "llm":
+        from app.background import dispatch as dispatch_background
+        from app.background.session_title import build_regeneration_window
+
+        if not build_regeneration_window(messages):
+            raise HTTPException(status_code=422, detail="no message to title")
+        scheduled = dispatch_background(
+            "session-title-regenerate",
+            dedup_key=thread_id,
+            ctx={"thread_id": thread_id, "model": _session_model(data)},
+        )
+        if not scheduled:
+            # Unregistered task, no running loop, or a regeneration for this
+            # thread is already in flight. Nothing was started, so nothing may
+            # claim the spinner.
+            return {"status": "unchanged", "thread_id": thread_id, "title": data.get("title", "")}
+        data["auto_title_pending"] = True
+        data["updated_at"] = datetime.now(UTC).isoformat()
+        _write_session_or_500(thread_id, data)
+        logger.info("Dispatched title regeneration for session %s", thread_id)
+        return {"status": "pending", "thread_id": thread_id, "title": data.get("title", "")}
+
+    from app.background.session_title import latest_user_text
+
+    source = latest_user_text(messages)
+    if not source:
+        raise HTTPException(status_code=422, detail="no message to title")
+    data["title"] = source[:100]
+    # An explicit regeneration claims the slot exactly as a rename does, so the
+    # automatic path stays locked out afterwards (UDR-0124 D3).
+    data["auto_title_done"] = True
+    data["auto_title_pending"] = False
+    data["updated_at"] = datetime.now(UTC).isoformat()
+    _write_session_or_500(thread_id, data)
+    logger.info("Regenerated title for session %s: %r", thread_id, data["title"])
+    return {"status": "applied", "thread_id": thread_id, "title": data["title"]}
+
+
 @router.post("/{thread_id}/archive", dependencies=[Depends(verify_api_key)])
 async def archive_session(thread_id: str) -> dict[str, str]:
     """Archive a session by moving it out of the session directory into ``.archived/``.

@@ -70,30 +70,38 @@ async def _run_isolated(task_type: str, dedup_key: str, ctx: dict[str, Any]) -> 
         _inflight_keys.discard((task_type, dedup_key))
 
 
-def dispatch(task_type: str, *, dedup_key: str, ctx: dict[str, Any]) -> None:
+def dispatch(task_type: str, *, dedup_key: str, ctx: dict[str, Any]) -> bool:
     """Schedule a background task; return immediately (never awaited).
 
     No-op if ``task_type`` is unregistered, if an identical
     ``(task_type, dedup_key)`` task is already in flight (dedup), or if there is
     no running event loop. Errors inside the task are isolated by
     ``_run_isolated`` and never propagate to the caller / chat path.
+
+    Returns True when a task was actually scheduled, False on any of the three
+    no-op conditions (PRP-0143 / UDR-0124 D7). A caller that persists a UI state
+    implied by the task -- the ``auto_title_pending`` sidebar spinner is the
+    motivating case -- MUST set that state only on a True result, or a silent
+    no-op leaves the spinner running forever. The post-turn chat-path callers
+    ignore the result, so this widening is source-compatible.
     """
     if task_type not in BACKGROUND_TASK_REGISTRY:
         logger.error("dispatch for unregistered background task %r; skipping", task_type)
-        return
+        return False
     key = (task_type, dedup_key)
     if key in _inflight_keys:
         logger.debug("background task %r already in flight for %s; skipping duplicate", task_type, dedup_key)
-        return
+        return False
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         logger.warning("dispatch called with no running event loop; skipping %r", task_type)
-        return
+        return False
     _inflight_keys.add(key)
     task = loop.create_task(_run_isolated(task_type, dedup_key, ctx))
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
+    return True
 
 
 async def shutdown(timeout: float = 5.0) -> None:
