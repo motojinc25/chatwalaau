@@ -140,7 +140,25 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
     D5/D7) so the operator sees what a run would actually wire up. The web-search
     gate is INFORMATIONAL here -- a withheld offering forces
     ``disable_web_search`` at build time (forced-safe, never a blocking warning).
+
+    ``compaction`` reports EFFECT, not declared intent (PRP-0144, UDR-0125 D4).
+    It was a bare ``not spec.compaction_disabled``, which returned true for an
+    agent whose compaction MAF had built no strategy for; a summary described as
+    "resolved" must report what a run would actually do. The object stays truthy
+    when enabled, so a reader treating it as a boolean is unaffected.
     """
+    from app.agent.harness.factory import resolve_compaction_budget
+
+    compaction: dict[str, object] = {"enabled": not spec.compaction_disabled}
+    if not spec.compaction_disabled:
+        window, output, source = resolve_compaction_budget(spec)
+        compaction.update(
+            {
+                "max_context_window_tokens": window,
+                "max_output_tokens": output,
+                "source": source,
+            }
+        )
     workspace = (settings.coding_workspace_dir or "").strip()
     skills_dir = (settings.skills_dir or "").strip()
     web_search: str = "disabled" if spec.web_search_disabled else "enabled"
@@ -160,7 +178,7 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
         "todo": not spec.todo_disabled,
         "mode": not spec.mode_disabled,
         "mode_initial": spec.mode_initial,
-        "compaction": not spec.compaction_disabled,
+        "compaction": compaction,
         "loop_max_iterations": min(spec.loop_max_iterations or HARNESS_MAX_ITERATIONS, HARNESS_MAX_ITERATIONS),
         "write_tool_approval": not spec.file_access_disable_write_tool_approval,
     }

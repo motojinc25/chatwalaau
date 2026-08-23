@@ -39,7 +39,17 @@ export interface HarnessPolicy {
   todo: boolean
   mode: boolean
   mode_initial: string | null
-  compaction: boolean
+  /**
+   * PRP-0144 / UDR-0125 D4 -- EFFECTIVE compaction, not declared intent. Was a
+   * bare boolean, which reported `true` for an agent the framework had built no
+   * compaction strategy for. The resolved budgets are present only when enabled.
+   */
+  compaction: {
+    enabled: boolean
+    max_context_window_tokens?: number
+    max_output_tokens?: number
+    source?: 'catalog' | 'yaml' | 'mixed'
+  }
   loop_max_iterations: number
   write_tool_approval: boolean
 }

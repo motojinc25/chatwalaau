@@ -109,6 +109,51 @@ _MAF_TOOL_APPROVAL_STATE_KEY = "tool_approval"
 _MAF_DEFERRED_GROUPS_KEY = "already_approved_approval_request_groups"
 
 
+def history_is_self_persisting(agent: Any) -> bool:
+    """True when the lane's own history already holds this turn's messages.
+
+    This is the criterion for whether the approval re-run must replay anything at
+    all (PRP-0144, UDR-0125 D1/D2). The replay this module builds is a
+    COMPENSATION for history a lane has not persisted yet -- and whether that
+    compensation is needed is a property of the AGENT, never of a lane name.
+
+    The Prompt lane needs it: ``FileHistoryProvider.after_run`` is a no-op
+    (``app.session.provider``) because the SPA saves after the stream completes,
+    so during an approval loop MAF's view of the conversation is frozen at what
+    ``before_run`` loaded and this turn's ``function_call``s exist nowhere it can
+    see them -- which is the orphan-``tool_result`` 400 this module was written
+    for.
+
+    The harness lane must NOT get it: ``create_harness_agent`` sets
+    ``require_per_service_call_history_persistence=True`` with a loading
+    ``InMemoryHistoryProvider`` (``store_inputs``/``store_outputs`` default True),
+    so every model call's inputs AND outputs are written to the provider as the
+    run proceeds -- including the model call that raised the approval request,
+    which completes normally before the loop pauses. Replaying into that history
+    duplicates it, and because MAF then re-streams the duplicated calls into the
+    next round's accumulator, the duplication compounds: an observed three-message
+    conversation reached 200 messages / 926 wire items over seven rounds with
+    every call id duplicated, and died on the model's context window.
+
+    Mirrors MAF's own condition (``Agent._resolve_per_service_call_history_providers``
+    / ``_agents.py``): the flag AND at least one attached history provider. Reading
+    the same two facts the framework reads keeps the two aligned by construction;
+    an upstream change becomes a canary-test failure rather than a silent
+    divergence. Any unexpected shape degrades to False -- the historical
+    behaviour, which is safe everywhere and merely redundant on a persisting lane.
+    """
+    if not getattr(agent, "require_per_service_call_history_persistence", False):
+        return False
+    try:
+        from agent_framework import HistoryProvider
+
+        providers = getattr(agent, "context_providers", None) or []
+        return any(isinstance(provider, HistoryProvider) for provider in providers)
+    except Exception:  # pragma: no cover - defensive; never break a run
+        logger.warning("Could not inspect agent history providers; assuming replay is required.", exc_info=True)
+        return False
+
+
 def maf_resumable_call_ids(session: Any) -> frozenset[str]:
     """Return the call ids MAF will resume on its own for ``session``.
 
@@ -510,4 +555,4 @@ class IterationContentAccumulator:
         return out
 
 
-__all__ = ["IterationContentAccumulator", "maf_resumable_call_ids"]
+__all__ = ["IterationContentAccumulator", "history_is_self_persisting", "maf_resumable_call_ids"]

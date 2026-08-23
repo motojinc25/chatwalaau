@@ -49,6 +49,43 @@ DEFAULT_AGENT_INSTRUCTIONS = (
 FILE_MEMORY_SUBDIR = "agent-file-memory"
 FILE_ACCESS_SUBDIR = "agent-file-access"
 
+# Application default output-token budget for compaction (PRP-0144, UDR-0125 D3,
+# amending UDR-0119 D9). A backend constant, deliberately NOT an env var -- the
+# UDR-0094 D5 precedent, where DEFAULT_CONTEXT_WINDOW replaced an env-configurable
+# equivalent; the operator knob is the per-agent `compaction.maxOutputTokens`.
+#
+# It exists because MAF builds NO compaction strategy unless BOTH token budgets
+# are present (_harness/_agent.py:119) and validates only the window
+# (_agent.py:530-539). An unset maxOutputTokens therefore disabled compaction
+# silently, while the GUI toggle, the CTR-0194 policy summary, and the YAML
+# template published in PRP-0135 all reported it as ON. An unset budget now means
+# "resolve to the application default", never "disable the feature".
+#
+# In the pinned MAF this value feeds _assemble_compaction and nothing else: it
+# sets WHERE compaction fires, never how much the model may generate.
+DEFAULT_HARNESS_MAX_OUTPUT_TOKENS = 32_768
+
+
+def resolve_compaction_budget(spec: HarnessAgentSpec) -> tuple[int | None, int | None, str]:
+    """Resolve (max_context_window_tokens, max_output_tokens, source) for ``spec``.
+
+    Returns ``(None, None, "disabled")`` when the YAML disables compaction. The
+    ``min(..., window // 8)`` clamp guarantees MAF's precondition
+    ``0 < max_output < max_window`` for any catalog window -- including a small
+    one -- without a second validation path.
+
+    ``source`` reports where the numbers came from for the CTR-0192 policy
+    summary (UDR-0125 D4): ``catalog`` (both resolved by the application),
+    ``yaml`` (both declared), or ``mixed``.
+    """
+    if spec.compaction_disabled:
+        return None, None, "disabled"
+    window = spec.max_context_window_tokens or providers.get_max_context_tokens(spec.model_id)
+    output = spec.max_output_tokens or min(DEFAULT_HARNESS_MAX_OUTPUT_TOKENS, max(window // 8, 1))
+    declared = (spec.max_context_window_tokens is not None, spec.max_output_tokens is not None)
+    source = {(True, True): "yaml", (False, False): "catalog"}.get(declared, "mixed")
+    return window, output, source
+
 
 def _workspace_dir() -> Path | None:
     raw = (settings.coding_workspace_dir or "").strip()
@@ -308,8 +345,18 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         )
         disable_web_search = True
 
-    # Token budgets from the Model Offering Catalog (UDR-0119 D9).
-    max_window = spec.max_context_window_tokens or providers.get_max_context_tokens(spec.model_id)
+    # Token budgets from the Model Offering Catalog (UDR-0119 D9 as amended by
+    # PRP-0144 / UDR-0125 D3): an unset maxOutputTokens resolves to the
+    # application default, never to a disabled feature.
+    max_window, max_output, _budget_source = resolve_compaction_budget(spec)
+    # Canary, unreachable by construction above. A declared-enabled compaction
+    # that resolved to no strategy MUST fail loudly at build time rather than
+    # ship an agent that quietly does not compact (UDR-0125 D3).
+    if not spec.compaction_disabled and (max_window is None or max_output is None):
+        raise HarnessAgentError(
+            f"Harness {spec.id}: compaction is enabled but its token budget did not resolve "
+            f"(window={max_window}, max_output={max_output}); MAF would build no strategy."
+        )
 
     # Initial mode (UDR-0119 D4): only a custom provider when the YAML chose one;
     # otherwise MAF's default provider (identical modes, MAF default initial).
@@ -324,8 +371,8 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         harness_instructions=spec.harness_instructions,
         agent_instructions=_resolve_agent_instructions(spec),
         tools=tools or None,
-        max_context_window_tokens=None if spec.compaction_disabled else max_window,
-        max_output_tokens=spec.max_output_tokens,
+        max_context_window_tokens=max_window,
+        max_output_tokens=max_output,
         # history_provider omitted => MAF-internal InMemoryHistoryProvider (D4).
         disable_compaction=spec.compaction_disabled,
         disable_todo=spec.todo_disabled,
@@ -382,14 +429,27 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         # is meant to compact.
         default_options={"store": False},
     )
+    # The resolved compaction budget is logged so "is compaction actually
+    # configured for this agent" is answerable from the log alone (UDR-0125 D3);
+    # the two thresholds are ContextWindowCompactionStrategy's defaults applied
+    # to the input budget (window - max_output).
+    if max_window is not None and max_output is not None:
+        _input_budget = max_window - max_output
+        _compaction_desc = (
+            f"on window={max_window} max_output={max_output} "
+            f"evict_at={int(_input_budget * 0.5)} truncate_at={int(_input_budget * 0.8)}"
+        )
+    else:
+        _compaction_desc = "off"
     logger.info(
-        "Harness agent built: id=%s model=%s tools=%d web_search=%s workspace=%s skills=%s",
+        "Harness agent built: id=%s model=%s tools=%d web_search=%s workspace=%s skills=%s compaction=%s",
         spec.id,
         spec.model_id,
         len(tools),
         not disable_web_search,
         workspace is not None,
         _skills_paths() is not None,
+        _compaction_desc,
     )
     return HarnessRuntime(agent, shell_executor)
 
@@ -418,12 +478,14 @@ def preflight(spec: HarnessAgentSpec) -> dict:
 
 __all__ = [
     "DEFAULT_AGENT_INSTRUCTIONS",
+    "DEFAULT_HARNESS_MAX_OUTPUT_TOKENS",
     "FILE_ACCESS_SUBDIR",
     "FILE_MEMORY_SUBDIR",
     "HarnessRuntime",
     "build_harness_agent",
     "build_harness_runtime",
     "preflight",
+    "resolve_compaction_budget",
     "resolve_tools",
     "web_search_withheld",
 ]

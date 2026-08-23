@@ -46,7 +46,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 from ag_ui.encoder import EventEncoder
-from agent_framework import AgentSession, Content
+from agent_framework import AgentSession, Content, Message
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -63,7 +63,11 @@ from app.agent.approval import (
     approval_store,
     truncate_arguments_preview,
 )
-from app.agent.approval_iteration import IterationContentAccumulator, maf_resumable_call_ids
+from app.agent.approval_iteration import (
+    IterationContentAccumulator,
+    history_is_self_persisting,
+    maf_resumable_call_ids,
+)
 from app.agent.declarative import active_spec
 from app.agent.identity import load_identity
 from app.agent.prompt_dump import dump_prompt
@@ -239,6 +243,18 @@ _MSG_CONTEXT_LENGTH = (
     "document, or a big tool result (e.g. many rag_search chunks) are the usual "
     "causes. Start a new chat, remove a large attachment, or lower RAG_TOP_K / "
     "RAG_CHUNK_SIZE so the search result is smaller, then resend."
+)
+# PRP-0144 / UDR-0125 D6: a run-error message must name only actions reachable in
+# the failing run's lane. A harness run has no attachment surface and no
+# rag_search chunk budget, so the advice above was inapplicable in every clause
+# for the operator who reported this failure.
+_MSG_CONTEXT_LENGTH_HARNESS = (
+    "The request exceeded the model's context window. A harness conversation "
+    "keeps its history in memory for the whole conversation, so a long "
+    "tool-heavy session can outgrow the window. Start a new chat with this "
+    "harness agent to reset its history, or lower "
+    "`compaction.maxOutputTokens` / set `compaction.maxContextWindowTokens` in "
+    "the agent's YAML so compaction trims earlier, then resend."
 )
 _MSG_CONTENT_FILTER = (
     "The model provider's content filter rejected this turn. When it fires right "
@@ -488,7 +504,7 @@ def _is_invalid_schema_error(exc: BaseException) -> bool:
     return False
 
 
-def _classify_run_error(exc: BaseException, *, continuation_token: bool) -> tuple[str, bool]:
+def _classify_run_error(exc: BaseException, *, continuation_token: bool, harness_run: bool = False) -> tuple[str, bool]:
     """Return (user-facing RUN_ERROR message, is_known) for a mid-stream error.
 
     ``is_known`` False means the cause is unexpected and the caller should log a
@@ -514,7 +530,8 @@ def _classify_run_error(exc: BaseException, *, continuation_token: bool) -> tupl
     if _is_deployment_feature_unsupported(exc):
         return _MSG_DEPLOYMENT_FEATURE, True
     if _is_context_length_error(exc):
-        return _MSG_CONTEXT_LENGTH, True
+        # UDR-0125 D6: lane-aware remedy text; the classification is identical.
+        return (_MSG_CONTEXT_LENGTH_HARNESS if harness_run else _MSG_CONTEXT_LENGTH), True
     if _is_content_filter_error(exc):
         return _MSG_CONTENT_FILTER, True
     # Before rate-limit and transient (v0.131.5): a peak-load capacity refusal is
@@ -1306,6 +1323,12 @@ async def _stream_with_reasoning(
         # responses and re-runs the agent. The loop terminates when an
         # iteration finishes without producing any approval request.
         iteration_messages: list[Any] = list(messages)
+        # PRP-0144 / UDR-0125 D1/D2: does this agent's own history already hold
+        # the turn, or does the re-run have to carry it? Read ONCE per run from
+        # the agent's persistence configuration -- never from `harness_run`, so a
+        # future lane that adopts per-service-call persistence inherits the
+        # correct behaviour without an edit here (D2).
+        self_persisting = history_is_self_persisting(agent)
         # PRP-0103 / UDR-0082 D1/D2: the approval re-run loop is bounded by two
         # operator-configurable counters. `interactive_rounds` only advances for
         # a round that required a human decision (source != "session-cache"), so
@@ -1317,11 +1340,12 @@ async def _stream_with_reasoning(
         total_rounds = 0
         approval_loop_exceeded = False
         logger.info(
-            "AG-UI run start: thread=%s model=%s harness=%s input_msgs=%d",
+            "AG-UI run start: thread=%s model=%s harness=%s input_msgs=%d self_persisting_history=%s",
             thread_id,
             effective_model if harness_run else (selected_model or "<default>"),
             _harness_id or "-",
             len(iteration_messages),
+            self_persisting,
         )
         # Structured output marker (PRP-0082, CTR-0009 v14, UDR-0058 D5). Tell the
         # SPA early that this turn is structured so it renders the answer as a JSON
@@ -1630,7 +1654,15 @@ async def _stream_with_reasoning(
                     elif content_type == "usage":
                         usage_details = getattr(content, "usage_details", None) or {}
                         usage_value = dict(usage_details)
-                        model_name = selected_model or agent_registry.default_model
+                        # PRP-0144 / UDR-0125 D5: attribute usage to the offering
+                        # that actually SERVED the turn. `effective_model` already
+                        # resolves to the harness run-target's bound offering for a
+                        # harness run and to the selected/default model otherwise;
+                        # reading `selected_model` back here reported another
+                        # model's context window, because a harness run
+                        # deliberately clears it (the per-message controls must not
+                        # leak into a run-target run).
+                        model_name = effective_model
                         # Catalog context window (CTR-0069, PRP-0113): an offering's
                         # declared context_window wins, else DEFAULT_CONTEXT_WINDOW.
                         usage_value["max_context_tokens"] = providers.get_max_context_tokens(model_name)
@@ -1750,6 +1782,42 @@ async def _stream_with_reasoning(
                 # less work to do.
                 await approval_store.drop(record.id)
 
+            # PRP-0144 / UDR-0125 D1: on a lane whose history has ALREADY
+            # persisted this turn, the replay below is not merely unnecessary --
+            # it is the defect. MAF's per-service-call persistence writes every
+            # model call's inputs and outputs to the history provider as the run
+            # proceeds, and `_split_service_call_messages` files our synthetic
+            # messages as NEW INPUT (they carry no `_attribution`), so each
+            # round's replay of rounds 1..N-1 is written into a history that
+            # already holds it. MAF then re-streams those calls, the accumulator
+            # observes them, and an even larger replay is appended: a closed
+            # feedback loop that took a three-message conversation to 200
+            # messages / 926 wire items in seven rounds and overran the model's
+            # context window. Send this round's approval responses ALONE and let
+            # MAF load the rest from the history it has been writing.
+            #
+            # Everything below this branch -- the provider-aware reconstruction,
+            # the deferred-call replay gate, the dangling-result healer -- exists
+            # to rebuild messages a lane cannot supply, so none of it applies
+            # here. It is untouched on the lane that needs it.
+            if self_persisting:
+                iteration_messages = [Message(role="user", contents=approval_response_contents)]
+                approval_debug.logger.info(
+                    "[iter %d replay] thread=%s self-persisting history: sending %d approval "
+                    "response(s) ALONE, no synthetic replay (UDR-0125 D1). sources=%s\n  responses: %s",
+                    total_rounds,
+                    thread_id,
+                    len(approval_response_contents),
+                    round_sources,
+                    ", ".join(approval_debug.describe_content(c) for c in approval_response_contents),
+                )
+                # NOT `continue`: the shared tail below (service_session_id reset,
+                # UDR-0082 round accounting and budget enforcement) applies to
+                # every lane and must not be skipped.
+                _build_replay = False
+            else:
+                _build_replay = True
+
             # PRP-0069 follow-up: append BOTH the iter-N synthetic assistant
             # message (carrying the originating function_call(s) plus the
             # accumulated text -- and, for Anthropic, the signed reasoning) AND
@@ -1766,28 +1834,29 @@ async def _stream_with_reasoning(
             # drop the reasoning and rebuild function_calls without server item
             # ids (matched by call_id). Anthropic keeps the signed reasoning +
             # original tool_use Content the API requires.
-            is_anthropic = providers.provider_for(effective_model).name == "anthropic"
-            iter_synthetic_messages = iter_accumulator.build_iteration_messages(
-                approval_response_contents,
-                include_reasoning=is_anthropic,
-                strip_function_call_ids=not is_anthropic,
-                # PRP-0141 / UDR-0119 D6: replay the calls MAF deferred ONLY when
-                # MAF will resume them, and never answer for them. Read BEFORE the
-                # re-run below, which is where MAF pops the group.
-                resumable_call_ids=(resumable_ids := maf_resumable_call_ids(session)),
-            )
-            approval_debug.logger.info(
-                "[iter %d replay] thread=%s provider=%s sources=%s resumable_call_ids=%s\n"
-                "  responses: %s\n  replay: %s",
-                total_rounds,
-                thread_id,
-                "anthropic" if is_anthropic else "openai-family",
-                round_sources,
-                sorted(resumable_ids),
-                ", ".join(approval_debug.describe_content(c) for c in approval_response_contents),
-                " | ".join(approval_debug.describe_messages(iter_synthetic_messages)),
-            )
-            iteration_messages = [*iteration_messages, *iter_synthetic_messages]
+            if _build_replay:
+                is_anthropic = providers.provider_for(effective_model).name == "anthropic"
+                iter_synthetic_messages = iter_accumulator.build_iteration_messages(
+                    approval_response_contents,
+                    include_reasoning=is_anthropic,
+                    strip_function_call_ids=not is_anthropic,
+                    # PRP-0141 / UDR-0119 D6: replay the calls MAF deferred ONLY when
+                    # MAF will resume them, and never answer for them. Read BEFORE the
+                    # re-run below, which is where MAF pops the group.
+                    resumable_call_ids=(resumable_ids := maf_resumable_call_ids(session)),
+                )
+                approval_debug.logger.info(
+                    "[iter %d replay] thread=%s provider=%s sources=%s resumable_call_ids=%s\n"
+                    "  responses: %s\n  replay: %s",
+                    total_rounds,
+                    thread_id,
+                    "anthropic" if is_anthropic else "openai-family",
+                    round_sources,
+                    sorted(resumable_ids),
+                    ", ".join(approval_debug.describe_content(c) for c in approval_response_contents),
+                    " | ".join(approval_debug.describe_messages(iter_synthetic_messages)),
+                )
+                iteration_messages = [*iteration_messages, *iter_synthetic_messages]
             # PRP-0141 multi-iteration follow-up: a call MAF DEFERRED in an earlier
             # round is resumed by MAF in the FOLLOWING iteration, which produces its
             # result on that iteration's request but never streams it back -- so the
@@ -1796,15 +1865,19 @@ async def _stream_with_reasoning(
             # provider rejects the turn (400 "No tool output found for function call
             # ..."). Heal by appending the result captured from the wire, so every
             # replayed function_call carries its output.
-            iteration_messages, healed_ids = approval_debug.heal_dangling_tool_calls(iteration_messages)
-            if healed_ids:
-                approval_debug.logger.info(
-                    "[iter %d heal] thread=%s appended captured results for deferred call(s) whose "
-                    "output MAF produced but never streamed: %s",
-                    total_rounds,
-                    thread_id,
-                    sorted(healed_ids),
-                )
+            # Only meaningful where a replay was built: the healer repairs
+            # REPLAYED function_calls left without their output. A self-persisting
+            # lane replays nothing, so there is nothing to heal (UDR-0125 D1).
+            if _build_replay:
+                iteration_messages, healed_ids = approval_debug.heal_dangling_tool_calls(iteration_messages)
+                if healed_ids:
+                    approval_debug.logger.info(
+                        "[iter %d heal] thread=%s appended captured results for deferred call(s) whose "
+                        "output MAF produced but never streamed: %s",
+                        total_rounds,
+                        thread_id,
+                        sorted(healed_ids),
+                    )
             # Reset server-side response chaining before the post-approval
             # re-run. The approval handshake interrupts the iteration-N
             # response stream, so the resp_... id MAF stored on the session
@@ -1857,7 +1930,9 @@ async def _stream_with_reasoning(
 
     except (OpenAINotFoundError, ChatClientException, TypeError) as exc:
         run_error = True
-        error_message, known = _classify_run_error(exc, continuation_token=bool(continuation_token))
+        error_message, known = _classify_run_error(
+            exc, continuation_token=bool(continuation_token), harness_run=harness_run
+        )
         if known:
             logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:
@@ -1878,7 +1953,9 @@ async def _stream_with_reasoning(
         # it through the same classifier so billing / rate-limit / transient
         # causes still surface an actionable message instead of the generic one.
         run_error = True
-        error_message, known = _classify_run_error(exc, continuation_token=bool(continuation_token))
+        error_message, known = _classify_run_error(
+            exc, continuation_token=bool(continuation_token), harness_run=harness_run
+        )
         if known:
             logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:

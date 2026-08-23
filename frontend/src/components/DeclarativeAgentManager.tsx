@@ -612,6 +612,24 @@ export function DeclarativeAgentManager() {
                             {current.policy.mode ? (current.policy.mode_initial ?? 'on') : 'off'} · Write approval{' '}
                             {current.policy.write_tool_approval ? 'required' : 'OFF (opt-in)'}
                           </p>
+                          {/*
+                            PRP-0144 / UDR-0125 D4: report the RESOLVED budget, not
+                            just that compaction is switched on. The numbers are what
+                            tell an operator compaction will actually run.
+                          */}
+                          <p>
+                            Compaction{' '}
+                            {current.policy.compaction.enabled ? (
+                              <>
+                                on · window{' '}
+                                {(current.policy.compaction.max_context_window_tokens ?? 0).toLocaleString()} · max
+                                output {(current.policy.compaction.max_output_tokens ?? 0).toLocaleString()}
+                                {current.policy.compaction.source === 'catalog' ? ' (defaults)' : ''}
+                              </>
+                            ) : (
+                              'off'
+                            )}
+                          </p>
                         </div>
                       )}
                       {current.kind === 'Harness' && current.runnable === false && !hasWarnings && current.loaded && (
