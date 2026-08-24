@@ -2,6 +2,7 @@ import { Loader2, Plug, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { notifyMcpInventoryChanged } from '@/hooks/useMcpToolNames'
 import { cn } from '@/lib/utils'
 
 /**
@@ -77,6 +78,10 @@ export function McpToolManager() {
     setConfigPath(data.config_path ?? '')
     setBaseline(selectionKey(next))
     setSelected((prev) => prev ?? next[0]?.name ?? null)
+    // The chat's tool-activity labels verify their "MCP:" claim against this same
+    // inventory (CTR-0013 v8, PRP-0145). Apply and Reload are the two operator
+    // actions that can change it, and both land here, so one notice covers both.
+    notifyMcpInventoryChanged()
   }, [])
 
   // Probe availability once on mount: show the icon whenever the endpoint is

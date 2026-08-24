@@ -23,6 +23,7 @@
 
 import type { ReactNode } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
+import { McpToolNamesProvider } from '@/components/McpToolNamesProvider'
 import { ReauthDialog } from '@/components/ReauthDialog'
 import { useAuth } from '@/hooks/useAuth'
 
@@ -48,14 +49,18 @@ export function AuthGuard({ children }: AuthGuardProps) {
     return <Navigate to={`/login?redirect=${encodeURIComponent(target)}`} replace />
   }
 
+  // McpToolNamesProvider (CTR-0013 v8 / CTR-0121, PRP-0145) mounts here rather
+  // than at the app root: its inventory fetch is CTR-0083-gated, so running it
+  // around /login would 401 once and never retry. This is the single point where
+  // every tool-call surface becomes allowed to run.
   return (
-    <>
+    <McpToolNamesProvider>
       {children}
       <ReauthDialog
         open={mode === 'login-required' && hasEverAuthenticated && reauthRequired}
         username={username}
         login={login}
       />
-    </>
+    </McpToolNamesProvider>
   )
 }
