@@ -65,8 +65,10 @@ from app.agent.approval import (
 )
 from app.agent.approval_iteration import (
     IterationContentAccumulator,
+    agent_self_reinvokes,
     history_is_self_persisting,
     maf_resumable_call_ids,
+    round_is_productive,
 )
 from app.agent.declarative import active_spec
 from app.agent.identity import load_identity
@@ -1335,17 +1337,40 @@ async def _stream_with_reasoning(
         # a blanket "approve for session" grant no longer burns the budget;
         # `total_rounds` advances for every round and is the runaway backstop.
         max_approval_iterations = settings.tool_approval_max_iterations
-        absolute_max_iterations = settings.tool_approval_absolute_max_iterations
+        # PRP-0146 / UDR-0082 D7/D8/D9: HOW the runaway backstop is budgeted depends
+        # on whether this agent RE-RUNS ITSELF -- read once, from the agent, never
+        # from `harness_run` (D8, following UDR-0125 D2). On a self-re-invoking
+        # agent every gated tool call is an approval round, so a flat round ceiling
+        # measures productivity: an observed harness turn died at total=201/200 with
+        # interactive=0/33, without one human decision. That lane is bounded by LACK
+        # OF PROGRESS instead, with a far higher round backstop behind it. An agent
+        # that does not re-invoke itself keeps the historical budget byte-for-byte.
+        autonomous = agent_self_reinvokes(agent)
+        absolute_max_iterations = (
+            settings.autonomous_loop_max_rounds if autonomous else settings.tool_approval_absolute_max_iterations
+        )
+        no_progress_limit = settings.autonomous_loop_no_progress_rounds if autonomous else None
         interactive_rounds = 0
         total_rounds = 0
+        # Consecutive rounds that executed no tool and produced no text; reset by
+        # every productive round (UDR-0082 D7). Only counted on the autonomous lane.
+        no_progress_rounds = 0
+        # Cumulative executed-tool count, so an exhausted budget can report the work
+        # the turn actually performed instead of only naming a number (D10).
+        tools_executed_total = 0
         approval_loop_exceeded = False
+        loop_stop_reason: str | None = None
         logger.info(
-            "AG-UI run start: thread=%s model=%s harness=%s input_msgs=%d self_persisting_history=%s",
+            "AG-UI run start: thread=%s model=%s harness=%s input_msgs=%d self_persisting_history=%s "
+            "self_reinvoking=%s round_budget=%s no_progress_limit=%s",
             thread_id,
             effective_model if harness_run else (selected_model or "<default>"),
             _harness_id or "-",
             len(iteration_messages),
             self_persisting,
+            autonomous,
+            absolute_max_iterations,
+            no_progress_limit if no_progress_limit is not None else "-",
         )
         # Structured output marker (PRP-0082, CTR-0009 v14, UDR-0058 D5). Tell the
         # SPA early that this turn is structured so it renders the answer as a JSON
@@ -1901,8 +1926,26 @@ async def _stream_with_reasoning(
             round_cached = bool(round_sources) and all(s == "session-cache" for s in round_sources)
             if not round_cached:
                 interactive_rounds += 1
-            if interactive_rounds > max_approval_iterations or total_rounds > absolute_max_iterations:
+            # PRP-0146 / UDR-0082 D7: a runaway is characterised by not getting
+            # anywhere, so the autonomous lane counts CONSECUTIVE unproductive
+            # rounds -- no tool executed and no text emitted. Reasoning is not
+            # progress. A gated flow alternates ("request approval" then "execute
+            # it and request the next"), so healthy operation never exceeds one.
+            productive = round_is_productive(iter_accumulator)
+            if iter_accumulator.executed_any():
+                tools_executed_total += len(iter_accumulator.executed_call_ids())
+            no_progress_rounds = 0 if productive else no_progress_rounds + 1
+            if interactive_rounds > max_approval_iterations:
                 approval_loop_exceeded = True
+                loop_stop_reason = "interactive"
+                break
+            if total_rounds > absolute_max_iterations:
+                approval_loop_exceeded = True
+                loop_stop_reason = "absolute"
+                break
+            if no_progress_limit is not None and no_progress_rounds >= no_progress_limit:
+                approval_loop_exceeded = True
+                loop_stop_reason = "no_progress"
                 break
 
         if approval_loop_exceeded:
@@ -1910,7 +1953,24 @@ async def _stream_with_reasoning(
             # emit a RUN_ERROR so the SPA surfaces the run as failed instead of
             # silently terminating.
             run_error = True
-            if total_rounds > absolute_max_iterations:
+            # PRP-0146 / UDR-0082 D10: on a self-re-invoking lane the side effects
+            # of the turn are ALREADY on disk -- todos completed, files edited,
+            # commands run -- and only the account of them is being discarded. The
+            # message therefore reports the work rather than only naming the number
+            # that was crossed. The non-autonomous texts are UNCHANGED.
+            _worked = f" {tools_executed_total} tool(s) executed in this turn; that work is not rolled back."
+            if loop_stop_reason == "no_progress":
+                error_message = (
+                    f"This autonomous run was stopped because {no_progress_rounds} consecutive rounds "
+                    f"executed no tool and produced no output -- the agent appears stuck."
+                    f"{_worked} Start a new turn to continue, or narrow the request."
+                )
+            elif loop_stop_reason == "absolute" and autonomous:
+                error_message = (
+                    f"This autonomous run was stopped after {absolute_max_iterations} approval rounds."
+                    f"{_worked} Start a new turn to continue, or narrow the request."
+                )
+            elif loop_stop_reason == "absolute":
                 error_message = (
                     f"Tool approval loop exceeded the absolute ceiling of "
                     f"{absolute_max_iterations} rounds; aborting run."
@@ -1919,13 +1979,34 @@ async def _stream_with_reasoning(
                 error_message = (
                     f"Tool approval loop exceeded {max_approval_iterations} interactive rounds; aborting run."
                 )
+            if autonomous:
+                # Additive CUSTOM event so the SPA can render the counts; no new
+                # event TYPE and nothing changes on the non-autonomous path.
+                yield encoder.encode(
+                    CustomEvent(
+                        type=EventType.CUSTOM,
+                        name="autonomous_run_stopped",
+                        value={
+                            "reason": loop_stop_reason,
+                            "rounds": total_rounds,
+                            "tools_executed": tools_executed_total,
+                            "no_progress_rounds": no_progress_rounds,
+                        },
+                    )
+                )
             logger.warning(
-                "approval loop exceeded for thread %s (interactive=%d/%d, total=%d/%d)",
+                "approval loop exceeded for thread %s (reason=%s interactive=%d/%d total=%d/%d "
+                "no_progress=%d/%s tools_executed=%d autonomous=%s)",
                 thread_id,
+                loop_stop_reason,
                 interactive_rounds,
                 max_approval_iterations,
                 total_rounds,
                 absolute_max_iterations,
+                no_progress_rounds,
+                no_progress_limit if no_progress_limit is not None else "-",
+                tools_executed_total,
+                autonomous,
             )
 
     except (OpenAINotFoundError, ChatClientException, TypeError) as exc:

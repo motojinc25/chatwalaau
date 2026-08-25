@@ -109,6 +109,68 @@ _MAF_TOOL_APPROVAL_STATE_KEY = "tool_approval"
 _MAF_DEFERRED_GROUPS_KEY = "already_approved_approval_request_groups"
 
 
+def agent_self_reinvokes(agent: Any) -> bool:
+    """True when the agent re-runs ITSELF in a loop between model calls.
+
+    This is the criterion for how the approval loop's runaway backstop is
+    budgeted (PRP-0146, UDR-0082 D8). It is a DIFFERENT property from
+    :func:`history_is_self_persisting`, even though both select the harness lane
+    today -- one is about who holds the turn's messages, the other about whether
+    approval rounds track WORK. Fusing them would make a future divergence
+    silent.
+
+    Why it decides a budget: every harness write, shell command, and skill script
+    is approval-gated by design (UDR-0119 D6), and under an "approve for this
+    session" grant each round resolves instantly with no human involved. So on a
+    self-re-invoking agent::
+
+        approval rounds ~= gated tool calls ~= work performed
+
+    A flat round ceiling is therefore a measure of PRODUCTIVITY there, not of
+    risk. An observed harness turn was killed at ``total=201/200`` with
+    ``interactive=0/33`` -- not one human decision in the whole turn. On an agent
+    that does NOT re-invoke itself the proxy holds (one answer's gated actions
+    are bounded by that answer), so its budget is left exactly as it was.
+
+    Detection reads the middleware the framework itself attaches:
+    ``create_harness_agent`` wires ``AgentLoopMiddleware`` as the OUTERMOST
+    middleware exactly when ``loop_should_continue`` is passed, and a Prompt-lane
+    ``Agent(...)`` has none. Reading what the framework builds -- rather than a
+    lane identifier -- is UDR-0125 D2's rule applied to this property; an
+    upstream change becomes a canary-test failure instead of a silent one.
+
+    Any unexpected shape degrades to False, i.e. to the historical budget, which
+    is the conservative direction.
+    """
+    try:
+        from agent_framework._harness._loop import AgentLoopMiddleware
+
+        middleware = getattr(agent, "middleware", None) or []
+        return any(isinstance(m, AgentLoopMiddleware) for m in middleware)
+    except Exception:  # pragma: no cover - defensive; never break a run
+        logger.warning("Could not inspect agent loop middleware; using the default budget.", exc_info=True)
+        return False
+
+
+def round_is_productive(accumulator: IterationContentAccumulator) -> bool:
+    """True when this approval round advanced the turn (PRP-0146, UDR-0082 D7).
+
+    A runaway is characterised by NOT GETTING ANYWHERE, not by doing a lot, so
+    this is what the autonomous backstop counts the absence of. A round advanced
+    the turn when at least one tool EXECUTED (produced a ``function_result``) or
+    the assistant produced non-empty TEXT.
+
+    Reasoning deliberately does NOT count. A model can think indefinitely without
+    advancing anything, and a valve that accepts thinking as progress cannot
+    catch the failure it is named for.
+
+    In a gated flow the normal shape alternates -- "request approval" (nothing
+    executes) then "execute it, request the next" -- so healthy operation never
+    exceeds ONE consecutive unproductive round. Many in a row is a genuine stall.
+    """
+    return accumulator.executed_any() or accumulator.produced_text()
+
+
 def history_is_self_persisting(agent: Any) -> bool:
     """True when the lane's own history already holds this turn's messages.
 
@@ -317,6 +379,37 @@ class IterationContentAccumulator:
         call_id = getattr(content, "call_id", None)
         if call_id:
             self._function_results[call_id] = content
+
+    def executed_any(self) -> bool:
+        """True when at least one tool produced a ``function_result`` this round.
+
+        One half of the progress signal the autonomous backstop counts the
+        absence of (PRP-0146, UDR-0082 D7).
+        """
+        return bool(self._function_results)
+
+    def executed_call_ids(self) -> list[str]:
+        """Call ids that produced a ``function_result`` this round (PRP-0146 D10).
+
+        Summed across rounds so an exhausted budget can report the work the turn
+        performed rather than only naming the number it crossed.
+
+        Read from the RESULTS, not from the intersection with the observed call
+        order that ``observation_summary`` uses for tracing. A result whose
+        originating ``function_call`` was not streamed in the same round -- which
+        happens on the resume side of an approval handshake -- is still a tool
+        that ran, and under-reporting completed work is exactly the failure D10
+        exists to prevent.
+        """
+        return list(self._function_results)
+
+    def produced_text(self) -> bool:
+        """True when the assistant emitted non-empty text this round.
+
+        The other half. Reasoning is deliberately excluded -- a model can think
+        indefinitely without advancing anything.
+        """
+        return any(t.strip() for t in self._text_chunks)
 
     def observation_summary(self) -> str:
         """IDs only: what this iteration's stream showed, classified the way the
@@ -555,4 +648,10 @@ class IterationContentAccumulator:
         return out
 
 
-__all__ = ["IterationContentAccumulator", "history_is_self_persisting", "maf_resumable_call_ids"]
+__all__ = [
+    "IterationContentAccumulator",
+    "agent_self_reinvokes",
+    "history_is_self_persisting",
+    "maf_resumable_call_ids",
+    "round_is_productive",
+]

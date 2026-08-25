@@ -739,6 +739,29 @@ class Settings(BaseSettings):
     # grant. MUST be >= TOOL_APPROVAL_MAX_ITERATIONS. Range 1..100000.
     tool_approval_absolute_max_iterations: int = 200
 
+    # ---- Autonomous (self-re-invoking) agent loop bounds (PRP-0146, UDR-0082 D7/D9) ----
+    # These govern an agent that RE-RUNS ITSELF in a loop -- today a Harness agent
+    # (AgentLoopMiddleware). On such an agent every gated tool call is an approval
+    # round, so a flat round ceiling measures PRODUCTIVITY, not risk: a real turn
+    # was killed at total=201/200 with interactive=0/33, i.e. without a single
+    # human decision. TOOL_APPROVAL_ABSOLUTE_MAX_ITERATIONS therefore applies ONLY
+    # where the agent does NOT re-invoke itself; the two keys below govern the
+    # autonomous lane instead. The interactive budget above still applies to both.
+    #
+    # A runaway is characterised by NOT GETTING ANYWHERE. The primary stop counts
+    # CONSECUTIVE rounds that executed no tool and produced no text (reasoning does
+    # NOT count -- a model can think forever without advancing). The counter resets
+    # on every productive round, and a gated flow's normal shape alternates, so
+    # healthy operation never exceeds one. Range 1..1000.
+    autonomous_loop_no_progress_rounds: int = 25
+
+    # Hard backstop for the same lane, counting EVERY round, for a runaway that
+    # manages to look productive forever. Deliberately far above any observed turn
+    # (the failing one reached 201); the no-progress detector is the sensitive
+    # trigger and this is the backstop behind it. MUST be >=
+    # TOOL_APPROVAL_MAX_ITERATIONS. Range 1..100000.
+    autonomous_loop_max_rounds: int = 2000
+
     # ---- Multi-Model helpers ----
     # PRP-0113 / UDR-0094 removed the legacy env-namespace model-list accessors
     # and the context-window accessors along with the routing lane. Model routing,
@@ -972,6 +995,20 @@ class Settings(BaseSettings):
             msg = (
                 "TOOL_APPROVAL_ABSOLUTE_MAX_ITERATIONS must be in 1..100000; "
                 f"got {self.tool_approval_absolute_max_iterations}"
+            )
+            raise ValueError(msg)
+        if not (1 <= self.autonomous_loop_no_progress_rounds <= 1000):
+            msg = (
+                f"AUTONOMOUS_LOOP_NO_PROGRESS_ROUNDS must be in 1..1000; got {self.autonomous_loop_no_progress_rounds}"
+            )
+            raise ValueError(msg)
+        if not (1 <= self.autonomous_loop_max_rounds <= 100000):
+            msg = f"AUTONOMOUS_LOOP_MAX_ROUNDS must be in 1..100000; got {self.autonomous_loop_max_rounds}"
+            raise ValueError(msg)
+        if self.autonomous_loop_max_rounds < self.tool_approval_max_iterations:
+            msg = (
+                f"AUTONOMOUS_LOOP_MAX_ROUNDS ({self.autonomous_loop_max_rounds}) must be >= "
+                f"TOOL_APPROVAL_MAX_ITERATIONS ({self.tool_approval_max_iterations})"
             )
             raise ValueError(msg)
         if self.tool_approval_absolute_max_iterations < self.tool_approval_max_iterations:
