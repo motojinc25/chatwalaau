@@ -10,7 +10,10 @@ and the soft, non-blocking final-message validation (UDR-0058 D4).
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Name of the ephemeral tool used by the OpenAI-native json_schema format. Kept stable
 # so the endpoint can recognise it.
@@ -183,6 +186,115 @@ def strip_web_search(run_options: dict[str, Any]) -> dict[str, Any]:
         else:
             run_options.pop("tools", None)
     return run_options
+
+
+# ---------------------------------------------------------------------------
+# Identity uniqueness of the request input (PRP-0147, UDR-0126 D3/D4)
+# ---------------------------------------------------------------------------
+#
+# Which field carries the provider-assigned identity, per item type. An item type
+# absent from this map has NO such identity and is NEVER de-duplicated -- notably
+# `message`, where identical content is legitimate (a user can send the same text
+# twice) and removing it would delete a real message (UDR-0126 D4).
+_IDENTITY_FIELD: dict[str, str] = {
+    "function_call": "call_id",
+    "function_call_output": "call_id",
+    "shell_call_output": "call_id",
+    "local_shell_call_output": "id",
+    "reasoning": "id",
+    "mcp_approval_request": "id",
+    "mcp_approval_response": "approval_request_id",
+}
+
+
+def _identity(item: Any) -> tuple[str, str] | None:
+    """The (type, provider-assigned id) key an item is de-duplicated on, or None."""
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if not isinstance(item_type, str):
+        return None
+    field = _IDENTITY_FIELD.get(item_type)
+    if field is None:
+        return None
+    value = item.get(field)
+    if not isinstance(value, str) or not value:
+        return None
+    return (item_type, value)
+
+
+def dedupe_wire_input(run_options: dict[str, Any]) -> int:
+    """Make ``run_options["input"]`` identity-unique in place; return items removed.
+
+    The Responses API assigns each call, reasoning block and approval request a unique
+    id; two items in one request carrying the same one is invalid by construction. A
+    harness turn nevertheless shipped fifty duplicated ``call_id``s for ~120 consecutive
+    rounds (PRP-0147 Finding B) because the function-invocation loop re-submits its whole
+    transcript as unattributed input into a history middleware that de-duplicates nothing
+    (RES-0002 F1). That PRODUCER is not fixed here; this stops the invalid request from
+    leaving the process while it stands.
+
+    Three properties, all load-bearing (UDR-0126 D4):
+
+    * Keyed on provider-assigned IDENTITY, never on content. An item with no such id --
+      ``message`` above all -- is never touched.
+    * The FIRST occurrence is kept and the order of survivors is unchanged. The first
+      copy sits adjacent to the ``reasoning`` item that produced it, and that adjacency
+      is what the API relies on when encrypted reasoning is replayed; keeping the last
+      would relocate a call after its own output.
+    * Two items sharing an identity should be byte-identical. If they are not, the
+      discrepancy is logged as a WARNING naming the differing fields -- that pair is not
+      the known duplication and must surface rather than be absorbed.
+
+    Inert and silent on a request with no duplicates. Never raises: a repair at the
+    request seam must not become a new way for a turn to fail.
+    """
+    try:
+        items = run_options.get("input")
+        if not isinstance(items, list):
+            return 0
+        seen: dict[tuple[str, str], dict[str, Any]] = {}
+        kept: list[Any] = []
+        removed = 0
+        for item in items:
+            key = _identity(item)
+            if key is None:
+                kept.append(item)
+                continue
+            first = seen.get(key)
+            if first is None:
+                seen[key] = item
+                kept.append(item)
+                continue
+            removed += 1
+            if item != first:
+                differing = sorted(k for k in set(first) | set(item) if first.get(k) != item.get(k))
+                logger.warning(
+                    "[wire dedup] %s %s appears twice with DIFFERING fields %s; "
+                    "keeping the first. This is not the known duplication.",
+                    key[0],
+                    key[1],
+                    differing,
+                )
+        if removed:
+            run_options["input"] = kept
+        return removed
+    except Exception:  # a repair must never break the request
+        logger.exception("[wire dedup] failed; sending the input unchanged")
+        return 0
+
+
+def summarize_removed(before: list[Any], after: list[Any]) -> str:
+    """``50 function_call, 3 reasoning`` -- what the dedup pass removed, by type."""
+    counts: dict[str, int] = {}
+    kept_ids = {id(i) for i in after}
+    for item in before:
+        if id(item) in kept_ids:
+            continue
+        key = _identity(item)
+        if key is not None:
+            counts[key[0]] = counts.get(key[0], 0) + 1
+    return ", ".join(f"{n} {t}" for t, n in sorted(counts.items(), key=lambda kv: -kv[1]))
 
 
 def soft_validate(text: str | None) -> dict[str, Any]:

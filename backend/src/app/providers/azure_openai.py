@@ -8,6 +8,7 @@ search tool, and the same ``reasoning.effort`` option shape.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from agent_framework_openai import OpenAIChatClient
@@ -20,10 +21,14 @@ from app.providers.base import hosted_tool_withheld
 from app.providers.structured import (
     GENERIC_OBJECT_SCHEMA,
     STRUCTURED_OUTPUT_NAME,
+    dedupe_wire_input,
     effective_schema,
     strip_skill_tools,
     strip_web_search,
+    summarize_removed,
 )
+
+logger = logging.getLogger(__name__)
 
 NAME = "azure-openai"
 
@@ -71,7 +76,24 @@ class _StructuredOutputMixin:
             strip_skill_tools(run_options)
         # Approval-resume tracing (PRP-0141 follow-up): the request as it will go on
         # the wire, ids only. This is the ground truth the three prior fixes lacked.
+        #
+        # ORDER IS NORMATIVE (PRP-0147, UDR-0126 D5): the trace -- and with it the
+        # pairing verdict -- is computed on the input as MAF assembled it, BEFORE the
+        # uniqueness repair below. The duplication's PRODUCER is upstream and is not
+        # fixed here; a repair that erased its own evidence would make that producer
+        # invisible and leave the next investigation with nothing. The removal count
+        # logged afterwards is the signal that the producer is worsening.
         log_wire_request(messages=messages, run_options=run_options)
+        before = run_options.get("input")
+        before_items = list(before) if isinstance(before, list) else []
+        removed = dedupe_wire_input(run_options)
+        if removed:
+            after = run_options.get("input")
+            logger.info(
+                "[wire dedup] removed %d duplicate item(s): %s",
+                removed,
+                summarize_removed(before_items, after if isinstance(after, list) else []),
+            )
         return run_options
 
     def _get_conversation_id(self, response: Any, store: Any) -> str | None:

@@ -20,6 +20,23 @@ logger = logging.getLogger("app.agent.approval_trace")
 
 _MAX_ITEMS = 80
 
+# The three output item types the OpenAI Responses assembler can emit for ONE tool
+# result, selected by a marker MAF attaches when a hosted `shell_call` is mapped onto
+# a local function name (agent_framework_openai/_chat_client.py:1910-1932).
+#
+# PRP-0147 / UDR-0126 D1: this module previously modelled only `function_call_output`,
+# so every `run_shell` call was reported as CALL-WITHOUT-OUTPUT -- 17 fabricated
+# defects per round, printed ahead of the 50 real ones. A check that models a subset
+# reports the absence of its own coverage as a defect in the subject.
+_CALL_KEYED_OUTPUT_TYPES = ("function_call_output", "shell_call_output")
+
+# `local_shell_call_output` carries the ORIGINATING item's `id` and no `call_id`
+# (_chat_client.py:1927-1932), so it cannot be paired against the `call_id` its
+# `function_call` was serialized with. UDR-0126 D1 requires saying so rather than
+# inferring a key: an item counted here is reported as a labelled NON-DEFECT and
+# never suppresses a real finding.
+_UNPAIRABLE_OUTPUT_TYPES = ("local_shell_call_output",)
+
 # call_id -> function_result Content most recently SEEN ON THE WIRE (PRP-0141
 # multi-iteration follow-up). MAF resumes a deferred call inside the iteration
 # that follows the one that replayed it and produces its result there -- that
@@ -55,14 +72,29 @@ def describe_content(content: Any) -> str:
     return str(ctype)
 
 
+def _truncation_note(total: int) -> list[str]:
+    """A visible marker when a dump was cut at ``_MAX_ITEMS`` (PRP-0147, UDR-0126 D2).
+
+    Volume discipline is correct -- a 934-item dump per model call is unreadable --
+    but silent truncation is not: a reader given 80 of 934 items with no marker
+    cannot tell which of the two numbers a verdict was derived from. The pairing
+    report always scans the FULL list; this line is what says so.
+    """
+    hidden = total - _MAX_ITEMS
+    if hidden <= 0:
+        return []
+    return [f"... +{hidden} more not shown (pairing verdict covers all {total})"]
+
+
 def describe_messages(messages: Any) -> list[str]:
     """One ``role{...}`` entry per MAF Message, contents summarised by type/id."""
+    message_list = list(messages or [])
     out: list[str] = []
-    for message in list(messages or [])[:_MAX_ITEMS]:
+    for message in message_list[:_MAX_ITEMS]:
         role = getattr(message, "role", "?")
         contents = getattr(message, "contents", None) or []
         out.append(f"{role}{{{', '.join(describe_content(c) for c in contents)}}}")
-    return out
+    return [*out, *_truncation_note(len(message_list))]
 
 
 def describe_wire_item(item: Any) -> str:
@@ -89,38 +121,79 @@ def describe_wire_item(item: Any) -> str:
         return f"message[{item.get('role', '?')} parts={n}]"
     if itype == "reasoning":
         return f"reasoning[id={_short(item.get('id'))}]"
+    if itype in _CALL_KEYED_OUTPUT_TYPES or itype in _UNPAIRABLE_OUTPUT_TYPES:
+        # PRP-0147 / UDR-0126 D1. Without this branch these fell to the generic tail
+        # below, which reads `id`; a shell output carries `call_id`, so the dump read
+        # `shell_call_output[id=-]` and erased the linkage from the one line a reader
+        # would use to audit the pairing check itself.
+        return f"{itype}[call_id={_short(item.get('call_id') or item.get('id'))}]"
     return f"{itype}[id={_short(item.get('id'))}]"
 
 
 def describe_wire_input(items: Any) -> list[str]:
     if isinstance(items, str):
         return [f"text[{len(items)} chars]"]
-    return [describe_wire_item(i) for i in list(items or [])[:_MAX_ITEMS]]
+    item_list = list(items or [])
+    described = [describe_wire_item(i) for i in item_list[:_MAX_ITEMS]]
+    return [*described, *_truncation_note(len(item_list))]
 
 
 def wire_pairing_report(items: Any) -> str:
-    """The exact checks the Responses API rejects on, computed locally before the POST."""
+    """The exact checks the Responses API rejects on, computed locally before the POST.
+
+    Always computed over the FULL item list, and -- per UDR-0126 D5 -- over the input
+    as MAF assembled it, BEFORE any repair this codebase applies at the request seam.
+    A repair that erased its own evidence would make an unfixed upstream producer
+    invisible to the next investigation.
+
+    The verdict leads with counts (PRP-0147, UDR-0126 D1): fifty duplicate ids is
+    roughly two kilobytes of log line, and the shape has to be readable in the first
+    characters. The ids follow, because they are the evidence.
+    """
     if not isinstance(items, list):
         return "n/a"
     calls: list[str] = []
     outputs: list[str] = []
     approvals: list[str] = []
+    unpairable = 0
     for item in items:
         if not isinstance(item, dict):
             continue
         t = item.get("type")
         if t == "function_call" and item.get("call_id"):
             calls.append(item["call_id"])
-        elif t == "function_call_output" and item.get("call_id"):
+        elif t in _CALL_KEYED_OUTPUT_TYPES and item.get("call_id"):
             outputs.append(item["call_id"])
+        elif t in _UNPAIRABLE_OUTPUT_TYPES:
+            unpairable += 1
         elif t == "mcp_approval_response":
             approvals.append(str(item.get("approval_request_id")))
+    orphans = [cid for cid in outputs if cid not in calls]
+    bare = [cid for cid in calls if cid not in outputs]
+    duplicates = sorted({c for c in calls if calls.count(c) > 1})
     problems: list[str] = []
-    problems.extend(f"OUTPUT-WITHOUT-CALL {cid}" for cid in outputs if cid not in calls)
-    problems.extend(f"CALL-WITHOUT-OUTPUT {cid}" for cid in calls if cid not in outputs)
-    problems.extend(f"DUPLICATE-CALL {cid}" for cid in sorted({c for c in calls if calls.count(c) > 1}))
+    problems.extend(f"OUTPUT-WITHOUT-CALL {cid}" for cid in orphans)
+    problems.extend(f"CALL-WITHOUT-OUTPUT {cid}" for cid in bare)
+    problems.extend(f"DUPLICATE-CALL {cid}" for cid in duplicates)
     problems.extend(f"MCP-APPROVAL-RESPONSE {aid}" for aid in approvals)
-    return "OK" if not problems else "; ".join(problems)
+    # An unpairable shell output is a LIMIT OF THE CHECK, not a defect in the payload,
+    # so it is counted and named but never makes the verdict non-OK and never
+    # suppresses a real finding (UDR-0126 D1).
+    note = f"{unpairable} unpairable-shell-output" if unpairable else ""
+    if not problems:
+        return f"OK | {note}" if note else "OK"
+    counts = ", ".join(
+        part
+        for part in (
+            f"{len(duplicates)} duplicate-call",
+            f"{len(bare)} call-without-output",
+            f"{len(orphans)} orphan-output",
+            f"{len(approvals)} mcp-approval-response",
+            note,
+        )
+        if part
+    )
+    return f"{counts} | " + "; ".join(problems)
 
 
 def record_wire_function_results(messages: Any) -> None:
