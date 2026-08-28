@@ -166,9 +166,7 @@ def _get_client():
 
     endpoint = config.endpoint if (config is not None and config.endpoint) else settings.azure_openai_endpoint
     api_version = (
-        config.api_version
-        if (config is not None and config.api_version)
-        else models_catalog.DEFAULT_IMAGE_API_VERSION
+        config.api_version if (config is not None and config.api_version) else models_catalog.DEFAULT_IMAGE_API_VERSION
     )
     cred_kwargs = {"api_key": config.api_key} if (config is not None and config.api_key) else get_azure_openai_kwargs()
 
@@ -568,19 +566,19 @@ async def generate_image(
         str | None,
         Field(description=_option_help("size")),
     ] = None,
-    quality: Annotated[
-        str | None, Field(description=_option_help("quality"))
-    ] = None,
-    output_format: Annotated[
-        str | None, Field(description=_option_help("format"))
-    ] = None,
-    background: Annotated[
-        str | None, Field(description=_option_help("background"))
-    ] = None,
+    quality: Annotated[str | None, Field(description=_option_help("quality"))] = None,
+    output_format: Annotated[str | None, Field(description=_option_help("format"))] = None,
+    background: Annotated[str | None, Field(description=_option_help("background"))] = None,
     compression: Annotated[
-        str | None, Field(description="Output compression 0-100 (jpeg only). OMIT THIS unless the user asked for a specific one.")
+        str | None,
+        Field(description="Output compression 0-100 (jpeg only). OMIT THIS unless the user asked for a specific one."),
     ] = None,
-    n: Annotated[int, Field(description="How many images to produce from THIS prompt (1-4). To make several, call ONCE with n set -- do not call the tool repeatedly.")] = 1,
+    n: Annotated[
+        int,
+        Field(
+            description="How many images to produce from THIS prompt (1-4). To make several, call ONCE with n set -- do not call the tool repeatedly."
+        ),
+    ] = 1,
 ) -> str:
     """Generate an image from a text description using AI.
 
@@ -626,17 +624,12 @@ async def edit_image(
             description="Output image size: auto, 1024x1024, 1024x1536, or 1536x1024 (omit to use the user's default)"
         ),
     ] = None,
-    quality: Annotated[
-        str | None, Field(description=_option_help("quality"))
-    ] = None,
-    output_format: Annotated[
-        str | None, Field(description=_option_help("format"))
-    ] = None,
-    background: Annotated[
-        str | None, Field(description=_option_help("background"))
-    ] = None,
+    quality: Annotated[str | None, Field(description=_option_help("quality"))] = None,
+    output_format: Annotated[str | None, Field(description=_option_help("format"))] = None,
+    background: Annotated[str | None, Field(description=_option_help("background"))] = None,
     compression: Annotated[
-        str | None, Field(description="Output compression 0-100 (jpeg only). OMIT THIS unless the user asked for a specific one.")
+        str | None,
+        Field(description="Output compression 0-100 (jpeg only). OMIT THIS unless the user asked for a specific one."),
     ] = None,
     n: Annotated[int, Field(description="Number of edited images to generate (1-4)")] = 1,
 ) -> str:

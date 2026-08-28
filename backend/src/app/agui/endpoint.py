@@ -1372,6 +1372,21 @@ async def _stream_with_reasoning(
             absolute_max_iterations,
             no_progress_limit if no_progress_limit is not None else "-",
         )
+        # PRP-0148 Section 4.3: did this turn START polluted? A harness conversation
+        # keeps its history in a cached MAF session the operator cannot see, and an
+        # aborted earlier run can leave orphaned tool calls in it (RES-0003 F3). An
+        # operator reporting "it failed again" can now say whether the agent began the
+        # turn already carrying debris, instead of that only being deducible from the
+        # request dump after the fact.
+        if harness_run:
+            from app.agent.harness import history_debug as _history_debug
+
+            _history_debug.log_run_start(
+                thread_id=thread_id,
+                harness_id=str(_harness_id or "-"),
+                session=session,
+                cached=True,
+            )
         # Structured output marker (PRP-0082, CTR-0009 v14, UDR-0058 D5). Tell the
         # SPA early that this turn is structured so it renders the answer as a JSON
         # code block. DEMO_MODE resolves no structured shape (DemoChatClient is

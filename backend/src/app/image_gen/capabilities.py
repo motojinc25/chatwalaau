@@ -105,6 +105,7 @@ def validate_option(option: str, value: str) -> str | None:
         return f"{option} must be one of {', '.join(allowed)}; got {value!r}"
     return None
 
+
 # Images API parameter name -> the option key used by the SPA / catalog defaults.
 PARAM_TO_OPTION: dict[str, str] = {
     "size": "size",

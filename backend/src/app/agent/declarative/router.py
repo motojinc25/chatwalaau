@@ -164,7 +164,9 @@ def register_declarative_agents(app: FastAPI, *, agent_registry) -> None:
 
         directory, writable = authoring.authoring_status()
         if is_demo_mode():
-            raise HTTPException(status_code=409, detail={"error": "read_only", "message": "Authoring is disabled in demo mode."})
+            raise HTTPException(
+                status_code=409, detail={"error": "read_only", "message": "Authoring is disabled in demo mode."}
+            )
         if directory is None:
             raise HTTPException(
                 status_code=403,

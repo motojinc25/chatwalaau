@@ -242,9 +242,10 @@ def dedupe_wire_input(run_options: dict[str, Any]) -> int:
       copy sits adjacent to the ``reasoning`` item that produced it, and that adjacency
       is what the API relies on when encrypted reasoning is replayed; keeping the last
       would relocate a call after its own output.
-    * Two items sharing an identity should be byte-identical. If they are not, the
-      discrepancy is logged as a WARNING naming the differing fields -- that pair is not
-      the known duplication and must surface rather than be absorbed.
+    * Two items sharing an identity should be byte-identical. Where they are NOT, the
+      survivor keeps the first occurrence's POSITION and adopts the more AUTHORITATIVE
+      field value (UDR-0126 D7, PRP-0148 C3): D4's "keep the first" governs position,
+      not content. Only a difference with no defined resolution is a WARNING.
 
     Inert and silent on a request with no duplicates. Never raises: a repair at the
     request seam must not become a new way for a turn to fail.
@@ -256,6 +257,7 @@ def dedupe_wire_input(run_options: dict[str, Any]) -> int:
         seen: dict[tuple[str, str], dict[str, Any]] = {}
         kept: list[Any] = []
         removed = 0
+        merged_ids = 0
         for item in items:
             key = _identity(item)
             if key is None:
@@ -268,20 +270,143 @@ def dedupe_wire_input(run_options: dict[str, Any]) -> int:
                 continue
             removed += 1
             if item != first:
-                differing = sorted(k for k in set(first) | set(item) if first.get(k) != item.get(k))
-                logger.warning(
-                    "[wire dedup] %s %s appears twice with DIFFERING fields %s; "
-                    "keeping the first. This is not the known duplication.",
-                    key[0],
-                    key[1],
-                    differing,
-                )
+                merged_ids += _merge_into_first(first, item, key)
+        if merged_ids:
+            # UDR-0126 D7: a known, explained, benign difference with a defined
+            # resolution. Logged at DEBUG with a count rather than as a WARNING per
+            # item -- eight warnings on every harness request would bury the D5
+            # signal beside them, and a warning that fires every time is one that
+            # stops being read (RES-0002 F0 is what that costs).
+            logger.debug("[wire dedup] adopted %d provider-issued item id(s) from duplicates", merged_ids)
         if removed:
             run_options["input"] = kept
         return removed
     except Exception:  # a repair must never break the request
         logger.exception("[wire dedup] failed; sending the input unchanged")
         return 0
+
+
+def _is_synthesized_fc_id(item: dict[str, Any]) -> bool:
+    """True when a ``function_call``'s ``id`` is the ``fc_<call_id>`` fallback.
+
+    The serializer prefers the provider's own item id when the content still carries
+    it, and falls back to synthesizing one otherwise
+    (``agent_framework_openai/_chat_client.py:1887-1899``):
+
+        fc_id = content.additional_properties.get("fc_id") or content.call_id
+        if not fc_id.startswith("fc_"):
+            fc_id = f"fc_{fc_id}"
+
+    So a copy that round-tripped through the history store (losing
+    ``additional_properties``) is recognisable by construction. RES-0003 F4: keeping
+    whichever copy came first discarded the id upstream deliberately prefers.
+    """
+    call_id = item.get("call_id")
+    item_id = item.get("id")
+    return isinstance(call_id, str) and isinstance(item_id, str) and item_id == f"fc_{call_id}"
+
+
+def _merge_into_first(first: dict[str, Any], other: dict[str, Any], key: tuple[str, str]) -> int:
+    """Adopt authoritative values from a dropped duplicate. Returns ids adopted.
+
+    UDR-0126 D7. Mutates ``first`` in place -- it is already in the kept list, so the
+    survivor keeps its POSITION while gaining the better content.
+    """
+    differing = sorted(k for k in set(first) | set(other) if first.get(k) != other.get(k))
+    adopted = 0
+    if differing == ["id"] and key[0] == "function_call":
+        # The one difference with a defined resolution: a provider-issued item id
+        # beats the locally synthesized fallback, regardless of which came first.
+        if _is_synthesized_fc_id(first) and not _is_synthesized_fc_id(other):
+            first["id"] = other["id"]
+            adopted = 1
+        return adopted
+    # WARNING is reserved for differences that remain UNEXPLAINED. Such a pair is not
+    # the known duplication and must surface rather than be absorbed.
+    logger.warning(
+        "[wire dedup] %s %s appears twice with DIFFERING fields %s; keeping the first. "
+        "This is not the known duplication.",
+        key[0],
+        key[1],
+        differing,
+    )
+    return adopted
+
+
+# ---------------------------------------------------------------------------
+# Pairing validity of the request input (PRP-0148 C2, UDR-0126 D6)
+# ---------------------------------------------------------------------------
+#
+# Identity uniqueness and pairing validity are DIFFERENT properties and the provider
+# rejects on both. A `function_call` with no matching output fails the whole request:
+#
+#   400 'No tool output found for function call call_E1izDLYx26D2x7hhyJJHVKtj.'
+#
+# In the reported incident (RES-0003) the seam had already computed that exact id and
+# printed it in the pairing verdict, and sent the request anyway.
+
+# Items that ANSWER a call, keyed by the field carrying the call's id.
+_ANSWER_BY_CALL_ID = ("function_call_output", "shell_call_output")
+# An approval-gated call is answered by an approval item, NOT by an output. These two
+# clauses are load-bearing: dropping a gated call would break FEAT-0028 for every
+# gated tool (PRP-0148 Section 2.2).
+_ANSWER_APPROVAL_BY_ID = ("mcp_approval_request",)
+_ANSWER_APPROVAL_BY_REQUEST_ID = ("mcp_approval_response",)
+# Carries the originating item's `id` and no `call_id`, so it cannot be matched to a
+# call. Its presence makes the request UNDECIDABLE (PRP-0148 Section 2.3).
+_UNDECIDABLE = ("local_shell_call_output",)
+
+
+def pairing_undecidable(items: Any) -> bool:
+    """True when the request contains an item that makes pairing unmatchable.
+
+    UDR-0126 D1's "say what you cannot check" binds the repair, not only the
+    diagnostic: where this is True the orphan analysis MUST be skipped for the whole
+    request rather than guessing at a key.
+    """
+    if not isinstance(items, list):
+        return False
+    return any(isinstance(i, dict) and i.get("type") in _UNDECIDABLE for i in items)
+
+
+def unanswered_calls(items: Any) -> list[tuple[str, str]]:
+    """``(call_id, tool_name)`` for every ``function_call`` nothing in the request answers.
+
+    Answered means ANY of: a ``function_call_output`` / ``shell_call_output`` with the
+    same ``call_id``; an ``mcp_approval_request`` whose ``id`` is the call id; or an
+    ``mcp_approval_response`` whose ``approval_request_id`` is the call id.
+
+    Returns an empty list when the request is undecidable (see ``pairing_undecidable``)
+    so a caller cannot act on a partial answer. Never raises.
+    """
+    try:
+        if not isinstance(items, list) or pairing_undecidable(items):
+            return []
+        answered: set[str] = set()
+        calls: list[tuple[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type")
+            if itype == "function_call" and isinstance(item.get("call_id"), str):
+                calls.append((item["call_id"], str(item.get("name") or "?")))
+            elif itype in _ANSWER_BY_CALL_ID and isinstance(item.get("call_id"), str):
+                answered.add(item["call_id"])
+            elif itype in _ANSWER_APPROVAL_BY_ID and isinstance(item.get("id"), str):
+                answered.add(item["id"])
+            elif itype in _ANSWER_APPROVAL_BY_REQUEST_ID and isinstance(item.get("approval_request_id"), str):
+                answered.add(item["approval_request_id"])
+        seen: set[str] = set()
+        orphans: list[tuple[str, str]] = []
+        for call_id, name in calls:
+            if call_id in answered or call_id in seen:
+                continue
+            seen.add(call_id)
+            orphans.append((call_id, name))
+        return orphans
+    except Exception:  # analysis must never break the request
+        logger.exception("[wire pairing] failed to analyse call pairing")
+        return []
 
 
 def summarize_removed(before: list[Any], after: list[Any]) -> str:

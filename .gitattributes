@@ -1,0 +1,51 @@
+# ChatWala'au line-ending policy
+# ============================================================
+# Scoped to this directory: the git repository root is the PARENT
+# (C:\Apps\DevOps.WeDXcc), which holds unrelated sibling projects. A
+# .gitattributes here applies to ChatWalaau/ and below, and to nothing else.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The project already declares LF in two places:
+#
+#   .editorconfig       end_of_line = lf     (for every file)
+#   frontend/biome.jsonc "lineEnding": "lf"   (enforced by `pnpm run check`)
+#
+# Neither is visible to git. On a Windows checkout with core.autocrlf=true
+# (the Git for Windows default) git rewrites LF to CRLF on the way out, so a
+# freshly cloned tree violates a rule the repository itself sets. The result
+# was `pnpm run check` reporting 60 formatter errors against files that are
+# byte-perfect in the repository -- the working copy was wrong, not the code.
+#
+# Declaring the policy here makes git honour what the project already says,
+# for every contributor, on every platform, regardless of their local
+# core.autocrlf setting. Nothing about file CONTENT changes: the blobs stored
+# in git have always been LF.
+
+# Default: treat as text, normalise to LF in the repository AND in the
+# working tree. `text eol=lf` is deliberate over `text=auto` -- the latter
+# still defers the working-tree ending to core.autocrlf on some git versions.
+* text eol=lf
+
+# ---- Binary: never touched, never diffed as text ----
+*.png   binary
+*.ico   binary
+*.svg   text eol=lf
+*.pdf   binary
+*.mp3   binary
+*.exe   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+
+# ---- Lockfiles: text, but noisy as diffs ----
+pnpm-lock.yaml  text eol=lf -diff
+uv.lock         text eol=lf -diff
+
+# ---- Windows-only scripts, if any are ever added ----
+# .bat / .cmd need CRLF; none are tracked today, but declaring it now means a
+# future one cannot be silently broken by the LF default above.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

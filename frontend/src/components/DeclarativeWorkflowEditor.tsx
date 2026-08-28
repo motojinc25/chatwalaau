@@ -1045,10 +1045,14 @@ function CsvInput({
       .filter(Boolean)
   const [text, setText] = useState(() => value.join(', '))
   // Re-seed only when the incoming list differs from what the current text parses to.
+  // `text` and `parse` are read but deliberately NOT dependencies: depending on them
+  // would re-run this on every keystroke and fight the user's typing. The suppression
+  // must sit directly above the hook -- placed inside the callback it is inert, which
+  // is how the rule went unsuppressed.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-seed on external change only
   useEffect(() => {
     const mine = parse(text)
     if (mine.length !== value.length || mine.some((v, i) => v !== value[i])) setText(value.join(', '))
-    // biome-ignore lint/correctness/useExhaustiveDependencies: re-seed on external change only
   }, [value])
   return (
     <input

@@ -726,6 +726,34 @@ class TruncateRequest(BaseModel):
     delete_from: int
 
 
+async def _reset_harness_conversation(thread_id: str, *, reason: str) -> None:
+    """Discard the conversation's cached harness runtime session (UDR-0119 D11).
+
+    A harness agent's history, todo list and mode live in a per-conversation MAF
+    session cached in-process -- state the operator cannot see. Rewriting the
+    session FILE leaves it untouched, so a rewound conversation kept the debris of
+    every earlier run: RES-0003 recorded a conversation truncated to zero messages
+    whose next request still carried eight orphaned tool calls from two runs that
+    had already died, and was rejected because of them.
+
+    Best-effort by design. A cleanup failure must never fail the user's edit, and a
+    non-harness conversation simply has nothing cached (drops 0).
+    """
+    try:
+        from app.agent.harness.runtime import drop_thread
+
+        dropped = await drop_thread(thread_id, reason=reason)
+        if dropped:
+            logger.info(
+                "Reset %d harness conversation(s) for session %s (reason=%s)",
+                dropped,
+                thread_id,
+                reason,
+            )
+    except Exception:  # never fail the caller's operation
+        logger.exception("Failed to reset harness conversation for session %s", thread_id)
+
+
 @router.post("/{thread_id}/truncate", dependencies=[Depends(verify_api_key)])
 async def truncate_session(thread_id: str, body: TruncateRequest) -> dict[str, Any]:
     """Truncate session messages from a given index onward.
@@ -743,6 +771,12 @@ async def truncate_session(thread_id: str, body: TruncateRequest) -> dict[str, A
         data["updated_at"] = datetime.now(UTC).isoformat()
         _write_session_or_500(thread_id, data)
         logger.info("Truncated session %s from index %d", thread_id, body.delete_from)
+
+    # UDR-0119 D11: the visible conversation was rewound, so the invisible one must
+    # agree. Unconditional -- a truncate request that changed nothing still means the
+    # operator asked to rewind, and the stored messages are not index-aligned with the
+    # visible ones, so there is no partial correspondence to preserve.
+    await _reset_harness_conversation(thread_id, reason="truncate")
 
     return {"status": "truncated", "thread_id": thread_id, "message_count": data.get("message_count", 0)}
 
@@ -763,6 +797,9 @@ async def delete_message(thread_id: str, index: int) -> dict[str, Any]:
     data["updated_at"] = datetime.now(UTC).isoformat()
     _write_session_or_500(thread_id, data)
     logger.info("Deleted message at index %d from session %s", index, thread_id)
+
+    # UDR-0119 D11 -- same divergence as truncate.
+    await _reset_harness_conversation(thread_id, reason="message_deleted")
 
     return {"status": "deleted", "thread_id": thread_id, "message_count": len(messages)}
 
@@ -1057,6 +1094,11 @@ async def delete_session(thread_id: str) -> dict[str, str]:
             await approval_store.clear_session(thread_id)
         except Exception:
             logger.debug("approval_store.clear_session failed", exc_info=True)
+
+        # UDR-0119 D11: the conversation is gone, so holding its harness agent state
+        # is a leak -- today a deleted conversation kept a live runtime (and its shell
+        # process) until LRU evicted it 32 conversations later.
+        await _reset_harness_conversation(thread_id, reason="session_deleted")
 
         logger.info("Deleted session: %s", thread_id)
         return {"status": "deleted", "thread_id": thread_id}

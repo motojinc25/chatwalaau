@@ -138,6 +138,18 @@ def describe_wire_input(items: Any) -> list[str]:
     return [*described, *_truncation_note(len(item_list))]
 
 
+def describe_wire_input_full(items: Any) -> list[str]:
+    """Every item, no ``_MAX_ITEMS`` cap (PRP-0148 Section 4.4).
+
+    Used only when the post-repair verdict says the request is going to be rejected.
+    That is the one moment the 80-item cap costs more than it saves, and it is rare
+    by construction: a request that is about to fail anyway.
+    """
+    if isinstance(items, str):
+        return [f"text[{len(items)} chars]"]
+    return [describe_wire_item(i) for i in list(items or [])]
+
+
 def wire_pairing_report(items: Any) -> str:
     """The exact checks the Responses API rejects on, computed locally before the POST.
 

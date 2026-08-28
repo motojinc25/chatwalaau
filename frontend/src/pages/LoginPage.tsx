@@ -193,7 +193,10 @@ export function LoginPage() {
               </button>
             </div>
             {capsLockOn && (
-              <p id="login-capslock" className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-500" role="alert">
+              <p
+                id="login-capslock"
+                className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-500"
+                role="alert">
                 Caps Lock is on.
               </p>
             )}

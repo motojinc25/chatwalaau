@@ -370,8 +370,7 @@ def _classify_upload_entry(basename: str, payload: bytes) -> tuple[bool, str | N
     max_size = max_upload_size_bytes(content_type)
     if max_size is not None and len(payload) > max_size:
         return False, (
-            f"Skipped an oversized attachment '{basename}'; it may not display "
-            "correctly in the imported chat."
+            f"Skipped an oversized attachment '{basename}'; it may not display correctly in the imported chat."
         )
     return True, None
 

@@ -39,16 +39,7 @@ const STORAGE_PREFIX = 'chatwalaau-image-'
 // v0.117.6: 2K / 4K sizes were missing entirely, so they could not be chosen.
 // Mirrors app/image_gen/capabilities.py OPTION_VALUES -- the backend validates
 // against the same surface, so the two must not drift.
-const SIZE_CHOICES = [
-  'auto',
-  '1024x1024',
-  '1536x1024',
-  '1024x1536',
-  '2048x2048',
-  '2048x1152',
-  '3840x2160',
-  '2160x3840',
-]
+const SIZE_CHOICES = ['auto', '1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '3840x2160', '2160x3840']
 const QUALITY_CHOICES = ['auto', 'low', 'medium', 'high']
 const FORMAT_CHOICES = ['png', 'jpeg']
 const BACKGROUND_CHOICES = ['auto', 'opaque']

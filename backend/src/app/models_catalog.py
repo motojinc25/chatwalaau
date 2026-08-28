@@ -180,6 +180,7 @@ DEFAULT_CONTEXT_WINDOW = 128000
 DEFAULT_IMAGE_API_VERSION = "preview"
 DEFAULT_EMBEDDING_API_VERSION = "2024-10-21"
 
+
 # Allowed values for the image offering's optional ``image_defaults`` block
 # (PRP-0114, UDR-0095 D3). Values are the operator DEFAULTS -- the per-session
 # ``state.image_options`` and an explicit LLM tool argument still override them.
@@ -193,6 +194,8 @@ def _image_default_enums() -> dict[str, frozenset[str]]:
     from app.image_gen.capabilities import OPTION_VALUES
 
     return {option: frozenset(values) for option, values in OPTION_VALUES.items()}
+
+
 _IMAGE_DEFAULT_KEYS = frozenset({"size", "quality", "format", "background", "compression"})
 
 # Keys that would embed a raw secret in the catalog file; rejected at load so

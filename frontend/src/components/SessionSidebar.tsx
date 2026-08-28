@@ -61,8 +61,8 @@ import {
   useState,
 } from 'react'
 import { AboutDialog } from '@/components/AboutDialog'
-import { DeclarativeAgentManagerTrigger } from '@/components/DeclarativeAgentManager'
 import { AppSettingsManager } from '@/components/AppSettingsManager'
+import { DeclarativeAgentManagerTrigger } from '@/components/DeclarativeAgentManager'
 import { PermissionsDisabledBanner } from '@/components/PermissionsDisabledBanner'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
 import {
@@ -489,8 +489,7 @@ const SessionRow = memo(function SessionRow({
               Temporary chats never reach this menu (they are not listed at all,
               CTR-0106), so no temp_ guard is needed here.
             */}
-            <DropdownMenuItem
-              onClick={() => window.open(`/chat?session=${session.thread_id}`, '_blank', 'noopener')}>
+            <DropdownMenuItem onClick={() => window.open(`/chat?session=${session.thread_id}`, '_blank', 'noopener')}>
               <ExternalLink className="mr-2 h-3.5 w-3.5" />
               Open in new tab
             </DropdownMenuItem>
@@ -799,6 +798,7 @@ function FolderGroup({
             // flight (UDR-0091 D4 loads a folder lazily). Show skeletons, not the
             // "empty folder" message, which would be a lie for a moment.
             Array.from({ length: Math.min(folder.session_count, 3) }, (_, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: identical stateless placeholders with no identity to key on
               <SessionRowSkeleton key={`skeleton-${folder.id}-${i}`} />
             ))
           ) : (

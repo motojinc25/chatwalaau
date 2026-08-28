@@ -14,7 +14,7 @@ from typing import Any
 from agent_framework_openai import OpenAIChatClient
 
 from app import models_catalog
-from app.agent.approval_debug import log_wire_request
+from app.agent.approval_debug import describe_wire_input_full, log_wire_request, wire_pairing_report
 from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
 from app.providers.base import hosted_tool_withheld
@@ -23,9 +23,11 @@ from app.providers.structured import (
     STRUCTURED_OUTPUT_NAME,
     dedupe_wire_input,
     effective_schema,
+    pairing_undecidable,
     strip_skill_tools,
     strip_web_search,
     summarize_removed,
+    unanswered_calls,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,7 @@ class _StructuredOutputMixin:
                 removed,
                 summarize_removed(before_items, after if isinstance(after, list) else []),
             )
+        _report_pairing(run_options)
         return run_options
 
     def _get_conversation_id(self, response: Any, store: Any) -> str | None:
@@ -124,6 +127,50 @@ class _StructuredOutputMixin:
         if store is not True:
             return None
         return super()._get_conversation_id(response, store)  # type: ignore[misc]
+
+
+def _report_pairing(run_options: dict[str, Any]) -> None:
+    """Post-repair self-verification (PRP-0148 Section 4.4, UDR-0126 D6).
+
+    The seam has printed the PRE-repair verdict (UDR-0126 D5) and applied its
+    repairs. It now checks its own work, so the next provider rejection on this path
+    arrives PRE-EXPLAINED, one line above the traceback, instead of being deduced
+    afterwards from a log that already contained the answer (RES-0003 Finding B).
+
+    C2 (removing unanswered calls) runs in REPORT-ONLY mode. PRP-0148 Section 6.4
+    makes an approval-gated wire trace a release GATE for the removal, because a
+    wrong orphan rule breaks FEAT-0028 for every gated tool. Reporting collects that
+    evidence from real traffic at zero risk; enabling the removal is then one change
+    at this call site, taken on measured data rather than on reasoning about a seam
+    that has already produced two wrong fixes.
+    """
+    try:
+        items = run_options.get("input")
+        if not isinstance(items, list):
+            return
+        verdict = wire_pairing_report(items)
+        if pairing_undecidable(items):
+            # UDR-0126 D6: refuse to judge rather than guess at a key.
+            logger.warning(
+                "[wire] post-repair: NOT CHECKED -- the request contains an item with no "
+                "matchable call id (local_shell_call_output); pairing is undecidable"
+            )
+            return
+        orphans = unanswered_calls(items)
+        if not orphans:
+            logger.info("[wire] post-repair: %s", verdict)
+            return
+        logger.error(
+            "[wire] POST-REPAIR VERDICT NOT OK -- this request is expected to be rejected: "
+            "%d unanswered call(s): %s\n  would remove (REPORT ONLY, PRP-0148 6.4 gate): %s\n"
+            "  full structural dump (ids and shapes only, untruncated):\n  %s",
+            len(orphans),
+            verdict,
+            "; ".join(f"{cid}:{name}" for cid, name in orphans),
+            " | ".join(describe_wire_input_full(items)),
+        )
+    except Exception:  # self-verification must never break the request
+        logger.exception("[wire] post-repair verification failed")
 
 
 _structured_client_cls: type | None = None

@@ -374,6 +374,12 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         max_context_window_tokens=max_window,
         max_output_tokens=max_output,
         # history_provider omitted => MAF-internal InMemoryHistoryProvider (D4).
+        # PRP-0148 Section 4.1 needs to TRACE that provider's loads, and does it by
+        # attaching an observer to MAF's own instance after construction
+        # (`history_debug.attach_history_tracing`, called from the runtime cache)
+        # rather than by passing one in: UDR-0119 D4's "parameter omitted" is pinned
+        # by PRP-0135 / PRP-0144 invariants, and observability must not require
+        # relaxing a shipped decision.
         disable_compaction=spec.compaction_disabled,
         disable_todo=spec.todo_disabled,
         disable_mode=spec.mode_disabled,
