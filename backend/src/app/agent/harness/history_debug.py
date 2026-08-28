@@ -32,13 +32,24 @@ _FAMILY_PREFIX = 16
 class HistorySnapshot:
     """Counts describing one harness history store. All fields are best-effort."""
 
-    __slots__ = ("families", "messages", "mode", "oldest_family", "orphan_calls", "todos")
+    __slots__ = (
+        "ambiguous_calls",
+        "families",
+        "messages",
+        "mode",
+        "oldest_family",
+        "orphan_calls",
+        "orphan_results",
+        "todos",
+    )
 
     def __init__(
         self,
         *,
         messages: int = 0,
         orphan_calls: int = 0,
+        orphan_results: int = 0,
+        ambiguous_calls: int = 0,
         families: int = 0,
         oldest_family: str = "-",
         todos: int = 0,
@@ -46,6 +57,8 @@ class HistorySnapshot:
     ) -> None:
         self.messages = messages
         self.orphan_calls = orphan_calls
+        self.orphan_results = orphan_results
+        self.ambiguous_calls = ambiguous_calls
         self.families = families
         self.oldest_family = oldest_family
         self.todos = todos
@@ -54,6 +67,7 @@ class HistorySnapshot:
     def __str__(self) -> str:
         return (
             f"stored_messages={self.messages} orphan_calls={self.orphan_calls} "
+            f"orphan_results={self.orphan_results} ambiguous_calls={self.ambiguous_calls} "
             f"families={self.families} oldest={self.oldest_family} "
             f"todos={self.todos} mode={self.mode}"
         )
@@ -92,6 +106,55 @@ def count_orphan_calls(messages: Any) -> int:
         return -1
 
 
+def count_orphan_results(messages: Any) -> int:
+    """``function_result`` contents whose ``function_call`` is not in ``messages``.
+
+    The mirror of ``count_orphan_calls``, and the one this lane actually failed on
+    (PRP-0149 Finding B): compaction collapsed the group holding a declaration and
+    kept the group holding its result, so the request carried an output with no call
+    and the provider rejected it. Measured here, one layer above the request, because
+    a property a consumer requires must be measured where it is produced (UDR-0127 D3).
+    """
+    try:
+        called: set[str] = set()
+        answered: set[str] = set()
+        for content in _iter_contents(messages):
+            ctype = getattr(content, "type", None)
+            call_id = getattr(content, "call_id", None)
+            if ctype == "function_call" and call_id:
+                called.add(call_id)
+            elif ctype == "function_result" and call_id:
+                answered.add(call_id)
+        return len(answered - called)
+    except Exception:  # a counter must never break a run
+        logger.exception("[history] failed to count orphan results")
+        return -1
+
+
+def count_ambiguous_calls(messages: Any) -> int:
+    """``call_id``s declared by more than one ``function_call`` content.
+
+    THE precondition of the PRP-0149 failure. MAF's compaction refuses to link a
+    result to a declaration whose ``call_id`` has more than one unmatched occurrence
+    (``_compaction.py:105-122``), so a non-zero count here means the store is in the
+    state that makes compaction split a call/result family. After the C1 normaliser
+    this MUST be 0; a non-zero value afterwards is a regression signal rather than a
+    mystery (UDR-0127 D3).
+    """
+    try:
+        counts: dict[str, int] = {}
+        for content in _iter_contents(messages):
+            if getattr(content, "type", None) != "function_call":
+                continue
+            call_id = getattr(content, "call_id", None)
+            if call_id:
+                counts[call_id] = counts.get(call_id, 0) + 1
+        return sum(1 for total in counts.values() if total > 1)
+    except Exception:  # a counter must never break a run
+        logger.exception("[history] failed to count ambiguous calls")
+        return -1
+
+
 def reasoning_families(messages: Any) -> list[str]:
     """Distinct response families present, oldest first (RES-0003 F2 technique)."""
     try:
@@ -121,6 +184,8 @@ def snapshot(session: Any) -> HistorySnapshot:
         messages = (state.get(InMemoryHistoryProvider.DEFAULT_SOURCE_ID) or {}).get("messages") or []
         snap.messages = len(messages)
         snap.orphan_calls = count_orphan_calls(messages)
+        snap.orphan_results = count_orphan_results(messages)
+        snap.ambiguous_calls = count_ambiguous_calls(messages)
         families = reasoning_families(messages)
         snap.families = len(families)
         snap.oldest_family = families[0] if families else "-"
@@ -204,12 +269,15 @@ def attach_history_tracing(agent: Any, *, thread_id: str) -> bool:
                     stored = len(state.get("messages", [])) if isinstance(state, dict) else -1
                     families = reasoning_families(messages)
                     logger.info(
-                        "[history] thread=%s source=%s stored=%d loaded=%d orphan_calls=%d families=%d oldest=%s",
+                        "[history] thread=%s source=%s stored=%d loaded=%d orphan_calls=%d "
+                        "orphan_results=%d ambiguous_calls=%d families=%d oldest=%s",
                         thread_id,
                         _source_id,
                         stored,
                         len(messages),
                         count_orphan_calls(messages),
+                        count_orphan_results(messages),
+                        count_ambiguous_calls(messages),
                         len(families),
                         families[0] if families else "-",
                     )
@@ -225,10 +293,77 @@ def attach_history_tracing(agent: Any, *, thread_id: str) -> bool:
     return False
 
 
+def attach_compaction_tracing(agent: Any, *, thread_id: str) -> bool:
+    """Make the in-run compaction say what it did (PRP-0149 C4, UDR-0127 D3).
+
+    The harness wires its BEFORE strategy as the agent's ``compaction_strategy`` chat
+    option, so it runs per model call, inside the client
+    (``agent_framework/_harness/_agent.py:99-107``). That is the pass which took the
+    reported turn from 268 messages to 116 between two model calls -- and it logged
+    nothing at all, so the collapse had to be reconstructed by reading framework
+    source. One line per firing closes that.
+
+    ``split_families`` is the number that matters: results left with no declaration
+    among the messages compaction KEPT. It is the defect the request seam then
+    rejects, measured where it is created rather than where it fails.
+
+    Wraps the callable the framework built; idempotent and best-effort.
+    """
+    try:
+        strategy = getattr(agent, "compaction_strategy", None)
+        if strategy is None or getattr(strategy, "_chatwalaau_traced", False):
+            return strategy is not None
+
+        async def traced(messages: Any, _inner: Any = strategy) -> Any:
+            before_total = len(messages or [])
+            before_included = _count_included(messages)
+            changed = await _inner(messages)
+            try:
+                after_total = len(messages or [])
+                included = _included(messages)
+                logger.info(
+                    "[harness compaction] thread=%s fired=%s messages=%d->%d included=%d->%d "
+                    "summaries=+%d split_families=%d",
+                    thread_id,
+                    bool(changed),
+                    before_total,
+                    after_total,
+                    before_included,
+                    len(included),
+                    max(after_total - before_total, 0),
+                    count_orphan_results(included),
+                )
+            except Exception:  # tracing must never break a compaction pass
+                logger.exception("[harness compaction] failed to describe a compaction pass")
+            return changed
+
+        traced._chatwalaau_traced = True  # type: ignore[attr-defined]
+        agent.compaction_strategy = traced
+        return True
+    except Exception:  # attaching must never break agent construction
+        logger.exception("[harness compaction] failed to attach compaction tracing")
+    return False
+
+
+def _included(messages: Any) -> list[Any]:
+    """The messages compaction has NOT excluded (``_excluded`` is MAF's own marker)."""
+    return [m for m in messages or [] if not (getattr(m, "additional_properties", None) or {}).get("_excluded", False)]
+
+
+def _count_included(messages: Any) -> int:
+    try:
+        return len(_included(messages))
+    except Exception:
+        return -1
+
+
 __all__ = [
     "HistorySnapshot",
+    "attach_compaction_tracing",
     "attach_history_tracing",
+    "count_ambiguous_calls",
     "count_orphan_calls",
+    "count_orphan_results",
     "log_run_start",
     "reasoning_families",
     "snapshot",

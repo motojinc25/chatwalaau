@@ -22,7 +22,9 @@ from app.providers.structured import (
     GENERIC_OBJECT_SCHEMA,
     STRUCTURED_OUTPUT_NAME,
     dedupe_wire_input,
+    drop_orphan_outputs,
     effective_schema,
+    orphan_outputs,
     pairing_undecidable,
     strip_skill_tools,
     strip_web_search,
@@ -96,6 +98,13 @@ class _StructuredOutputMixin:
                 removed,
                 summarize_removed(before_items, after if isinstance(after, list) else []),
             )
+        # Pairing is SYMMETRIC (PRP-0149 C2, UDR-0126 D8). An output whose call is not
+        # in the same request is a guaranteed 400 -- and, unlike an unanswered CALL, it
+        # carries no FEAT-0028 risk, because no approval item is ever expressed as a
+        # bare output. So this direction is REMOVED, not merely reported.
+        orphaned = drop_orphan_outputs(run_options)
+        if orphaned:
+            logger.info("[wire pairing] removed %d orphan output item(s) with no matching call", orphaned)
         _report_pairing(run_options)
         return run_options
 
@@ -130,19 +139,25 @@ class _StructuredOutputMixin:
 
 
 def _report_pairing(run_options: dict[str, Any]) -> None:
-    """Post-repair self-verification (PRP-0148 Section 4.4, UDR-0126 D6).
+    """Post-repair self-verification, BOTH directions (PRP-0149 C3, UDR-0126 D6/D8).
 
     The seam has printed the PRE-repair verdict (UDR-0126 D5) and applied its
     repairs. It now checks its own work, so the next provider rejection on this path
     arrives PRE-EXPLAINED, one line above the traceback, instead of being deduced
     afterwards from a log that already contained the answer (RES-0003 Finding B).
 
-    C2 (removing unanswered calls) runs in REPORT-ONLY mode. PRP-0148 Section 6.4
-    makes an approval-gated wire trace a release GATE for the removal, because a
-    wrong orphan rule breaks FEAT-0028 for every gated tool. Reporting collects that
-    evidence from real traffic at zero risk; enabling the removal is then one change
-    at this call site, taken on measured data rather than on reasoning about a seam
-    that has already produced two wrong fixes.
+    Removing unanswered CALLS runs in REPORT-ONLY mode. PRP-0148 Section 6.4 makes an
+    approval-gated wire trace a release GATE for that removal, because a wrong orphan
+    rule breaks FEAT-0028 for every gated tool. Reporting collects that evidence from
+    real traffic at zero risk; enabling the removal is then one change at this call
+    site, taken on measured data rather than on reasoning about a seam that has already
+    produced two wrong fixes.
+
+    The OUTPUT direction is different and is judged the same way here (UDR-0126 D8).
+    Before PRP-0149 this function judged on ``unanswered_calls()`` alone, so a request
+    carrying two outputs with no call -- ids the verdict string had already named --
+    was logged as ``post-repair: ...`` at INFO and posted, and the provider rejected
+    it one line later. A check that verifies one direction has not verified pairing.
     """
     try:
         items = run_options.get("input")
@@ -156,17 +171,29 @@ def _report_pairing(run_options: dict[str, Any]) -> None:
                 "matchable call id (local_shell_call_output); pairing is undecidable"
             )
             return
-        orphans = unanswered_calls(items)
-        if not orphans:
+        bare_calls = unanswered_calls(items)
+        stray_outputs = orphan_outputs(items)
+        if not bare_calls and not stray_outputs:
             logger.info("[wire] post-repair: %s", verdict)
             return
+        defects: list[str] = []
+        if bare_calls:
+            defects.append(
+                f"{len(bare_calls)} unanswered call(s) "
+                f"[REPORT ONLY, PRP-0148 6.4 gate]: " + "; ".join(f"{cid}:{name}" for cid, name in bare_calls)
+            )
+        if stray_outputs:
+            # C2 removes these, so reaching here means a shape the removal did not
+            # recognise. That must be loud, not absorbed.
+            defects.append(
+                f"{len(stray_outputs)} orphan output(s) SURVIVED the C2 removal: "
+                + "; ".join(f"{cid}:{itype}" for cid, itype in stray_outputs)
+            )
         logger.error(
-            "[wire] POST-REPAIR VERDICT NOT OK -- this request is expected to be rejected: "
-            "%d unanswered call(s): %s\n  would remove (REPORT ONLY, PRP-0148 6.4 gate): %s\n"
-            "  full structural dump (ids and shapes only, untruncated):\n  %s",
-            len(orphans),
+            "[wire] POST-REPAIR VERDICT NOT OK -- this request is expected to be rejected: %s\n"
+            "  %s\n  full structural dump (ids and shapes only, untruncated):\n  %s",
             verdict,
-            "; ".join(f"{cid}:{name}" for cid, name in orphans),
+            "\n  ".join(defects),
             " | ".join(describe_wire_input_full(items)),
         )
     except Exception:  # self-verification must never break the request

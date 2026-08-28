@@ -409,6 +409,84 @@ def unanswered_calls(items: Any) -> list[tuple[str, str]]:
         return []
 
 
+def orphan_outputs(items: Any) -> list[tuple[str, str]]:
+    """``(call_id, item_type)`` for every output item nothing in the request declares.
+
+    The MIRROR of ``unanswered_calls`` (PRP-0149 C2, UDR-0126 D8). The provider rejects
+    on both directions and phrases each differently:
+
+        400 'No tool output found for function call call_...'      <- unanswered call
+        400 'No tool call found for shell call output ... call_...' <- orphan output
+
+    An output is orphaned when no ``function_call`` in the SAME request carries its
+    ``call_id``. Approval items are irrelevant here: an approval answers a CALL and is
+    never expressed as a bare output, which is why this direction carries none of the
+    FEAT-0028 risk that keeps ``unanswered_calls`` removal gated.
+
+    Returns an empty list when the request is undecidable (``pairing_undecidable``).
+    Never raises.
+    """
+    try:
+        if not isinstance(items, list) or pairing_undecidable(items):
+            return []
+        declared: set[str] = set()
+        outputs: list[tuple[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type")
+            if itype == "function_call" and isinstance(item.get("call_id"), str):
+                declared.add(item["call_id"])
+            elif itype in _ANSWER_BY_CALL_ID and isinstance(item.get("call_id"), str):
+                outputs.append((item["call_id"], str(itype)))
+        seen: set[str] = set()
+        orphans: list[tuple[str, str]] = []
+        for call_id, itype in outputs:
+            if call_id in declared or call_id in seen:
+                continue
+            seen.add(call_id)
+            orphans.append((call_id, itype))
+        return orphans
+    except Exception:  # analysis must never break the request
+        logger.exception("[wire pairing] failed to analyse orphan outputs")
+        return []
+
+
+def drop_orphan_outputs(run_options: dict[str, Any]) -> int:
+    """Remove outputs whose call is absent; return the number removed (UDR-0126 D8).
+
+    Unlike the unanswered-CALL removal -- still REPORT ONLY behind the PRP-0148
+    Section 6.4 gate, because an approval item can be a gated call's only answer --
+    this direction ships active. Removing an orphan output can do exactly one thing:
+    convert a request the provider is CERTAIN to reject into one it can serve.
+
+    Inert and silent on a valid request. Skipped entirely where pairing is undecidable
+    (UDR-0126 D1). Never raises: a repair at the request seam must not become a new way
+    for a turn to fail.
+    """
+    try:
+        items = run_options.get("input")
+        if not isinstance(items, list):
+            return 0
+        orphans = {call_id for call_id, _ in orphan_outputs(items)}
+        if not orphans:
+            return 0
+        kept = [
+            item
+            for item in items
+            if not (
+                isinstance(item, dict) and item.get("type") in _ANSWER_BY_CALL_ID and item.get("call_id") in orphans
+            )
+        ]
+        removed = len(items) - len(kept)
+        if removed:
+            run_options["input"] = kept
+        return removed
+    except Exception:  # a repair must never break the request
+        logger.exception("[wire pairing] failed to drop orphan outputs; sending the input unchanged")
+        return 0
+
+
 def summarize_removed(before: list[Any], after: list[Any]) -> str:
     """``50 function_call, 3 reasoning`` -- what the dedup pass removed, by type."""
     counts: dict[str, int] = {}

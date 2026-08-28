@@ -18,7 +18,7 @@ from collections import OrderedDict
 import logging
 from typing import Any
 
-from app.agent.harness import history_debug
+from app.agent.harness import history_debug, history_normalize
 from app.agent.harness.factory import HarnessRuntime, build_harness_runtime
 from app.agent.harness.loader import resolve_spec
 
@@ -62,6 +62,14 @@ async def agent_for_thread(harness_id: str, thread_id: str) -> tuple[Any, Any, s
         # Attached here rather than passed into the factory so UDR-0119 D4's "parameter
         # omitted" -- pinned by the PRP-0135 / PRP-0144 invariants -- stays literally true.
         history_debug.attach_history_tracing(runtime.agent, thread_id=thread_id)
+        # PRP-0149 C4: the in-run compaction pass says what it collapsed and whether it
+        # left a call/result family split (UDR-0127 D3).
+        history_debug.attach_compaction_tracing(runtime.agent, thread_id=thread_id)
+        # PRP-0149 C1: the store is kept identity-unique at the SAVE seam of the same
+        # instance (UDR-0119 D12, UDR-0127 D2). This is the root fix -- the duplication
+        # it removes is what makes MAF's compaction split a call from its result, and
+        # the request seam cannot repair that from downstream.
+        history_normalize.attach_history_normalization(runtime.agent, thread_id=thread_id)
         _cache[key] = _Entry(runtime, session, spec.model_id)
         logger.info("[harness session] thread=%s harness=%s created", thread_id, harness_id)
         while len(_cache) > _MAX_ENTRIES:
