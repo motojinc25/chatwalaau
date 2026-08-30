@@ -345,9 +345,45 @@ def attach_compaction_tracing(agent: Any, *, thread_id: str) -> bool:
     return False
 
 
+def _excluded_key() -> str:
+    """MAF's own exclusion marker, DERIVED rather than mirrored (UDR-0128 D8).
+
+    Only the fallback path uses this; ``_included`` prefers MAF's own helper. The
+    literal remains for a MAF that stops exporting the name.
+    """
+    try:
+        from agent_framework import EXCLUDED_KEY
+
+        return str(EXCLUDED_KEY)
+    except Exception:  # pragma: no cover - a MAF that no longer exports the marker
+        logger.warning("[harness compaction] MAF no longer exports EXCLUDED_KEY; assuming '_excluded'")
+        return "_excluded"
+
+
 def _included(messages: Any) -> list[Any]:
-    """The messages compaction has NOT excluded (``_excluded`` is MAF's own marker)."""
-    return [m for m in messages or [] if not (getattr(m, "additional_properties", None) or {}).get("_excluded", False)]
+    """The messages compaction has NOT excluded (UDR-0128 D8).
+
+    DELEGATES to MAF's own ``included_messages`` rather than re-implementing its
+    exclusion test. This function is the base of every compaction counter UDR-0127 D3
+    requires, and a mirror that drifts here does not FAIL -- it goes BLIND: nothing
+    matches the stale marker, every message counts as included, and
+    ``split_families`` reports 0 forever while the defect it exists to catch runs
+    free. UDR-0109 D4 settled this class of question for the skills discovery mirror
+    (derive from the live package, never hardcode a value while claiming to mirror a
+    constant); delegating to the exported helper is the same rule taken one step
+    further, because it also survives a change in HOW exclusion is represented, not
+    just in what the key is called.
+
+    The local filter is kept as a fallback for a MAF that stops exporting the helper.
+    """
+    items = list(messages or [])
+    try:
+        from agent_framework import included_messages
+
+        return list(included_messages(items))
+    except Exception:  # pragma: no cover - fallback for a MAF without the helper
+        key = _excluded_key()
+        return [m for m in items if not (getattr(m, "additional_properties", None) or {}).get(key, False)]
 
 
 def _count_included(messages: Any) -> int:

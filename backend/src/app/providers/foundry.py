@@ -107,35 +107,82 @@ def _effective_family(model: str) -> str:
 _structured_client_cls: type | None = None
 
 
-class _EncryptedReasoningMixin:
-    """Drop the connector's `include: reasoning.encrypted_content` for families that
-    reject it (PRP-0131, UDR-0085 D9).
+_ENCRYPTED_REASONING = "reasoning.encrypted_content"
 
-    The MAF OpenAI connector appends it UNCONDITIONALLY whenever a request does not
-    use service-side storage -- i.e. on every ordinary turn
-    (``agent_framework_openai/_chat_client.py:1413-1417``). That is correct for its
+# The keys `RawOpenAIChatClient._prepare_options` reads to decide whether a request
+# is server-managed. It appends `reasoning.encrypted_content` ONLY when none of them
+# carries a non-empty string (agent_framework_openai/_chat_client.py:1408-1418), so
+# the re-add below MUST honour the same precondition or it would introduce the
+# parameter on a request shape the connector deliberately leaves it off.
+_SERVICE_SIDE_STORAGE_KEYS = ("conversation_id", "previous_response_id", "conversation")
+
+
+def _uses_service_side_storage(options: Any, run_options: dict[str, Any]) -> bool:
+    """True when this request is server-managed (mirrors the connector's own test)."""
+    for source in (options, run_options):
+        getter = getattr(source, "get", None)
+        if getter is None:
+            continue
+        for key in _SERVICE_SIDE_STORAGE_KEYS:
+            value = getter(key)
+            if isinstance(value, str) and value:
+                return True
+    return False
+
+
+class _EncryptedReasoningMixin:
+    """Decide `include: reasoning.encrypted_content` for the Foundry lane, in BOTH
+    directions (PRP-0131 / UDR-0085 D9, re-expressed by PRP-0150 C1 / UDR-0128 D3).
+
+    The MAF OpenAI connector appends the parameter whenever a request does not use
+    service-side storage -- i.e. on every ordinary turn
+    (``agent_framework_openai/_chat_client.py:1408-1418``). That is correct for its
     primary provider, but this lane also serves DeepSeek / Grok / Llama / Phi /
     Mistral deployments, which answer::
 
         400 'Encrypted content is not supported with this model.' (param: 'include')
 
     So the failure was not occasional: every non-background turn on such a deployment
-    failed. Stripping is narrow by design -- one named parameter, and only for
-    deployments the existing OpenAI-reasoning name detector rejects -- so a request
-    that works today is never altered. Same pattern as the web-search strip: the
-    connector assembles for its primary provider and the seam corrects for the family
-    actually being addressed.
+    failed. The correction is narrow by design -- one named parameter, keyed on the
+    deployment family -- so a request that works today is never altered.
+
+    WHY THIS IS AN ASSERTION AND NOT A STRIP (UDR-0128 D3). Until
+    ``agent-framework-foundry`` 1.11.0 this mixin only ever SUBTRACTED, and that was
+    correct only while the layer beneath it only ever ADDED. 1.11.0 gave
+    ``RawFoundryChatClient`` its own ``_prepare_options`` that removes the same
+    parameter unless the CALLER put it in ``options["include"]`` -- a BROADER rule
+    than this lane's, sitting BELOW this mixin in the MRO::
+
+        _EncryptedReasoningMixin        <- this class, ChatWalaʻau lane policy
+          -> _StructuredOutputMixin
+               -> RawFoundryChatClient   <- NEW in 1.11.0, strips unconditionally
+                                            for us (we never populate `include`)
+                    -> RawOpenAIChatClient  <- adds the parameter
+
+    Composed that way, upstream's policy silently won and the OpenAI-reasoning
+    PRESERVATION branch below became unreachable: encrypted reasoning stopped being
+    requested for o-series / gpt-5 deployments with no error and no failing test.
+    So the mixin now states the policy rather than nudging it -- present for the
+    OpenAI reasoning family, absent otherwise, whatever any lower layer did.
     """
 
     async def _prepare_options(self, messages: Any, options: Any, **kwargs: Any) -> dict[str, Any]:
         run_options = await super()._prepare_options(messages, options, **kwargs)  # type: ignore[misc]
         include = run_options.get("include")
-        if not isinstance(include, list) or "reasoning.encrypted_content" not in include:
-            return run_options
+        include_list = list(include) if isinstance(include, list) else []
+        present = _ENCRYPTED_REASONING in include_list
         # The deployment name lands in run_options["model"] during the super() call.
-        if is_openai_reasoning_deployment(str(run_options.get("model") or "")):
+        wanted = is_openai_reasoning_deployment(str(run_options.get("model") or ""))
+        if wanted:
+            # Re-add only on the request shape the connector itself would have added
+            # it to. A server-managed turn keeps the connector's own answer.
+            if present or _uses_service_side_storage(options, run_options):
+                return run_options
+            run_options["include"] = [*include_list, _ENCRYPTED_REASONING]
             return run_options
-        kept = [item for item in include if item != "reasoning.encrypted_content"]
+        if not present:
+            return run_options
+        kept = [item for item in include_list if item != _ENCRYPTED_REASONING]
         if kept:
             run_options["include"] = kept
         else:
