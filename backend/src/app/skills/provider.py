@@ -353,12 +353,28 @@ class SessionTolerantToolApprovalMiddleware(ToolApprovalMiddleware):
             return
         await super().process(context, call_next)
 
-    def _prepare_inbound_messages(self, messages: Any, state: Any) -> list[Any]:
-        # Deviation 2: never hijack inbound approval responses (see class doc).
+    def _prepare_inbound_messages(self, messages: Any, state: Any, *args: Any, **kwargs: Any) -> list[Any]:
+        """Deviation 2: never hijack inbound approval responses (see class doc).
+
+        ``*args``/``**kwargs`` absorb parameters the base hook gains. MAF 1.15.0
+        added a third positional argument (``session``) to this hook (PRP-0151,
+        UDR-0129), and because the override ignores everything but ``messages`` the
+        extras are genuinely irrelevant here -- but an exact-arity override turns an
+        upstream signature widening into a TypeError mid-turn. UDR-0109 A2 recorded
+        this failure mode once already (the ``FilteringSkillsSource`` predicate
+        widening from ``(skill)`` to ``(skill, context)``); this is the same class of
+        break, so the override is made tolerant rather than re-pinned every release.
+        The tolerance is safe ONLY because this override discards its inputs; a hook
+        that used them would have to be updated deliberately instead.
+        """
         return list(messages)
 
-    def _inject_collected_responses(self, messages: Any, state: Any) -> list[Any]:
+    def _inject_collected_responses(self, messages: Any, state: Any, *args: Any, **kwargs: Any) -> list[Any]:
         """Deviation 4: APPEND the auto-approved responses, never PREPEND them.
+
+        ``*args``/``**kwargs``: see ``_prepare_inbound_messages``. This hook's arity
+        did NOT change in 1.15.0, but the sibling's did, and an override that uses
+        only ``messages`` and ``state`` gains nothing from refusing extras.
 
         The base class re-enters the loop with::
 

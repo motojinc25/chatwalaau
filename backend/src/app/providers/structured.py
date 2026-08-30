@@ -189,6 +189,57 @@ def strip_web_search(run_options: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Harness loop marker leakage (PRP-0151 C4, UDR-0129 D8; UDR-0113 posture)
+# ---------------------------------------------------------------------------
+
+
+_MISSING = object()
+
+
+def _loop_iteration_key() -> str:
+    """MAF's harness-loop marker key, DERIVED rather than mirrored.
+
+    UDR-0109 D4 / UDR-0129 D2: never hardcode a value while claiming to mirror a
+    constant. The literal is only the fallback for a MAF that stops exporting it --
+    and if that happens the strip becomes a no-op against a key nobody sets, which
+    is the safe direction.
+    """
+    try:
+        from agent_framework._agents import _LOOP_ITERATION_TOKEN_KEY
+
+        return str(_LOOP_ITERATION_TOKEN_KEY)
+    except Exception:  # pragma: no cover - a MAF that no longer exports the marker
+        return "_agent_loop_iteration"
+
+
+def strip_loop_iteration_marker(run_options: dict[str, Any]) -> bool:
+    """Remove MAF's internal harness-loop marker from an outgoing request.
+
+    Returns True when a marker was removed.
+
+    MAF 1.15.0's ``AgentLoopMiddleware`` stamps ``_agent_loop_iteration`` into
+    ``context.options`` for the duration of a harness turn (``_harness/_loop.py``),
+    as a private signal read by ``_agents.py``. No connector filters it back out:
+    ``RawOpenAIChatClient._prepare_options`` seeds ``run_options`` from a DENYLIST
+    (``exclude_keys``) that does not list it, and the Anthropic connector does the
+    same, so the marker is forwarded as a raw request kwarg and the SDK rejects it::
+
+        TypeError: AsyncResponses.create() got an unexpected keyword argument
+                   '_agent_loop_iteration'
+
+    That killed the FIRST model call of every Harness run-target turn on the OpenAI,
+    Azure OpenAI and Foundry lanes, and would have done the same on Anthropic.
+
+    This is an UPSTREAM defect corrected at the seam ChatWalaʻau already owns
+    (UDR-0113): the lane mixins hold the single request-assembly chokepoint, the
+    removal is one named key, and stripping it from ``run_options`` does NOT disturb
+    ``context.options`` -- a different object -- so the loop's own use of the marker
+    is untouched. Inert (byte-for-byte) on any request that does not carry it.
+    """
+    return run_options.pop(_loop_iteration_key(), _MISSING) is not _MISSING
+
+
+# ---------------------------------------------------------------------------
 # Identity uniqueness of the request input (PRP-0147, UDR-0126 D3/D4)
 # ---------------------------------------------------------------------------
 #

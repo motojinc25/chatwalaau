@@ -45,6 +45,7 @@ from app.providers.base import hosted_tool_withheld
 from app.providers.structured import (
     CLOSED_ANSWER_SCHEMA,
     effective_schema,
+    strip_loop_iteration_marker,
     strip_web_search,
 )
 
@@ -205,6 +206,11 @@ class _PromptCacheMixin:
 
     def _prepare_options(self, messages: Any, options: Any, **kwargs: Any) -> dict[str, Any]:
         run_options = super()._prepare_options(messages, options, **kwargs)  # type: ignore[misc]
+        # PRP-0151 C4 / UDR-0129 D8: see app/providers/azure_openai.py. The Anthropic
+        # connector filters framework-level options by its own denylist, which does not
+        # list MAF 1.15.0's harness-loop marker either, so this lane leaks it too
+        # (measured). Removed at the same kind of chokepoint; inert when absent.
+        strip_loop_iteration_marker(run_options)
         # Deferred-call wire capture (PRP-0141 multi-iteration follow-up, UDR-0123
         # D8). MAF resumes a deferred function_call INSIDE the next outer-loop
         # iteration and produces its function_result on THAT iteration's provider

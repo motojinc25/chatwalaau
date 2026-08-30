@@ -31,6 +31,23 @@ mutates its subject loses the guarantee that makes its own output trustworthy
 Nothing here may raise. On any internal error the messages are saved UNCHANGED: a
 hygiene pass at the store must not become a new way for a turn to fail (UDR-0126 D5
 posture).
+
+SECOND DUTY -- IDENTITY ASSIGNMENT (PRP-0151 C1, UDR-0129 D2). MAF 1.15.0 added its
+own de-duplication INSIDE ``save_messages`` (``_sessions.filter_new_messages``,
+#7242) -- the same defect, fixed at the same seam this module wraps, but keyed
+differently: it prefers ``message_id`` and otherwise falls back to a HASH OF THE
+MESSAGE CONTENT. Because this module wraps the provider, upstream's rule runs
+DOWNSTREAM of ours and wins, and a plain user ``Message`` carries no ``message_id``.
+Measured against 1.15.0, a user who sends the same text twice in a row had the
+second one silently dropped -- contradicting the guarantee published in the v0.138.0
+release notes that identical typed messages are both retained (UDR-0127 D2).
+
+The fix is not to override upstream or to duplicate it: the two rules AGREE whenever
+an id is present and disagree only on the fallback. So this module now SUPPLIES the
+key upstream's rule prefers. Every message leaving here carries a ``message_id``,
+upstream takes its id branch, and its content branch becomes unreachable for
+anything ChatWalaʻau saves. Both layers then reach the same verdict instead of one
+suppressing the other.
 """
 
 from __future__ import annotations
@@ -38,10 +55,15 @@ from __future__ import annotations
 from collections.abc import Sequence  # noqa: TC003 -- runtime use in a public signature
 import logging
 from typing import Any
+import uuid
 
 from agent_framework import InMemoryHistoryProvider
 
 logger = logging.getLogger("app.agent.harness_history")
+
+# Prefix so an id this module assigned is distinguishable in a log or a session file
+# from one MAF's compaction annotation assigned (``_ensure_message_ids``).
+_ASSIGNED_ID_PREFIX = "cw-"
 
 
 def message_identities(message: Any) -> frozenset[tuple[str, str]]:
@@ -139,6 +161,42 @@ def normalize(existing: Sequence[Any], incoming: Sequence[Any]) -> tuple[list[An
     return kept, removed
 
 
+def assign_message_ids(messages: Sequence[Any]) -> int:
+    """Give every message a ``message_id`` it does not already have (UDR-0129 D2).
+
+    Returns the number of ids assigned.
+
+    Three properties are load-bearing, and each is a rule rather than a detail:
+
+    1. **Never overwrite.** MAF's compaction annotation assigns ``message_id`` via
+       ``_ensure_message_ids`` and GROUPS on it; overwriting would break its
+       grouping, which is the very mechanism UDR-0127 D1 found the defect in. Only
+       gaps are filled.
+    2. **Never derived from content.** A content hash is the obvious way to make an
+       id "stable", and it is exactly wrong: it would re-introduce content
+       de-duplication under another name and defeat UDR-0127 D2 while appearing to
+       honour it. Two messages with identical text MUST get DIFFERENT ids -- that is
+       the whole point. UUID4 has no relationship to the message.
+    3. **Assigned in place, once.** The id is written onto the message object, so a
+       message that passes this seam again keeps the id it already has and object
+       identity, ``message_id`` and upstream's identity all continue to agree.
+
+    Nothing here may raise: an unassigned id costs the guarantee, an exception would
+    cost the turn.
+    """
+    assigned = 0
+    for message in messages or []:
+        try:
+            existing = getattr(message, "message_id", None)
+            if isinstance(existing, str) and existing:
+                continue
+            message.message_id = f"{_ASSIGNED_ID_PREFIX}{uuid.uuid4().hex}"
+            assigned += 1
+        except Exception:  # a message that refuses an id is saved without one
+            logger.exception("[history normalize] failed to assign a message_id")
+    return assigned
+
+
 def attach_history_normalization(agent: Any, *, thread_id: str) -> bool:
     """Wrap the save seam of MAF's own history provider instance (UDR-0119 D12).
 
@@ -189,6 +247,20 @@ def attach_history_normalization(agent: Any, *, thread_id: str) -> bool:
                 except Exception:  # normalisation must never break the save
                     logger.exception("[history normalize] failed; saving the messages unchanged")
                     to_save = messages
+                # UDR-0129 D2: stamp identity AFTER the verdict, never before. Our
+                # rules already decided what survives; the id exists so that MAF's
+                # own de-duplication one layer down reaches the SAME verdict instead
+                # of falling back to a content hash and deleting a real message.
+                try:
+                    assigned = assign_message_ids(list(to_save or []))
+                    if assigned:
+                        logger.debug(
+                            "[history normalize] thread=%s assigned %d message_id(s)",
+                            thread_id,
+                            assigned,
+                        )
+                except Exception:  # identity assignment must never break the save
+                    logger.exception("[history normalize] failed to assign message ids")
                 return await _inner(session_id, to_save, state=state, **kwargs)
 
             provider.save_messages = save_messages  # type: ignore[method-assign]

@@ -26,6 +26,7 @@ from app.providers.structured import (
     effective_schema,
     orphan_outputs,
     pairing_undecidable,
+    strip_loop_iteration_marker,
     strip_skill_tools,
     strip_web_search,
     summarize_removed,
@@ -64,6 +65,15 @@ OPENAI_VERBOSITY_DEFAULT = "medium"
 class _StructuredOutputMixin:
     async def _prepare_options(self, messages: Any, options: Any, **kwargs: Any) -> dict[str, Any]:
         run_options = await super()._prepare_options(messages, options, **kwargs)  # type: ignore[misc]
+        # PRP-0151 C4 / UDR-0129 D8, UDR-0113 posture. MAF 1.15.0's AgentLoopMiddleware
+        # stamps `_agent_loop_iteration` into context.options for the length of a
+        # harness turn, and no connector filters it back out -- the Responses client
+        # seeds run_options from a denylist that does not list it, so it reaches
+        # `responses.create()` as a raw kwarg and the SDK raises TypeError. That killed
+        # the FIRST model call of every Harness run-target turn on this lane. Removed
+        # here, at the chokepoint this provider already owns; inert when absent.
+        if strip_loop_iteration_marker(run_options):
+            logger.debug("[wire] removed MAF's internal harness-loop marker from the request")
         text_cfg = run_options.get("text")
         if isinstance(text_cfg, dict) and text_cfg.get("format") is not None:
             strip_web_search(run_options)
