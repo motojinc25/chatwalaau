@@ -14,7 +14,21 @@ ChatWalaʻau owns every INPUT --
   (initial mode from YAML), ``todos_remaining()`` loop clamped to the MAF cap,
   ``file_access_disable_readonly_tool_approval=True`` set EXPLICITLY.
 * Workspace wiring (UDR-0119 D7): CODING_WORKSPACE_DIR-scoped file stores and a
-  LocalShellTool; SKILLS_DIR-scoped ``skills_paths``.
+  LocalShellTool; Skills through the SHARED provider (below).
+* Skills ride ``skills_provider=create_skills_provider()`` -- the ONE construction
+  path for a mounted SkillsProvider (CTR-0043, UDR-0130 D1). Handing MAF a bare
+  directory string instead would make it build its own
+  ``SkillsProvider.from_paths(...)``, which carries none of the four properties
+  this project already fixed: the CODING_ENABLED-gated script runner (CTR-0043
+  v3), the six-extension script filter (UDR-0086 D3), the Skills Management
+  disabled set (UDR-0065 D2), and the per-agent allow-list (UDR-0100 D3).
+  The factory returns ``None`` when SKILLS_DIR is unset, blank, or not a
+  directory -- the condition UDR-0119 D7 states and the shape MAF's
+  ``if skills_provider:`` opt-in expects, so the wiring stays conditional with no
+  helper of its own. The skills APPROVAL middleware is deliberately NOT attached
+  here -- UDR-0119 D6 keeps one approval coordinator, so skill tools stay
+  ``always_require`` and every request reaches the FEAT-0028 card
+  (UDR-0130 D5).
 * The per-offering web-search capability gate (UDR-0119 D5) forces
   ``disable_web_search=True`` when the offering is withheld.
 """
@@ -29,6 +43,7 @@ from app import providers
 from app.agent.harness.mapping import HARNESS_MAX_ITERATIONS
 from app.agent.harness.spec import IDENTITY_SENTINEL, HarnessAgentError, HarnessAgentSpec
 from app.core.config import settings
+from app.skills.provider import create_skills_provider
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +107,6 @@ def _workspace_dir() -> Path | None:
     if not raw:
         return None
     return Path(raw)
-
-
-def _skills_paths() -> str | None:
-    raw = (settings.skills_dir or "").strip()
-    if raw and Path(raw).is_dir():
-        return raw
-    return None
 
 
 def _resolve_function_tools(names: list[str]) -> list[Any]:
@@ -348,6 +356,11 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
     # Token budgets from the Model Offering Catalog (UDR-0119 D9 as amended by
     # PRP-0144 / UDR-0125 D3): an unset maxOutputTokens resolves to the
     # application default, never to a disabled feature.
+    # Built ONCE (UDR-0130 D1): the factory snapshots the Skills override store and
+    # refreshes the live-build set (set_loaded_skills, CTR-0123 / UDR-0068 D4), so a
+    # second call would repeat a side effect for a value the build already holds.
+    skills_provider = create_skills_provider()
+
     max_window, max_output, _budget_source = resolve_compaction_budget(spec)
     # Canary, unreachable by construction above. A declared-enabled compaction
     # that resolved to no strategy MUST fail loudly at build time rather than
@@ -391,7 +404,8 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         # EXPLICIT True (the MAF default is False): readonly tools never prompt (D4/D6).
         file_access_disable_readonly_tool_approval=True,
         file_access_disable_write_tool_approval=spec.file_access_disable_write_tool_approval,
-        skills_paths=_skills_paths(),
+        # UDR-0130 D1: the SHARED provider, never skills_paths (see module doc).
+        skills_provider=skills_provider,
         shell_executor=shell_executor,
         disable_web_search=disable_web_search,
         # ONE approval coordinator, always (UDR-0119 D6). MAF's harness
@@ -454,7 +468,7 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         len(tools),
         not disable_web_search,
         workspace is not None,
-        _skills_paths() is not None,
+        skills_provider is not None,
         _compaction_desc,
     )
     return HarnessRuntime(agent, shell_executor)

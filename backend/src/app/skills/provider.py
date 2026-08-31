@@ -10,6 +10,22 @@ SkillsProvider implements progressive disclosure:
 
 Skills are discovered from SKILLS_DIR (default: ".skills"), searching up to 2 levels deep.
 
+ONE construction path (PRP-0152, UDR-0130 D1/D2):
+  ``create_skills_provider()`` is the ONLY way a mounted ``SkillsProvider`` is built
+  in this codebase. Both lanes use it -- the assembly chokepoint
+  (``app.agui.agent_factory``) and the harness factory (``app.agent.harness.factory``,
+  CTR-0193, which previously handed MAF a bare directory string and got its own
+  ``SkillsProvider.from_paths(...)`` instead). The four properties below are
+  therefore LANE-INDEPENDENT, and a lane-specific need is an argument to this
+  factory, never a second provider:
+    1. the CODING_ENABLED-gated script runner (below),
+    2. the six-extension script filter (``_SCRIPT_EXTENSIONS``, UDR-0086 D3),
+    3. the Skills Management disabled set (UDR-0065 D2),
+    4. the per-agent allow-list (UDR-0100 D3).
+  What does NOT follow the provider is approval coordination: the harness lane
+  must not attach ``create_skills_approval_middleware()`` (UDR-0119 D6 keeps one
+  coordinator; UDR-0130 D5).
+
 Script execution (v0.75.x defect fix):
   Current agent-framework builds advertise a ``run_skill_script`` tool and instruct
   the agent to use it whenever a discovered skill ships scripts (e.g. the document
@@ -151,6 +167,21 @@ async def _skill_script_runner(skill: Any, script: Any, args: dict[str, Any] | l
     return await asyncio.to_thread(_run_skill_script_sync, skill, script, args)
 
 
+def skills_root() -> Path | None:
+    """The configured Skills directory, or ``None`` when there is none.
+
+    An EMPTY / whitespace ``SKILLS_DIR`` means "no Skills directory", not "the
+    current working directory" -- but ``Path("")`` is ``Path(".")``, which
+    ``is_dir()`` answers True for. Without this guard an operator who blanks
+    SKILLS_DIR gets a depth-2 scan of the server's CWD instead of no Skills at
+    all. The harness lane's former ``_skills_paths()`` carried exactly this
+    check; UDR-0130 D1/D2 folds it into the one shared seam so both lanes agree
+    on what "absent" means.
+    """
+    raw = (settings.skills_dir or "").strip()
+    return Path(raw) if raw else None
+
+
 def discover_skill_names(root: Path | None = None) -> set[str]:
     """Return the discovered skill names (SKILL.md dir basenames), depth <= 2.
 
@@ -160,7 +191,9 @@ def discover_skill_names(root: Path | None = None) -> set[str]:
     entries on Reload. A synchronous disk walk so it can run inside the sync agent
     build chokepoint.
     """
-    base = Path(settings.skills_dir) if root is None else root
+    base = skills_root() if root is None else root
+    if base is None:
+        return set()
     names: set[str] = set()
 
     def _search(directory: Path, depth: int) -> None:
@@ -191,7 +224,7 @@ def build_skill_source() -> DeduplicatingSkillsSource:
     skill NAMES match exactly what the runtime FilteringSkillsSource predicate
     gates against (PRP-0087, UDR-0065 D2/D3).
     """
-    skills_path = Path(settings.skills_dir)
+    skills_path = skills_root() or Path(settings.skills_dir)
     return DeduplicatingSkillsSource(
         FileSkillsSource(
             skills_path,
@@ -240,6 +273,12 @@ def create_skills_provider(allowlist_names: set[str] | None = None) -> SkillsPro
     so MAF injects no advertise text and no skill tools at all -- observationally
     identical to omitting the provider (UDR-0065 D3).
 
+    PRP-0152 / UDR-0130 D1: this is the ONLY construction path for a mounted
+    provider; the harness factory (CTR-0193) calls it too rather than handing MAF a
+    bare directory string. ``None`` is returned when SKILLS_DIR is unset, blank, or
+    not a directory -- exactly the shape MAF's ``if skills_provider:`` opt-in expects,
+    so UDR-0119 D7's "only when SKILLS_DIR is set" is preserved.
+
     PRP-0117 / UDR-0100 D2/D3: ``allowlist_names`` layers the active declarative
     agent's per-agent Skills subset on top of the override store. ``None`` means
     "inherit all" (byte-for-byte). A set (possibly empty) means "keep ONLY these
@@ -249,13 +288,16 @@ def create_skills_provider(allowlist_names: set[str] | None = None) -> SkillsPro
     Returns:
         SkillsProvider instance if skills directory exists, None otherwise.
     """
-    skills_path = Path(settings.skills_dir)
+    skills_path = skills_root()
 
     # Refresh the live-build snapshot every build so the inventory's ``loaded`` flag
     # (CTR-0123, UDR-0068 D4) reflects exactly what this build discovered on disk.
     # A skill added after this point is shown but disabled until the next Reload.
-    set_loaded_skills(discover_skill_names(skills_path))
+    set_loaded_skills(discover_skill_names(skills_path) if skills_path else set())
 
+    if skills_path is None:
+        logger.info("SKILLS_DIR is empty (skipping SkillsProvider)")
+        return None
     if not skills_path.is_dir():
         logger.info("Skills directory not found: %s (skipping SkillsProvider)", skills_path)
         return None

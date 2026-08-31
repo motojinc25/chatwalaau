@@ -150,8 +150,8 @@ def _map_instructions(data: dict[str, Any], warnings: list[str]) -> tuple[str | 
 def _map_tools(data: dict[str, Any], warnings: list[str]) -> list[str]:
     """Map ``tools`` -- a flat list of CTR-0178 identifiers (UDR-0119 D2).
 
-    Skills ride ``skills_paths`` (the harness's own progressive loading), never
-    this list; ChatWalaʻau coding tools are never mountable (UDR-0119 D7). The
+    Skills ride the shared ``SkillsProvider`` (CTR-0043, UDR-0130 D1), never this
+    list; ChatWalaʻau coding tools are never mountable (UDR-0119 D7). The
     identifiers' existence against live state is validated in the loader.
     """
     raw = data.get("tools")

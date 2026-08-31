@@ -11,6 +11,17 @@ large advertised Skills surface does not waste tokens every turn:
                          responding only AFTER the rebuild completes (this drives the
                          SPA "rebuilding" indicator).
 
+The apply boundary covers EVERY lane that holds a built provider (UDR-0130 D3).
+The AgentRegistry rebuild reaches the Prompt lane; the per-conversation harness
+session cache (CTR-0009 / UDR-0119 D3) holds its own built agent and must be
+cleared in the same apply. Since UDR-0130 D1 the harness lane runs on the same
+``create_skills_provider()`` source, so skipping it would leave a disabled skill
+gone from chat and alive in every cached harness conversation until an unrelated
+authoring write happened to clear it -- a worse state than the divergence D1
+removed. The cost is that an in-flight harness transcript (MAF-internal, in
+memory, UDR-0119 D4) is discarded; that is the same cost the authoring-write
+clear already imposes, on a second trigger.
+
 Both endpoints are gated by CTR-0083 (``verify_api_key``); loopback bypass keeps
 localhost-first development zero-config (UDR-0065 D6). The override store is
 in-memory only -- a restart re-enables every Skill (UDR-0065 D4).
@@ -30,6 +41,21 @@ from app.skills.overrides import get_skills_override_store
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/skills", tags=["Skills"])
+
+
+async def _clear_harness_sessions(*, reason: str) -> None:
+    """Drop every cached harness conversation so the apply reaches that lane too.
+
+    UDR-0130 D3. The import is local for the same reason the ``rebuild_agent_registry``
+    import is: ``app.agent.harness.factory`` imports ``app.skills.provider``, so a
+    module-level import here would close the cycle.
+    """
+    from app.agent.harness.runtime import cache_size, clear_cache
+
+    dropped = cache_size()
+    await clear_cache()
+    if dropped:
+        logger.info("Harness session cache cleared (%d entry/entries, reason=%s)", dropped, reason)
 
 
 class SkillSelection(BaseModel):
@@ -99,6 +125,12 @@ def register_skills_management(app: FastAPI, *, agent_registry) -> None:
                 detail={"error": "agent_rebuild_failed"},
             ) from None
 
+        # UDR-0130 D3: the harness session cache holds agents built from this same
+        # source, so the apply is not complete until they are dropped. Ordering is
+        # rebuild-then-clear: the rollback above owns a FAILED rebuild, and a clear
+        # that has not run yet cannot leave a half-applied state.
+        await _clear_harness_sessions(reason="skills_apply")
+
         # Log the EFFECTIVE advertised set from the refreshed inventory (not just the
         # requested count): this is exactly what the next chat run will advertise, so
         # an operator can confirm the gating actually took effect. MAF's own
@@ -136,6 +168,10 @@ def register_skills_management(app: FastAPI, *, agent_registry) -> None:
         except Exception:
             logger.exception("Skills reload failed during agent rebuild")
             raise HTTPException(status_code=500, detail={"error": "agent_rebuild_failed"}) from None
+
+        # UDR-0130 D3: same boundary as PUT -- Reload rebuilds every lane, not just
+        # the registry.
+        await _clear_harness_sessions(reason="skills_reload")
 
         # Prune disabled names that no longer exist on disk (UDR-0068 D2). The rebuild
         # above refreshed the live-build snapshot, so it is the authoritative
