@@ -84,7 +84,10 @@ def message_identities(message: Any) -> frozenset[tuple[str, str]]:
                 if isinstance(call_id, str) and call_id:
                     identities.add((ctype, call_id))
             elif ctype == "text_reasoning":
-                rs_id = getattr(content, "id", None) or getattr(content, "raw_representation_id", None)
+                # `content.id` only -- see UDR-0131 D4. `raw_representation_id`
+                # is not a framework field, and `raw_representation` is discarded
+                # on every deep copy as of core 1.16.0 (#7903).
+                rs_id = getattr(content, "id", None)
                 if isinstance(rs_id, str) and rs_id:
                     identities.add(("text_reasoning", rs_id))
     except Exception:  # a key function must never break a save

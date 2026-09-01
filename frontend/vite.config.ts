@@ -15,7 +15,12 @@ export default defineConfig({
 	plugins: [react()],
 	resolve: {
 		alias: {
-			'@': resolve(__dirname, './src'),
+			// `import.meta.dirname`, not `__dirname`: Vite's `configLoader: 'native'`
+			// (planned to become the default) loads this file as a real ES module, where
+			// `__dirname` does not exist. Under the current 'bundle' loader Vite defines
+			// BOTH names to the same value -- the original config file's directory -- so
+			// the resolved alias is byte-for-byte unchanged either way.
+			'@': resolve(import.meta.dirname, './src'),
 		},
 	},
 	server: {

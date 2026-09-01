@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.141.0"
+version = "0.142.1"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "pydantic-settings>=2.9.0",
     "python-dotenv>=1.1.0",
-    # Microsoft Agent Framework family: EXACT pins (PRP-0151, UDR-0129 D1;
+    # Microsoft Agent Framework family: EXACT pins (PRP-0153, UDR-0131 D1;
     # policy from PRP-0108, UDR-0086 D1; method from PRP-0126, UDR-0109 D1/D2).
     # MAF ships breaking changes inside minor releases (1.8.0 async Skill lookup,
     # 1.9.0 MCP sampling guardrails, 1.10.0 SkillsProvider approval-by-default,
@@ -29,37 +29,50 @@ dependencies = [
     # 1.15.0 history de-duplication at the save seam + OTel semconv consolidation);
     # a version bump is a deliberate, PRP-reviewed act, never a routine refresh.
     #
-    # The family does NOT share a version line (UDR-0109 D1, carried by UDR-0129 D1):
-    # each package is pinned at the version published in the SAME release wave as
-    # `agent-framework==1.15.0` (2026-08-21), so the declared set and the resolved
-    # set are identical for uv.lock AND for a bare `pip install chatwalaau`.
-    # `agent-framework-foundry==1.15.0` does not exist.
+    # 1.16.0 publishes NO "Breaking" section at all -- which is the condition under
+    # which reading the changelog is most easily mistaken for analysis, not evidence
+    # of safety. Three of its four findings that reach this codebase are filed under
+    # "Fixed" (UDR-0131 context). The most consequential is #7860: `_agents.py` now
+    # pops the private harness-loop marker before options reach the chat client,
+    # which RETIRES the emergency correction shipped in v0.140.0. That correction is
+    # nonetheless KEPT (UDR-0131 D2) -- a guard is never withdrawn in the same
+    # release that moves the framework version underneath it, because a regression
+    # then could not be attributed to either change.
+    #
+    # The family does NOT share a version line (UDR-0109 D1, carried by UDR-0129 D1
+    # and reaffirmed unamended by UDR-0131 D1): each package is pinned at the version
+    # published in the SAME release wave as `agent-framework==1.16.0` (2026-08-28),
+    # so the declared set and the resolved set are identical for uv.lock AND for a
+    # bare `pip install chatwalaau`.
     #
     # A package that published NO artifact in the target wave is HELD at its current
     # pin, and REJOINS at the first wave that does publish it -- it is never advanced
     # in between to make the family look uniform, and never kept back afterwards for
-    # having missed one (UDR-0129 D1). Both halves of that rule fire in this wave:
-    # `agent-framework-foundry` is held; `agent-framework-anthropic`, held by
-    # UDR-0128 D1, rejoins here.
-    "agent-framework==1.15.0",
-    "agent-framework-ag-ui==1.2.0",
+    # having missed one. THREE packages are held in this wave (devui, foundry,
+    # declarative), two of them for the first time; the rule needed no amendment to
+    # cover that, which is the evidence it was stated at the right level.
+    "agent-framework==1.16.0",
+    "agent-framework-ag-ui==1.2.1",
+    # HELD at the 1.15.0-wave build (UDR-0131 D1): the 1.16.0 wave published no
+    # artifact for this package.
     "agent-framework-devui==1.0.0b260821",
     # Declared because ChatWalaʻau SUBCLASSES it and overrides the private
     # `_prepare_options` chokepoint (app/providers/azure_openai.py, PRP-0082 /
     # UDR-0058). An undeclared package is an unpinned package (UDR-0109 D2).
     # 1.13.0 gates approval-content serialization behind `_is_hosted_tool_approval`
     # (UDR-0128 D5): local approvals are no longer serialized to the provider.
-    "agent-framework-openai==1.14.0",
+    # 1.14.1 (#7705) fixes streaming when a GenAI instrumentor replaces the raw SDK
+    # response -- a latent failure on the traced streaming path, which is the same
+    # area published as BREAKING 1 of v0.140.0.
+    "agent-framework-openai==1.14.1",
     # Anthropic (Claude) base-model provider, Direct + Foundry hostings
     # (PRP-0069, UDR-0045 D8). Already resolved transitively via
     # agent-framework-core[all]; declared explicitly to guarantee the capability.
-    #
-    # REJOINS the cohort here (UDR-0129 D1): held at 1.0.0b260730 by UDR-0128 D1
-    # because the 1.14.0 wave published no build for it, it ships again in the
-    # 1.15.0 wave. Crossing two waves is correct -- the hold ends at the first wave
-    # that publishes, and `_prepare_options` is still SYNC (app/providers/anthropic
-    # `_PromptCacheMixin` does not await its super()).
-    "agent-framework-anthropic==1.0.0b260821",
+    # 1.0.0b260827 (#7850) passes UNMAPPED provider stop reasons through instead of
+    # reporting no finish reason; `finish_reason` is not read anywhere in app/.
+    # `_prepare_options` is still SYNC (app/providers/anthropic `_PromptCacheMixin`
+    # does not await its super()) -- measured, not assumed.
+    "agent-framework-anthropic==1.0.0b260827",
     # Microsoft Foundry base-model provider (PRP-0106, UDR-0085 D1): the stable
     # FoundryChatClient connector (OpenAI Responses API via a Foundry project
     # endpoint, Entra ID credential only). Already resolved transitively via the
@@ -68,15 +81,18 @@ dependencies = [
     # `reasoning.encrypted_content` unless the caller asked for it; UDR-0085 D9's
     # narrower policy is re-asserted at app/providers/foundry.py (UDR-0128 D3).
     #
-    # HELD at the 1.14.0-wave build (UDR-0129 D1): the 1.15.0 wave published NO
-    # artifact for this package, so 1.11.0 is still its newest release. Held because
-    # there is nothing to move to, not because nothing changed.
+    # HELD for the SECOND consecutive wave (UDR-0131 D1): neither the 1.15.0 nor the
+    # 1.16.0 wave published an artifact, so 1.11.0 is still its newest release. Held
+    # because there is nothing to move to, not because nothing changed.
     "agent-framework-foundry==1.11.0",
     # Declarative agents (PRP-0094, FEAT-0051, UDR-0072): the MAF AgentFactory front
     # end (create_agent_from_yaml / create_agent_from_yaml_path) used to PARSE and
     # VALIDATE declarative agent YAML. The runtime agent is built by ChatWalaʻau
     # (UDR-0072 D2), so the package is used for schema validation only; the loader
     # degrades gracefully to its own structural checks if it is unavailable.
+    #
+    # HELD at the 1.15.0-wave build (UDR-0131 D1): the 1.16.0 wave published no
+    # artifact for this package.
     "agent-framework-declarative==1.0.3",
     "azure-identity>=1.23.0",
     "httpx>=0.28.0",

@@ -162,7 +162,12 @@ def reasoning_families(messages: Any) -> list[str]:
         for content in _iter_contents(messages):
             if getattr(content, "type", None) != "text_reasoning":
                 continue
-            rs_id = getattr(content, "id", None) or getattr(content, "raw_representation_id", None)
+            # `content.id` only: `raw_representation_id` is NOT a framework field
+            # (it exists nowhere in the MAF cohort) and the fallback never once
+            # evaluated to anything but None. Identity is read from `id`, which
+            # survives every framework copy path -- unlike `raw_representation`,
+            # which core 1.16.0 DISCARDS on deep copy (UDR-0131 D4).
+            rs_id = getattr(content, "id", None)
             if not isinstance(rs_id, str) or not rs_id:
                 continue
             family = rs_id[:_FAMILY_PREFIX]
