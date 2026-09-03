@@ -25,6 +25,7 @@ import json
 import logging
 from pathlib import Path
 import sys
+import time
 from typing import Any, get_args
 import uuid
 
@@ -233,6 +234,16 @@ _MSG_CAPACITY = (
     "carries less input, switch to another configured model, or have the "
     "operator move the deployment to Provisioned Throughput (PTU)."
 )
+_MSG_STREAM_INTERRUPTED = (
+    "The connection to the model provider dropped part-way through the answer. "
+    "The request itself was accepted (the provider returned 200 and started "
+    "streaming), so this is a network interruption rather than a problem with "
+    "the conversation -- nothing was charged for a completed answer, and no tool "
+    "ran twice. It was retried automatically if it failed before any output "
+    "appeared. Please resend your message. If it keeps happening at roughly the "
+    "same point each time, ask the operator to check for an idle timeout on the "
+    "path to the provider."
+)
 _MSG_TRANSIENT = (
     "The model provider returned a temporary server error (HTTP 5xx) "
     "while generating the response. This is usually transient -- "
@@ -316,6 +327,16 @@ _CAPACITY_MARKERS = (
 )
 
 
+# Markers that identify a TRANSPORT termination of an already-accepted response
+# (PRP-0155 / UDR-0133 C1). The status line arrived (200) and the body did not
+# finish. Distinct from every status-carrying condition above, and from an
+# APITimeoutError, which the transient detector already names.
+_STREAM_INTERRUPTED_MARKERS = (
+    "peer closed connection",
+    "incomplete chunked read",
+)
+
+
 # Markers that identify an out-of-credits / quota-exhausted condition (as
 # opposed to a transient 429). Anthropic: "Your credit balance is too low ...
 # Plans & Billing ... purchase credits". OpenAI: code "insufficient_quota" /
@@ -369,6 +390,49 @@ def _is_deployment_feature_unsupported(exc: BaseException) -> bool:
         seen.add(id(cur))
         text = str(cur).lower()
         if any(marker in text for marker in _DEPLOYMENT_FEATURE_MARKERS):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _is_stream_interrupted_error(exc: BaseException) -> bool:
+    """Detect a transport termination of an ALREADY-ACCEPTED response (UDR-0133 C1).
+
+    The provider returned 200 and began streaming; the connection carrying the
+    body was then closed by the far end without its terminating chunk::
+
+        httpcore.RemoteProtocolError: peer closed connection without sending
+          complete message body (incomplete chunked read)
+
+    Nothing in this codebase erred and nothing internal happened, but the
+    condition matched no detector: there IS a status and it is 200 (so the 5xx
+    branch cannot fire), ``RemoteProtocolError`` is absent from the transient
+    type set, and its message is unlike either transient marker. It therefore
+    reached the terminal branch of :func:`_classify_run_error`, which returns
+    ``is_known=False`` -- the contract for "unexpected, log a traceback" -- and
+    a routine network event was reported as an internal defect.
+
+    Note that ``APIConnectionError`` is ALREADY in the transient type set: that is
+    this same condition on the other side of the response, a connection that fails
+    BEFORE the status line. Its mid-stream sibling was missing only because it had
+    not yet been observed. This predicate is written against the TRANSPORT rather
+    than against a provider, so it holds on every lane.
+
+    Markers are deliberately narrow, matching the discipline of
+    :func:`_is_capacity_overload_error`: a miss degrades to the generic message,
+    while a false positive would both mislabel an unrelated failure AND suppress
+    its traceback.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        # httpx and httpcore both name it RemoteProtocolError; http.client calls
+        # the same condition IncompleteRead.
+        if type(cur).__name__ in {"RemoteProtocolError", "IncompleteRead"}:
+            return True
+        text = str(cur).lower()
+        if any(marker in text for marker in _STREAM_INTERRUPTED_MARKERS):
             return True
         cur = cur.__cause__ or cur.__context__
     return False
@@ -543,6 +607,14 @@ def _classify_run_error(exc: BaseException, *, continuation_token: bool, harness
         return _MSG_CAPACITY, True
     if _is_rate_limit_error(exc):
         return _MSG_RATE_LIMIT, True
+    # Before the transient 5xx branch (PRP-0155, UDR-0133 C1). The two cannot
+    # collide -- a terminated stream carries a 200, not a 5xx -- but the more
+    # specific diagnosis leads, the ordering rule v0.131.5 established. Reusing
+    # _MSG_TRANSIENT here would tell the operator the provider returned an HTTP
+    # 5xx, which the log disproves; a confidently wrong diagnosis costs more than
+    # a generic one because it is acted upon.
+    if _is_stream_interrupted_error(exc):
+        return _MSG_STREAM_INTERRUPTED, True
     if _is_transient_upstream_error(exc):
         return _MSG_TRANSIENT, True
     # v0.117.2: name the exception TYPE so an opaque report ("the chat just says
@@ -580,8 +652,36 @@ class _RetryNotice:
         self.delay_ms = delay_ms
 
 
+class _RunStats:
+    """The two facts a failed run must be able to report (PRP-0155, UDR-0133 C3).
+
+    ``updates`` is how many updates the CURRENT attempt yielded, and it is the
+    fact that decides whether the retry in :func:`_resilient_run` was reachable
+    at all -- the gate only opens when an attempt produced nothing. Without it a
+    mid-stream failure cannot be told apart from a pre-output one after the fact,
+    which is the position that made three prior corrections on this path
+    unattributable (UDR-0127).
+
+    ``started`` is reset at the start of every attempt, so the elapsed time
+    reported is the failing attempt's, not the whole run's. A drop that lands
+    near the same interval every time points at an idle timeout in the network
+    path; a scattered one does not.
+    """
+
+    __slots__ = ("attempt", "started", "updates")
+
+    def __init__(self) -> None:
+        self.attempt = 0
+        self.started = time.monotonic()
+        self.updates = 0
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+
 async def _resilient_run(
-    agent: Any, messages: Any, session: Any, run_options: dict[str, Any]
+    agent: Any, messages: Any, session: Any, run_options: dict[str, Any], stats: _RunStats | None = None
 ) -> AsyncGenerator[Any, None]:
     """Yield MAF updates, auto-retrying a TRANSIENT upstream 5xx that fails before
     any update is produced (v0.77.1).
@@ -598,18 +698,32 @@ async def _resilient_run(
     attempt = 0
     while True:
         produced = False
+        if stats is not None:
+            # Per ATTEMPT, not per run (UDR-0133 C3): a retry starts a new clock
+            # and a new count, so what a failure reports is the failing attempt's.
+            stats.attempt = attempt
+            stats.started = time.monotonic()
+            stats.updates = 0
         try:
             response_stream = agent.run(messages, stream=True, session=session, options=run_options or None)
             stream = await _normalize_response_stream(response_stream)
             async for update in stream:
                 produced = True
+                if stats is not None:
+                    stats.updates += 1
                 yield update
             return
         except Exception as exc:
             retryable = (
                 not produced
                 and attempt < _MAX_TRANSIENT_RETRIES
-                and _is_transient_upstream_error(exc)
+                # UDR-0133 C2: a terminated response stream joins the retry set.
+                # Every completed tool result is already in the request body, so a
+                # re-POST re-sends finished work rather than repeating it. The
+                # `not produced` gate above is NOT relaxed for it -- retrying after
+                # output would duplicate streamed text on the client, the same
+                # commit boundary UDR-0088 D3 drew on the SPA side.
+                and (_is_transient_upstream_error(exc) or _is_stream_interrupted_error(exc))
                 and not _is_billing_or_quota_error(exc)
                 and not _is_rate_limit_error(exc)
                 and not _is_previous_response_not_found(exc)
@@ -1010,6 +1124,10 @@ async def _stream_with_reasoning(
             _dispatch_background("session-title-clear", dedup_key=thread_id, ctx={"thread_id": thread_id})
         except Exception:
             logger.warning("failed to dispatch session-title-clear for %s", thread_id, exc_info=True)
+
+    # PRP-0155 / UDR-0133 C3: declared BEFORE the try so the failure log below can
+    # read it on any path, including one that fails before the run loop is reached.
+    run_stats = _RunStats()
 
     try:
         # Pre-process: strip PDF image_url entries from messages before normalization.
@@ -1427,7 +1545,7 @@ async def _stream_with_reasoning(
                 " | ".join(approval_debug.describe_messages(iteration_messages)),
             )
 
-            async for update in _resilient_run(agent, iteration_messages, session, run_options):
+            async for update in _resilient_run(agent, iteration_messages, session, run_options, stats=run_stats):
                 # v0.77.1: a transient upstream 5xx before any output triggers an
                 # automatic retry. The helper yields a _RetryNotice so we can tell
                 # the SPA a retry is happening (the run continues; no RUN_ERROR).
@@ -2074,11 +2192,15 @@ async def _stream_with_reasoning(
         # PRP-0141 tracing: which approval iteration died. The preceding
         # "[wire]" line from app.agent.approval_trace holds the request body shape.
         approval_debug.logger.error(
-            "[run failed] thread=%s rounds total=%s interactive=%s error=%s -- see the last [wire] line above",
+            "[run failed] thread=%s rounds total=%s interactive=%s error=%s "
+            "attempt=%s elapsed=%.1fs updates=%d -- see the last [wire] line above",
             thread_id,
             locals().get("total_rounds"),
             locals().get("interactive_rounds"),
             type(exc).__name__,
+            run_stats.attempt,
+            run_stats.elapsed,
+            run_stats.updates,
         )
 
     except Exception as exc:
