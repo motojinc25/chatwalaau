@@ -230,19 +230,181 @@ def record_wire_function_results(messages: Any) -> None:
         logger.exception("[wire] failed to record function results")
 
 
-def heal_dangling_tool_calls(messages: Any) -> tuple[list[Any], list[str]]:
+def approval_response_call_id(content: Any) -> str | None:
+    """The TOOL CALL id an approval response answers for.
+
+    Read from the wrapped ``function_call``, never from the response's own ``id``:
+    that one is the APPROVAL REQUEST id, a different namespace, and comparing the
+    two discards valid approvals (the same rule ``build_iteration_messages``
+    documents at its pairing invariant). The response id is the last resort only
+    because MAF's own binding keys on it and the two coincide for the local
+    function-tool path.
+    """
+    wrapped = getattr(content, "function_call", None)
+    return getattr(wrapped, "call_id", None) or getattr(content, "id", None)
+
+
+def settle_consumed_approvals(messages: Any) -> tuple[list[Any], list[str], list[str]]:
+    """Settle every already-consumed ``function_approval_response`` in ``messages``.
+
+    UDR-0132 D1. An approval response is a SINGLE-USE TICKET, not a durable fact.
+    MAF binds it to the pending approval request and POPS that entry
+    (``_tools._bind_approval_response_to_pending_request``, ``consume=True``); a
+    later replay of the same response matches nothing, is logged as "Ignored an
+    approval response ... because no pending approval request exists" and is
+    REMOVED from the request. The ``function_call`` our replay put beside it is
+    not removed, so the provider receives a call it will never see an output for
+    and rejects the whole turn (400 "No tool output found for function call ...").
+
+    ``messages`` here is the content the approval loop is CARRYING FORWARD -- it
+    has been through at least one ``agent.run``, so every approval response in it
+    is spent by position, not by heuristic. The round currently being submitted is
+    appended afterwards and is untouched by construction.
+
+    Per response, in order of preference:
+
+    1. the call already has a ``function_result`` in ``messages`` -> drop the
+       response only;
+    2. its result was captured on an earlier request (``_wire_results``) -> drop
+       the response and emit that result in a ``tool`` message in its place;
+    3. no result is obtainable -> drop the response AND its ``function_call``.
+
+    Rule 3 is load-bearing: a carried-forward call with no obtainable output must
+    not reach the request. The cost is a re-issued tool call (the model asks
+    again, the operator approves again, a non-idempotent tool may run twice) and
+    it is logged at WARNING for exactly that reason. The alternative is a
+    guaranteed 400 that kills the turn.
+
+    Returns ``(messages, settled_call_ids, dropped_call_ids)``. Best-effort: on
+    any unexpected shape the input is returned unchanged, which degrades to
+    today's behaviour rather than to a corrupted request.
+    """
+    try:
+        message_list = list(messages)
+        have_result: set[str] = set()
+        consumed: list[tuple[Any, str | None]] = []
+        for message in message_list:
+            for content in getattr(message, "contents", []) or []:
+                ctype = getattr(content, "type", None)
+                if ctype == "function_result" and getattr(content, "call_id", None):
+                    have_result.add(content.call_id)
+                elif ctype == "function_approval_response":
+                    consumed.append((content, approval_response_call_id(content)))
+        if not consumed:
+            return message_list, [], []
+
+        # Decide per call id BEFORE rebuilding, because rule 3 has to strip a
+        # function_call that sits in an EARLIER message than its response.
+        settled_ids: list[str] = []
+        dropped_ids: list[str] = []
+        replacement: dict[str, Any] = {}
+        for _content, call_id in consumed:
+            if call_id is None or call_id in settled_ids or call_id in dropped_ids:
+                continue
+            if call_id in have_result:
+                settled_ids.append(call_id)
+                continue
+            captured = _wire_results.get(call_id)
+            if captured is not None:
+                replacement[call_id] = captured
+                settled_ids.append(call_id)
+                continue
+            dropped_ids.append(call_id)
+
+        from agent_framework import Message
+
+        dropped = set(dropped_ids)
+        out: list[Any] = []
+        for message in message_list:
+            contents = getattr(message, "contents", None) or []
+            kept: list[Any] = []
+            emit_after: list[Any] = []
+            for content in contents:
+                ctype = getattr(content, "type", None)
+                if ctype == "function_approval_response":
+                    call_id = approval_response_call_id(content)
+                    if call_id is None:
+                        kept.append(content)
+                        continue
+                    if call_id in replacement:
+                        emit_after.append(replacement[call_id])
+                    # settled (rule 1/2) or dropped (rule 3): the response goes.
+                    continue
+                if ctype == "function_call" and getattr(content, "call_id", None) in dropped:
+                    continue
+                kept.append(content)
+            if len(kept) != len(contents):
+                if kept:
+                    out.append(
+                        Message(
+                            role=getattr(message, "role", "user"),
+                            contents=kept,
+                            author_name=getattr(message, "author_name", None),
+                            message_id=getattr(message, "message_id", None),
+                            # `additional_properties` is load-bearing and carried:
+                            # MAF's `_split_service_call_messages` reads `_attribution`
+                            # from it to tell replayed history from new input.
+                            # `raw_representation` is NOT carried -- it is excluded from
+                            # serialization by `Message.DEFAULT_EXCLUDE`, never reaches a
+                            # provider, and reading it here would break UDR-0131 D4.
+                            additional_properties=getattr(message, "additional_properties", None),
+                        )
+                    )
+                # A message emptied by this settlement is dropped, exactly as MAF
+                # drops one it emptied itself (`messages[:] = filtered_messages`).
+            else:
+                out.append(message)
+            if emit_after:
+                # Role "tool" and a separate message: the same shape
+                # heal_dangling_tool_calls already proved on both provider lanes.
+                out.append(Message(role="tool", contents=emit_after))
+
+        if settled_ids:
+            logger.info(
+                "[settle] consumed approval response(s) settled into their results (UDR-0132 D1): %s",
+                sorted(settled_ids),
+            )
+        if dropped_ids:
+            logger.warning(
+                "[settle] consumed approval response(s) with NO obtainable result: removed the "
+                "response AND its function_call so the request stays valid (UDR-0132 D1 rule 3). "
+                "The model will re-issue these call(s) and the operator will be asked to approve "
+                "again: %s",
+                sorted(dropped_ids),
+            )
+        return out, settled_ids, dropped_ids
+    except Exception:  # settlement must never break the run
+        logger.exception("[settle] failed to settle consumed approval responses")
+        return list(messages), [], []
+
+
+def heal_dangling_tool_calls(
+    messages: Any,
+    *,
+    live_approval_call_ids: Any = (),
+) -> tuple[list[Any], list[str]]:
     """Append captured results for any ``function_call`` in ``messages`` that has
-    neither a matching ``function_result`` nor a ``function_approval_response``.
+    neither a matching ``function_result`` nor a LIVE ``function_approval_response``.
 
     Returns ``(possibly_extended_messages, healed_call_ids)``. This closes the
     multi-iteration deferred-call gap: a call MAF resumed in an earlier iteration
     (its result captured on that iteration's wire) but which our replay left bare.
+
+    UDR-0132 D2: ``live_approval_call_ids`` is the set of calls answered by the
+    round being submitted -- the only approvals whose ticket is still unspent and
+    therefore the only ones that predict an output. It is passed IN and is never
+    derived by scanning ``messages``. That scan is what let this heal skip the one
+    call that needed it: a spent approval response from an earlier round satisfied
+    the "is answered" test while MAF was discarding it, and the bare call reached
+    the provider. Defaulting to "nothing is live" errs toward healing, which is
+    the safe direction -- a call that already has its result is skipped anyway by
+    the ``have_result`` test.
     """
     try:
         message_list = list(messages)
         called: list[str] = []
         have_result: set[str] = set()
-        have_approval: set[str] = set()
+        have_approval: set[str] = {cid for cid in (live_approval_call_ids or ()) if cid}
         for message in message_list:
             for content in getattr(message, "contents", []) or []:
                 ctype = getattr(content, "type", None)
@@ -250,11 +412,6 @@ def heal_dangling_tool_calls(messages: Any) -> tuple[list[Any], list[str]]:
                     called.append(content.call_id)
                 elif ctype == "function_result" and getattr(content, "call_id", None):
                     have_result.add(content.call_id)
-                elif ctype == "function_approval_response":
-                    wrapped = getattr(content, "function_call", None)
-                    approval_call = getattr(wrapped, "call_id", None) or getattr(content, "id", None)
-                    if approval_call:
-                        have_approval.add(approval_call)
         seen: set[str] = set()
         healed_contents: list[Any] = []
         healed_ids: list[str] = []
@@ -340,6 +497,7 @@ def describe_session_state(session: Any) -> str:
 
 
 __all__ = [
+    "approval_response_call_id",
     "describe_content",
     "describe_messages",
     "describe_session_state",
@@ -348,5 +506,6 @@ __all__ = [
     "log_wire_request",
     "logger",
     "record_wire_function_results",
+    "settle_consumed_approvals",
     "wire_pairing_report",
 ]

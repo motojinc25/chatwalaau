@@ -1875,6 +1875,32 @@ async def _stream_with_reasoning(
             # ids (matched by call_id). Anthropic keeps the signed reasoning +
             # original tool_use Content the API requires.
             if _build_replay:
+                # PRP-0154 / UDR-0132 D1. SETTLE BEFORE APPENDING. Everything already
+                # in `iteration_messages` has been through at least one agent.run, so
+                # every approval response it carries has been offered to MAF and its
+                # ticket is SPENT -- MAF pops the pending entry on the first bind
+                # (_tools._bind_approval_response_to_pending_request, consume=True) and
+                # silently discards a later replay of the same response while leaving
+                # OUR function_call in the request. From round 3 on, that reached the
+                # provider as a call with no output (400 "No tool output found for
+                # function call ..."), on every provider, because the consumption
+                # happens inside MAF ahead of any connector.
+                #
+                # This runs BEFORE the append below, so the round being submitted --
+                # `approval_response_contents`, not yet in the list -- is untouched by
+                # construction. Spentness is established by POSITION in the loop, not
+                # by a liveness heuristic, so no live approval can be damaged.
+                iteration_messages, settled_ids, dropped_ids = approval_debug.settle_consumed_approvals(
+                    iteration_messages
+                )
+                if settled_ids or dropped_ids:
+                    approval_debug.logger.info(
+                        "[iter %d settle] thread=%s settled=%s dropped-with-call=%s",
+                        total_rounds,
+                        thread_id,
+                        sorted(settled_ids),
+                        sorted(dropped_ids),
+                    )
                 is_anthropic = providers.provider_for(effective_model).name == "anthropic"
                 iter_synthetic_messages = iter_accumulator.build_iteration_messages(
                     approval_response_contents,
@@ -1909,7 +1935,19 @@ async def _stream_with_reasoning(
             # REPLAYED function_calls left without their output. A self-persisting
             # lane replays nothing, so there is nothing to heal (UDR-0125 D1).
             if _build_replay:
-                iteration_messages, healed_ids = approval_debug.heal_dangling_tool_calls(iteration_messages)
+                # UDR-0132 D2: the calls answered by THIS round are the only approvals
+                # whose ticket is unspent, so they are the only ones that predict an
+                # output. Passed in explicitly -- the healer must never re-derive this
+                # by scanning the messages, which is what let a spent response from an
+                # earlier round pass as an answer.
+                iteration_messages, healed_ids = approval_debug.heal_dangling_tool_calls(
+                    iteration_messages,
+                    live_approval_call_ids=[
+                        cid
+                        for cid in (approval_debug.approval_response_call_id(c) for c in approval_response_contents)
+                        if cid
+                    ],
+                )
                 if healed_ids:
                     approval_debug.logger.info(
                         "[iter %d heal] thread=%s appended captured results for deferred call(s) whose "
