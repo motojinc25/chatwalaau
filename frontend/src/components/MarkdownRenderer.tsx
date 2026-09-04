@@ -241,10 +241,23 @@ const components: Components = {
  * Convert LaTeX-style delimiters (\[...\] and \(...\)) to standard
  * math delimiters ($$...$$ and $...$) that remark-math recognizes.
  * Some AI models output formulas using LaTeX delimiters.
+ *
+ * PRP-0156 (UDR-0134 D1/D2): the replacements MUST stay in replacer-function
+ * form. A replacement STRING is a pattern in which `$` is an escape character,
+ * so the literal `'$$'` emits ONE dollar sign -- which is how `\[...\]` shipped
+ * as INLINE math from v0.6.0 (PRP-0006) until v0.143.2. A replacer function's
+ * return value is inserted verbatim, so the delimiter written here is the
+ * delimiter emitted. Do NOT "simplify" these back to string literals.
+ *
+ * Display math must reach remark-math as a FLOW construct: `$$` is consumed
+ * during block-level parsing and therefore protects its own content, whereas
+ * `$` is resolved only after block parsing has run -- so a formula containing
+ * a line pair such as `X\n=` is claimed by CommonMark as a setext heading and
+ * the delimiters can never pair.
  */
 function preprocessMath(text: string): string {
-  let processed = text.replace(/\\\[/g, '$$').replace(/\\\]/g, '$$')
-  processed = processed.replace(/\\\(/g, '$').replace(/\\\)/g, '$')
+  let processed = text.replace(/\\\[/g, () => '$$').replace(/\\\]/g, () => '$$')
+  processed = processed.replace(/\\\(/g, () => '$').replace(/\\\)/g, () => '$')
   return processed
 }
 
