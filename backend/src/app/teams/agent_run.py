@@ -26,6 +26,8 @@ from collections.abc import Awaitable, Callable
 import logging
 from typing import TYPE_CHECKING, Any
 
+from agent_framework import add_usage_details
+
 if TYPE_CHECKING:
     from app.teams.message import TeamsMessage
 
@@ -36,6 +38,39 @@ logger = logging.getLogger(__name__)
 # decides, and return True/False. The trailing (iteration, max_iterations) are the
 # PRP-0103 / UDR-0082 D3 round counter shown on the card.
 ApprovalRenderer = Callable[[str, str, str, dict[str, Any], int, int], Awaitable[bool]]
+
+
+def _record_turn(
+    turn_usage: dict[str, Any] | None,
+    model_calls: int,
+    effective_model: str,
+    thread_id: str,
+) -> None:
+    """Append this Teams turn to the CTR-0200 ledger (PRP-0158, UDR-0136 D5).
+
+    Writes the SUMMARY produced by the shared CTR-0009 derivation, so this lane and
+    the SPA lane record the same normalized price points rather than two dialects of
+    the same numbers. Self-silencing: statistics may never fail a turn (D6).
+    """
+    if not turn_usage or model_calls <= 0:
+        return
+    try:
+        from app import providers
+        from app.agui.token_usage import turn_summary
+        from app.usage.ledger import append_turn_usage
+
+        append_turn_usage(
+            lane="teams",
+            turn=turn_summary(
+                turn_usage,
+                model_calls=model_calls,
+                includes_cache_read=providers.input_tokens_include_cache_read(effective_model),
+            ),
+            model=effective_model,
+            thread_id=thread_id,
+        )
+    except Exception:
+        logger.warning("usage ledger teams append failed for thread %s", thread_id, exc_info=True)
 
 
 def _collect_generated_images(content: Any, out: list[str]) -> None:
@@ -151,7 +186,18 @@ async def run_turn(
             assistant_text=final_text,
             conversation_type=msg.conversation_type,
         )
+        # CTR-0200 append (PRP-0158). `_finish` is the single exit of this turn --
+        # normal completion and both budget stops route through it -- so the record
+        # is written exactly once per turn. Best-effort by contract (UDR-0136 D6).
+        _record_turn(turn_usage, model_calls, effective_model, thread_id)
         return final_text
+
+    # Token Usage Ledger accumulation (CTR-0200, PRP-0158, UDR-0136 D5). This lane
+    # had NO `usage` branch at all: a Teams turn was billed and was invisible even
+    # to the operator's own per-message display. Declared here, outside the round
+    # loop, so the total spans every approval round exactly as CTR-0009 does.
+    turn_usage: dict[str, Any] | None = None
+    model_calls = 0
 
     # PRP-0103 / UDR-0082 D2/D5: two-counter approval budget, parity with AG-UI.
     max_iterations = settings.tool_approval_max_iterations
@@ -178,6 +224,13 @@ async def run_turn(
                         assistant_text_parts.append(text)
                 elif content_type == "function_call":
                     accumulator.observe_function_call(content)
+                elif content_type == "usage":
+                    # One MAF usage content per MODEL CALL. Summed with the framework's
+                    # own public helper, exactly as the AG-UI seam does, so both lanes
+                    # report the same quantity (PRP-0158).
+                    details = getattr(content, "usage_details", None) or {}
+                    turn_usage = dict(add_usage_details(turn_usage, dict(details)))
+                    model_calls += 1
                 elif content_type == "function_result":
                     accumulator.observe_function_result(content)
                     _collect_generated_images(content, generated_image_uris)

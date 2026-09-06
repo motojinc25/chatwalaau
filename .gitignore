@@ -55,6 +55,9 @@ __pycache__/
 # Declarative agents (PRP-0094: operator-authored YAML; default DECLARATIVE_AGENTS_DIR=.agents)
 .agents/
 
+# Token usage ledger (PRP-0158, CTR-0200; default USAGE_DIR=.usage)
+.usage/
+
 # TLS Certificates
 .certs/
 

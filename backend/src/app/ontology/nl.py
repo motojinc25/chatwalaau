@@ -30,6 +30,7 @@ from app.ontology.vocabulary import (
     RDFS_RANGE,
     local_name,
 )
+from app.usage.ledger import append_helper_usage
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,12 @@ async def generate_sparql(question: str, store: Any, *, construct_only: bool = F
         ),
     ]
     response = await client.get_response(messages, stream=False)
+    # CTR-0200 (PRP-0158, UDR-0136 D5): record the pass MAF already totalled.
+    append_helper_usage(
+        purpose="ontology_nl_query",
+        usage_details=getattr(response, "usage_details", None),
+        model=model,
+    )
     sparql = strip_code_fence(getattr(response, "text", "") or "")
     if not sparql:
         raise ValueError("The model produced no SPARQL query")

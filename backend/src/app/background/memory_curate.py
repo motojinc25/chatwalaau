@@ -30,6 +30,7 @@ from typing import Any
 from app.agent.agent_memory import ENTRY_DELIMITER, load_agent_memory, parse_entries, write_agent_memory
 from app.background import register_task
 from app.core.config import settings
+from app.usage.ledger import append_helper_usage
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,12 @@ async def _reconcile(memory_body: str, turn_text: str, model: str | None) -> lis
         Message(role="user", contents=[prompt]),
     ]
     response = await client.get_response(messages, stream=False)
+    # CTR-0200 (PRP-0158, UDR-0136 D5): record the pass MAF already totalled.
+    append_helper_usage(
+        purpose="agent_memory_curation",
+        usage_details=getattr(response, "usage_details", None),
+        model=reconcile_model,
+    )
     return _parse_memory_lines(getattr(response, "text", "") or "")
 
 

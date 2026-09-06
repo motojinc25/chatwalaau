@@ -614,6 +614,14 @@ from app.ontology.router import router as ontology_router
 
 app.include_router(ontology_router)
 
+# Token Usage Ledger read side (CTR-0201, PRP-0158, UDR-0136) -- GET
+# /api/usage/summary aggregates the append-only ledger by day / month / chat /
+# model / lane. Read-only and always mounted: the ledger has no enable flag, and a
+# deployment with no records simply summarizes to zero rows. Consumes CTR-0083.
+from app.usage.router import router as usage_router
+
+app.include_router(usage_router)
+
 # Server -> client notification WebSocket (CTR-0110, PRP-0077). Real-time push
 # channel; first event type is session_title (CTR-0109).
 from app.notifications import register_notifications_endpoint

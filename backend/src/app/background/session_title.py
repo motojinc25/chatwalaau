@@ -45,6 +45,7 @@ import logging
 from typing import Any
 
 from app.background import register_task
+from app.usage.ledger import append_helper_usage
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,13 @@ async def _generate_title(user_text: str, assistant_text: str, model: str | None
         Message(role="user", contents=[prompt]),
     ]
     response = await client.get_response(messages, stream=False)
+    # CTR-0200 (PRP-0158, UDR-0136 D5): this NON-streaming call returns a usage
+    # total MAF already aggregated; it was discarded here until now.
+    append_helper_usage(
+        purpose="session_title",
+        usage_details=getattr(response, "usage_details", None),
+        model=title_model,
+    )
     return _clean_title(getattr(response, "text", "") or "")
 
 
@@ -187,6 +195,11 @@ async def _generate_title_from_conversation(conversation: str, model: str | None
         Message(role="user", contents=[_REGEN_USER_TEMPLATE.format(conversation=conversation[:_INPUT_CHAR_CAP])]),
     ]
     response = await client.get_response(messages, stream=False)
+    append_helper_usage(
+        purpose="session_title_regenerate",
+        usage_details=getattr(response, "usage_details", None),
+        model=title_model,
+    )
     return _clean_title(getattr(response, "text", "") or "")
 
 

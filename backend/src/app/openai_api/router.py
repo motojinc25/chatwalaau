@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any
 
-from agent_framework import AgentSession, Message
+from agent_framework import AgentSession, Message, add_usage_details
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -33,6 +33,61 @@ from app.openai_api.session import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _accumulate_usage_contents(contents: Any) -> tuple[dict[str, Any] | None, int]:
+    """Sum every usage content in ``contents`` (CTR-0200, PRP-0158).
+
+    The non-streaming lane holds the whole content list, so the turn total is a
+    fold over it. `maf_contents_to_openai_output` deliberately keeps its own
+    last-call semantics for the API RESPONSE; this is the ledger's view of the same
+    contents.
+    """
+    turn_usage: dict[str, Any] | None = None
+    model_calls = 0
+    for content in contents or []:
+        if getattr(content, "type", None) != "usage":
+            continue
+        details = getattr(content, "usage_details", None) or {}
+        turn_usage = dict(add_usage_details(turn_usage, dict(details)))
+        model_calls += 1
+    return turn_usage, model_calls
+
+
+def _record_api_turn(
+    turn_usage: dict[str, Any] | None,
+    model_calls: int,
+    requested_model: str,
+    thread_id: str,
+    *,
+    temporary: bool,
+) -> None:
+    """Append an OpenAI-compatible turn to the CTR-0200 ledger (PRP-0158).
+
+    This lane writes no browsable chat, so its consumption reached no record at all
+    before now. Self-silencing: statistics may never fail a request (UDR-0136 D6).
+    """
+    if not turn_usage or model_calls <= 0:
+        return
+    try:
+        from app.agui.token_usage import turn_summary
+        from app.usage.ledger import append_turn_usage
+
+        model = requested_model
+        append_turn_usage(
+            lane="openai-api",
+            turn=turn_summary(
+                turn_usage,
+                model_calls=model_calls,
+                includes_cache_read=providers.input_tokens_include_cache_read(model),
+            ),
+            model=model,
+            thread_id=thread_id,
+            temporary=temporary,
+        )
+    except Exception:
+        logger.warning("usage ledger openai-api append failed for thread %s", thread_id, exc_info=True)
+
 
 router = APIRouter(prefix="/v1", tags=["OpenAI API"])
 
@@ -104,6 +159,11 @@ async def _stream_responses(
 
     # Select agent from registry based on model parameter (CTR-0070, PRP-0035)
     agent = agent_registry.get(request.model if request.model != "chatwalaau" else None)
+
+    # Token Usage Ledger accumulation (CTR-0200, PRP-0158). Outside the approval
+    # round loop below, so the total spans the whole turn.
+    turn_usage: dict[str, Any] | None = None
+    model_calls = 0
 
     messages_raw = openai_input_to_maf_messages(request.input)
     messages, _ = normalize_agui_input_messages(messages_raw)
@@ -246,6 +306,13 @@ async def _stream_responses(
 
                     elif content_type == "usage":
                         usage_details = getattr(content, "usage_details", None) or {}
+                        # CTR-0200 (PRP-0158, UDR-0136 D5). The `usage` dict below keeps
+                        # its existing last-call semantics -- changing this lane's
+                        # RESPONSE shape is a wire change nobody approved -- so the
+                        # ledger gets its own turn accumulator, summed the same way
+                        # CTR-0009 sums it.
+                        turn_usage = dict(add_usage_details(turn_usage, dict(usage_details)))
+                        model_calls += 1
                         usage["input_tokens"] = getattr(usage_details, "input_token_count", 0) or usage_details.get(
                             "input_token_count", 0
                         )
@@ -306,6 +373,10 @@ async def _stream_responses(
         _build_session_message("user", user_text),
         _build_session_message("assistant", full_text),
     )
+
+    # CTR-0200 append (PRP-0158, UDR-0136 D5). This lane writes no chat the operator
+    # can browse, so before now its consumption was recorded nowhere at all.
+    _record_api_turn(turn_usage, model_calls, request.model, thread_id, temporary=temporary)
 
     # Emit completed event
     completed = {
@@ -458,6 +529,11 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
             raise HTTPException(status_code=500, detail="Agent execution failed.") from exc
 
         output_items, usage = maf_contents_to_openai_output(all_contents)
+        # CTR-0200 append (PRP-0158, UDR-0136 D5). Folded over the same contents the
+        # converter reads, so the ledger records the TURN while the response keeps
+        # its existing field semantics.
+        _ledger_turn, _ledger_calls = _accumulate_usage_contents(all_contents)
+        _record_api_turn(_ledger_turn, _ledger_calls, request.model, thread_id, temporary=temporary)
 
         # Save session
         full_text = ""

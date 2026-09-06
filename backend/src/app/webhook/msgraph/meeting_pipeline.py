@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 from app.core.config import settings
 from app.pipeline.models import Job, JobStatus
 from app.pipeline.registry import JobType, ParamSpec, register_job_type
+from app.usage.ledger import append_helper_usage
 from app.webhook import store as webhook_store
 from app.webhook.msgraph import SOURCE_NAME, graph_client, graph_delegated_client
 
@@ -424,6 +425,13 @@ async def _summarize(transcript_text: str) -> dict[str, Any]:
         Message(role="user", contents=[f"Summarize this meeting transcript as JSON:\n\n{excerpt}"]),
     ]
     response = await client.get_response(messages, stream=False)
+    # CTR-0200 (PRP-0158, UDR-0136 D5): a meeting summary is one of the largest
+    # single helper passes in the system and was entirely unrecorded.
+    append_helper_usage(
+        purpose="teams_meeting_summary",
+        usage_details=getattr(response, "usage_details", None),
+        model=model,
+    )
     text = (getattr(response, "text", "") or "").strip()
     return _parse_summary(text)
 

@@ -681,6 +681,52 @@ class _RunStats:
         return time.monotonic() - self.started
 
 
+def _record_turn_usage(
+    *,
+    harness_run: bool,
+    turn_usage: dict[str, Any] | None,
+    model_calls: int,
+    effective_model: str,
+    thread_id: str,
+    temporary: bool,
+    harness_id: Any,
+    outcome: str,
+) -> None:
+    """Append this turn to the CTR-0200 ledger (PRP-0158, UDR-0136 D5).
+
+    Writes the SUMMARY, not the raw accumulator: `turn_summary` applies the CTR-0102
+    provider convention, so the ledger stores the same normalized price points the
+    CTR-0009 event publishes and no consumer has to re-apply it. A turn that
+    measured nothing writes nothing rather than a record of zeros.
+
+    Self-silencing by contract (UDR-0136 D6) -- `append_turn_usage` swallows its own
+    failures, and the guard here covers the summary computation as well.
+    """
+    if not turn_usage or model_calls <= 0:
+        return
+    try:
+        from app.usage.ledger import append_turn_usage
+
+        summary = turn_summary(
+            turn_usage,
+            model_calls=model_calls,
+            includes_cache_read=providers.input_tokens_include_cache_read(effective_model),
+        )
+        append_turn_usage(
+            lane="spa-harness" if harness_run else "spa-prompt",
+            turn=summary,
+            model=effective_model,
+            thread_id=thread_id,
+            temporary=temporary,
+            # The backend's own name for the run-target. The SPA's display label is a
+            # client concern; the harness id is what this side actually selected.
+            run_target=str(harness_id) if harness_run and harness_id else None,
+            outcome=outcome,
+        )
+    except Exception:
+        logger.warning("usage ledger turn append failed for thread %s", thread_id, exc_info=True)
+
+
 async def _resilient_run(
     agent: Any, messages: Any, session: Any, run_options: dict[str, Any], stats: _RunStats | None = None
 ) -> AsyncGenerator[Any, None]:
@@ -2274,6 +2320,26 @@ async def _stream_with_reasoning(
         # double-dispatch. Sync dispatch only; never yields.
         if sys.exc_info()[0] is not None:
             _dispatch_title_clear()
+
+        # Token Usage Ledger (CTR-0200, PRP-0158, UDR-0136 D5/D6/D8). The turn is
+        # recorded HERE, in the finally, because this is the only place that runs on
+        # EVERY exit: normal completion, a classified error, and a user Stop or
+        # dropped connection -- which cancels the generator and skips the post-try
+        # block entirely. A billed turn must be recorded even when it did not finish
+        # (D8), so the cancellation path is the one that matters most.
+        #
+        # The append is synchronous and self-silencing: an async generator may not
+        # await during GeneratorExit, and statistics may never fail a turn (D6).
+        _record_turn_usage(
+            harness_run=harness_run,
+            turn_usage=turn_usage,
+            model_calls=model_calls,
+            effective_model=effective_model,
+            thread_id=thread_id,
+            temporary=temporary,
+            harness_id=_harness_id,
+            outcome=("interrupted" if sys.exc_info()[0] is not None else ("error" if run_error else "completed")),
+        )
 
     # Always finalize open blocks -- even after exceptions, so the frontend
     # can stop thinking indicators and display any error.

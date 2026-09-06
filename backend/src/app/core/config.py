@@ -131,6 +131,15 @@ class Settings(BaseSettings):
     # Session
     sessions_dir: str = ".sessions"
 
+    # Token Usage Ledger (CTR-0200, PRP-0158 / UDR-0136 D1/D2). Append-only monthly
+    # JSONL of token consumption. Deliberately its OWN directory and NOT a file under
+    # SESSIONS_DIR: deleting a chat unlinks there, the Temporary Chat sweep unlinks
+    # there on a timer, and chat export/import re-identifies what lives there -- a
+    # billing record must survive all three. Retention is INDEFINITE and deliberately
+    # not configurable (UDR-0136 D10): a retention knob's only function would be to
+    # lose money history. DEMO_MODE writes nothing (UDR-0136 D7).
+    usage_dir: str = ".usage"
+
     # Auto Session Title (CTR-0109, CTR-0006, PRP-0077 / UDR-0053). SESSION_TITLE_MODE
     # selects how a chat's sidebar title is set: "truncate" (default) keeps the
     # leading characters of the first user message (pre-PRP-0077 behavior,
