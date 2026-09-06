@@ -276,6 +276,12 @@ class AnthropicProvider:
     # Anthropic carries the conversation in the request (no server-side response
     # chaining), so it is already client-managed (PRP-0142).
     stores_responses_server_side = False
+    # Anthropic reports `usage.input_tokens` EXCLUSIVE of cache_read_input_tokens
+    # and cache_creation_input_tokens (agent_framework_anthropic maps them to three
+    # separate keys). The cached prefix still occupies the context window, so the
+    # CTR-0009 usage seam adds it back for `context_base_tokens` (PRP-0157,
+    # UDR-0135 D4/D5).
+    input_tokens_include_cache_read = False
 
     def build_chat_client(self, model: str) -> Any:
         # Catalog routing (PRP-0113, UDR-0094): `model` is the offering id, so the

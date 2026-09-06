@@ -49,6 +49,18 @@ class Provider(Protocol):
     # harness-lane decision (UDR-0119 D4).
     stores_responses_server_side: bool
 
+    # Whether this provider counts prompt-cache READ tokens INSIDE the
+    # ``input_token_count`` it reports (PRP-0157, UDR-0135 D5). The OpenAI family
+    # includes ``cached_tokens`` in ``usage.input_tokens``; Anthropic reports
+    # ``input_tokens`` EXCLUSIVE of both cache_read and cache_creation. Consumed by
+    # the CTR-0009 usage seam for the two axes it publishes: `context_base_tokens`
+    # (add the cache tokens back when they are NOT already counted) and
+    # `turn.uncached_input_token_count` (subtract them when they ARE). Declared
+    # here rather than in the model catalog because it is a property of the SDK's
+    # reporting, not of an offering -- two offerings of one provider cannot
+    # disagree about it.
+    input_tokens_include_cache_read: bool
+
     def build_chat_client(self, model: str) -> Any:
         """Construct the MAF ChatClient for ``model`` (credential owned here)."""
         ...

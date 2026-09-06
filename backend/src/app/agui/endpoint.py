@@ -47,7 +47,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 from ag_ui.encoder import EventEncoder
-from agent_framework import AgentSession, Content, Message
+from agent_framework import AgentSession, Content, Message, add_usage_details
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -77,6 +77,7 @@ from app.agent.prompt_dump import dump_prompt
 from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_path
 from app.agent.user_memory import session_user_profile_snapshot
 from app.agui.agent_registry import AgentRegistry
+from app.agui.token_usage import context_base_tokens, turn_summary
 from app.auth import verify_api_key
 from app.core import provider_errors
 from app.core.config import settings
@@ -1129,6 +1130,19 @@ async def _stream_with_reasoning(
     # read it on any path, including one that fails before the run loop is reached.
     run_stats = _RunStats()
 
+    # Two-axis token measurement (PRP-0157, UDR-0135 D1/D2). A turn emits one MAF
+    # usage content per MODEL CALL, and the approval loop below runs one stream per
+    # ROUND, so these are declared HERE -- outside the round loop -- and are never
+    # reset mid-turn. `turn_usage` accumulates the billing axis with the public
+    # `add_usage_details`, NOT via `ResponseStream.get_final_response()`, which
+    # covers a single round and, on a stream that was not fully consumed, drains the
+    # remainder -- resuming and billing a run the operator stopped (UDR-0135 D2).
+    # `last_usage` keeps the most recent call for the context axis, which is a
+    # different quantity and cannot be recovered from the cumulative.
+    turn_usage: dict[str, Any] | None = None
+    last_usage: dict[str, Any] | None = None
+    model_calls = 0
+
     try:
         # Pre-process: strip PDF image_url entries from messages before normalization.
         # normalize_agui_input_messages converts image_url content to MAF Content,
@@ -1812,6 +1826,18 @@ async def _stream_with_reasoning(
                     elif content_type == "usage":
                         usage_details = getattr(content, "usage_details", None) or {}
                         usage_value = dict(usage_details)
+                        # Two-axis accumulation (PRP-0157, UDR-0135 D1/D2). This
+                        # content is ONE model call; the billing axis is the sum of
+                        # every one of them across every approval round, and the
+                        # context axis is this call alone when it turns out to be
+                        # the last. `add_usage_details` sums every integer key,
+                        # including the provider-prefixed extras, and is exactly
+                        # what `AgentResponse.from_updates` would have summed --
+                        # arithmetically identical, without the finalizer's
+                        # stream-draining behaviour.
+                        turn_usage = dict(add_usage_details(turn_usage, dict(usage_details)))
+                        last_usage = dict(usage_details)
+                        model_calls += 1
                         # PRP-0144 / UDR-0125 D5: attribute usage to the offering
                         # that actually SERVED the turn. `effective_model` already
                         # resolves to the harness run-target's bound offering for a
@@ -1869,6 +1895,27 @@ async def _stream_with_reasoning(
                             usage_value["cache_read_input_tokens"] = cache_read
                         if cache_write is not None:
                             usage_value["cache_write_input_tokens"] = cache_write
+                        # Two-axis publication (PRP-0157, UDR-0135 D3/D4/D6/D7).
+                        # ADDITIVE: every key above keeps the meaning it has always
+                        # had -- the most recent model call -- because sessions
+                        # persisted since v0.18.0 store them under that meaning and
+                        # a stored key cannot be re-measured. `context_base_tokens`
+                        # is the context axis, normalized here because the
+                        # correction depends on the provider's reporting convention
+                        # (CTR-0102), which does not belong in a React component.
+                        # `turn` is the billing axis. Both are omitted when nothing
+                        # was measured; zero never stands in for unknown.
+                        includes_cache_read = providers.input_tokens_include_cache_read(model_name)
+                        base_tokens = context_base_tokens(last_usage, includes_cache_read=includes_cache_read)
+                        if base_tokens is not None:
+                            usage_value["context_base_tokens"] = base_tokens
+                        turn_value = turn_summary(
+                            turn_usage,
+                            model_calls=model_calls,
+                            includes_cache_read=includes_cache_read,
+                        )
+                        if turn_value is not None:
+                            usage_value["turn"] = turn_value
                         yield encoder.encode(
                             CustomEvent(
                                 type=EventType.CUSTOM,

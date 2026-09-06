@@ -242,6 +242,12 @@ class AzureOpenAIProvider:
     # Responses API stores server-side by default and chains via previous_response_id
     # (PRP-0142). Inherited by OpenAIProvider and FoundryProvider.
     stores_responses_server_side = True
+    # The Responses API counts `input_tokens_details.cached_tokens` INSIDE
+    # `usage.input_tokens`, so the cached prefix is already part of the reported
+    # input and must be SUBTRACTED to obtain the full-price (uncached) input
+    # (PRP-0157, UDR-0135 D5). Inherited by OpenAIProvider and FoundryProvider,
+    # which are the same API surface.
+    input_tokens_include_cache_read = True
 
     def build_chat_client(self, model: str) -> Any:
         # Prompt caching (PRP-0080, FEAT-0038 / UDR-0056 D4): Azure/OpenAI prompt

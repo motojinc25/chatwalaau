@@ -212,6 +212,21 @@ def stores_responses_server_side(model: str) -> bool:
     return bool(getattr(provider_for(model), "stores_responses_server_side", False))
 
 
+def input_tokens_include_cache_read(model: str) -> bool:
+    """Whether ``model``'s provider counts cache-READ tokens inside its input count.
+
+    True for the OpenAI family (Responses API: ``input_tokens`` INCLUDES
+    ``input_tokens_details.cached_tokens``); False for Anthropic, which reports
+    ``input_tokens`` exclusive of both cache_read and cache_creation. Consumed by
+    the CTR-0009 usage seam to publish the two axes of UDR-0135: the cache tokens
+    are ADDED to ``context_base_tokens`` when this is False (they occupy the window
+    either way) and SUBTRACTED from the turn input to obtain
+    ``uncached_input_token_count`` when it is True. Unknown models resolve via
+    ``provider_for`` (defaults to azure-openai), like every other provider flag.
+    """
+    return bool(getattr(provider_for(model), "input_tokens_include_cache_read", True))
+
+
 def background_supported_map(models: list[str]) -> dict[str, bool]:
     """model -> background support flag for the GET /api/model selector (CTR-0041)."""
     return {model: background_supported(model) for model in models}
@@ -253,6 +268,7 @@ __all__ = [
     "build_model_options",
     "build_structured_output",
     "get_max_context_tokens",
+    "input_tokens_include_cache_read",
     "max_context_tokens_map",
     "merge_generation_options",
     "model_options_catalog",

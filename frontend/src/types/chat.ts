@@ -17,11 +17,43 @@ export interface ImageRef {
   media_type: string
 }
 
+/**
+ * The BILLING axis of a turn (PRP-0157, UDR-0135 D1): every model call of every
+ * approval round, summed. Distinct from the sibling fields on `UsageInfo`, which
+ * describe the LAST model call only. Price points are kept separate because cache
+ * reads and writes are billed at different rates from ordinary input; no
+ * `total_token_count` is published because the Anthropic client reports none and a
+ * computed total would mean different things per provider (UDR-0135 D6).
+ * A key the provider did not report is ABSENT, never 0 (UDR-0135 D7).
+ */
+export interface TurnUsage {
+  /** Raw sum of the reported input counts, kept for traceability. */
+  input_token_count?: number
+  output_token_count?: number
+  /** Full-price input: reported input minus cache reads where the provider includes them. */
+  uncached_input_token_count?: number
+  cache_read_input_token_count?: number
+  cache_creation_input_token_count?: number
+  /** Subset of `output_token_count`. */
+  reasoning_output_token_count?: number
+  /** How many model calls this turn made. */
+  model_calls?: number
+}
+
 export interface UsageInfo {
   input_token_count?: number
   output_token_count?: number
   total_token_count?: number
   max_context_tokens?: number
+  /**
+   * Context occupancy the NEXT message starts from (PRP-0157, UDR-0135 D4).
+   * Backend-computed and provider-normalized: cache tokens occupy the window even
+   * where the provider excludes them from `input_token_count`. Absent on messages
+   * persisted before v0.144.0 -- CTR-0041 then falls back to input + output.
+   */
+  context_base_tokens?: number
+  /** Cumulative consumption of the whole turn (PRP-0157). Absent on legacy messages. */
+  turn?: TurnUsage
   /** Model that produced this turn (CTR-0009 usage event). */
   model?: string
   /** Reasoning effort used for this turn (CTR-0030, PRP-0071). */

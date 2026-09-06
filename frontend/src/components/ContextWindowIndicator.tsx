@@ -35,9 +35,18 @@ export function ContextWindowIndicator({ usage, maxContextTokens }: ContextWindo
   const max = usage?.max_context_tokens ?? maxContextTokens
   if (!max || max <= 0) return null
 
+  // Context occupancy is the backend-computed, provider-normalized scalar
+  // (PRP-0157, UDR-0135 D4). The legacy `input + output` is kept as the fallback
+  // for messages persisted before v0.144.0 and for a provider that reports no
+  // input count -- degrading to the previous behaviour, never to a false zero.
+  //
+  // The fallback is WRONG on Anthropic and is retained only because old messages
+  // carry nothing better: Anthropic reports `input_token_count` exclusive of the
+  // cached prefix, so with FEAT-0038 active it under-reported occupancy by most of
+  // the window and the 95% warning arrived late. `context_base_tokens` corrects it.
   const input = usage?.input_token_count ?? 0
   const output = usage?.output_token_count ?? 0
-  const consumed = input + output
+  const consumed = usage?.context_base_tokens ?? input + output
   const rate = Math.min((consumed / max) * 100, 100)
   const level = getWarningLevel(rate)
 

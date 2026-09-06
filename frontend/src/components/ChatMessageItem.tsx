@@ -22,6 +22,7 @@ import { ImageGenerationResults } from '@/components/ImageGenerationResult'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
 import { McpAppView } from '@/components/mcp-apps/McpAppView'
 import { ReasoningIndicator, ThinkingBlock } from '@/components/ReasoningIndicator'
+import { TokenUsageDialog } from '@/components/TokenUsageDialog'
 import { ToolCallBlock, ToolCallIndicator } from '@/components/ToolCallIndicator'
 import {
   AlertDialog,
@@ -383,6 +384,8 @@ function ChatMessageItemImpl({
   const [editing, setEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  // Per-turn token detail (CTR-0030, PRP-0157). Opened from the in/out label.
+  const [usageDetailOpen, setUsageDetailOpen] = useState(false)
   const [regenModelOpen, setRegenModelOpen] = useState(false)
   const editRef = useRef<HTMLTextAreaElement>(null)
 
@@ -814,13 +817,33 @@ function ChatMessageItemImpl({
                 JSON
               </span>
             )}
-            {!isUser && message.usage && (
+            {/* Token label (CTR-0030). The rendered text is unchanged; with a turn
+                breakdown available (PRP-0157) it additionally opens the detail
+                dialog. A legacy message carries no `turn`, so it stays the plain
+                span it has always been rather than an affordance that opens
+                nothing. */}
+            {!isUser && message.usage && !message.usage.turn && (
               <span className="ml-1 text-[11px] tabular-nums text-muted-foreground/60">
                 {message.usage.input_token_count?.toLocaleString() ?? '?'}in /{' '}
                 {message.usage.output_token_count?.toLocaleString() ?? '?'}out
               </span>
             )}
+            {!isUser && message.usage?.turn && (
+              <button
+                type="button"
+                className="ml-1 text-[11px] tabular-nums text-muted-foreground/60 hover:text-foreground hover:underline"
+                onClick={() => setUsageDetailOpen(true)}
+                title="Show token usage detail for this turn"
+                aria-label="Show token usage detail for this turn">
+                {message.usage.input_token_count?.toLocaleString() ?? '?'}in /{' '}
+                {message.usage.output_token_count?.toLocaleString() ?? '?'}out
+              </button>
+            )}
           </div>
+        )}
+
+        {!isUser && message.usage?.turn && (
+          <TokenUsageDialog usage={message.usage} open={usageDetailOpen} onOpenChange={setUsageDetailOpen} />
         )}
 
         <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
