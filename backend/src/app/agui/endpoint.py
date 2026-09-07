@@ -681,6 +681,27 @@ class _RunStats:
         return time.monotonic() - self.started
 
 
+def _harness_run_target(harness_id: Any) -> str | None:
+    """The harness agent's NAME for the ledger's ``run_target`` (PRP-0159 C3).
+
+    Recorded as a name rather than an id so "which agent costs the most" reads as
+    agent names instead of a column of identifiers. Resolved once per TURN, never
+    per model call, and only on the harness lane.
+
+    Falls back to the id when the spec cannot be read -- an unreadable spec is not a
+    reason to lose the record, and the id is still a true answer to "which agent".
+    """
+    if not harness_id:
+        return None
+    try:
+        from app.agent.harness.loader import resolve_spec
+
+        spec = resolve_spec(str(harness_id))
+        return spec.display_name or spec.name or str(harness_id)
+    except Exception:
+        return str(harness_id)
+
+
 def _record_turn_usage(
     *,
     harness_run: bool,
@@ -718,9 +739,7 @@ def _record_turn_usage(
             model=effective_model,
             thread_id=thread_id,
             temporary=temporary,
-            # The backend's own name for the run-target. The SPA's display label is a
-            # client concern; the harness id is what this side actually selected.
-            run_target=str(harness_id) if harness_run and harness_id else None,
+            run_target=_harness_run_target(harness_id) if harness_run else None,
             outcome=outcome,
         )
     except Exception:
@@ -1188,6 +1207,16 @@ async def _stream_with_reasoning(
     turn_usage: dict[str, Any] | None = None
     last_usage: dict[str, Any] | None = None
     model_calls = 0
+
+    # Both `except` handlers below read `continuation_token`, and it was bound ~30
+    # lines INSIDE the try -- after message normalization, image/PDF injection and
+    # the session setup. Anything that raised before that point produced
+    # `UnboundLocalError` from the error handler itself, replacing the classified
+    # RUN_ERROR with an unrelated crash and hiding the real cause. Declared here for
+    # the same reason `run_stats` is (PRP-0155 / UDR-0133 C3): a value the failure
+    # path reads must be bound on every path that can reach it. The assignment inside
+    # the try stays -- it re-binds the same None before the state is parsed.
+    continuation_token: Any = None
 
     try:
         # Pre-process: strip PDF image_url entries from messages before normalization.

@@ -11,9 +11,14 @@ dependency for mutating methods: usage history is operational data.
 
 Returns token counts only -- there is no cost, price or currency field anywhere in
 this module (UDR-0136 D3), and no completeness claim: the Declarative Workflow lane
-and MAF's internal compaction calls are not in the ledger as of v0.145.0
-(UDR-0136 D11), which ``coverage`` states in every response so a consumer cannot
-mistake the numbers for a bill.
+is not in the ledger as of v0.145.1 (UDR-0136 D11), which ``coverage`` states in
+every response so a consumer cannot mistake the numbers for a bill.
+
+The v0.145.0 coverage text also named the framework's compaction calls. That was
+wrong and is corrected here (PRP-0159, UDR-0137 D1): no compaction strategy this
+application constructs takes a client, so none calls a model. The condition is kept
+rather than deleted (D2), because a summarizing strategy would -- and an invariant
+test fails the moment one is built.
 """
 
 from __future__ import annotations
@@ -35,9 +40,11 @@ router = APIRouter(prefix="/api/usage", tags=["usage"])
 # incomplete is more dangerous than no record, so the gap travels with the numbers
 # instead of living only in a document someone may not read.
 COVERAGE_NOTE = (
-    "Observable model calls only. Declarative Workflow runs and the framework's "
-    "internal compaction calls are not recorded, so these totals are what the "
-    "observable work consumed -- not what the account was charged."
+    "Observable model calls only. Declarative Workflow runs are not recorded, so "
+    "these totals are what the observable work consumed -- not what the account was "
+    "charged. Context compaction does not call a model in any configuration this "
+    "application builds, so it consumes no tokens to record; a summarizing "
+    "compaction strategy would, and none is constructed."
 )
 
 
