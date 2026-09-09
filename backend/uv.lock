@@ -37,14 +37,14 @@ wheels = [
 
 [[package]]
 name = "agent-framework"
-version = "1.16.0"
+version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core", extra = ["all"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1b/53/4952d847dae5e6a2b2432288b1cdfc97211c5bb3e1d9cdbe59412d28d11a/agent_framework-1.16.0.tar.gz", hash = "sha256:7fd501c2670d3d0dad7c2db40eb7140e06b66ea59ef54f1e71be1853987dfa39", size = 9895, upload-time = "2026-08-28T01:10:35.331Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/3d/18c0d10fd871f3584250b71f4b67efc91561864e4dc140e40c67fb79233b/agent_framework-1.17.0.tar.gz", hash = "sha256:b818f08b510c064ee7da0d9780203a891093825bdc4d585411ac0220263ae252", size = 9850, upload-time = "2026-09-03T09:53:44.091Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/db/54/801ec9ef5ae01d3b6546cf0dd04d6a1a7ab12e2ed2ca847682ba4cf3ee79/agent_framework-1.16.0-py3-none-any.whl", hash = "sha256:86c2089f7d45d3df8ab4d3d018d48f0cf3c30c8845964c29daf74c5fd061100c", size = 5707, upload-time = "2026-08-28T01:10:24.7Z" },
+    { url = "https://files.pythonhosted.org/packages/49/cf/8928c2a4020e9d9bda75a6e509c89ce300fd0c128aa01e22fef423796712/agent_framework-1.17.0-py3-none-any.whl", hash = "sha256:31254e515c8c007a7a1bcd87bd2979b8cd24ff047004af258100cb1b384d9e35", size = 5706, upload-time = "2026-09-03T09:53:29.867Z" },
 ]
 
 [[package]]
@@ -62,7 +62,7 @@ wheels = [
 
 [[package]]
 name = "agent-framework-ag-ui"
-version = "1.2.1"
+version = "1.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ag-ui-protocol" },
@@ -72,9 +72,9 @@ dependencies = [
     { name = "sse-starlette" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c2/28/7f1aa04837deb021051e915cca6ca303f2623b42595887a1c559c8e5ace6/agent_framework_ag_ui-1.2.1.tar.gz", hash = "sha256:8be7031656a47e5a28692a7ecdb167e398b06eeeed5d04b9d806c716aa44947b", size = 343233, upload-time = "2026-08-28T01:10:36.197Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b0/48/4e590800fb8e1d7f69afbd301095c0d947dfd6a9f7d693a4119b4503d13a/agent_framework_ag_ui-1.2.2.tar.gz", hash = "sha256:d81838b75baddf87e0ee9fe8b85700ac689e6924240f0fe3d85b4a4fd5ced81a", size = 352214, upload-time = "2026-09-03T09:53:44.796Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ed/e9/91782b053a83397ab33b3a285a47e6d6ed9eddd0f1c4fb33337290a72875/agent_framework_ag_ui-1.2.1-py3-none-any.whl", hash = "sha256:5161cef98776654d70d2b83e31c08cd8f0f768b190fba0ce9a3ef1a41dbc260a", size = 178637, upload-time = "2026-08-28T01:10:25.861Z" },
+    { url = "https://files.pythonhosted.org/packages/11/dc/917351bb86bcad89d9ad6f938c1435595525cdd9d0d7433ba1ee21f4dac7/agent_framework_ag_ui-1.2.2-py3-none-any.whl", hash = "sha256:c6b3ad70e8afc54f938029a08cdad49ef9eb5284524e4c9453031c55ad1b76b6", size = 181102, upload-time = "2026-09-03T09:53:31.615Z" },
 ]
 
 [[package]]
@@ -202,7 +202,7 @@ wheels = [
 
 [[package]]
 name = "agent-framework-core"
-version = "1.16.0"
+version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "msgspec" },
@@ -211,9 +211,9 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b0/96/14e04d00dfc2653677f3f97fa6b348bd202dc4bf4eba4621caabd93ee607/agent_framework_core-1.16.0.tar.gz", hash = "sha256:47ee37b4f6201add7a8a8f9cc39ffe43438c24360b53b116f61ba075e6962d94", size = 584318, upload-time = "2026-08-28T01:10:39.244Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1d/a6/a47518b61275a7b001d3acebae6857ad98b7d10303ef8d7c9b6546b1a450/agent_framework_core-1.17.0.tar.gz", hash = "sha256:c1b69ab7f496d1ec9ab5dcb0afc5a99e60e5c820f03f5a755a9104fd89d01394", size = 593864, upload-time = "2026-09-03T09:53:46.019Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ed/17/7abbfc9e560911967dd5b96a8b6cea537d35efab18f8f77367429159b637/agent_framework_core-1.16.0-py3-none-any.whl", hash = "sha256:382a6a0332cdc3144ffcf14b07a9a38c3ef42afc06dde8230226b850fe4cc76e", size = 641893, upload-time = "2026-08-28T01:10:29.874Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/cb/1fceefa6dc720774fc8180a8651045e583de550b946cc59c291684fcbbf6/agent_framework_core-1.17.0-py3-none-any.whl", hash = "sha256:75958ff692a38bf0c627aaa910bae6c4a89569dfec68e1e79eac8e206d88874d", size = 651715, upload-time = "2026-09-03T09:53:33.222Z" },
 ]
 
 [package.optional-dependencies]
@@ -268,7 +268,7 @@ wheels = [
 
 [[package]]
 name = "agent-framework-devui"
-version = "1.0.0b260821"
+version = "1.0.0b260903"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
@@ -277,9 +277,9 @@ dependencies = [
     { name = "opentelemetry-sdk" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/de/13/427b80168f0b98627f4a177223aed933256f9d30ff736ec9963c321834f9/agent_framework_devui-1.0.0b260821.tar.gz", hash = "sha256:c99ca31e7b1518c18b03674a93ac8910ad2272412e395278c5757f62fd30c0ce", size = 361526, upload-time = "2026-08-21T23:22:50.001Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/07/aa/cc9b3226dc924cef753c325dffbfd832ce13d9ef7826c38ac87cb0805d56/agent_framework_devui-1.0.0b260903.tar.gz", hash = "sha256:a0364e09e6a4f3c37d0d2e54705920f0f4830abbb24001a9530e54851f06e1de", size = 355223, upload-time = "2026-09-03T09:53:47.089Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5e/5c/393f79f15c8e62bab2c2d11d8f9ba4def5cf72024f72ac38543cb5f73c24/agent_framework_devui-1.0.0b260821-py3-none-any.whl", hash = "sha256:ebfe643a57e72f755f0f7795eec9850ba9959bad8a9a7f62234730a10d9abcd6", size = 366347, upload-time = "2026-08-21T23:22:36.692Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/fb/72bf62b9c228ff5bd0de5a622b9ffa0b0159ba2fe07d752064d3c86e9511/agent_framework_devui-1.0.0b260903-py3-none-any.whl", hash = "sha256:8359ae8b4c31389da048e9e5c11f64d61307eecedb5b9aca4ca3b02dedc1f0ee", size = 360118, upload-time = "2026-09-03T09:53:34.815Z" },
 ]
 
 [[package]]
@@ -299,7 +299,7 @@ wheels = [
 
 [[package]]
 name = "agent-framework-foundry"
-version = "1.11.0"
+version = "1.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
@@ -307,10 +307,11 @@ dependencies = [
     { name = "aiohttp" },
     { name = "azure-ai-inference" },
     { name = "azure-ai-projects" },
+    { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/85/23/c9eb231baee90868ed634b33fa4828c3ff2d0d6a63ab290fe759c4a66bf8/agent_framework_foundry-1.11.0.tar.gz", hash = "sha256:dc69c4f6c5d7acbbc87bfb7bc35606436a0ac65e8af4a00d16c1edde9e39a214", size = 50443, upload-time = "2026-08-14T02:39:34.372Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/14/a1/2a1a8b7d50d0ab6de9c7170b1f90a9d91f664a40f833913b2d2164dba91e/agent_framework_foundry-1.12.0.tar.gz", hash = "sha256:6361fb0ead699ddc907c95c4ecac7176d688f14a3d60f00e8dfdf06904336356", size = 51220, upload-time = "2026-09-03T09:53:48.254Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/46/ff/599d747018ccaf7ceb239818b0b411e665deeca0dbb082f4622466385808/agent_framework_foundry-1.11.0-py3-none-any.whl", hash = "sha256:6750b01927ec6350a084d7bc71a5edb01e4ecec97e9c87cf593e8c6c72b6ddb2", size = 53255, upload-time = "2026-08-14T02:39:12.489Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/6b/b066715e5ccc2d906920b1859160c54703aacc213f2f01c5e8e121d8555a/agent_framework_foundry-1.12.0-py3-none-any.whl", hash = "sha256:f48362cd01962a526ec8f88f67608fbac13d1c728400c6c6ec8a5bc9b1f42c94", size = 53787, upload-time = "2026-09-03T09:53:36.555Z" },
 ]
 
 [[package]]
@@ -450,15 +451,15 @@ wheels = [
 
 [[package]]
 name = "agent-framework-openai"
-version = "1.14.1"
+version = "1.14.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
     { name = "openai" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1f/e1/85c4f4ae54440f950913d206be6de6c5e06e82c8cd76358c92bff791fe66/agent_framework_openai-1.14.1.tar.gz", hash = "sha256:b255ec3979aa4dcaf894144511ce08cca163f7e1bb5aa7d0fb6da4b44de92c38", size = 60966, upload-time = "2026-08-28T01:10:42.631Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/b2/c784f2c11b03f586a61775b1c5f61710379a1069257698dd803e7fbb03fa/agent_framework_openai-1.14.2.tar.gz", hash = "sha256:a09684d35bc0202b8fffea6fbd187480bc56a95027ed352d699a839d536a12ff", size = 63266, upload-time = "2026-09-03T09:53:52.239Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/68/fe/a5014f619abf032b48db78db3d1a3896f5ebf3830c6b451ab5714e79d0fa/agent_framework_openai-1.14.1-py3-none-any.whl", hash = "sha256:93dc402f90dd8f5c38acf17e720d1bbc202af29f279641caa206acbc84a14bb4", size = 66265, upload-time = "2026-08-28T01:10:34.354Z" },
+    { url = "https://files.pythonhosted.org/packages/43/de/6bdf51e5671b9f72ba83cc8b9ae3bc616c23bdb7f30365756c7d8baa0e74/agent_framework_openai-1.14.2-py3-none-any.whl", hash = "sha256:3da7d1f81bcd2bdbae8ba833647a4a8c2da1f1250bd3cc7947b2eb4e67e10c61", size = 68397, upload-time = "2026-09-03T09:53:41.964Z" },
 ]
 
 [[package]]
@@ -1194,7 +1195,7 @@ wheels = [
 
 [[package]]
 name = "chatwalaau"
-version = "0.146.0"
+version = "0.147.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework" },
@@ -1213,6 +1214,7 @@ dependencies = [
     { name = "httpx" },
     { name = "httpx-sse" },
     { name = "microsoft-teams-apps" },
+    { name = "openai" },
     { name = "pydantic-settings" },
     { name = "pymupdf" },
     { name = "pyoxigraph" },
@@ -1237,13 +1239,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-framework", specifier = "==1.16.0" },
-    { name = "agent-framework-ag-ui", specifier = "==1.2.1" },
+    { name = "agent-framework", specifier = "==1.17.0" },
+    { name = "agent-framework-ag-ui", specifier = "==1.2.2" },
     { name = "agent-framework-anthropic", specifier = "==1.0.0b260827" },
     { name = "agent-framework-declarative", specifier = "==1.0.3" },
-    { name = "agent-framework-devui", specifier = "==1.0.0b260821" },
-    { name = "agent-framework-foundry", specifier = "==1.11.0" },
-    { name = "agent-framework-openai", specifier = "==1.14.1" },
+    { name = "agent-framework-devui", specifier = "==1.0.0b260903" },
+    { name = "agent-framework-foundry", specifier = "==1.12.0" },
+    { name = "agent-framework-openai", specifier = "==1.14.2" },
     { name = "av", specifier = ">=12.0" },
     { name = "azure-identity", specifier = ">=1.23.0" },
     { name = "chromadb", specifier = ">=1.0.0" },
@@ -1253,6 +1255,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "httpx-sse", specifier = ">=0.4.0" },
     { name = "microsoft-teams-apps", specifier = ">=2.0.13" },
+    { name = "openai", specifier = ">=2.54,<3" },
     { name = "pip-system-certs", marker = "extra == 'corp'", specifier = ">=4.0" },
     { name = "pydantic-settings", specifier = ">=2.9.0" },
     { name = "pymupdf", specifier = ">=1.25.0" },
@@ -2946,7 +2949,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "2.52.0"
+version = "2.54.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -2958,9 +2961,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bb/5a/c45fa035cd72c70ebe67c6e079e3adf871492382634f69e3dff62c43597d/openai-2.52.0.tar.gz", hash = "sha256:7c736d592f81471ce1f734838390983c4d8c8aecff23dcd36e600a58e5032d9c", size = 1098876, upload-time = "2026-07-31T15:13:03.228Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/50/9a/8c75e8c8a5b407a0586faeb2afac91674ff955c191ecc1d6d3b6669f6788/openai-2.54.0.tar.gz", hash = "sha256:e3e6f8bc1ba30ddf381ace1a14340eed381cb984a1a59bd0f34b5be3b5d49cfa", size = 1100285, upload-time = "2026-08-11T18:46:59.035Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/ac/ceb40c995df49533ad4dcff6c37f0d85cf14446a212363fc9d2f927e60b4/openai-2.52.0-py3-none-any.whl", hash = "sha256:f97e231d9a8fa69ab55897df1080f02d99913fb0a30e3ee56ea16a1eb6c2d434", size = 1659569, upload-time = "2026-07-31T15:13:01.145Z" },
+    { url = "https://files.pythonhosted.org/packages/64/a8/bb76c7356de8ad57f59d5ff993d434df0607f07f08bcc9c9a5c275e399c0/openai-2.54.0-py3-none-any.whl", hash = "sha256:89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b", size = 1660351, upload-time = "2026-08-11T18:46:56.684Z" },
 ]
 
 [[package]]
