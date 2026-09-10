@@ -65,7 +65,9 @@ class AgentRegistry:
     PRP-0067 / UDR-0042 D1: an optional ``compaction_strategy`` is passed
     through to every per-model Agent. The strategy is a stateless MAF object so
     sharing one instance across models is safe and matches the factory
-    chokepoint pattern used for tools / context_providers.
+    chokepoint pattern used for tools / context_providers. PRP-0162 / UDR-0140:
+    it is re-derived by the caller on every ``rebuild()`` as well, so a
+    ``rebuild``-scope settings save reaches the agents it claims to change.
 
     PRP-0069 / UDR-0045: the live model list and per-model client / options /
     web search tool are provider-aware via ``app.providers``.
@@ -218,21 +220,44 @@ class AgentRegistry:
         tools: list[Any],
         context_providers: list[Any],
         instructions: str,
+        compaction_strategy: Any | None,
         middleware: list[Any] | None = None,
     ) -> None:
-        """Rebuild all per-model agents with a new tool set and swap atomically.
+        """Rebuild all per-model agents with fresh construction inputs, atomically.
 
         PRP-0086 / UDR-0064 D2/D5: builds a brand-new per-model map off to the
         side, then installs it under a single lock. ``get()`` always returns a
         fully-built agent; if the build raises, the prior agents stay installed (no
-        partial swap). The compaction strategy is reused from construction; the
-        middleware list is refreshed (PRP-0108 -- skills can appear/disappear on
-        a Skills Reload, and the auto-approval middleware must track that).
+        partial swap). The middleware list is refreshed (PRP-0108 -- skills can
+        appear/disappear on a Skills Reload, and the auto-approval middleware must
+        track that).
+
+        PRP-0162 / UDR-0140 D2: ``compaction_strategy`` is a REQUIRED keyword. It
+        used to be reused from construction, which made the three ``rebuild``-scope
+        compaction settings (CTR-0098) unreachable by any save -- the App Settings
+        screen reported success while every cached Agent kept the strategy it was
+        born with. Every Settings-derived construction input must now be re-derived
+        by the caller and passed in; a default here would let the next caller
+        inherit the stale value by omission, which is exactly how that defect
+        arrived.
+
+        UDR-0140 D3: the strategy participates in the same all-or-nothing swap as
+        the agent map. It is assigned before the build (``_build`` reads it) and
+        restored if the build raises, so the registry's fields and its agents can
+        never disagree.
         """
         async with self._rebuild_lock:
+            previous_middleware = self._middleware
+            previous_strategy = self._compaction_strategy
             self._middleware = list(middleware or [])
-            built = self._build(tools, context_providers, instructions)
-            self._install(built)
+            self._compaction_strategy = compaction_strategy
+            try:
+                built = self._build(tools, context_providers, instructions)
+                self._install(built)
+            except BaseException:
+                self._middleware = previous_middleware
+                self._compaction_strategy = previous_strategy
+                raise
             logger.info(
                 "AgentRegistry rebuilt: %d model(s), default=%s, demo=%s",
                 len(built[0]),

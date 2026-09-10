@@ -472,6 +472,12 @@ async def rebuild_agent_registry(registry: AgentRegistry) -> None:
     tool set; ``AgentRegistry.rebuild()`` swaps the per-model map atomically. Safe
     to call repeatedly -- ``_build_tools_and_instructions`` re-initialises only
     cheap, idempotent pieces (RAG init is guarded, CTR-0077).
+
+    PRP-0162 / UDR-0140 D1: the compaction strategy is re-resolved here, exactly as
+    ``create_agent_registry()`` does. It used to be carried over from process
+    start, so the three ``rebuild``-scope compaction settings never reached the
+    rebuilt agents. The resolver's own INFO line doubles as the operator's record
+    of which window the next turn will use.
     """
     tools, context_providers, instructions, middleware = _build_tools_and_instructions(
         include_mcp=True,
@@ -482,6 +488,7 @@ async def rebuild_agent_registry(registry: AgentRegistry) -> None:
         tools=tools,
         context_providers=context_providers,
         instructions=instructions,
+        compaction_strategy=resolve_compaction_strategy(),
         middleware=middleware,
     )
 

@@ -5,10 +5,13 @@ Maps the operator Settings ``COMPACTION_STRATEGY`` /
 to a Microsoft Agent Framework ``CompactionStrategy`` instance (or
 ``None`` when compaction is disabled).
 
-The resolved object is consumed once at ``AgentRegistry.__init__`` time
-(``app.agui.agent_factory``) and passed as the ``compaction_strategy=``
-keyword on every ``Agent(...)`` construction call (CTR-0007 v7,
-UDR-0042 D1). Compaction operates purely on the in-memory message list
+The resolved object is consumed by ``app.agui.agent_factory`` on every
+registry build -- at ``AgentRegistry.__init__`` time AND at every
+``AgentRegistry.rebuild()`` (PRP-0162, UDR-0140 D1/D2) -- and passed as
+the ``compaction_strategy=`` keyword on every ``Agent(...)`` construction
+call (CTR-0007 v7, UDR-0042 D1). Resolving on rebuild is what makes the
+three ``rebuild``-scope settings apply on save instead of only on a
+process restart. Compaction operates purely on the in-memory message list
 MAF assembles for the next model call; the on-disk session JSON owned
 by ``FileHistoryProvider`` (CTR-0014) is not mutated (UDR-0042 D4).
 
@@ -80,8 +83,9 @@ class AnchorLastUserTurnStrategy:
 def resolve_compaction_strategy() -> Any | None:
     """Return a MAF ``CompactionStrategy`` instance, or ``None`` if disabled.
 
-    Read once per process at registry construction; the resolved instance
-    is reused across every per-model Agent. Unknown strategy names log
+    Read on every registry build -- construction and rebuild alike
+    (PRP-0162, UDR-0140 D2) -- and the resolved instance is reused across
+    every per-model Agent of that build. Unknown strategy names log
     a WARNING and fall back to ``SlidingWindowStrategy(keep_last_groups=N)``
     (UDR-0042 D2).
 

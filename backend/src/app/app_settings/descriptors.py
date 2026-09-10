@@ -219,13 +219,20 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         help="Quarantine retention for temporary chats. 0 or less disables the sweep.",
     ),
     # Compaction (PRP-0140 / UDR-0120 D3 correction). All three are `rebuild`, NOT
-    # `runtime`: resolve_compaction_strategy() runs at AgentRegistry construction
+    # `runtime`: resolve_compaction_strategy() runs when the AgentRegistry is built
     # (agent_factory.py -> Agent(compaction_strategy=...)), and the per-model Agent
     # objects are cached with the strategy instance baked in -- so assigning to the
     # singleton cannot reach them. PRP-0136 shipped `compaction_strategy` as
     # `runtime`, which badged a save "Applies immediately" while the running agents
-    # kept the old strategy. The CTR-0070 rebuild re-runs the resolver, so `rebuild`
-    # is correct and `restart` would be a needless demand.
+    # kept the old strategy.
+    # `rebuild` rather than `restart` because rebuild_agent_registry() re-resolves
+    # the strategy and passes it to AgentRegistry.rebuild() as a REQUIRED keyword
+    # (PRP-0162 / UDR-0140 D2). Until v0.148.0 it did NOT: the rebuild reused the
+    # instance from construction, so this scope named a path that could not deliver
+    # and the save was as inert as the `runtime` one it replaced. The claim is now
+    # pinned behaviourally by tests/integration/test_ctr0070_rebuild_applies_settings.py
+    # -- a scope is justified by the apply path as implemented, never by this comment
+    # (UDR-0140 D4).
     SettingDescriptor(
         "compaction_strategy",
         "History compaction strategy",
