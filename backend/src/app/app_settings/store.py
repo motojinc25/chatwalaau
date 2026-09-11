@@ -51,6 +51,7 @@ from pydantic import TypeAdapter, ValidationError
 from app.app_settings.descriptors import (
     DESCRIPTORS,
     RENAMED_FROM,
+    RETIRED_KEYS,
     SCOPE_REBUILD,
     SCOPE_RESTART,
     annotation_for,
@@ -58,7 +59,7 @@ from app.app_settings.descriptors import (
     descriptor,
     known_keys,
 )
-from app.core.config import settings
+from app.core.config import COMPACTION_RULE_TEXT, compaction_bounds_satisfy_rule, settings
 from app.mcp.config import _strip_jsonc_comments
 
 logger = logging.getLogger(__name__)
@@ -81,10 +82,19 @@ class SettingsStoreError(Exception):
 # real behaviour, so degrading them to the default would silently CHANGE what the
 # system does, which is not what D7's degrade rule is for (that rule exists for
 # values that no longer mean anything).
-_VALUE_ALIASES: dict[str, dict[str, str]] = {
-    # app.agent.compaction treats these as "compaction disabled".
-    "compaction_strategy": {"": "none", "off": "none", "disabled": "none"},
-}
+_VALUE_ALIASES: dict[str, dict[str, str]] = {}
+
+# A RETIRED key (descriptors.RETIRED_KEYS, UDR-0120 D7) is not an unknown key.
+# An unknown key is one this binary cannot interpret, so D5 preserves it; a
+# retired key is one whose meaning we know is gone, and carrying it forever
+# would rewrite a dead row into every save. Retired keys are therefore dropped
+# -- with a warning, and after any value worth rescuing has been absorbed.
+#
+# `compaction_strategy` (PRP-0163): the strategy picker is gone. An operator who
+# had DISABLED compaction must not silently get it back, so a disabling value is
+# absorbed into `compaction_enabled=false`; any other value named a strategy
+# that no longer exists.
+_COMPACTION_DISABLING_VALUES = frozenset({"", "none", "off", "disabled"})
 
 
 @dataclass
@@ -161,7 +171,77 @@ def coerce_value(key: str, raw: Any) -> tuple[Any, str | None]:
         fallback = default_for(key)
         return fallback, (f"{desc.env_name}: {raw!r} is not one of {list(desc.enum)}; using the default {fallback!r}")
 
+    # A declared bound is enforced HERE, on the path that writes the value, and
+    # not only by a Settings validator that assignment does not re-run
+    # (UDR-0141 D4). Until PRP-0163 an out-of-range value saved successfully,
+    # applied, and then prevented the next start.
+    if desc.min is not None and isinstance(value, int) and not isinstance(value, bool) and value < desc.min:
+        fallback = default_for(key)
+        return fallback, (f"{desc.env_name}: {raw!r} is below the minimum {desc.min}; using the default {fallback!r}")
+    if desc.max is not None and isinstance(value, int) and not isinstance(value, bool) and value > desc.max:
+        fallback = default_for(key)
+        return fallback, (f"{desc.env_name}: {raw!r} is above the maximum {desc.max}; using the default {fallback!r}")
+
     return value, None
+
+
+# ---- Cross-field rules (UDR-0141 D4/D5) -----------------------------------
+#
+# A rule spanning two keys cannot live in `coerce_value`, which sees one key at
+# a time, and must not live ONLY in a `Settings` validator, which assignment
+# does not re-run. It therefore lives here, between coercion and the write, and
+# is reached by both paths -- in opposite directions, which is the whole point:
+# the WRITE path rejects (the operator is looking at the value), the LOAD path
+# degrades (a file may predate the binary and must keep the process booting).
+
+
+def _effective(values: dict[str, Any], key: str) -> Any:
+    """The value the document would apply for `key`: what it sets, else the default."""
+    return values[key] if key in values else default_for(key)
+
+
+def validate_document(values: dict[str, Any]) -> list[str]:
+    """Cross-field errors for a document about to be WRITTEN. Empty means valid.
+
+    Absent keys resolve to their defaults, because an absent key IS its default
+    once applied (`apply_defaults_for_absent`) -- validating only what the
+    payload happens to carry would let a violating pair through by omission.
+    """
+    errors: list[str] = []
+    keep_tool_call_groups = _effective(values, "compaction_keep_last_tool_call_groups")
+    keep_groups = _effective(values, "compaction_keep_last_groups")
+    if not compaction_bounds_satisfy_rule(keep_tool_call_groups, keep_groups):
+        errors.append(
+            f"COMPACTION_KEEP_LAST_TOOL_CALL_GROUPS={keep_tool_call_groups} and "
+            f"COMPACTION_KEEP_LAST_GROUPS={keep_groups} violate {COMPACTION_RULE_TEXT}. "
+            "The margin is what keeps the request being answered inside the window; "
+            f"raise the group budget above {2 * keep_tool_call_groups} or lower the tool-call budget"
+        )
+    return errors
+
+
+def degrade_document(values: dict[str, Any]) -> list[str]:
+    """Repair cross-field violations for a document being LOADED; return warnings.
+
+    Mutates `values` in place. A violating pair resets BOTH keys to their
+    defaults rather than clamping one: clamping invents a window the operator
+    neither chose nor can predict, while a reset to a known-good pair is
+    explainable in the single line this returns (UDR-0141 D5).
+    """
+    warnings: list[str] = []
+    keep_tool_call_groups = _effective(values, "compaction_keep_last_tool_call_groups")
+    keep_groups = _effective(values, "compaction_keep_last_groups")
+    if not compaction_bounds_satisfy_rule(keep_tool_call_groups, keep_groups):
+        default_k = default_for("compaction_keep_last_tool_call_groups")
+        default_n = default_for("compaction_keep_last_groups")
+        values["compaction_keep_last_tool_call_groups"] = default_k
+        values["compaction_keep_last_groups"] = default_n
+        warnings.append(
+            f"COMPACTION_KEEP_LAST_TOOL_CALL_GROUPS={keep_tool_call_groups} and "
+            f"COMPACTION_KEEP_LAST_GROUPS={keep_groups} violate {COMPACTION_RULE_TEXT}; "
+            f"both were reset to their defaults ({default_k}, {default_n})"
+        )
+    return warnings
 
 
 def parse_store(data: dict[str, Any] | None) -> StoreDocument:
@@ -199,6 +279,10 @@ def parse_store(data: dict[str, Any] | None) -> StoreDocument:
             doc.warnings.append(f"{raw_key} was renamed to {successor}; migrating the value")
             key = successor
 
+        if key in RETIRED_KEYS:
+            _absorb_retired(doc, block, key, raw_value)
+            continue
+
         if key not in valid:
             doc.unknown[raw_key] = raw_value
             continue
@@ -208,7 +292,39 @@ def parse_store(data: dict[str, Any] | None) -> StoreDocument:
             doc.warnings.append(warning)
         doc.values[key] = value
 
+    doc.warnings.extend(degrade_document(doc.values))
     return doc
+
+
+def _absorb_retired(doc: StoreDocument, block: dict[str, Any], key: str, raw_value: Any) -> None:
+    """Rescue what a retired key still means, warn, and drop it.
+
+    A retired key with nothing to rescue is warned about and dropped; that is
+    the default path a future retirement gets for free. `compaction_strategy` is
+    the one case that carries a decision worth keeping -- see above.
+    """
+    if key != "compaction_strategy":
+        doc.warnings.append(f"{key} is retired and no longer has any effect; it was dropped")
+        return
+
+    name = raw_value.strip().lower() if isinstance(raw_value, str) else raw_value
+    if name in _COMPACTION_DISABLING_VALUES:
+        if "compaction_enabled" in block:
+            doc.warnings.append(
+                "compaction_strategy is retired and compaction_enabled is already set; "
+                "keeping compaction_enabled and dropping compaction_strategy"
+            )
+            return
+        doc.values["compaction_enabled"] = False
+        doc.warnings.append(
+            f"compaction_strategy={raw_value!r} is retired; it disabled compaction, so "
+            "compaction_enabled=false was written in its place"
+        )
+        return
+    doc.warnings.append(
+        f"compaction_strategy={raw_value!r} is retired; the Prompt lane now runs one fixed "
+        "pipeline and the key was dropped. Compaction stays enabled -- use COMPACTION_ENABLED to turn it off"
+    )
 
 
 def load_store(path: Path | None = None) -> StoreDocument:

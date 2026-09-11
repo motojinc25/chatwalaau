@@ -123,6 +123,13 @@ def register_app_settings(app: FastAPI, *, agent_registry) -> None:
             )
 
         coerced, errors = _coerce_payload(body.settings)
+        # Cross-field rules run AFTER per-key coercion and BEFORE the write, so a
+        # rule spanning two keys is enforced on the path an operator actually uses
+        # (UDR-0141 D4). A `Settings` validator would not run here at all: apply
+        # is an attribute assignment and the model does not set
+        # `validate_assignment`, which is how an out-of-range bound used to save
+        # successfully and then prevent the next start.
+        errors.extend(store_mod.validate_document(coerced))
         if errors:
             raise HTTPException(
                 status_code=400,

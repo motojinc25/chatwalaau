@@ -1,27 +1,44 @@
-"""Conversation Compaction resolver (CTR-0098, PRP-0067, UDR-0042).
+"""Conversation Compaction resolver (CTR-0098 v4, PRP-0163, UDR-0141).
 
-Maps the operator Settings ``COMPACTION_STRATEGY`` /
-``COMPACTION_KEEP_LAST_GROUPS`` / ``COMPACTION_PRESERVE_SYSTEM`` triplet
-to a Microsoft Agent Framework ``CompactionStrategy`` instance (or
-``None`` when compaction is disabled).
+The Prompt lane runs ONE fixed, ordered two-stage pipeline. There is no
+strategy name to select and no unknown-name fallback branch::
 
-The resolved object is consumed by ``app.agui.agent_factory`` on every
-registry build -- at ``AgentRegistry.__init__`` time AND at every
-``AgentRegistry.rebuild()`` (PRP-0162, UDR-0140 D1/D2) -- and passed as
-the ``compaction_strategy=`` keyword on every ``Agent(...)`` construction
-call (CTR-0007 v7, UDR-0042 D1). Resolving on rebuild is what makes the
-three ``rebuild``-scope settings apply on save instead of only on a
-process restart. Compaction operates purely on the in-memory message list
-MAF assembles for the next model call; the on-disk session JSON owned
-by ``FileHistoryProvider`` (CTR-0014) is not mutated (UDR-0042 D4).
+    (1) SelectiveToolCallCompactionStrategy(keep_last_tool_call_groups=K)
+            exclude older tool-call groups, keep the newest K
+    (2) SlidingWindowStrategy(keep_last_groups=N, preserve_system=B)
+            keep the newest N of whatever (1) left included
 
-PRP-0160 / UDR-0138: every resolved strategy is wrapped in
-``AnchorLastUserTurnStrategy`` so that no strategy can elide the request
-the current run is answering. MAF applies compaction before EVERY model
-call -- once per tool-loop iteration, not once per turn -- and
-``SlidingWindowStrategy`` ranks the user's request equal to a tool round,
-so a turn that called four tools used to lose its own question and answer
-something else. The anchor is not operator-configurable (UDR-0138 D3).
+The order is normative, not stylistic (UDR-0141 D1). Both stages mutate the
+same annotated message list through MAF's ``set_excluded`` and both re-read the
+included-group set at call time, so stage (2) counts only what stage (1) left
+included. Reversed, stage (1)'s K under-counts against a set the window has
+already thinned and the active request is excluded at N tool rounds -- measured
+at the pinned ``agent-framework 1.17.0``.
+
+Each stage covers what the other cannot. Stage (1) alone is a no-op on a
+session without tool calls; stage (2) alone bounds that session but ranks the
+active request equal to a tool round, so it is the one that can lose the
+request. Composed, a 1000-round tool turn and a 1000-turn chat session both
+project to 26 messages, with the request present.
+
+The request the run is answering survives STRUCTURALLY rather than by a wrapper
+(UDR-0141 D3, superseding UDR-0138 D1/D2/D3). Stage (1) caps the INCLUDED
+tool-call groups at K across the whole history, so the request sits at most
+K+1 groups from the end and stage (2) retains it whenever ``N > K``. The
+configuration is held to the stronger ``2K < N`` so that the measured tolerance
+for interim ``assistant_text`` groups -- exactly ``N - K - 1``, and stage (1)
+does not bound those -- is at least as large as the tool budget itself. That
+rule is enforced on the write path (``app.app_settings.store``) and degraded on
+the load path (``Settings._validate_compaction``), never argued in a comment
+(UDR-0141 D4/D5).
+
+The resolved object is consumed by ``app.agui.agent_factory`` on every registry
+build -- at ``AgentRegistry.__init__`` AND at every ``AgentRegistry.rebuild()``
+(UDR-0140 D1/D2) -- and by ``app.workflow.builder`` for every Prompt workflow
+node, which is the same population and needs no special case. Compaction
+operates purely on the in-memory message list MAF assembles for the next model
+call; the on-disk session JSON owned by ``FileHistoryProvider`` (CTR-0014) is
+not mutated (UDR-0042 D4).
 """
 
 from __future__ import annotations
@@ -33,65 +50,58 @@ from app.core.config import settings
 
 _logger = logging.getLogger(__name__)
 
-# Names that mean "compaction disabled". Trimmed lowercased value
-# is compared against this set.
-_DISABLED_VALUES = frozenset({"", "none", "off", "disabled"})
 
+class CompactionPipeline:
+    """Run an ordered sequence of strategies over the shared message list.
 
-class AnchorLastUserTurnStrategy:
-    """Run the selected strategy, then re-include the trailing user group.
+    Implements MAF's ``CompactionStrategy`` Protocol, which is the extension
+    route UDR-0042 D3 names (it forbids a wrapper Protocol of our own, not an
+    implementation OF theirs). This is the ONLY in-house strategy
+    implementation; it replaced ``AnchorLastUserTurnStrategy`` rather than
+    joining it, so the count stayed at one and the private-MAF-symbol
+    dependency that wrapper carried (``_compaction.set_excluded``) is gone.
 
-    Implements MAF's ``CompactionStrategy`` Protocol (UDR-0042 D3 permits an
-    implementation OF that Protocol; it forbids a wrapper Protocol of our own).
-    The rule lives here, above the selected strategy, rather than inside any one
-    of them, because "compaction may not elide the active request" applies to
-    every strategy including ones not yet adopted (UDR-0138 D2).
-
-    The trailing ``user`` message IS the active request at every point of a run:
-    MAF appends the new user message before the first model call and appends no
-    further user message during the tool loop. A ``user`` group is exactly one
-    message, so re-including it can neither split a group nor orphan a
-    ``function_call_output``.
+    Stages share one annotated list and each re-reads the included-group set, so
+    running them in sequence is what composes them -- there is nothing to merge.
+    ``changed`` is the OR of the stages, because MAF only needs to know whether
+    the projection moved.
 
     Takes no client and calls no model, so the token-ledger coverage statement
     (UDR-0136 D11 as corrected by UDR-0137) is unaffected.
     """
 
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
+    def __init__(self, *stages: Any) -> None:
+        if not stages:
+            msg = "CompactionPipeline requires at least one stage"
+            raise ValueError(msg)
+        self._stages = tuple(stages)
 
     @property
-    def inner(self) -> Any:
-        """The wrapped strategy. Exposed for tests and logging, not for dispatch."""
-        return self._inner
+    def stages(self) -> tuple[Any, ...]:
+        """The ordered stages. Exposed for tests and logging, not for dispatch."""
+        return self._stages
 
     async def __call__(self, messages: list[Any]) -> bool:
-        # Private MAF surface, pinned by
-        # tests/invariants/test_prp0153_maf_116_upgrade.py (UDR-0086 D5).
-        from agent_framework._compaction import set_excluded
-
-        changed = await self._inner(messages)
-        for message in reversed(messages):
-            if message.role == "user":
-                return set_excluded(message, excluded=False) or changed
+        changed = False
+        for stage in self._stages:
+            changed = (await stage(messages)) or changed
         return changed
 
     def __repr__(self) -> str:
-        return f"AnchorLastUserTurnStrategy({self._inner!r})"
+        inner = ", ".join(repr(stage) for stage in self._stages)
+        return f"CompactionPipeline({inner})"
 
 
 def resolve_compaction_strategy() -> Any | None:
-    """Return a MAF ``CompactionStrategy`` instance, or ``None`` if disabled.
+    """Return the fixed compaction pipeline, or ``None`` when it is disabled.
 
-    Read on every registry build -- construction and rebuild alike
-    (PRP-0162, UDR-0140 D2) -- and the resolved instance is reused across
-    every per-model Agent of that build. Unknown strategy names log
-    a WARNING and fall back to ``SlidingWindowStrategy(keep_last_groups=N)``
-    (UDR-0042 D2).
+    Read on every registry build -- construction and rebuild alike (UDR-0140
+    D2) -- and the resolved instance is reused across every per-model Agent of
+    that build.
 
-    Every non-``None`` branch is wrapped in ``AnchorLastUserTurnStrategy``
-    (UDR-0138 D1). The disabled branch still returns ``None``: there is
-    nothing to anchor where nothing compacts.
+    The two stages are enabled and disabled as a UNIT (UDR-0141 D2): the D3
+    guarantee is a property of the composition, and a configuration able to run
+    the window alone is a configuration able to lose the active request.
     """
     # Local import keeps the agent_framework import cost confined to the
     # registry constructor call site -- modules that never instantiate
@@ -99,52 +109,28 @@ def resolve_compaction_strategy() -> Any | None:
     from agent_framework import (
         SelectiveToolCallCompactionStrategy,
         SlidingWindowStrategy,
-        ToolResultCompactionStrategy,
     )
 
-    name = (settings.compaction_strategy or "").strip().lower()
-    keep = settings.compaction_keep_last_groups
-    preserve_system = settings.compaction_preserve_system
-
-    if name in _DISABLED_VALUES:
-        _logger.info("Compaction disabled (COMPACTION_STRATEGY=%r)", settings.compaction_strategy)
+    if not settings.compaction_enabled:
+        _logger.info("Compaction disabled (COMPACTION_ENABLED=false)")
         return None
 
-    if name == "sliding-window":
-        strategy = SlidingWindowStrategy(keep_last_groups=keep, preserve_system=preserve_system)
-        _logger.info(
-            "Compaction strategy: sliding-window (keep_last_groups=%d, preserve_system=%s)",
-            keep,
-            preserve_system,
-        )
-        return AnchorLastUserTurnStrategy(strategy)
+    keep_tool_call_groups = settings.compaction_keep_last_tool_call_groups
+    keep_groups = settings.compaction_keep_last_groups
+    preserve_system = settings.compaction_preserve_system
 
-    if name == "selective-tool-call":
-        if not preserve_system:
-            _logger.info(
-                "COMPACTION_PRESERVE_SYSTEM=false is ignored by selective-tool-call strategy (sliding-window only)"
-            )
-        strategy = SelectiveToolCallCompactionStrategy(keep_last_tool_call_groups=keep)
-        _logger.info("Compaction strategy: selective-tool-call (keep_last_tool_call_groups=%d)", keep)
-        return AnchorLastUserTurnStrategy(strategy)
-
-    if name == "tool-result":
-        if not preserve_system:
-            _logger.info("COMPACTION_PRESERVE_SYSTEM=false is ignored by tool-result strategy (sliding-window only)")
-        strategy = ToolResultCompactionStrategy(keep_last_tool_call_groups=keep)
-        _logger.info("Compaction strategy: tool-result (keep_last_tool_call_groups=%d)", keep)
-        return AnchorLastUserTurnStrategy(strategy)
-
-    # Unknown name -> fall back to the safe default per UDR-0042 D2.
-    # The Settings validator already logged a WARNING for unknown names
-    # at startup; emit one more here so the operator can correlate the
-    # warning with the actual fallback that was chosen.
-    _logger.warning(
-        "Unknown COMPACTION_STRATEGY=%r; falling back to sliding-window (keep_last_groups=%d)",
-        settings.compaction_strategy,
-        keep,
+    pipeline = CompactionPipeline(
+        SelectiveToolCallCompactionStrategy(keep_last_tool_call_groups=keep_tool_call_groups),
+        SlidingWindowStrategy(keep_last_groups=keep_groups, preserve_system=preserve_system),
     )
-    return AnchorLastUserTurnStrategy(SlidingWindowStrategy(keep_last_groups=keep, preserve_system=preserve_system))
+    _logger.info(
+        "Compaction pipeline: selective-tool-call(keep_last_tool_call_groups=%d) "
+        "-> sliding-window(keep_last_groups=%d, preserve_system=%s)",
+        keep_tool_call_groups,
+        keep_groups,
+        preserve_system,
+    )
+    return pipeline
 
 
-__all__ = ["AnchorLastUserTurnStrategy", "resolve_compaction_strategy"]
+__all__ = ["CompactionPipeline", "resolve_compaction_strategy"]

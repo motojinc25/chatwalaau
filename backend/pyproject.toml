@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.148.0"
+version = "0.149.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -35,12 +35,14 @@ dependencies = [
     # that matter are, once again, filed under "Fixed" (UDR-0139 context):
     #
     #   * #7912 fixes compaction across tool-loop calls and adds
-    #     `preserve_first_user_group`. It does NOT retire the anchor shipped in
-    #     v0.146.0: the option protects the FIRST user group, UDR-0138 is about the
-    #     TRAILING one, and it exists only on TruncationStrategy /
-    #     ContextWindowCompactionStrategy, neither of which CTR-0098 can resolve.
-    #     Measured at 1.17.0, a raw SlidingWindowStrategy still evicts the active
-    #     request (PRP-0161 M4). The guard is KEPT on measurement, not on policy.
+    #     `preserve_first_user_group`. It is NOT adopted: the option protects the
+    #     FIRST user group, the property at stake is about the TRAILING one, and it
+    #     exists only on TruncationStrategy / ContextWindowCompactionStrategy,
+    #     neither of which CTR-0098 can resolve. Measured at 1.17.0, a raw
+    #     SlidingWindowStrategy still evicts the active request (PRP-0161 M4).
+    #     v0.149.0 note: the v0.146.0 anchor was later retired by PRP-0163 /
+    #     UDR-0141 D3 -- by the compaction pipeline's own bounds, NOT by this
+    #     upstream option, whose non-adoption stands unchanged.
     #   * #7980 fixes a real destroyer of data on the AG-UI wire: a message with N
     #     function_result contents converted to ONE tool message, keeping only the
     #     last (measured 1-of-3 at 1.2.1, 3-of-3 at 1.2.2, PRP-0161 M5).

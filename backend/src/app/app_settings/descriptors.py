@@ -44,7 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.core.config import Settings
+from app.core.config import COMPACTION_BOUND_MAX, COMPACTION_BOUND_MIN, Settings
 
 # ---- Scope values (UDR-0120 D3) ------------------------------------------
 
@@ -75,6 +75,13 @@ class SettingDescriptor:
     scope: str
     help: str = ""
     enum: tuple[str, ...] | None = None
+    # Inclusive bounds for an `int` key, enforced during coercion so the bound
+    # reaches the path an operator writes through -- not only the validator that
+    # runs at startup (UDR-0141 D4). Until PRP-0163 no descriptor could carry a
+    # bound at all, so `Settings`'s declared ranges were enforced on boot and
+    # silently ignored by every save.
+    min: int | None = None
+    max: int | None = None
     # Predecessor key absorbed ONCE at load and rewritten under `key` (D7). An
     # absorbed name is never reused for a different meaning.
     renamed_from: str | None = None
@@ -218,31 +225,45 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         SCOPE_RUNTIME,
         help="Quarantine retention for temporary chats. 0 or less disables the sweep.",
     ),
-    # Compaction (PRP-0140 / UDR-0120 D3 correction). All three are `rebuild`, NOT
-    # `runtime`: resolve_compaction_strategy() runs when the AgentRegistry is built
-    # (agent_factory.py -> Agent(compaction_strategy=...)), and the per-model Agent
-    # objects are cached with the strategy instance baked in -- so assigning to the
-    # singleton cannot reach them. PRP-0136 shipped `compaction_strategy` as
-    # `runtime`, which badged a save "Applies immediately" while the running agents
-    # kept the old strategy.
-    # `rebuild` rather than `restart` because rebuild_agent_registry() re-resolves
-    # the strategy and passes it to AgentRegistry.rebuild() as a REQUIRED keyword
-    # (PRP-0162 / UDR-0140 D2). Until v0.148.0 it did NOT: the rebuild reused the
-    # instance from construction, so this scope named a path that could not deliver
-    # and the save was as inert as the `runtime` one it replaced. The claim is now
-    # pinned behaviourally by tests/integration/test_ctr0070_rebuild_applies_settings.py
-    # -- a scope is justified by the apply path as implemented, never by this comment
+    # Compaction (PRP-0163 / UDR-0141). All four are `rebuild`, NOT `runtime`:
+    # resolve_compaction_strategy() runs when the AgentRegistry is built
+    # (agent_factory.py -> Agent(compaction_strategy=...)), and the per-model
+    # Agent objects are cached with the pipeline instance baked in -- so
+    # assigning to the singleton cannot reach them. `rebuild` rather than
+    # `restart` because rebuild_agent_registry() re-resolves the pipeline and
+    # passes it to AgentRegistry.rebuild() as a REQUIRED keyword (UDR-0140 D2),
+    # pinned behaviourally by
+    # tests/integration/test_ctr0070_rebuild_applies_settings.py -- a scope is
+    # justified by the apply path as implemented, never by this comment
     # (UDR-0140 D4).
+    #
+    # There is no strategy picker. PRP-0163 removed `compaction_strategy`
+    # outright: the lane runs one fixed pipeline and the only operator decision
+    # left is whether it runs at all.
     SettingDescriptor(
-        "compaction_strategy",
-        "History compaction strategy",
+        "compaction_enabled",
+        "History compaction",
         "chat",
-        "enum",
+        "bool",
         SCOPE_REBUILD,
-        enum=("none", "sliding-window", "selective-tool-call", "tool-result"),
         help=(
-            "In-memory only -- the on-disk session JSON is never mutated, so switching "
-            "back to none fully restores the model's view of history."
+            "Run the two-stage history compaction pipeline (tool-call trimming, then a "
+            "sliding window). In-memory only -- the on-disk session JSON is never mutated, "
+            "so turning this off fully restores the model's view of history."
+        ),
+    ),
+    SettingDescriptor(
+        "compaction_keep_last_tool_call_groups",
+        "Compaction: tool-call groups kept",
+        "chat",
+        "int",
+        SCOPE_REBUILD,
+        min=COMPACTION_BOUND_MIN,
+        max=COMPACTION_BOUND_MAX,
+        help=(
+            "Stage 1 (K). How many of the newest tool-call groups survive. Capping this is "
+            "what keeps a long tool run from crowding the request out of the window, so it "
+            "must stay well below the group budget below: 2 x K < N."
         ),
     ),
     SettingDescriptor(
@@ -251,9 +272,12 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         "chat",
         "int",
         SCOPE_REBUILD,
+        min=COMPACTION_BOUND_MIN,
+        max=COMPACTION_BOUND_MAX,
         help=(
-            "How many recent message groups the sliding-window strategy keeps verbatim. "
-            "Values outside 1..32 fall back to the default with a warning."
+            "Stage 2 (N). How many of the newest message groups survive, counted after "
+            "stage 1 has trimmed the tool-call groups. Must satisfy 2 x K < N -- the margin "
+            "is what guarantees the request being answered stays in view."
         ),
     ),
     SettingDescriptor(
@@ -262,7 +286,7 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         "chat",
         "bool",
         SCOPE_REBUILD,
-        help="Exempt the system prompt from compaction so the agent's instructions survive.",
+        help="Exempt system-kind groups from the stage 2 sliding window.",
     ),
     # ---- Memory ------------------------------------------------------------
     # NOTE (PRP-0140): `user_profile_enabled` and `agent_memory_enabled` are
@@ -706,7 +730,16 @@ RENAMED_FROM: dict[str, str] = {d.renamed_from: d.key for d in DESCRIPTORS if d.
 # test fails on a key that vanishes from DESCRIPTORS without landing here or in
 # RENAMED_FROM. A retired name is permanently reserved and MUST NOT be reused for
 # a different meaning, exactly like a retired ANCA ID.
-RETIRED_KEYS: frozenset[str] = frozenset()
+RETIRED_KEYS: frozenset[str] = frozenset(
+    {
+        # PRP-0163 / UDR-0141 D1: the compaction strategy PICKER is gone. The
+        # Prompt lane runs one fixed two-stage pipeline and the only decision
+        # left is whether it runs at all (`compaction_enabled`). Not a rename:
+        # the successor is a boolean with a different meaning, so the value is
+        # absorbed by `app.app_settings.store` rather than carried across.
+        "compaction_strategy",
+    }
+)
 
 
 def descriptor(key: str) -> SettingDescriptor | None:
@@ -754,6 +787,12 @@ def descriptor_registry() -> list[dict[str, Any]]:
             "group": d.group,
             "type": d.type,
             "enum": list(d.enum) if d.enum else None,
+            # Declared bounds travel to the GUI so the number input can carry
+            # them, and so an operator can see the range BEFORE the save is
+            # rejected. They are enforced server-side regardless (UDR-0141 D4)
+            # -- the store is also written by the CLI and by hand.
+            "min": d.min,
+            "max": d.max,
             "scope": d.scope,
             "requires_restart": d.scope == SCOPE_RESTART,
             "help": d.help,

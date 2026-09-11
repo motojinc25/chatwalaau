@@ -5,6 +5,25 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _logger = logging.getLogger(__name__)
 
+# ---- Compaction bounds (CTR-0098 v4, PRP-0163, UDR-0141 D3/D4) -------------
+# Declared here rather than inline so the Settings validator (load path), the
+# App Settings descriptors (write path) and the tests all read ONE definition.
+# A bound that is written down in two places is a bound that will disagree with
+# itself -- the shape UDR-0140 D4 exists to prevent.
+COMPACTION_BOUND_MIN = 1
+COMPACTION_BOUND_MAX = 64
+
+# 2K < N. N > K is what the measurement shows to be necessary and sufficient for
+# tool rounds; the second K is the headroom for interim `assistant_text` groups,
+# which stage (1) does not bound. The measured tolerance is exactly N - K - 1,
+# so this rule states "the headroom is at least as large as the tool budget".
+COMPACTION_RULE_TEXT = "2 * COMPACTION_KEEP_LAST_TOOL_CALL_GROUPS < COMPACTION_KEEP_LAST_GROUPS"
+
+
+def compaction_bounds_satisfy_rule(keep_tool_call_groups: int, keep_groups: int) -> bool:
+    """Whether the two compaction bounds satisfy `2K < N`."""
+    return 2 * keep_tool_call_groups < keep_groups
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -672,32 +691,39 @@ class Settings(BaseSettings):
     # [0, 500] at use time.
     demo_latency_ms: int = 40
 
-    # ---- Conversation Compaction (CTR-0006 v23, PRP-0067, UDR-0042) ----
-    # Resolved by app.agent.compaction.resolve_compaction_strategy() at
-    # AgentRegistry construction time and passed to every Agent in the
-    # registry (CTR-0070, CTR-0098). Compaction is purely in-memory --
-    # the on-disk session JSON (FileHistoryProvider, CTR-0014) is NOT
-    # mutated, so switching back to "none" fully restores the model's
-    # view of history (UDR-0042 D4).
+    # ---- Conversation Compaction (CTR-0006 v24, PRP-0163, UDR-0141) ----
+    # Resolved by app.agent.compaction.resolve_compaction_strategy() on every
+    # AgentRegistry build -- construction AND rebuild (UDR-0140 D2) -- and
+    # passed to every Agent in the registry (CTR-0070, CTR-0098). Compaction is
+    # purely in-memory: the on-disk session JSON (FileHistoryProvider,
+    # CTR-0014) is NOT mutated, so disabling it fully restores the model's view
+    # of history (UDR-0042 D4).
     #
-    # Allowed values (case-insensitive, unknown -> sliding-window):
-    # - "none" / "off" / "disabled" / empty -> compaction disabled
-    # - "sliding-window" (default) -> SlidingWindowStrategy
-    # - "selective-tool-call" -> SelectiveToolCallCompactionStrategy
-    # - "tool-result" -> ToolResultCompactionStrategy
-    compaction_strategy: str = "sliding-window"
+    # There is no strategy NAME any more. The Prompt lane runs one fixed,
+    # ordered two-stage pipeline (UDR-0141 D1):
+    #   (1) SelectiveToolCallCompactionStrategy(keep_last_tool_call_groups=K)
+    #   (2) SlidingWindowStrategy(keep_last_groups=N, preserve_system=B)
+    # Stage (1) caps how many tool-call groups can ever be included; stage (2)
+    # bounds everything else, including a chat-only session that stage (1)
+    # cannot touch. The two are enabled as a unit (UDR-0141 D2).
+    compaction_enabled: bool = True
 
-    # Number of trailing message groups retained verbatim by the
-    # selected strategy. For sliding-window this is the "keep_last_groups"
-    # constructor parameter; for the two tool-call-aware variants it is
-    # the "keep_last_tool_call_groups" parameter. Range 1..32 (pydantic
-    # validator below).
-    compaction_keep_last_groups: int = 4
+    # K -- newest tool-call groups stage (1) keeps. Because stage (1) caps the
+    # INCLUDED tool-call groups at K across the whole history, the active
+    # request sits at most K+1 groups from the end, which is what makes the
+    # UDR-0141 D3 guarantee structural. Range 1..64.
+    compaction_keep_last_tool_call_groups: int = 12
 
-    # Preserve the system / instructions message during sliding-window
-    # compaction. Only consumed by sliding-window (the other two strategies
-    # ignore this flag; the resolver logs an INFO note when it is set
-    # under those strategies).
+    # N -- newest non-system groups stage (2) keeps, counted over what stage (1)
+    # left included. Range 1..64. MUST satisfy 2K < N (UDR-0141 D3): N > K is
+    # the bare minimum for tool rounds, and the second K is the measured
+    # headroom for interim `assistant_text` groups, which stage (1) does not
+    # bound (the tolerance is exactly N - K - 1).
+    compaction_keep_last_groups: int = 25
+
+    # Preserve system-kind groups during stage (2). Inert on the Prompt lane --
+    # the assembled prompt travels as the agent's `instructions` and is never a
+    # system MESSAGE in the compacted list (UDR-0138, unchanged by PRP-0163).
     compaction_preserve_system: bool = True
 
     # ---- Tool Approval (CTR-0006 v23, PRP-0067, UDR-0043) ----
@@ -945,20 +971,54 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_compaction(self) -> "Settings":
-        """Normalize compaction settings and reject out-of-range values."""
-        name = (self.compaction_strategy or "").strip().lower()
-        allowed = {"", "none", "off", "disabled", "sliding-window", "selective-tool-call", "tool-result"}
-        if name and name not in allowed:
+        """Degrade out-of-range or rule-violating compaction bounds; never raise.
+
+        UDR-0141 D5: the LOAD path degrades with a warning, because a
+        configuration may predate the binary and must keep the process booting
+        (UDR-0120 D7). The WRITE path rejects instead -- see
+        ``app.app_settings.store.validate_document()``, which is the enforcement
+        an operator sees. Until PRP-0163 this validator RAISED on an
+        out-of-range bound while the save path checked nothing at all, so the
+        two were inverted.
+
+        A cross-field violation resets BOTH bounds rather than clamping one:
+        clamping invents a window the operator neither chose nor can predict.
+        """
+        keep_k = self.compaction_keep_last_tool_call_groups
+        keep_n = self.compaction_keep_last_groups
+        default_k = type(self).model_fields["compaction_keep_last_tool_call_groups"].default
+        default_n = type(self).model_fields["compaction_keep_last_groups"].default
+
+        for name, value in (
+            ("COMPACTION_KEEP_LAST_TOOL_CALL_GROUPS", keep_k),
+            ("COMPACTION_KEEP_LAST_GROUPS", keep_n),
+        ):
+            if not (COMPACTION_BOUND_MIN <= value <= COMPACTION_BOUND_MAX):
+                _logger.warning(
+                    "%s=%r is outside %d..%d; resetting both compaction bounds to their defaults (%d, %d)",
+                    name,
+                    value,
+                    COMPACTION_BOUND_MIN,
+                    COMPACTION_BOUND_MAX,
+                    default_k,
+                    default_n,
+                )
+                self.compaction_keep_last_tool_call_groups = default_k
+                self.compaction_keep_last_groups = default_n
+                return self
+
+        if not compaction_bounds_satisfy_rule(keep_k, keep_n):
             _logger.warning(
-                "COMPACTION_STRATEGY=%r is not recognised; will fall back to sliding-window. Allowed: %s",
-                self.compaction_strategy,
-                sorted(a for a in allowed if a),
+                "COMPACTION_KEEP_LAST_TOOL_CALL_GROUPS=%d and COMPACTION_KEEP_LAST_GROUPS=%d violate "
+                "%s; resetting both to their defaults (%d, %d)",
+                keep_k,
+                keep_n,
+                COMPACTION_RULE_TEXT,
+                default_k,
+                default_n,
             )
-        # Store normalized value so downstream readers compare lowercased.
-        self.compaction_strategy = name
-        if not (1 <= self.compaction_keep_last_groups <= 32):
-            msg = f"COMPACTION_KEEP_LAST_GROUPS must be in 1..32; got {self.compaction_keep_last_groups}"
-            raise ValueError(msg)
+            self.compaction_keep_last_tool_call_groups = default_k
+            self.compaction_keep_last_groups = default_n
         return self
 
     @model_validator(mode="after")

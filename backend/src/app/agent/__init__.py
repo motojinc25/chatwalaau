@@ -2,7 +2,7 @@
 
 Thin resolver / helper modules:
 
-- ``app.agent.compaction`` -- maps ``COMPACTION_STRATEGY`` to a MAF
+- ``app.agent.compaction`` -- builds the fixed two-stage MAF
   ``CompactionStrategy`` instance (or ``None``).
 - ``app.agent.approval`` -- maps ``TOOL_APPROVAL_MODE`` /
   ``TOOL_APPROVAL_REQUIRE_LIST`` to a require-set and wraps individual

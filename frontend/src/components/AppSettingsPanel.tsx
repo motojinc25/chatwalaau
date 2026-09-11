@@ -35,6 +35,11 @@ export interface SettingDescriptor {
   label: string
   group: string
   type: 'bool' | 'int' | 'str' | 'enum'
+  // Declared bounds for an `int` key (PRP-0163 / UDR-0141 D4). Advisory here:
+  // the server enforces them regardless, because the store is also written by
+  // the CLI and by hand.
+  min?: number | null
+  max?: number | null
   enum: string[] | null
   scope: SettingScope
   requires_restart: boolean
@@ -151,6 +156,8 @@ function SettingRow({
           type="number"
           className="h-8 w-56 text-xs"
           value={value === null || value === undefined ? '' : String(value)}
+          min={descriptor.min ?? undefined}
+          max={descriptor.max ?? undefined}
           disabled={disabled}
           aria-label={descriptor.label}
           onChange={(e) => {
