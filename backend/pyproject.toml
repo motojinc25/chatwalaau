@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.149.0"
+version = "0.150.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -183,4 +183,10 @@ where = ["src"]
 app = ["_frontend_dist/**/*", "_frontend_dist/*", "templates/.env.template"]
 
 [dependency-groups]
-dev = ["ruff>=0.15.5", "pytest>=8.3.0", "pytest-asyncio>=1.0.0", "pyyaml>=6.0"]
+dev = [
+    "ruff>=0.15.5",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=1.0.0",
+    "pyyaml>=6.0",
+    "httpx2>=2.12.0",
+]

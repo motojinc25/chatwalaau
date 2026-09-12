@@ -543,7 +543,7 @@ export function ChatPanel({
     }
     if (assistantIdx < 0) return null
     const assistant = msgs[assistantIdx]
-    if (!assistant.content || !assistant.content.trim()) return null
+    if (!assistant.content?.trim()) return null
     let userText = ''
     for (let j = assistantIdx - 1; j >= 0; j--) {
       if (msgs[j].role === 'user') {

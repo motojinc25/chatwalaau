@@ -46,6 +46,12 @@ export interface SettingDescriptor {
   help: string
   default: unknown
   deprecated: boolean
+  // The descriptor whose value decides whether this row is ACTIVE, and the
+  // parent value that makes it so (PRP-0164 / UDR-0142 D1). Optional because an
+  // older backend does not send them; absent means the row has no parent and is
+  // always active, which is the behaviour that predates this field.
+  parent?: string | null
+  enabled_when?: unknown
 }
 
 export interface SettingGroup {
@@ -89,6 +95,67 @@ const SCOPE_BADGE: Record<SettingScope, { label: string; title: string; classNam
   },
 }
 
+/**
+ * The nearest ancestor currently switching a row OFF, or null when the row is
+ * active. The TypeScript mirror of `descriptors.is_active` (UDR-0142 D1),
+ * resolved over the whole ancestor chain and returning the responsible link
+ * rather than a bare boolean -- an operator told only that a control is
+ * unavailable has been told the half they already knew.
+ *
+ * It reads FORM state, not the persisted snapshot, and that is the reason it
+ * lives here rather than arriving as a computed flag on the descriptor (D3):
+ * the operator expects a child to grey out the instant the parent toggle moves,
+ * which is before any save, and a server-derived flag would be wrong for exactly
+ * that interval.
+ */
+function blockingAncestor(
+  descriptor: SettingDescriptor,
+  values: Record<string, unknown>,
+  byKey: Map<string, SettingDescriptor>,
+): SettingDescriptor | null {
+  const seen = new Set<string>([descriptor.key])
+  let current: SettingDescriptor | undefined = descriptor
+
+  while (current?.parent) {
+    const parent = byKey.get(current.parent)
+    // An unknown parent cannot ship (invariant I1). If one ever does, leave the
+    // row usable rather than greying it out for a reason nothing on screen can
+    // explain.
+    if (!parent) return null
+    const effective = current.parent in values ? values[current.parent] : parent.default
+    // An enum parent may carry string options for an int-typed field (the audio
+    // rates), so compare enum links as text; a bool parent compares exactly.
+    const matched =
+      parent.type === 'enum' ? String(effective) === String(current.enabled_when) : effective === current.enabled_when
+    if (!matched) return parent
+    // Cycles cannot ship either (invariant I2); refuse to spin if one ever does.
+    if (seen.has(parent.key)) return null
+    seen.add(parent.key)
+    current = parent
+  }
+
+  return null
+}
+
+/**
+ * Whether a row carries an unresolved issue, which un-greys it regardless of its
+ * parent (UDR-0142 D4).
+ *
+ * Without this, `2K < N` plus an unconditional grey-out is a trap: the server
+ * rejects the document, the message names two controls, and both are disabled
+ * because the parent they hang off is switched off. Two sources, matching the
+ * two rules that can produce one -- a declared bound (UDR-0141 D4), checked
+ * locally, and a cross-field rule (D5), which lives only on the server and is
+ * therefore recognised by the key it NAMES in the rejection.
+ */
+function hasUnresolvedIssue(descriptor: SettingDescriptor, value: unknown, saveError: string | null): boolean {
+  if (typeof value === 'number') {
+    if (descriptor.min != null && value < descriptor.min) return true
+    if (descriptor.max != null && value > descriptor.max) return true
+  }
+  return Boolean(saveError?.includes(descriptor.env_name))
+}
+
 function ScopeBadge({ scope }: { scope: SettingScope }) {
   const meta = SCOPE_BADGE[scope]
   return (
@@ -106,11 +173,19 @@ function SettingRow({
   value,
   onChange,
   disabled,
+  inactiveBecause,
 }: {
   descriptor: SettingDescriptor
   value: unknown
   onChange: (key: string, value: unknown) => void
   disabled: boolean
+  /**
+   * Label of the parent that is currently switching this row off, or null when
+   * the row is active. An inactive row stays VISIBLE and stays in the document
+   * (UDR-0142 D4) -- hiding it would leave an operator without the one thing
+   * they need, which is why their value is not taking effect.
+   */
+  inactiveBecause?: string | null
 }) {
   const isDefault = JSON.stringify(value) === JSON.stringify(descriptor.default)
 
@@ -180,10 +255,17 @@ function SettingRow({
 
   return (
     <div className="flex items-start justify-between gap-4 border-b py-2.5 last:border-b-0">
-      <div className="min-w-0 flex-1">
+      <div className={cn('min-w-0 flex-1', inactiveBecause && 'opacity-60')}>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium">{descriptor.label}</span>
           <ScopeBadge scope={descriptor.scope} />
+          {inactiveBecause && (
+            <span
+              title={`This value is not read while "${inactiveBecause}" is off. It is still stored, so turning that back on restores it.`}
+              className="shrink-0 rounded border border-muted-foreground/30 bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+              Needs {inactiveBecause}
+            </span>
+          )}
           {!isDefault && (
             <button
               type="button"
@@ -231,6 +313,10 @@ export function AppSettingsPanel({
     () => status.descriptors.filter((d) => d.group === groupKey && !d.deprecated),
     [status.descriptors, groupKey],
   )
+  // Indexed over EVERY descriptor, not just this group's rows. An invariant test
+  // keeps a parent in the same group as its child, but resolving from the whole
+  // registry means a violation would misrender rather than crash here.
+  const byKey = useMemo(() => new Map(status.descriptors.map((d) => [d.key, d])), [status.descriptors])
 
   const dirty = useMemo(
     () =>
@@ -358,9 +444,25 @@ export function AppSettingsPanel({
         )}
 
         <div>
-          {rows.map((d) => (
-            <SettingRow key={d.key} descriptor={d} value={draft[d.key]} onChange={handleChange} disabled={busy} />
-          ))}
+          {rows.map((d) => {
+            // Inactive means "not read", never "not stored" (UDR-0142 D5): the
+            // value still travels in the save, is still coerced, and is still
+            // spanned by the cross-field rules. Only the control is disabled --
+            // and even that yields to an unresolved issue (D4), which is what
+            // keeps a rejected document correctable from this screen.
+            const blocker = blockingAncestor(d, draft, byKey)
+            const escaped = blocker !== null && hasUnresolvedIssue(d, draft[d.key], error)
+            return (
+              <SettingRow
+                key={d.key}
+                descriptor={d}
+                value={draft[d.key]}
+                onChange={handleChange}
+                disabled={busy || (blocker !== null && !escaped)}
+                inactiveBecause={blocker?.label ?? null}
+              />
+            )
+          })}
           {rows.length === 0 && <p className="text-[11px] text-muted-foreground">No settings in this group.</p>}
         </div>
 

@@ -37,12 +37,25 @@ where the field is consumed, not by guessing:
                   into a cached object that cannot be safely re-created in
                   flight; the apply path persists only and reports
                   ``restart_required``.
+
+``parent`` / ``enabled_when`` (UDR-0142) declare that a key is only read when
+another key holds a particular value -- ``compaction_enabled`` over the three
+compaction bounds, say, which ``resolve_compaction_strategy()`` short-circuits
+before dereferencing. The registry is the only place such a dependency is
+written; the GUI greys the row out from these fields rather than knowing any key
+name (D1). Inactivity is a RENDERING fact and nothing more: an inactive key is
+still stored, still coerced, still bound-checked, and still spanned by
+cross-field rules (D5), so turning a parent off and back on returns the
+operator's tuning rather than a default.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 from app.core.config import COMPACTION_BOUND_MAX, COMPACTION_BOUND_MIN, Settings
 
@@ -88,6 +101,19 @@ class SettingDescriptor:
     # A key kept only so an existing file keeps loading; hidden from the main
     # composer and shown as deprecated.
     deprecated: bool = False
+    # The descriptor whose value decides whether this row is ACTIVE -- that is,
+    # whether the value is read at all (PRP-0164 / UDR-0142 D1). The registry is
+    # the ONLY place a dependency between two settings is written; no consumer
+    # may hard-code one, which extends to relationships the property UDR-0120 D8
+    # established for keys.
+    parent: str | None = None
+    # The parent value that makes this row active. A single literal compared by
+    # equality, never an expression (D2): conjunction, ranges, and multiple
+    # parents are out of scope and are rejected by the invariant tests. Its type
+    # MUST match the parent's declared `type` -- True/False for a `bool` parent,
+    # a member of `enum` for an `enum` parent -- and it MUST be left at its
+    # default when `parent` is None.
+    enabled_when: Any = True
 
     @property
     def env_name(self) -> str:
@@ -260,6 +286,8 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         SCOPE_REBUILD,
         min=COMPACTION_BOUND_MIN,
         max=COMPACTION_BOUND_MAX,
+        parent="compaction_enabled",
+        enabled_when=True,
         help=(
             "Stage 1 (K). How many of the newest tool-call groups survive. Capping this is "
             "what keeps a long tool run from crowding the request out of the window, so it "
@@ -274,6 +302,8 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         SCOPE_REBUILD,
         min=COMPACTION_BOUND_MIN,
         max=COMPACTION_BOUND_MAX,
+        parent="compaction_enabled",
+        enabled_when=True,
         help=(
             "Stage 2 (N). How many of the newest message groups survive, counted after "
             "stage 1 has trimmed the tool-call groups. Must satisfy 2 x K < N -- the margin "
@@ -286,6 +316,8 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         "chat",
         "bool",
         SCOPE_REBUILD,
+        parent="compaction_enabled",
+        enabled_when=True,
         help="Exempt system-kind groups from the stage 2 sliding window.",
     ),
     # ---- Memory ------------------------------------------------------------
@@ -766,6 +798,61 @@ def annotation_for(key: str) -> Any:
     return Settings.model_fields[key].annotation
 
 
+def is_active(
+    key: str,
+    values: Mapping[str, Any],
+    *,
+    index: Mapping[str, SettingDescriptor] | None = None,
+) -> bool:
+    """Whether ``key``'s control is ACTIVE under ``values`` (UDR-0142 D1).
+
+    A row is active when EVERY link from it to a root descriptor is satisfied,
+    where a link is satisfied when the parent's effective value equals the
+    child's ``enabled_when``. Chains of arbitrary depth resolve, because a child
+    that is itself a parent already exists in the registry's shape (the memory
+    group's identity -> extraction -> interval line).
+
+    The GUI mirrors this in TypeScript against FORM state rather than calling a
+    server-computed flag (D3): the operator expects a child to grey out the
+    instant the parent toggle moves, which is before any save, and a flag
+    derived from persisted state would be wrong for exactly that interval. This
+    function is the normative definition the mirror is checked against, and the
+    entry point for a non-GUI consumer.
+
+    ``index`` overrides the live registry, which is what lets the invariant
+    tests resolve a synthetic chain. ``values`` supplies a key's value; a key it
+    omits falls back to the derived default, so passing a partial document
+    resolves the same way applying it would.
+    """
+    table = _BY_KEY if index is None else index
+    seen: set[str] = {key}
+    current = table.get(key)
+
+    while current is not None and current.parent is not None:
+        parent = table.get(current.parent)
+        # An unknown parent is caught by invariant I1 before it can ship. At
+        # runtime, treat the link as satisfied rather than greying a row out for
+        # a reason nothing on the screen can explain.
+        if parent is None:
+            return True
+        effective = values[parent.key] if parent.key in values else default_for(parent.key)
+        # An `enum` parent may declare string options for an int-typed field
+        # (the audio rates), so compare enum links as text. A `bool` parent
+        # compares exactly.
+        matched = (
+            str(effective) == str(current.enabled_when) if parent.type == "enum" else effective == current.enabled_when
+        )
+        if not matched:
+            return False
+        if parent.key in seen:
+            # Cycles cannot ship (invariant I2); refuse to spin if one ever does.
+            return True
+        seen.add(parent.key)
+        current = parent
+
+    return True
+
+
 def group_registry() -> list[dict[str, str]]:
     """Group descriptors for the App Settings screen's settings-item list (D8)."""
     return [{"key": g.key, "label": g.label, "description": g.description} for g in GROUPS]
@@ -778,6 +865,11 @@ def descriptor_registry() -> list[dict[str, Any]]:
     than stored on the descriptor (D4): the first from ``Settings``, the second
     from the key, the third from ``scope``. A stored copy of any of the three
     would be a second place to change when the first one moves.
+
+    ``parent`` / ``enabled_when`` travel as declared. What does NOT travel is a
+    computed ``active`` flag (UDR-0142 D3): it would describe persisted state and
+    so be wrong while the operator is editing, and it would put a second source
+    of truth beside a rule the client can apply to data it already holds.
     """
     return [
         {
@@ -798,6 +890,8 @@ def descriptor_registry() -> list[dict[str, Any]]:
             "help": d.help,
             "default": default_for(d.key),
             "deprecated": d.deprecated,
+            "parent": d.parent,
+            "enabled_when": d.enabled_when,
         }
         for d in DESCRIPTORS
     ]
@@ -819,5 +913,6 @@ __all__ = [
     "descriptor",
     "descriptor_registry",
     "group_registry",
+    "is_active",
     "known_keys",
 ]
