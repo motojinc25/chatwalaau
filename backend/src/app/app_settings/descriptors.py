@@ -25,6 +25,21 @@ feature's BOUND (``CODING_BASH_TIMEOUT``) appears here -- a bound narrows what a
 already-enabled feature may do, a gate decides whether it exists at all, and only
 the second is a security decision.
 
+UDR-0149 replaced two of those three exclusions with CONDITIONS, and the Agent
+Skills group at the bottom of this registry is the case that prompted it:
+
+- a GATE may live here when the floor it protects is enforced somewhere this
+  store cannot reach. ``skill_install_enabled`` qualifies because demo mode
+  refuses installation regardless of it, ``DEMO_MODE`` stays in ``.env``, and
+  every write to this store is itself CTR-0083 gated (D1);
+- a SECRET may live here only behind ``secret=True``, which is what makes the
+  store able to keep one: the value is never returned by CTR-0199 GET and a PUT
+  echoing the mask back leaves it untouched (D2).
+
+The bootstrap exclusion is unchanged and still binding: ``SKILLS_DIR`` stays in
+``.env`` because the two Skills paths below RESOLVE UNDER it, so a store that
+owned the root would have to be found before it could be read.
+
 ``scope`` is three-valued (UDR-0120 D3) and each value was assigned by MEASURING
 where the field is consumed, not by guessing:
 
@@ -66,6 +81,14 @@ SCOPE_REBUILD = "rebuild"
 SCOPE_RESTART = "restart"
 
 SCOPES: frozenset[str] = frozenset({SCOPE_RUNTIME, SCOPE_REBUILD, SCOPE_RESTART})
+
+# What CTR-0199 GET sends in place of a secret that is SET, and the exact value a
+# PUT may send back to mean "keep the stored one" (UDR-0149 D2). The mask is a
+# constant on both sides of the wire so the GUI needs no protocol of its own: it
+# renders what it was given, and returns it untouched unless the operator typed
+# something. Clearing a secret is sending the empty string, which is also its
+# default -- so the existing "reset to default" control is the clear control.
+SECRET_MASK = "********"
 
 
 @dataclass(frozen=True)
@@ -114,6 +137,15 @@ class SettingDescriptor:
     # a member of `enum` for an `enum` parent -- and it MUST be left at its
     # default when `parent` is None.
     enabled_when: Any = True
+    # A credential. UDR-0120 D1 forbade secrets in this store outright, and
+    # UDR-0149 D2 replaced that with a condition: a secret may live here only
+    # behind this flag, which is what makes the store able to KEEP one. The value
+    # is never returned by CTR-0199 GET (it is replaced by SECRET_MASK when set,
+    # and by the empty string when not), and a PUT carrying the mask back means
+    # "leave it alone" rather than "set it to eight asterisks". `type` stays
+    # "str": coercion, bounds and validation are unchanged -- only the two
+    # directions of the wire are.
+    secret: bool = False
 
     @property
     def env_name(self) -> str:
@@ -156,6 +188,11 @@ GROUPS: tuple[SettingGroup, ...] = (
         "schedule",
         "Schedule",
         "Cron tick cadence, run timeouts, grace window, and timezone.",
+    ),
+    SettingGroup(
+        "skills",
+        "Agent Skills",
+        "Skill catalog and installation: the switch, its source table, and its bounds.",
     ),
 )
 
@@ -746,6 +783,110 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         SCOPE_RUNTIME,
         help="Cap per captured stdout/stderr log of a scheduled run.",
     ),
+    # ---- Agent Skills (PRP-0165 amendment, UDR-0149) ------------------------
+    # The parent/child links below are assigned by MEASUREMENT, not by topic
+    # (UDR-0149 D4): a child is a key the backend stops READING when the switch
+    # is off. The catalog file and the state file are deliberately NOT children
+    # -- browsing the catalog and persisting the enable/disable selection both
+    # keep working with installation switched off, so greying those rows out
+    # would describe a dependency that does not exist.
+    SettingDescriptor(
+        "skill_install_enabled",
+        "Skill installation",
+        "skills",
+        "bool",
+        SCOPE_RUNTIME,
+        help=(
+            "Master switch for the WRITE side of Agent Skills: catalog refresh, install, "
+            "reinstall and uninstall. Browsing what is installed keeps working when it is "
+            "off. Demo deployments cannot install regardless of this value."
+        ),
+    ),
+    SettingDescriptor(
+        "skill_catalog_file",
+        "Catalog file",
+        "skills",
+        "str",
+        SCOPE_RUNTIME,
+        help=(
+            "Where the catalog snapshot is written. A relative path resolves under "
+            "SKILLS_DIR, so mounting that one directory covers it. Read whether or not "
+            "installation is enabled."
+        ),
+    ),
+    SettingDescriptor(
+        "skill_state_file",
+        "Install ledger file",
+        "skills",
+        "str",
+        SCOPE_RESTART,
+        help=(
+            "Where the install ledger and the enable/disable selection are written. A "
+            "relative path resolves under SKILLS_DIR. Restart-scoped because the "
+            "selection is applied ONCE, before the first agent is built: pointing at a "
+            "different file changes where writes land, not what is in effect."
+        ),
+    ),
+    SettingDescriptor(
+        "skill_catalog_sources_file",
+        "Source table file",
+        "skills",
+        "str",
+        SCOPE_RUNTIME,
+        parent="skill_install_enabled",
+        help=(
+            "Path to a JSON file REPLACING the built-in source table (openai, anthropic, "
+            "huggingface, gstack, nvidia). Empty uses the built-in table. The file must "
+            "already exist on the server: this names one, it does not carry one."
+        ),
+    ),
+    SettingDescriptor(
+        "skill_source_github_token",
+        "GitHub token",
+        "skills",
+        "str",
+        SCOPE_RUNTIME,
+        parent="skill_install_enabled",
+        secret=True,
+        help=(
+            "Optional token for the catalog refresh, raising GitHub's 60 requests/hour "
+            "limit for anonymous callers. Never returned by this API once set; leave the "
+            "masked value alone to keep it, or clear the field to remove it."
+        ),
+    ),
+    SettingDescriptor(
+        "skill_source_timeout_seconds",
+        "Source request timeout (seconds)",
+        "skills",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=300,
+        parent="skill_install_enabled",
+        help="Per-request timeout when listing or downloading from a source.",
+    ),
+    SettingDescriptor(
+        "skill_install_max_bytes",
+        "Install size cap (bytes)",
+        "skills",
+        "int",
+        SCOPE_RUNTIME,
+        min=65_536,
+        max=1_073_741_824,
+        parent="skill_install_enabled",
+        help="Total extracted bytes allowed for ONE skill. An over-cap download is refused before anything is written.",
+    ),
+    SettingDescriptor(
+        "skill_install_max_files",
+        "Install file-count cap",
+        "skills",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=100_000,
+        parent="skill_install_enabled",
+        help="Number of files allowed for ONE skill. An over-cap download is refused before anything is written.",
+    ),
 )
 
 
@@ -777,6 +918,21 @@ RETIRED_KEYS: frozenset[str] = frozenset(
 def descriptor(key: str) -> SettingDescriptor | None:
     """Return the descriptor for a settings key, or None when it is unknown."""
     return _BY_KEY.get(key)
+
+
+def mask_if_secret(key: str, value: Any) -> Any:
+    """Return what may leave the process for this key (UDR-0149 D2).
+
+    A secret becomes the mask when set and the empty string when not; every other
+    key is returned untouched. ONE helper because there is more than one outward
+    path -- the CTR-0199 GET, `chatwalaau settings list`, and the migrate dry run
+    -- and a credential that is masked on the API but printed by the CLI is not
+    masked at all.
+    """
+    desc = _BY_KEY.get(key)
+    if desc is None or not desc.secret:
+        return value
+    return SECRET_MASK if str(value or "").strip() else ""
 
 
 def known_keys() -> frozenset[str]:
@@ -892,6 +1048,7 @@ def descriptor_registry() -> list[dict[str, Any]]:
             "deprecated": d.deprecated,
             "parent": d.parent,
             "enabled_when": d.enabled_when,
+            "secret": d.secret,
         }
         for d in DESCRIPTORS
     ]
@@ -906,6 +1063,7 @@ __all__ = [
     "SCOPE_REBUILD",
     "SCOPE_RESTART",
     "SCOPE_RUNTIME",
+    "SECRET_MASK",
     "SettingDescriptor",
     "SettingGroup",
     "annotation_for",
@@ -915,4 +1073,5 @@ __all__ = [
     "group_registry",
     "is_active",
     "known_keys",
+    "mask_if_secret",
 ]

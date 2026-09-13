@@ -23,18 +23,34 @@ memory, UDR-0119 D4) is discarded; that is the same cost the authoring-write
 clear already imposes, on a second trigger.
 
 Both endpoints are gated by CTR-0083 (``verify_api_key``); loopback bypass keeps
-localhost-first development zero-config (UDR-0065 D6). The override store is
-in-memory only -- a restart re-enables every Skill (UDR-0065 D4).
+localhost-first development zero-config (UDR-0065 D6).
+
+PRP-0165 adds two things to this router.
+
+1. The selection is now DURABLE (UDR-0148, superseding UDR-0065 D4). The in-memory
+   override store is still the runtime authority -- nothing about the build path
+   changed -- but every successful apply also writes it to the state file under
+   SKILLS_DIR, and startup loads it back before the first agent is built. An
+   absent file still means "nothing disabled", so a fleet that never opens this
+   screen behaves exactly as it did before.
+2. The catalog and install endpoints (CTR-0205) live here too, because they end in
+   the same place a selection apply does: a registry rebuild plus a harness cache
+   clear. Their WRITE half is refused in demo mode and when SKILL_INSTALL_ENABLED
+   is off; the read half stays available so the screen is never blank.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import verify_api_key
+from app.skills import catalog as catalog_mod
+from app.skills import state as state_mod
+from app.skills.install import InstallError, install_skill, uninstall_skill
 from app.skills.inventory import get_skills_inventory
 from app.skills.overrides import get_skills_override_store
 
@@ -80,6 +96,18 @@ class SkillsSelection(BaseModel):
     """The full desired selection submitted by the management UI."""
 
     groups: list[GroupSelection] = Field(default_factory=list)
+
+
+class InstallRequest(BaseModel):
+    """Install or reinstall one catalog skill (CTR-0205).
+
+    ``force`` overrides ONLY the local-modification refusal. There is deliberately
+    no force for a name collision: MAF drops the duplicate silently, so the write
+    would produce a folder the agent never loads (UDR-0146 D3).
+    """
+
+    id: str = Field(..., min_length=1, max_length=512)
+    force: bool = False
 
 
 def register_skills_management(app: FastAPI, *, agent_registry) -> None:
@@ -130,6 +158,11 @@ def register_skills_management(app: FastAPI, *, agent_registry) -> None:
         # rebuild-then-clear: the rollback above owns a FAILED rebuild, and a clear
         # that has not run yet cannot leave a half-applied state.
         await _clear_harness_sessions(reason="skills_apply")
+
+        # UDR-0148: persist the selection AFTER the rebuild succeeded. The rollback
+        # above owns a failed rebuild, so a write that has not happened yet cannot
+        # leave the file describing a state the process never reached.
+        state_mod.save_disabled(disabled)
 
         # Log the EFFECTIVE advertised set from the refreshed inventory (not just the
         # requested count): this is exactly what the next chat run will advertise, so
@@ -182,11 +215,76 @@ def register_skills_management(app: FastAPI, *, agent_registry) -> None:
         pruned = prior & discovered
         if pruned != prior:
             store.set_disabled(pruned)
+            state_mod.save_disabled(pruned)
             logger.info("Skills reload pruned %d stale override(s)", len(prior - pruned))
 
         inventory = await get_skills_inventory()
         logger.info("Skills reloaded from disk: %d skill(s) discovered", len(discovered))
         return inventory
+
+    # ------------------------------------------------------------------
+    # Skill Catalog and Installation (CTR-0205, PRP-0165)
+    # ------------------------------------------------------------------
+
+    async def _apply_install_change(*, reason: str) -> None:
+        """Rebuild every lane that holds a built provider after a disk change.
+
+        Identical to the apply boundary a selection change uses (UDR-0130 D3):
+        an installed skill that only reached the registry would stay invisible to
+        every cached harness conversation, and an uninstalled one would stay alive
+        there.
+        """
+        try:
+            from app.agui.agent_factory import rebuild_agent_registry
+
+            await rebuild_agent_registry(agent_registry)
+        except Exception:
+            logger.exception("Skill %s succeeded but the agent rebuild failed", reason)
+            raise HTTPException(status_code=500, detail={"error": "agent_rebuild_failed"}) from None
+        await _clear_harness_sessions(reason=reason)
+
+    @router.get("/catalog", dependencies=[Depends(verify_api_key)])
+    async def get_catalog() -> dict:
+        """Return the catalog snapshot merged with the install ledger and disk state.
+
+        Readable even when the write side is off (demo mode, SKILL_INSTALL_ENABLED
+        false) so the screen shows what IS installed instead of nothing; the
+        ``available`` flag tells the UI to disable every install control.
+        """
+        return await asyncio.to_thread(catalog_mod.build_view)
+
+    @router.post("/catalog/refresh", dependencies=[Depends(verify_api_key)])
+    async def refresh_catalog_endpoint() -> dict:
+        """Rebuild the catalog snapshot from every configured source.
+
+        Per-source atomic: a source that fails keeps its previous entries, marked
+        stale with the error attached (UDR-0147 D3), so one rate-limited repository
+        cannot blank a working catalog.
+        """
+        if not catalog_mod.install_available():
+            raise HTTPException(status_code=403, detail={"error": "install_disabled"})
+        await catalog_mod.refresh_catalog()
+        return await asyncio.to_thread(catalog_mod.build_view)
+
+    @router.post("/install", dependencies=[Depends(verify_api_key)])
+    async def install_endpoint(body: InstallRequest) -> dict:
+        """Install or reinstall one catalog skill, then rebuild the agents."""
+        try:
+            await install_skill(body.id, force=body.force)
+        except InstallError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.payload()) from None
+        await _apply_install_change(reason="skill_install")
+        return await asyncio.to_thread(catalog_mod.build_view)
+
+    @router.delete("/install/{skill_id:path}", dependencies=[Depends(verify_api_key)])
+    async def uninstall_endpoint(skill_id: str) -> dict:
+        """Remove one installed skill and its ledger row, then rebuild the agents."""
+        try:
+            await uninstall_skill(skill_id)
+        except InstallError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.payload()) from None
+        await _apply_install_change(reason="skill_uninstall")
+        return await asyncio.to_thread(catalog_mod.build_view)
 
     app.include_router(router)
 

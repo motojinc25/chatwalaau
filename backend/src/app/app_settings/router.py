@@ -62,6 +62,26 @@ class SettingsPayload(BaseModel):
     unknown: dict[str, Any] | None = None
 
 
+def _resolve_secret(key: str, value: Any) -> Any:
+    """Turn a masked secret back into the stored one (UDR-0149 D2).
+
+    GET never returns a secret's value -- it returns ``SECRET_MASK`` when one is
+    set. A full-document PUT therefore carries the mask back for every save the
+    operator makes for some OTHER reason, and storing it verbatim would overwrite
+    the credential with eight asterisks on the first unrelated edit. The mask
+    means "leave it alone"; anything else, including the empty string, is what
+    the operator typed, and the empty string is how a secret is cleared.
+    """
+    desc = descriptors_mod.descriptor(key)
+    if desc is None or not desc.secret:
+        return value
+    if isinstance(value, str) and value == descriptors_mod.SECRET_MASK:
+        from app.core.config import settings as _settings
+
+        return getattr(_settings, key, "")
+    return value
+
+
 def register_app_settings(app: FastAPI, *, agent_registry) -> None:
     """Mount the application settings endpoints, closing over the agent registry.
 
@@ -94,6 +114,7 @@ def register_app_settings(app: FastAPI, *, agent_registry) -> None:
             if key not in valid:
                 errors.append(f"{key} is not a known setting")
                 continue
+            value = _resolve_secret(key, value)
             result, warning = store_mod.coerce_value(key, value)
             if warning:
                 errors.append(warning)

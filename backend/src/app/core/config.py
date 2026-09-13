@@ -407,7 +407,51 @@ class Settings(BaseSettings):
     file_explorer_max_upload_files: int = 500
 
     # Agent Skills (CTR-0042, PRP-0024)
+    # PRP-0165 / UDR-0143: SKILLS_DIR is also the DURABLE ROOT for everything the
+    # product writes about Skills -- the catalog snapshot, the install ledger and
+    # the gating selection all resolve under it. Persistence itself is a property
+    # of the DEPLOYMENT (a mounted volume), never a promise made here: an install
+    # whose folder vanished is reported as `missing` and offered for reinstall.
     skills_dir: str = ".skills"
+
+    # ---- Skill Catalog and Installation (PRP-0165, CTR-0202/CTR-0205/CTR-0206) --
+    # APPLICATION SETTINGS, not .env (UDR-0149): these eight are Settings fields
+    # like every other store-owned key -- the store applies onto this singleton --
+    # but they are owned by app_settings.jsonc and MUST NOT appear in
+    # .env.template. The descriptor registry is what exempts them there, and
+    # `residual_env_keys()` names any leftover .env spelling at startup.
+    #
+    # Two of them are here by a CONDITION rather than by the plain UDR-0120 D1
+    # rule. `skill_install_enabled` is a gate, admitted because demo mode refuses
+    # installation regardless of it (UDR-0144 D4, DEMO_MODE stays in .env) and
+    # every write to the store is itself CTR-0083 gated.
+    # `skill_source_github_token` is a secret, admitted only because its
+    # descriptor carries `secret=True`, so CTR-0199 masks it in both directions.
+    #
+    # SKILLS_DIR itself is NOT here: the two paths below resolve UNDER it, so the
+    # root has to be readable before the store can be found (UDR-0149 D3).
+    skill_install_enabled: bool = True
+    # Catalog snapshot and install-ledger/gating file. A RELATIVE path resolves
+    # under SKILLS_DIR (not the CWD), which is what makes the durable root a single
+    # directory to mount. Both defaults start with "." so MAF discovery ignores
+    # them: its scan recurses into directories only, so a dot-FILE is invisible
+    # while a dot-DIRECTORY would be walked (UDR-0143 D3).
+    skill_catalog_file: str = ".skills-index.json"
+    skill_state_file: str = ".skills-state.json"
+    # Optional JSON file REPLACING the built-in source table (CTR-0204). Empty
+    # means the built-in table, which is the allowlist: this setting NAMES a file,
+    # it never carries one, so widening the installable set still requires putting
+    # a JSON file on the server (UDR-0144 D2, UDR-0149 D1).
+    skill_catalog_sources_file: str = ""
+    # Optional GitHub token for the catalog refresh. Secret: never returned by an
+    # endpoint or written to a log line. Unauthenticated refresh works (about three
+    # API requests per repository against a 60/hour limit).
+    skill_source_github_token: str = ""
+    skill_source_timeout_seconds: int = 30
+    # Bounds on ONE extracted skill (UDR-0144 D5). An over-cap download is refused
+    # before anything is written into place.
+    skill_install_max_bytes: int = 52_428_800  # 50 MiB, total extracted
+    skill_install_max_files: int = 2000
 
     # Declarative Agents (CTR-0006, CTR-0142..0144, PRP-0094, UDR-0072)
     # Folder of CUSTOM declarative agent YAML files (*.yaml / *.yml, nested folders

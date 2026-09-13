@@ -502,6 +502,15 @@ app.include_router(tts_router)
 # activate_mcp() is called later in lifespan to start servers asynchronously
 prepare_mcp()
 
+# Durable Agent Skills state (CTR-0206, PRP-0165, UDR-0148 D2). Applied BEFORE the
+# registry below is built: create_skills_provider() reads the override store while
+# it builds, so an apply deferred to lifespan would let the first build advertise
+# skills the operator switched off. Also sweeps a staging directory left behind by
+# a crashed install, which would otherwise be discovered as a half-extracted skill.
+from app.skills.state import load_state_into_stores
+
+load_state_into_stores()
+
 # Multi-Model Agent Registry (CTR-0070, PRP-0035)
 agent_registry = create_agent_registry()
 

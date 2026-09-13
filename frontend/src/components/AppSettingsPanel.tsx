@@ -52,6 +52,12 @@ export interface SettingDescriptor {
   // always active, which is the behaviour that predates this field.
   parent?: string | null
   enabled_when?: unknown
+  // A credential (PRP-0165 amendment / UDR-0149 D2). The GET never carries its
+  // value: a set secret arrives as the mask, an unset one as the empty string.
+  // Sending the mask back means "keep it", so an unrelated save cannot overwrite
+  // a token with asterisks, and clearing the field clears the secret. Optional
+  // because an older backend does not send the flag; absent means not a secret.
+  secret?: boolean
 }
 
 export interface SettingGroup {
@@ -244,9 +250,12 @@ function SettingRow({
     }
     return (
       <Input
+        type={descriptor.secret ? 'password' : 'text'}
         className="h-8 w-56 text-xs"
         value={value === null || value === undefined ? '' : String(value)}
         disabled={disabled}
+        autoComplete={descriptor.secret ? 'new-password' : undefined}
+        placeholder={descriptor.secret ? 'not set' : undefined}
         aria-label={descriptor.label}
         onChange={(e) => onChange(descriptor.key, e.target.value)}
       />

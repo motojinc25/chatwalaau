@@ -58,6 +58,7 @@ from app.app_settings.descriptors import (
     default_for,
     descriptor,
     known_keys,
+    mask_if_secret,
 )
 from app.core.config import COMPACTION_RULE_TEXT, compaction_bounds_satisfy_rule, settings
 from app.mcp.config import _strip_jsonc_comments
@@ -523,7 +524,19 @@ def store_status() -> dict[str, Any]:
     # Report the LIVE singleton values, not the file's -- they are what the system
     # is actually using, which is the question an operator opening the screen is
     # asking. They agree with the file except where a value degraded (D7).
-    values = {d.key: getattr(settings, d.key, default_for(d.key)) for d in DESCRIPTORS}
+    #
+    # A secret is the one exception (UDR-0149 D2): what leaves here is the MASK
+    # when it is set and the empty string when it is not, so a credential never
+    # reaches a browser, a log, or a screen recording. `secret_keys` names which
+    # rows those are, so a client too old to read the descriptor flag still has
+    # no way to mistake the mask for the value.
+    values: dict[str, Any] = {}
+    secret_keys: list[str] = []
+    for d in DESCRIPTORS:
+        live = getattr(settings, d.key, default_for(d.key))
+        if d.secret:
+            secret_keys.append(d.key)
+        values[d.key] = mask_if_secret(d.key, live)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -532,6 +545,7 @@ def store_status() -> dict[str, Any]:
         "groups": group_registry(),
         "unknown": doc.unknown,
         "warnings": doc.warnings,
+        "secret_keys": secret_keys,
         "residual_env_keys": residual_env_keys(),
         "path": str(path) if path else None,
         "present": doc.present,

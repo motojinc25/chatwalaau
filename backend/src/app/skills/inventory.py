@@ -94,6 +94,16 @@ def _discover_skill_dirs(root: Path) -> list[Path]:
     return out
 
 
+def discover_skill_dirs(root: Path) -> list[Path]:
+    """Public alias of the MAF-delegating discovery scan (CTR-0205, PRP-0165).
+
+    The install path needs exactly the candidate set MAF discovers to answer "is
+    this name already taken?", and it must be the SAME answer the collision
+    warning above is computed from -- one scan, one rule, two callers.
+    """
+    return _discover_skill_dirs(root)
+
+
 def _read_command_meta(skill_dir: Path) -> dict[str, str]:
     """Best-effort read of optional slash-command metadata from SKILL.md frontmatter.
 
@@ -172,6 +182,13 @@ async def get_skills_inventory() -> dict[str, Any]:
     store = get_skills_override_store()
     loaded = get_loaded_skills()
 
+    # Install provenance (CTR-0123 v-note, PRP-0165). Additive per-skill fields so
+    # the one screen can say where a skill came from without a second round trip.
+    # Keyed by NAME because that is the identity MAF and the gating store both use.
+    from app.skills.state import read_state
+
+    ledger = {entry.name: entry for entry in read_state().installed.values()}
+
     grouped: dict[str, list[dict[str, Any]]] = {}
     for skill in skills:
         name = skill.frontmatter.name
@@ -186,6 +203,11 @@ async def get_skills_inventory() -> dict[str, Any]:
         }
         # Optional slash-command metadata (CTR-0043 v-note, PRP-0088); additive.
         entry.update(_read_command_meta(skill_dir))
+        installed = ledger.get(name)
+        if installed is not None:
+            entry["installed"] = True
+            entry["source_id"] = installed.source_id
+            entry["catalog_id"] = installed.id
         grouped.setdefault(group, []).append(entry)
 
     # Collision scan: duplicate basenames among all discovered SKILL.md dirs.
@@ -206,4 +228,4 @@ async def get_skills_inventory() -> dict[str, Any]:
     return {"groups": groups_out, "collisions": sorted(collisions), "skills_dir": str(skills_path)}
 
 
-__all__ = ["get_skills_inventory"]
+__all__ = ["discover_skill_dirs", "get_skills_inventory"]

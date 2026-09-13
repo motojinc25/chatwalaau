@@ -76,6 +76,7 @@ def _run_settings_help(args: argparse.Namespace) -> None:
 
 def _run_settings_list(args: argparse.Namespace) -> None:
     from app.app_settings import descriptor_registry, load_store
+    from app.app_settings.descriptors import mask_if_secret
     from app.app_settings.store import SettingsStoreError, store_path
 
     try:
@@ -94,7 +95,9 @@ def _run_settings_list(args: argparse.Namespace) -> None:
                 "env_name": desc["env_name"],
                 "group": desc["group"],
                 "scope": desc["scope"],
-                "value": doc.values.get(key, desc["default"]),
+                # A credential is masked on every outward path, the terminal
+                # included (UDR-0149 D2).
+                "value": mask_if_secret(key, doc.values.get(key, desc["default"])),
                 "source": "store" if stored else "default",
             }
         )
@@ -145,6 +148,7 @@ def _run_settings_list(args: argparse.Namespace) -> None:
 
 def _run_settings_migrate(args: argparse.Namespace) -> None:
     from app.app_settings import load_store, write_store
+    from app.app_settings.descriptors import mask_if_secret
     from app.app_settings.store import (
         SettingsStoreError,
         coerce_value,
@@ -201,7 +205,7 @@ def _run_settings_migrate(args: argparse.Namespace) -> None:
             else f"Copied {len(planned)} value(s) from .env:"
         )
         for key in sorted(planned):
-            print(f"  + {key.upper()} = {planned[key]!r}")
+            print(f"  + {key.upper()} = {mask_if_secret(key, planned[key])!r}")
     if skipped:
         print()
         print(f"Left alone ({len(skipped)} already set in the store):")
