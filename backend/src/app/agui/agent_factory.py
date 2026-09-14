@@ -56,7 +56,7 @@ def _build_coding_instructions() -> str:
             "Prefer file_glob/file_grep tools over shell find/grep commands for cross-platform safety."
         )
 
-    return (
+    base = (
         "You have access to coding tools for working with files in the workspace directory. "
         "Use file_glob to find files by pattern before reading them. "
         "Use file_grep to search for specific content across files. "
@@ -64,6 +64,28 @@ def _build_coding_instructions() -> str:
         "Use file_write to create or modify files. "
         "Use bash_execute to run shell commands (build, test, git, etc.). "
         "All file paths are relative to the workspace directory. " + platform_note
+    )
+    return f"{base.rstrip()}\n\n{_workspace_file_reference_note()}"
+
+
+def _workspace_file_reference_note() -> str:
+    """How a delivered file is referenced (CTR-0207, PRP-0166, UDR-0150 D5/D6).
+
+    Part of the `coding` tool-guide, so it is emitted only when the coding tools are
+    registered. The absolute workspace path is disclosed because a skill script runs
+    in its OWN directory (UDR-0145 D4) and needs an absolute output path to deliver
+    into the workspace; the same model already runs bash_execute inside it.
+    """
+    raw = (settings.coding_workspace_dir or "").strip()
+    workspace = str(Path(raw).resolve()) if raw else "the workspace directory"
+    return (
+        "When you create a file for the user, save it inside the workspace and reference it in your "
+        "answer as a Markdown link whose target is workspace:<path relative to the workspace>, for example "
+        "[hello_world.pdf](workspace:output/pdf/hello_world.pdf). Use this form for images too: "
+        "![chart](workspace:output/chart.png). Never use sandbox:, file:, or an absolute path as a link "
+        "target; the user cannot open those. run_skill_script runs a skill's script inside the skill's own "
+        "directory, so a relative output path there does NOT land in the workspace. When a skill script "
+        f"writes a file for the user, pass it an absolute output path under the workspace: {workspace}"
     )
 
 

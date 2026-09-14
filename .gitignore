@@ -105,3 +105,6 @@ batch-server.log
 
 # Ontologies
 .ontologies
+
+# Agent Skills
+.skills/

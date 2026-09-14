@@ -86,7 +86,7 @@ See the [Configuration guide](https://www.chatwalaau.com/docs/getting-started/co
 | **Ontology** | Build RDF concept models on a visual graph canvas. Import/export RDF, query with SPARQL or natural language, and let agents use your ontologies. |
 | **MCP** | Connect MCP servers using Claude Desktop-compatible configuration. Toggle servers and tools, reload connections, and render interactive MCP Apps in chat. |
 | **Memory** | Maintain agent identity, user preferences, and project knowledge in editable Markdown files with automatic backups. |
-| **Workspace** | Browse and edit files in a Monaco-based editor with tabs and split panes. Upload folders, download ZIPs, preview PDFs and images, and attach them to chat. |
+| **Workspace** | Browse and edit files in a Monaco-based editor with tabs and split panes. Upload folders, download ZIPs, preview PDFs and images, and attach them to chat. Download or open files the assistant creates straight from its answer. |
 | **Agents & workflows** | Define agents in YAML or a GUI. Compose workflows in a visual DAG editor with branching, loops, tool calls, human input, and live execution views. Run in chat or as background jobs. |
 | **Harness agents** | Run autonomous coding agents with planning, todo lists, session memory, workspace-scoped file and shell access, Skills, and context compaction. |
 | **Automation & Teams** | Schedule workspace scripts, chat with agents in Microsoft Teams, and summarize meeting transcripts through Microsoft Graph webhooks or on demand. |

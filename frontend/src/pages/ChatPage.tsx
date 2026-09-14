@@ -1,5 +1,5 @@
 import { Loader2, Menu } from 'lucide-react'
-import { Suspense, useCallback, useState } from 'react'
+import { Suspense, useCallback, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
 import { CronManager } from '@/components/CronManager'
@@ -10,8 +10,9 @@ import { SessionSidebar } from '@/components/SessionSidebar'
 import { TemporaryChatToggle } from '@/components/TemporaryChatToggle'
 import { Button } from '@/components/ui/button'
 import { WebhookManager } from '@/components/WebhookManager'
+import { type WorkspaceLinkContextValue, WorkspaceLinkProvider } from '@/components/WorkspaceFileLink'
 import { useCronAvailable } from '@/hooks/useCronAvailable'
-import { useFileExplorerAvailable } from '@/hooks/useFileExplorerAvailable'
+import { useFileExplorerProbe } from '@/hooks/useFileExplorerAvailable'
 import { useOntologyAvailable } from '@/hooks/useOntologyAvailable'
 import { usePipelineAvailable } from '@/hooks/usePipelineAvailable'
 import { useSession } from '@/hooks/useSession'
@@ -103,8 +104,22 @@ export function ChatPage() {
 
   // File Explorer overlay (CTR-0137, PRP-0091). Lifted here so both the sidebar-footer
   // launcher icon and the /files slash command open the same overlay instance.
-  const fileExplorerAvailable = useFileExplorerAvailable()
+  const fileExplorerProbe = useFileExplorerProbe()
+  const fileExplorerAvailable = fileExplorerProbe === true
   const [filesOpen, setFilesOpen] = useState(false)
+  // Workspace file references in chat (CTR-0207, PRP-0166, UDR-0150 D8): "Open" on a
+  // PDF / image reference asks the File Explorer to open that path in its existing
+  // viewer. The nonce makes a repeat request for the same path observable.
+  const [fileOpenRequest, setFileOpenRequest] = useState<{ path: string; nonce: number } | null>(null)
+  const workspaceLinks = useMemo<WorkspaceLinkContextValue>(
+    () => ({
+      available: fileExplorerProbe,
+      onOpen: fileExplorerAvailable
+        ? (path: string) => setFileOpenRequest((prev) => ({ path, nonce: (prev?.nonce ?? 0) + 1 }))
+        : undefined,
+    }),
+    [fileExplorerProbe, fileExplorerAvailable],
+  )
   // Bridge a File Explorer image/PDF attach into the composer (PRP-0116, CTR-0137).
   // The File is handed up here; ChatPanel (which owns the thread id) consumes it.
   const [attachFile, setAttachFile] = useState<File | null>(null)
@@ -157,129 +172,136 @@ export function ChatPage() {
   }, [temp, createSession])
 
   return (
-    <div className="flex h-screen">
-      {sidebarOpen && (
-        <SessionSidebar
-          sessions={sessions}
-          folders={folders}
-          currentThreadId={temp.isTemporary ? '' : threadId}
-          creatingFolder={isCreatingFolder}
-          deletingFolderId={deletingFolderId}
-          updatingFolderId={updatingFolderId}
-          movingSessionId={movingSessionId}
-          importing={isImporting}
-          onSwitch={handleSwitch}
-          onDelete={deleteSession}
-          onExport={exportSession}
-          onImport={importSession}
-          onDeleteFolder={deleteFolder}
-          onCreateFolder={createFolder}
-          onRenameFolder={renameFolder}
-          onUpdateFolderColor={updateFolderColor}
-          onReorderFolders={reorderFolders}
-          onMoveToFolder={moveSessionToFolder}
-          onRename={renameSession}
-          onRegenerateTitle={regenerateTitle}
-          onArchive={archiveSession}
-          onPin={pinSession}
-          onCreate={handleCreate}
-          onClose={() => setSidebarOpen(false)}
-          hasMoreSessions={hasMoreSessions}
-          isLoadingMoreSessions={isLoadingMoreSessions}
-          onLoadMoreSessions={loadMoreSessions}
-          onLoadFolderSessions={loadFolderSessions}
-          cronAvailable={cronAvailable}
-          onOpenCron={() => setCronOpen(true)}
-          fileExplorerAvailable={fileExplorerAvailable}
-          onOpenFiles={() => setFilesOpen(true)}
-          pipelineAvailable={pipelineAvailable}
-          onOpenPipeline={() => setPipelineOpen(true)}
-          webhookAvailable={webhookAvailable}
-          onOpenWebhook={() => setWebhookOpen(true)}
-          onOpenMemory={() => setMemoryOpen(true)}
-          ontologyAvailable={ontologyAvailable}
-          onOpenOntology={() => setOntologyOpen(true)}
-        />
-      )}
-
-      {cronAvailable && <CronManager open={cronOpen} onOpenChange={setCronOpen} />}
-
-      {pipelineAvailable && <PipelineManager open={pipelineOpen} onOpenChange={setPipelineOpen} />}
-
-      {webhookAvailable && <WebhookManager open={webhookOpen} onOpenChange={setWebhookOpen} />}
-
-      {fileExplorerAvailable && (
-        <Suspense fallback={null}>
-          <FileExplorer open={filesOpen} onOpenChange={setFilesOpen} onAttach={setAttachFile} />
-        </Suspense>
-      )}
-
-      {memoryOpen && (
-        <Suspense fallback={null}>
-          <MemoryManager open={memoryOpen} onOpenChange={setMemoryOpen} />
-        </Suspense>
-      )}
-
-      {ontologyAvailable && ontologyOpen && (
-        <Suspense fallback={null}>
-          <OntologyManager open={ontologyOpen} onOpenChange={setOntologyOpen} />
-        </Suspense>
-      )}
-
-      <div className="relative flex flex-1 flex-col">
-        {!sidebarOpen && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="absolute left-3 top-3 z-10 h-8 w-8"
-            onClick={() => setSidebarOpen(true)}
-            aria-label="Open sessions">
-            <Menu className="h-4 w-4" />
-          </Button>
+    <WorkspaceLinkProvider value={workspaceLinks}>
+      <div className="flex h-screen">
+        {sidebarOpen && (
+          <SessionSidebar
+            sessions={sessions}
+            folders={folders}
+            currentThreadId={temp.isTemporary ? '' : threadId}
+            creatingFolder={isCreatingFolder}
+            deletingFolderId={deletingFolderId}
+            updatingFolderId={updatingFolderId}
+            movingSessionId={movingSessionId}
+            importing={isImporting}
+            onSwitch={handleSwitch}
+            onDelete={deleteSession}
+            onExport={exportSession}
+            onImport={importSession}
+            onDeleteFolder={deleteFolder}
+            onCreateFolder={createFolder}
+            onRenameFolder={renameFolder}
+            onUpdateFolderColor={updateFolderColor}
+            onReorderFolders={reorderFolders}
+            onMoveToFolder={moveSessionToFolder}
+            onRename={renameSession}
+            onRegenerateTitle={regenerateTitle}
+            onArchive={archiveSession}
+            onPin={pinSession}
+            onCreate={handleCreate}
+            onClose={() => setSidebarOpen(false)}
+            hasMoreSessions={hasMoreSessions}
+            isLoadingMoreSessions={isLoadingMoreSessions}
+            onLoadMoreSessions={loadMoreSessions}
+            onLoadFolderSessions={loadFolderSessions}
+            cronAvailable={cronAvailable}
+            onOpenCron={() => setCronOpen(true)}
+            fileExplorerAvailable={fileExplorerAvailable}
+            onOpenFiles={() => setFilesOpen(true)}
+            pipelineAvailable={pipelineAvailable}
+            onOpenPipeline={() => setPipelineOpen(true)}
+            webhookAvailable={webhookAvailable}
+            onOpenWebhook={() => setWebhookOpen(true)}
+            onOpenMemory={() => setMemoryOpen(true)}
+            ontologyAvailable={ontologyAvailable}
+            onOpenOntology={() => setOntologyOpen(true)}
+          />
         )}
 
-        {/*
+        {cronAvailable && <CronManager open={cronOpen} onOpenChange={setCronOpen} />}
+
+        {pipelineAvailable && <PipelineManager open={pipelineOpen} onOpenChange={setPipelineOpen} />}
+
+        {webhookAvailable && <WebhookManager open={webhookOpen} onOpenChange={setWebhookOpen} />}
+
+        {fileExplorerAvailable && (
+          <Suspense fallback={null}>
+            <FileExplorer
+              open={filesOpen}
+              onOpenChange={setFilesOpen}
+              onAttach={setAttachFile}
+              openRequest={fileOpenRequest}
+            />
+          </Suspense>
+        )}
+
+        {memoryOpen && (
+          <Suspense fallback={null}>
+            <MemoryManager open={memoryOpen} onOpenChange={setMemoryOpen} />
+          </Suspense>
+        )}
+
+        {ontologyAvailable && ontologyOpen && (
+          <Suspense fallback={null}>
+            <OntologyManager open={ontologyOpen} onOpenChange={setOntologyOpen} />
+          </Suspense>
+        )}
+
+        <div className="relative flex flex-1 flex-col">
+          {!sidebarOpen && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="absolute left-3 top-3 z-10 h-8 w-8"
+              onClick={() => setSidebarOpen(true)}
+              aria-label="Open sessions">
+              <Menu className="h-4 w-4" />
+            </Button>
+          )}
+
+          {/*
           Top-right controls. Privacy Screen (CTR-0190, PRP-0124) sits to the LEFT
           of Temporary Chat (CTR-0107, PRP-0076); both are the full-page /chat
           surface only, and both may be active at once (their active pills use
           distinct colors so they stay distinguishable -- UDR-0107 D11).
         */}
-        <div className="absolute right-3 top-3 z-20 flex items-center gap-1">
-          <PrivacyScreenToggle />
-          <TemporaryChatToggle isTemporary={temp.isTemporary} onEnter={temp.enter} onExit={temp.exit} />
+          <div className="absolute right-3 top-3 z-20 flex items-center gap-1">
+            <PrivacyScreenToggle />
+            <TemporaryChatToggle isTemporary={temp.isTemporary} onEnter={temp.enter} onExit={temp.exit} />
+          </div>
+
+          {isSwitching ? (
+            <div className="flex flex-1 items-center justify-center">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              <span className="ml-2 text-sm text-muted-foreground">Loading session...</span>
+            </div>
+          ) : (
+            <ChatPanel
+              key={effectiveThreadId}
+              threadId={effectiveThreadId}
+              initialMessages={temp.isTemporary ? [] : initialMessages}
+              continuationToken={temp.isTemporary ? null : continuationToken}
+              onStreamComplete={handleStreamComplete}
+              onSessionCreated={handleSessionCreated}
+              onBranchFromMessage={temp.isTemporary ? undefined : handleBranch}
+              onSlashCron={() => setCronOpen(true)}
+              onSlashFiles={() => setFilesOpen(true)}
+              attachFile={attachFile}
+              onAttachConsumed={() => setAttachFile(null)}
+              temporary={temp.isTemporary}
+            />
+          )}
         </div>
 
-        {isSwitching ? (
-          <div className="flex flex-1 items-center justify-center">
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-            <span className="ml-2 text-sm text-muted-foreground">Loading session...</span>
-          </div>
-        ) : (
-          <ChatPanel
-            key={effectiveThreadId}
-            threadId={effectiveThreadId}
-            initialMessages={temp.isTemporary ? [] : initialMessages}
-            continuationToken={temp.isTemporary ? null : continuationToken}
-            onStreamComplete={handleStreamComplete}
-            onSessionCreated={handleSessionCreated}
-            onBranchFromMessage={temp.isTemporary ? undefined : handleBranch}
-            onSlashCron={() => setCronOpen(true)}
-            onSlashFiles={() => setFilesOpen(true)}
-            attachFile={attachFile}
-            onAttachConsumed={() => setAttachFile(null)}
-            temporary={temp.isTemporary}
-          />
-        )}
-      </div>
-
-      {/* Declarative Agents & Workflows modal + its open-request listener (CTR-0144).
+        {/* Declarative Agents & Workflows modal + its open-request listener (CTR-0144).
           Mounted HERE, outside every conditional, because the request arrives on a
           window event (UDR-0111 D6) and a window event has no failure signal: while
           this lived inside the collapsible sidebar, closing the sidebar deleted the
           listener and the composer's run-target button silently did nothing
           (PRP-0134 / UDR-0115 D1/D3). Renders null until it is opened or its
           availability probe succeeds, so an unconfigured deployment costs nothing. */}
-      <DeclarativeAgentManager />
-    </div>
+        <DeclarativeAgentManager />
+      </div>
+    </WorkspaceLinkProvider>
   )
 }

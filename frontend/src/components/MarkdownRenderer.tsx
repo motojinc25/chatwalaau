@@ -3,7 +3,7 @@ import 'katex/dist/katex.min.css'
 import { Check, Copy } from 'lucide-react'
 import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import type { Components } from 'react-markdown'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -11,6 +11,8 @@ import { CodeBlock } from '@/components/CodeBlock'
 import { MermaidBlock } from '@/components/MermaidBlock'
 import { remarkCjkStrongEmphasisRescue } from '@/components/markdown/remarkCjkStrongEmphasisRescue'
 import { Button } from '@/components/ui/button'
+import { WorkspaceFileLink, WorkspaceImage } from '@/components/WorkspaceFileLink'
+import { isWorkspaceRefUrl, makeWorkspaceUrlTransform, normalizeWorkspaceRef } from '@/lib/workspace-ref'
 
 interface MarkdownRendererProps {
   content: string
@@ -123,7 +125,14 @@ const components: Components = {
     return <>{children}</>
   },
 
+  // CTR-0012 v1.10 (PRP-0166, UDR-0150 D4): a workspace file reference is
+  // dispatched to WorkspaceFileLink and NEVER written into an href. A reference
+  // whose path is rejected (`..`, drive letter, ...) renders as its plain label.
   a({ href, children, node: _, ...props }) {
+    if (isWorkspaceRefUrl(href)) {
+      const path = normalizeWorkspaceRef(href)
+      return path ? <WorkspaceFileLink path={path}>{children}</WorkspaceFileLink> : <span>{children}</span>
+    }
     return (
       <a
         href={href}
@@ -134,6 +143,16 @@ const components: Components = {
         {children}
       </a>
     )
+  },
+
+  // CTR-0012 v1.10 (PRP-0166): a workspace image is fetched through CTR-0136 /raw
+  // and shown via an object URL; the reference itself never reaches `src`.
+  img({ src, alt, node: _, ...props }) {
+    if (typeof src === 'string' && isWorkspaceRefUrl(src)) {
+      const path = normalizeWorkspaceRef(src)
+      return path ? <WorkspaceImage path={path} alt={alt} /> : <span>{alt}</span>
+    }
+    return <img src={src} alt={alt} {...props} />
   },
 
   table({ children, node: _, ...props }) {
@@ -261,6 +280,15 @@ function preprocessMath(text: string): string {
   return processed
 }
 
+/**
+ * CTR-0012 v1.10 (PRP-0166, UDR-0150 D4): react-markdown's default URL transform
+ * blanks every scheme outside its safe set -- which is what neutralizes a
+ * `javascript:` link in model output, so it stays in force for every other URL.
+ * Only `workspace:` and `sandbox:` (CTR-0207) are preserved, and only so the `a` /
+ * `img` components above can dispatch them to a fetch; they never reach the DOM.
+ */
+export const urlTransform = makeWorkspaceUrlTransform(defaultUrlTransform)
+
 function MarkdownRendererImpl({ content }: MarkdownRendererProps) {
   // CTR-0012 v1.6 (PRP-0055): compact body text size and leading for
   // higher information density on a single viewport.
@@ -273,6 +301,7 @@ function MarkdownRendererImpl({ content }: MarkdownRendererProps) {
         remarkPlugins={[remarkGfm, remarkMath, remarkCjkStrongEmphasisRescue]}
         rehypePlugins={[[rehypeKatex, { throwOnError: false, trust: true, strict: false }]]}
         remarkRehypeOptions={remarkRehypeOptions}
+        urlTransform={urlTransform}
         components={components}>
         {processed}
       </ReactMarkdown>

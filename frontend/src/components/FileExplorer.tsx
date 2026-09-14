@@ -61,6 +61,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
+import { downloadUrl } from '@/lib/workspace-download'
 import '@/lib/monaco-setup'
 
 /**
@@ -94,6 +95,13 @@ interface FileExplorerProps {
    * File up keeps the active thread id owned by the composer.
    */
   onAttach?: (file: File) => void
+  /**
+   * Open a workspace path on request (CTR-0137, PRP-0166, UDR-0150 D8). Each new
+   * `nonce` opens the overlay and opens or focuses `path` through the existing
+   * tab-kind routing (text / image / pdf). It only adds or focuses a tab, so it
+   * never discards unsaved work.
+   */
+  openRequest?: { path: string; nonce: number } | null
 }
 
 /** Best-guess MIME for a workspace media file being attached to the composer. */
@@ -248,23 +256,9 @@ function revokeTab(t: Tab): void {
   if (t.blobUrl) URL.revokeObjectURL(t.blobUrl)
 }
 
-async function downloadUrl(url: string, filename: string): Promise<void> {
-  try {
-    const res = await fetch(url)
-    if (!res.ok) return
-    const blob = await res.blob()
-    const objectUrl = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = objectUrl
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(objectUrl)
-  } catch {
-    // silent: download is best-effort
-  }
-}
+// downloadUrl lives in @/lib/workspace-download since PRP-0166 (UDR-0150 D3), shared
+// with the chat's workspace file references. The explorer ignores its result, which
+// keeps download best-effort and silent here.
 
 function useElementSize() {
   const [size, setSize] = useState({ width: 0, height: 0 })
@@ -285,7 +279,7 @@ function useElementSize() {
   return [setEl, size] as const
 }
 
-export function FileExplorer({ open, onOpenChange, onAttach }: FileExplorerProps) {
+export function FileExplorer({ open, onOpenChange, onAttach, openRequest }: FileExplorerProps) {
   const [data, setData] = useState<FileNode[]>([])
   const [rootLoaded, setRootLoaded] = useState(false)
   const loadedRef = useRef<Set<string>>(new Set())
@@ -596,6 +590,18 @@ export function FileExplorer({ open, onOpenChange, onAttach }: FileExplorerProps
     },
     [mapTab, newId, findTab],
   )
+
+  // Chat "Open" on a workspace file reference (PRP-0166, UDR-0150 D8). The nonce is
+  // remembered so a re-render never re-opens, while a repeat request for the same
+  // path (a new nonce) still does. Works on first mount of the lazy chunk too: the
+  // request is already set when the effect first runs.
+  const handledOpenNonce = useRef(0)
+  useEffect(() => {
+    if (!openRequest || openRequest.nonce === handledOpenNonce.current) return
+    handledOpenNonce.current = openRequest.nonce
+    onOpenChange(true)
+    void openFile(openRequest.path)
+  }, [openRequest, onOpenChange, openFile])
 
   const onEditorChange = useCallback(
     (value: string | undefined) => {

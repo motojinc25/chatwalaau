@@ -191,11 +191,12 @@ class TeamsAdapter:
             await self.send_text(msg.conversation_ref, "Sorry, something went wrong while answering.")
             return
         # Generated images are sent as DATA attachments, not dead /api/uploads links
-        # (UDR-0070 D9); the image markdown is stripped from the text body.
-        from app.teams.outbound import extract_upload_images, strip_upload_image_markdown
+        # (UDR-0070 D9); the image markdown is stripped from the text body. Workspace
+        # file references become plain text for the same reason (UDR-0150 D7).
+        from app.teams.outbound import extract_upload_images, rewrite_workspace_refs, strip_upload_image_markdown
 
         images = extract_upload_images(text, msg.thread_id)
-        body = strip_upload_image_markdown(text)
+        body = rewrite_workspace_refs(strip_upload_image_markdown(text))
         chunks = reply.chunk_reply(body)
         if not chunks and not images:
             chunks = ["(no response)"]

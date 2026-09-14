@@ -7,18 +7,23 @@ import { useEffect, useState } from 'react'
  * (UDR-0069 D3), so a successful response means the feature is available and the
  * launcher icon / /files command should be shown. Probed once on mount; silent on
  * failure (mirrors useCronAvailable).
+ *
+ * Tri-state (PRP-0166): `undefined` until the probe settles, so a workspace file
+ * reference in chat history does not flash "File Explorer is disabled" while the
+ * probe is still in flight.
  */
-export function useFileExplorerAvailable(): boolean {
-  const [available, setAvailable] = useState(false)
+export function useFileExplorerProbe(): boolean | undefined {
+  const [available, setAvailable] = useState<boolean | undefined>(undefined)
 
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       try {
         const res = await fetch('/api/workspace/tree')
-        if (!cancelled && res.ok) setAvailable(true)
+        if (!cancelled) setAvailable(res.ok)
       } catch {
         // Silent: the File Explorer is simply unavailable.
+        if (!cancelled) setAvailable(false)
       }
     })()
     return () => {
@@ -27,4 +32,8 @@ export function useFileExplorerAvailable(): boolean {
   }, [])
 
   return available
+}
+
+export function useFileExplorerAvailable(): boolean {
+  return useFileExplorerProbe() === true
 }

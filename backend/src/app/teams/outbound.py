@@ -81,3 +81,30 @@ def extract_upload_images(text: str, thread_id: str) -> list[TeamsImage]:
 def strip_upload_image_markdown(text: str) -> str:
     """Remove ![...](/api/uploads/...) markdown (the image is sent as an attachment)."""
     return _UPLOAD_IMG_RE.sub("", text or "").strip()
+
+
+def rewrite_workspace_refs(text: str) -> str:
+    """Rewrite workspace file references to plain text (CTR-0207, UDR-0150 D7).
+
+    A ``workspace:`` / ``sandbox:`` link or image targets a local ChatWalaʻau route a
+    Teams client cannot reach -- the same reason UDR-0070 D9 inlines generated
+    images -- so it becomes ``label (workspace file: <path>)``. The file itself is
+    NOT attached: sending workspace files into a Teams conversation is a data-egress
+    decision outside PRP-0166. A reference whose path is rejected keeps only its
+    label. Every other link (including ``/api/uploads`` images, handled above) is
+    left untouched. The persisted session keeps the original text.
+    """
+    from app.workspace.refs import MARKDOWN_LINK_RE, is_workspace_ref_url, normalize_workspace_ref
+
+    def _rewrite(match: re.Match[str]) -> str:
+        label, target = match.group(2), match.group(3)
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1]
+        if not is_workspace_ref_url(target):
+            return match.group(0)
+        path = normalize_workspace_ref(target)
+        if path is None:
+            return label
+        return f"{label or path.rsplit('/', 1)[-1]} (workspace file: {path})"
+
+    return MARKDOWN_LINK_RE.sub(_rewrite, text or "")
