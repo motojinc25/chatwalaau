@@ -6,6 +6,7 @@
 import { writeFileSync } from 'node:fs'
 import { arch, release } from 'node:os'
 import { app, type BrowserWindow, dialog, type SaveDialogOptions } from 'electron'
+import { detectHostArch } from './host-arch'
 import { redact } from './log'
 import { isPortFree } from './ports'
 import { runProcess } from './spawn'
@@ -48,7 +49,9 @@ export async function collectDiagnostics(ctx: DiagnosticsContext, childEnv?: Rec
       devMode: ctx.devMode,
       signedBuild: ctx.signedBuild,
     },
-    os: { platform: process.platform, release: release(), arch: arch() },
+    // nativeArch tells a support reader that an "x64" app is running on an ARM device,
+    // where slower startup is expected rather than a fault (UDR-0151 D14, RES-0006 F4).
+    os: { platform: process.platform, release: release(), arch: arch(), ...detectHostArch(process.arch, process.env) },
     phase: ctx.phase,
     lastError: ctx.lastError ?? null,
     environment: { envId: ctx.envId ?? null, python: ctx.python ?? null, backendVersion: ctx.backendVersion ?? null, isolation: ctx.isolation ?? null },

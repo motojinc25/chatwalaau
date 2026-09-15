@@ -4,6 +4,12 @@ An Electron shell that installs and runs the **unchanged** ChatWalaʻau web app 
 Windows desktop application. It bundles its own Python runtime, so users install nothing
 else. User documentation: <https://www.chatwalaau.com/docs/getting-started/desktop>.
 
+One artifact, the **x64** installer, serves both x64 and Windows on ARM devices -- the
+latter through Windows' x64 emulation (not yet validated on ARM hardware). There is no
+native arm64 build: 13 locked dependencies publish no `win_arm64` wheel, and the
+environment must be installed offline from hash-locked wheels. Check with
+`pnpm arm64:readiness`.
+
 ## How it works
 
 ```text
@@ -20,8 +26,8 @@ sessions, uploads and RAG data). The installer goes to `%LOCALAPPDATA%\Programs\
 
 ## Development
 
-Prerequisites: Windows 10/11 x64, Node >= 22.12, pnpm, uv, and the backend set up
-(`cd backend && uv sync`).
+Prerequisites: Windows 10/11 x64 (development and the payload build both resolve wheels
+for the host), Node >= 22.12, pnpm, uv, and the backend set up (`cd backend && uv sync`).
 
 ```bash
 cd frontend && pnpm build          # the SPA served in dev mode

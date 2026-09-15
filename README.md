@@ -18,7 +18,8 @@ The UI, runtime, and local storage run on your machine. Model requests go to you
 
 > **On Windows and prefer an app?** Install **ChatWalaʻau Desktop** from the
 > [Releases](https://github.com/motojinc25/chatwalaau/releases) page -- it bundles its own
-> Python, so nothing else is needed. See [Desktop app](https://www.chatwalaau.com/docs/getting-started/desktop).
+> Python, so nothing else is needed. The same x64 installer also runs on Windows on ARM
+> devices through emulation. See [Desktop app](https://www.chatwalaau.com/docs/getting-started/desktop).
 
 ### 1. Install and initialize
 

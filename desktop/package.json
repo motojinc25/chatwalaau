@@ -1,7 +1,7 @@
 {
   "name": "chatwalaau-desktop",
   "productName": "ChatWalaau",
-  "version": "0.153.1",
+  "version": "0.153.2",
   "description": "ChatWalaʻau Desktop -- a Windows shell around the unchanged ChatWalaʻau web app",
   "private": true,
   "author": "WeDX Digital Twins Solutions",
@@ -18,6 +18,7 @@
     "test": "vitest run",
     "check": "tsc -p tsconfig.json --noEmit && vitest run",
     "icons": "node scripts/make-icons.mjs",
+    "arm64:readiness": "node scripts/arm64-readiness.mjs",
     "payload:build": "node scripts/payload-build.mjs",
     "payload:verify": "node scripts/payload-verify.mjs",
     "dist": "pnpm run build && node scripts/payload-verify.mjs && electron-builder --config electron-builder.config.cjs --win nsis --x64 --publish never",

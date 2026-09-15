@@ -18,6 +18,7 @@ import { type DesktopConfig, loadConfig, saveConfig } from './config'
 import { APP_DIR_NAME, DesktopError, DISPLAY_NAME, type Phase } from './constants'
 import { collectDiagnostics, exportDiagnostics } from './diagnostics'
 import { EnvironmentManager, ensureProfile, isForeignPythonDir, makeLayoutDirs, type ReadyEnvironment } from './environment'
+import { describeHostArch, detectHostArch } from './host-arch'
 import { RotatingLog } from './log'
 import { computeLayout } from './paths'
 import { isPortFree, pickPort } from './ports'
@@ -35,6 +36,8 @@ const dataRoot = devMode
   ? p.join(repoRoot, 'desktop', '.dev-profile')
   : p.join(process.env.LOCALAPPDATA || app.getPath('appData'), APP_DIR_NAME)
 const layout = computeLayout(dataRoot)
+/** x64 everywhere; also "on arm64 (emulated)" on a Windows on ARM device (UDR-0151 D14). */
+const hostArch = detectHostArch(process.arch, process.env)
 
 // Chromium's own profile (partitions, caches) under the Desktop root, never Roaming (UDR-0151 D5).
 app.setPath('userData', p.join(layout.desktopDir, 'electron'))
@@ -439,7 +442,9 @@ if (!app.requestSingleInstanceLock()) {
     )
     registerIpc()
     ensureBootstrap()
-    desktopLog.write(`ChatWalaau Desktop ${app.getVersion()} starting (${devMode ? 'dev' : 'packaged'}, data ${dataRoot})`)
+    desktopLog.write(
+      `ChatWalaau Desktop ${app.getVersion()} starting (${devMode ? 'dev' : 'packaged'}, ${describeHostArch(hostArch)}, data ${dataRoot})`,
+    )
     await boot()
   })
 }

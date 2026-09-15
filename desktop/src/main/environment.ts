@@ -220,8 +220,13 @@ export class EnvironmentManager {
 
   async ensure(progress: Progress): Promise<ReadyEnvironment> {
     progress('PRECHECK', 'Checking the installation')
+    // An x64 process is what we ship. Windows on ARM runs it under emulation and still
+    // reports x64 here, which is why arm64 devices pass this guard (UDR-0151 D14).
     if (process.platform !== 'win32' || process.arch !== 'x64') {
-      throw new DesktopError('UNSUPPORTED_PLATFORM', `ChatWalaʻau Desktop v1 supports Windows x64 only (found ${process.platform}/${process.arch}).`)
+      throw new DesktopError(
+        'UNSUPPORTED_PLATFORM',
+        `ChatWalaʻau Desktop is an x64 Windows application (found ${process.platform}/${process.arch}). On Windows on ARM, install the same x64 build -- it runs under emulation.`,
+      )
     }
     const m = this.readManifest()
     makeLayoutDirs(this.layout)
