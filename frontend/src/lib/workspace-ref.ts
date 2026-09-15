@@ -55,6 +55,48 @@ export function normalizeWorkspaceRef(url: string | null | undefined): string | 
   return segments.join('/')
 }
 
+// A URL scheme (`https:`, `mailto:`, and also a Windows drive letter `C:`).
+const HAS_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/
+// A final segment that names a file: `.pdf`, `.png`, `.tar.gz` -> yes; `readme` -> no.
+const HAS_EXTENSION = /\.[A-Za-z0-9]{1,10}$/
+
+/**
+ * Normalize an explicit link / image TARGET to a workspace path, or return null
+ * (CTR-0207 v2, PRP-0168, UDR-0150 D9).
+ *
+ * Extends the scheme forms with the shape a model most often writes when it
+ * ignores the guidance: a RELATIVE path in a Markdown link, such as
+ * `[PDF](output/pdf/hello_world.pdf)`. That is safe to adopt because a relative
+ * link has no other meaning in a chat answer -- the browser would resolve it
+ * against `/chat` and 404 -- so the choice is between a control and a dead link.
+ *
+ * Deliberately NOT adopted, each because it has another meaning or cannot be
+ * resolved here: a ROOTED path (`/api/uploads/...` is a real app route), any
+ * scheme (`https:`, `file:`, `mailto:`), a Windows absolute path (the SPA does
+ * not know the workspace's absolute path), a query or fragment, and a target
+ * whose last segment has no extension. Bare paths in PROSE are still never
+ * linked -- this applies only to a target the model wrote as a link.
+ */
+export function normalizeWorkspaceLinkTarget(url: string | null | undefined): string | null {
+  if (!url) return null
+  if (isWorkspaceRefUrl(url)) return normalizeWorkspaceRef(url)
+  const raw = url.trim()
+  if (!raw || HAS_SCHEME.test(raw) || raw.startsWith('/') || raw.includes('?') || raw.includes('#')) return null
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(raw)
+  } catch {
+    return null
+  }
+  if (decoded.includes('\0')) return null
+  const cleaned = decoded.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '')
+  if (cleaned.startsWith('/')) return null
+  const segments = cleaned.split('/').filter((s) => s !== '' && s !== '.')
+  if (segments.length === 0 || segments.includes('..')) return null
+  if (!HAS_EXTENSION.test(segments[segments.length - 1])) return null
+  return segments.join('/')
+}
+
 /** The file name of a normalized reference. */
 export function workspaceRefName(path: string): string {
   const i = path.lastIndexOf('/')

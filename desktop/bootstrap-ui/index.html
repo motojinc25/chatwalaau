@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' file: data:" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ChatWalaʻau</title>
+    <link rel="stylesheet" href="bootstrap.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <!-- The product favicon, copied next to this page at build time (copy-static.mjs). -->
+        <img class="mark" src="favicon.svg" width="44" height="44" alt="" aria-hidden="true" />
+        <div>
+          <h1>ChatWalaʻau</h1>
+          <p class="sub">Desktop</p>
+        </div>
+      </header>
+
+      <section class="status" aria-live="polite">
+        <div id="spinner" class="spinner" role="progressbar" aria-label="Working"></div>
+        <div>
+          <p id="phase" class="phase">Starting</p>
+          <p id="message" class="message"></p>
+          <p id="hint" class="hint" hidden>First launch after installing or updating: ChatWalaʻau is setting up its own Python environment from the installer. No internet connection is needed.</p>
+        </div>
+      </section>
+
+      <section id="error" class="error" hidden>
+        <p><span id="error-code" class="code"></span> <span id="error-message"></span></p>
+        <pre id="error-detail" hidden></pre>
+        <div class="actions">
+          <button id="retry" type="button" class="primary">Retry</button>
+          <button id="logs" type="button">Open Logs</button>
+          <button id="rebuild" type="button">Rebuild Environment</button>
+          <button id="quit" type="button">Quit</button>
+        </div>
+      </section>
+    </main>
+    <script src="bootstrap.js"></script>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+# Standalone pnpm project (not part of a workspace). Electron downloads its binary in a
+# postinstall script and esbuild (a vitest dependency) ships a native binary; both must be
+# allowed to run their build scripts or every `pnpm run` fails its pre-run check.
+allowBuilds:
+  electron: true
+  # Squirrel.Windows installer backend; unused (the NSIS target is used, UDR-0151 D2).
+  electron-winstaller: false
+  esbuild: true

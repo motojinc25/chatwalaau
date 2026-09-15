@@ -1,0 +1,36 @@
+{
+  "name": "chatwalaau-desktop",
+  "productName": "ChatWalaau",
+  "version": "0.153.1",
+  "description": "ChatWalaʻau Desktop -- a Windows shell around the unchanged ChatWalaʻau web app",
+  "private": true,
+  "author": "WeDX Digital Twins Solutions",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "main": "build/main/main.js",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev:full": "pnpm run build && node scripts/dev-azure.mjs && electron . --dev",
+    "dev:azure-check": "node scripts/dev-azure.mjs --check-only",
+    "test": "vitest run",
+    "check": "tsc -p tsconfig.json --noEmit && vitest run",
+    "icons": "node scripts/make-icons.mjs",
+    "payload:build": "node scripts/payload-build.mjs",
+    "payload:verify": "node scripts/payload-verify.mjs",
+    "dist": "pnpm run build && node scripts/payload-verify.mjs && electron-builder --config electron-builder.config.cjs --win nsis --x64 --publish never",
+    "release": "node scripts/release.mjs"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.2",
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

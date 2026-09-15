@@ -9,6 +9,13 @@ backend/dist/
 backend/LICENSE.md
 backend/src/*.egg-info/
 
+# Desktop build outputs (PRP-0167): compiled Main, installer, payload, dev data, downloads
+desktop/build/
+desktop/dist/
+desktop/resources/generated/
+desktop/.dev-profile/
+desktop/.cache/
+
 # Environment
 .env
 .env.local

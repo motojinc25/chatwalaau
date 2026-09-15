@@ -16,6 +16,10 @@ The UI, runtime, and local storage run on your machine. Model requests go to you
 
 ## Quick Start
 
+> **On Windows and prefer an app?** Install **ChatWalaʻau Desktop** from the
+> [Releases](https://github.com/motojinc25/chatwalaau/releases) page -- it bundles its own
+> Python, so nothing else is needed. See [Desktop app](https://www.chatwalaau.com/docs/getting-started/desktop).
+
 ### 1. Install and initialize
 
 ```bash
@@ -119,7 +123,7 @@ Some features require explicit enablement or additional provider configuration. 
 
 Full guides are available in **English and 日本語**, with full-text search.
 
-- **Get started:** [Installation](https://www.chatwalaau.com/docs/getting-started/installation) · [Configuration](https://www.chatwalaau.com/docs/getting-started/configuration) · [Authentication](https://www.chatwalaau.com/docs/api-and-cli/authentication)
+- **Get started:** [Installation](https://www.chatwalaau.com/docs/getting-started/installation) · [Desktop app (Windows)](https://www.chatwalaau.com/docs/getting-started/desktop) · [Configuration](https://www.chatwalaau.com/docs/getting-started/configuration) · [Authentication](https://www.chatwalaau.com/docs/api-and-cli/authentication)
 - **Use the app:** [Chat & UI](https://www.chatwalaau.com/docs/features/chat-and-ui) · [Models & Reasoning](https://www.chatwalaau.com/docs/features/models-and-reasoning) · [Memory & Sessions](https://www.chatwalaau.com/docs/features/memory-and-sessions)
 - **Build agents:** [Tools & Skills](https://www.chatwalaau.com/docs/features/agents-and-tools) · [Knowledge & MCP](https://www.chatwalaau.com/docs/features/knowledge-and-mcp) · [Declarative Agents](https://www.chatwalaau.com/docs/features/declarative-agents)
 - **Integrate:** [OpenAI-compatible API](https://www.chatwalaau.com/docs/api-and-cli/openai-compatible-api) · [CLI](https://www.chatwalaau.com/docs/api-and-cli/cli) · [Usage Statistics](https://www.chatwalaau.com/docs/api-and-cli/usage-statistics)

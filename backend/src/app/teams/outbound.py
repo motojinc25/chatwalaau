@@ -94,17 +94,16 @@ def rewrite_workspace_refs(text: str) -> str:
     label. Every other link (including ``/api/uploads`` images, handled above) is
     left untouched. The persisted session keeps the original text.
     """
-    from app.workspace.refs import MARKDOWN_LINK_RE, is_workspace_ref_url, normalize_workspace_ref
+    from app.workspace.refs import MARKDOWN_LINK_RE, is_workspace_ref_url, normalize_workspace_link_target
 
     def _rewrite(match: re.Match[str]) -> str:
         label, target = match.group(2), match.group(3)
         if target.startswith("<") and target.endswith(">"):
             target = target[1:-1]
-        if not is_workspace_ref_url(target):
-            return match.group(0)
-        path = normalize_workspace_ref(target)
+        path = normalize_workspace_link_target(target)
         if path is None:
-            return label
+            # A rejected scheme form keeps its label; anything else is an ordinary link.
+            return label if is_workspace_ref_url(target) else match.group(0)
         return f"{label or path.rsplit('/', 1)[-1]} (workspace file: {path})"
 
     return MARKDOWN_LINK_RE.sub(_rewrite, text or "")

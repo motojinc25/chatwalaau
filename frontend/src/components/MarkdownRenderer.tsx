@@ -12,7 +12,7 @@ import { MermaidBlock } from '@/components/MermaidBlock'
 import { remarkCjkStrongEmphasisRescue } from '@/components/markdown/remarkCjkStrongEmphasisRescue'
 import { Button } from '@/components/ui/button'
 import { WorkspaceFileLink, WorkspaceImage } from '@/components/WorkspaceFileLink'
-import { isWorkspaceRefUrl, makeWorkspaceUrlTransform, normalizeWorkspaceRef } from '@/lib/workspace-ref'
+import { isWorkspaceRefUrl, makeWorkspaceUrlTransform, normalizeWorkspaceLinkTarget } from '@/lib/workspace-ref'
 
 interface MarkdownRendererProps {
   content: string
@@ -125,14 +125,16 @@ const components: Components = {
     return <>{children}</>
   },
 
-  // CTR-0012 v1.10 (PRP-0166, UDR-0150 D4): a workspace file reference is
-  // dispatched to WorkspaceFileLink and NEVER written into an href. A reference
-  // whose path is rejected (`..`, drive letter, ...) renders as its plain label.
+  // CTR-0012 v1.11 (PRP-0166 / PRP-0168, UDR-0150 D4/D9): a workspace file
+  // reference is dispatched to WorkspaceFileLink and NEVER written into an href.
+  // Since v1.11 a plain RELATIVE target (`output/pdf/x.pdf`) counts too -- a model
+  // that ignores the `workspace:` guidance would otherwise produce a dead link.
+  // A `workspace:` / `sandbox:` target whose path is rejected (`..`, drive letter)
+  // renders as its plain label.
   a({ href, children, node: _, ...props }) {
-    if (isWorkspaceRefUrl(href)) {
-      const path = normalizeWorkspaceRef(href)
-      return path ? <WorkspaceFileLink path={path}>{children}</WorkspaceFileLink> : <span>{children}</span>
-    }
+    const path = normalizeWorkspaceLinkTarget(href)
+    if (path) return <WorkspaceFileLink path={path}>{children}</WorkspaceFileLink>
+    if (isWorkspaceRefUrl(href)) return <span>{children}</span>
     return (
       <a
         href={href}
@@ -145,13 +147,13 @@ const components: Components = {
     )
   },
 
-  // CTR-0012 v1.10 (PRP-0166): a workspace image is fetched through CTR-0136 /raw
-  // and shown via an object URL; the reference itself never reaches `src`.
+  // CTR-0012 v1.11 (PRP-0166 / PRP-0168): a workspace image is fetched through
+  // CTR-0136 /raw and shown via an object URL; the reference never reaches `src`.
+  // A generated image (`/api/uploads/...`) is ROOTED, so it is never captured here.
   img({ src, alt, node: _, ...props }) {
-    if (typeof src === 'string' && isWorkspaceRefUrl(src)) {
-      const path = normalizeWorkspaceRef(src)
-      return path ? <WorkspaceImage path={path} alt={alt} /> : <span>{alt}</span>
-    }
+    const path = typeof src === 'string' ? normalizeWorkspaceLinkTarget(src) : null
+    if (path) return <WorkspaceImage path={path} alt={alt} />
+    if (typeof src === 'string' && isWorkspaceRefUrl(src)) return <span>{alt}</span>
     return <img src={src} alt={alt} {...props} />
   },
 
