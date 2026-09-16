@@ -598,6 +598,14 @@ class UsageItem(BaseModel):
     # Per-action payload logs are deliberately NOT persisted -- unbounded in aggregate.
     workflow_completed: dict[str, Any] | None = None
     workflow_run: dict[str, Any] | None = None
+    # Two-axis token detail (PRP-0157) and the Declarative Workflow breakdown (PRP-0170).
+    # Declared for the same reason as the keys above: without them a reload dropped
+    # `turn` (the detail dialog stopped opening), `context_base_tokens` (the indicator fell
+    # back to input + output) and `workflow_nodes` (the indicator could no longer add a
+    # workflow reply to the session estimate, so a reloaded chat showed only one turn).
+    context_base_tokens: int | None = None
+    turn: dict[str, Any] | None = None
+    workflow_nodes: list[dict[str, Any]] | None = None
 
 
 class SaveMessageItem(BaseModel):

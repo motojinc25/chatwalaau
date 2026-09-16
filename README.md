@@ -95,7 +95,7 @@ See the [Configuration guide](https://www.chatwalaau.com/docs/getting-started/co
 | **Agents & workflows** | Define agents in YAML or a GUI. Compose workflows in a visual DAG editor with branching, loops, tool calls, human input, and live execution views. Run in chat or as background jobs. |
 | **Harness agents** | Run autonomous coding agents with planning, todo lists, session memory, workspace-scoped file and shell access, Skills, and context compaction. |
 | **Automation & Teams** | Schedule workspace scripts, chat with agents in Microsoft Teams, and summarize meeting transcripts through Microsoft Graph webhooks or on demand. |
-| **API & usage** | Connect OpenAI-SDK applications through `/v1/responses`. Track token usage by day, month, chat, model, or lane; workflow runs are excluded, and token counts are not billing totals. |
+| **API & usage** | Connect OpenAI-SDK applications through `/v1/responses`. Track token usage by day, month, chat, model, lane, or workflow node; token counts are not billing totals. |
 | **Settings & diagnostics** | Manage models and runtime settings in the app, with clear notices about when changes take effect. Inspect prompts and tool availability with opt-in Prompt Dump. |
 | **Local-first storage & access** | Keep sessions, vectors, and uploads on your machine. Use API-key authentication, optional web sign-in, session-protected images, and restart-persistent sign-in. |
 

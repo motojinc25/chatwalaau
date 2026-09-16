@@ -1066,7 +1066,7 @@ async def _stream_with_reasoning(
     # the endpoint runs the active agent exactly as before (byte-for-byte, UDR-0101 D5).
     _workflow_id = (request_body.state or {}).get("workflow_id") if request_body.state else None
     if _workflow_id:
-        from app.workflow.runtime import stream_workflow
+        from app.workflow.runtime import stream_workflow, workflow_run_target
 
         # PRP-0123 / UDR-0106 D5: a human-in-the-loop answer arrives as `state.workflow_resume`
         # ({request_id: answer}) on the NEXT request rather than over a held connection. Such a
@@ -1075,6 +1075,7 @@ async def _stream_with_reasoning(
         _wf_resume = _wf_resume_raw if isinstance(_wf_resume_raw, dict) and _wf_resume_raw else None
         _wf_input = "" if _wf_resume else _latest_user_text(request_body.messages)
         _wf_result: dict[str, Any] = {}
+        _wf_temporary = bool((request_body.state or {}).get("temporary"))
         async for _chunk in stream_workflow(
             str(_workflow_id),
             _wf_input,
@@ -1082,6 +1083,7 @@ async def _stream_with_reasoning(
             thread_id=thread_id,
             result=_wf_result,
             resume=_wf_resume,
+            temporary=_wf_temporary,
         ):
             yield _chunk
         # Auto Session Title (PRP-0077, CTR-0109, UDR-0053 D17): the workflow branch
@@ -1089,7 +1091,6 @@ async def _stream_with_reasoning(
         # otherwise a FIRST-turn workflow run leaves auto_title_pending set and the
         # sidebar spinner animates forever (v0.115.1). Generate a title from the
         # workflow's output when it produced text; otherwise clear the pending spinner.
-        _wf_temporary = bool((request_body.state or {}).get("temporary"))
         if (
             settings.session_title_mode == "llm"
             and not _wf_temporary
@@ -1109,6 +1110,9 @@ async def _stream_with_reasoning(
                             "user_text": _wf_user,
                             "assistant_text": _wf_assistant,
                             "model": "",
+                            # PRP-0170 / UDR-0152 D9: the title spend is attributed to the
+                            # workflow that produced the reply, not only to the chat.
+                            "run_target": workflow_run_target(str(_workflow_id)),
                         },
                     )
                 else:

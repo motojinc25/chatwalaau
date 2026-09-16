@@ -828,6 +828,9 @@ function ChatMessageItemImpl({
                 {message.usage.output_token_count?.toLocaleString() ?? '?'}out
               </span>
             )}
+            {/* A workflow message labels the RUN total (PRP-0170): the "last call" of a
+                multi-node graph is not a number anyone asked for. Prompt / Harness
+                messages keep the last-call label byte-for-byte. */}
             {!isUser && message.usage?.turn && (
               <button
                 type="button"
@@ -835,8 +838,16 @@ function ChatMessageItemImpl({
                 onClick={() => setUsageDetailOpen(true)}
                 title="Show token usage detail for this turn"
                 aria-label="Show token usage detail for this turn">
-                {message.usage.input_token_count?.toLocaleString() ?? '?'}in /{' '}
-                {message.usage.output_token_count?.toLocaleString() ?? '?'}out
+                {(message.usage.workflow_nodes
+                  ? message.usage.turn.input_token_count
+                  : message.usage.input_token_count
+                )?.toLocaleString() ?? '?'}
+                in /{' '}
+                {(message.usage.workflow_nodes
+                  ? message.usage.turn.output_token_count
+                  : message.usage.output_token_count
+                )?.toLocaleString() ?? '?'}
+                out
               </button>
             )}
           </div>

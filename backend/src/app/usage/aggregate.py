@@ -28,7 +28,7 @@ from app.usage.ledger import TOKEN_FIELDS, ledger_dir
 
 logger = logging.getLogger(__name__)
 
-GROUP_BY = ("day", "month", "chat", "model", "lane")
+GROUP_BY = ("day", "month", "chat", "model", "lane", "run_target", "node", "agent")
 
 # The chat view's bucket for Temporary Chat records, which carry no thread id by
 # design (UDR-0136 D9). Collected under an explicit key rather than dropped, so the
@@ -110,6 +110,12 @@ def _group_key(record: dict[str, Any], group_by: str) -> str:
             return TEMPORARY_KEY
         thread_id = record.get("thread_id")
         return str(thread_id) if thread_id else UNKNOWN_KEY
+    if group_by == "node":
+        # An action id is only unique within its workflow (PRP-0170).
+        node = record.get("node")
+        if not node:
+            return UNKNOWN_KEY
+        return f"{record.get('run_target') or UNKNOWN_KEY} / {node}"
     value = record.get(group_by)
     return str(value) if value else UNKNOWN_KEY
 

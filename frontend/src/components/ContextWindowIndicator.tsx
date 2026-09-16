@@ -51,11 +51,18 @@ export function ContextWindowIndicator({ usage, maxContextTokens }: ContextWindo
   const level = getWarningLevel(rate)
 
   return (
-    <div className="flex items-center gap-2 px-1 py-0.5">
+    <div
+      className="flex items-center gap-2 px-1 py-0.5"
+      title={
+        usage?.context_estimated
+          ? 'Estimated: the last measured context plus the chat output of later workflow turns'
+          : undefined
+      }>
       <div className="h-1.5 w-24 overflow-hidden rounded-full bg-muted">
         <div className={cn('h-full rounded-full transition-all', barColors[level])} style={{ width: `${rate}%` }} />
       </div>
       <span className={cn('text-[11px] tabular-nums whitespace-nowrap', textColors[level])}>
+        {usage?.context_estimated ? '~' : ''}
         {Math.round(rate)}% ({formatTokenCount(consumed)} / {formatTokenCount(max)})
       </span>
     </div>

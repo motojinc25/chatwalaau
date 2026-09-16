@@ -10,9 +10,9 @@ It consumes ``verify_api_key`` (CTR-0083) although the invariant only compels th
 dependency for mutating methods: usage history is operational data.
 
 Returns token counts only -- there is no cost, price or currency field anywhere in
-this module (UDR-0136 D3), and no completeness claim: the Declarative Workflow lane
-is not in the ledger as of v0.145.1 (UDR-0136 D11), which ``coverage`` states in
-every response so a consumer cannot mistake the numbers for a bill.
+this module (UDR-0136 D3), and no claim that the numbers are a bill: ``coverage``
+states in every response what the ledger observes (UDR-0136 D11). Since v0.154.0
+(PRP-0170, UDR-0152) that includes Declarative Workflow runs, recorded per node.
 
 The v0.145.0 coverage text also named the framework's compaction calls. That was
 wrong and is corrected here (PRP-0159, UDR-0137 D1): no compaction strategy this
@@ -40,11 +40,12 @@ router = APIRouter(prefix="/api/usage", tags=["usage"])
 # incomplete is more dangerous than no record, so the gap travels with the numbers
 # instead of living only in a document someone may not read.
 COVERAGE_NOTE = (
-    "Observable model calls only. Declarative Workflow runs are not recorded, so "
-    "these totals are what the observable work consumed -- not what the account was "
-    "charged. Context compaction does not call a model in any configuration this "
-    "application builds, so it consumes no tokens to record; a summarizing "
-    "compaction strategy would, and none is constructed."
+    "Observable model calls in every lane, including Declarative Workflow runs "
+    "(recorded per node since v0.154.0). A model call that fails before its provider "
+    "reports usage records nothing, so these totals are what the observable work "
+    "consumed -- not what the account was charged. Context compaction does not call a "
+    "model in any configuration this application builds, so it consumes no tokens to "
+    "record; a summarizing compaction strategy would, and none is constructed."
 )
 
 

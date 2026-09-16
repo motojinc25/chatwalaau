@@ -34,7 +34,7 @@ import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { getHarnessRunTarget, getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
-import type { ChatMessage, ImageRef, PersistedWorkflowRun } from '@/types/chat'
+import type { ChatMessage, ImageRef, PersistedWorkflowRun, UsageInfo } from '@/types/chat'
 
 const BG_STORAGE_KEY = 'chatwalaau-bg-enabled'
 
@@ -568,11 +568,39 @@ export function ChatPanel({
     [resolveTurn, memory],
   )
 
-  const latestUsage = useMemo(() => {
+  // Context indicator input (CTR-0041, UDR-0152 D8). A Prompt / Harness turn MEASURES what
+  // the next message carries: its input already holds the whole session history. A
+  // workflow turn measures nothing of the kind -- its nodes see only the latest user
+  // message -- yet its reply is saved with the session and becomes history for the next
+  // Prompt turn. So after workflow turns the indicator shows an ESTIMATE: the latest
+  // measured Prompt / Harness context plus the chat output of every workflow turn since.
+  const latestUsage = useMemo((): UsageInfo | undefined => {
+    let workflowTokens = 0
+    let sawWorkflow = false
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].usage) return messages[i].usage
+      const usage = messages[i].usage
+      if (!usage) continue
+      if (usage.workflow_nodes) {
+        const rows = usage.workflow_nodes
+        const flagged = rows.some((n) => n.sent_to_chat !== undefined)
+        for (const n of rows) {
+          if (flagged && !n.sent_to_chat) continue
+          const out = n.turn?.output_token_count ?? 0
+          workflowTokens += Math.max(out - (n.turn?.reasoning_output_token_count ?? 0), 0)
+        }
+        sawWorkflow = true
+        continue
+      }
+      if (usage.context_base_tokens === undefined && usage.input_token_count === undefined) continue
+      if (!sawWorkflow) return usage
+      const base = usage.context_base_tokens ?? (usage.input_token_count ?? 0) + (usage.output_token_count ?? 0)
+      return {
+        max_context_tokens: usage.max_context_tokens,
+        context_base_tokens: base + workflowTokens,
+        context_estimated: true,
+      }
     }
-    return undefined
+    return sawWorkflow ? { context_base_tokens: workflowTokens, context_estimated: true } : undefined
   }, [messages])
 
   const handleSend = useCallback(

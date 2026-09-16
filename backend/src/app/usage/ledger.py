@@ -85,6 +85,12 @@ LEDGER_FIELDS: tuple[str, ...] = (
     "model",
     "provider",
     "run_target",
+    # Declarative Workflow node attribution (PRP-0170, UDR-0152 D6): the authored action
+    # id, the referenced Prompt agent's name, and an opaque run id. Identifiers from the
+    # operator's own YAML -- never content, never a user identifier (UDR-0136 D3).
+    "node",
+    "agent",
+    "run_id",
     "model_calls",
     *TOKEN_FIELDS,
     "outcome",
@@ -133,6 +139,9 @@ def build_record(
     temporary: bool = False,
     purpose: str | None = None,
     run_target: str | None = None,
+    node: str | None = None,
+    agent: str | None = None,
+    run_id: str | None = None,
     outcome: str = "completed",
     when: datetime | None = None,
 ) -> dict[str, Any] | None:
@@ -171,6 +180,12 @@ def build_record(
         record["provider"] = provider
     if run_target:
         record["run_target"] = run_target
+    if node:
+        record["node"] = node
+    if agent:
+        record["agent"] = agent
+    if run_id:
+        record["run_id"] = run_id
 
     calls = _int_or_none(turn, "model_calls")
     if calls is not None:
@@ -274,12 +289,55 @@ def append_turn_usage(
     append_record(record)
 
 
+def append_workflow_node_usage(
+    *,
+    lane: str,
+    turn: Mapping[str, Any] | None,
+    model: str | None,
+    thread_id: str | None,
+    temporary: bool = False,
+    run_target: str | None = None,
+    node: str | None = None,
+    agent: str | None = None,
+    run_id: str | None = None,
+    outcome: str = "completed",
+) -> None:
+    """Record one Declarative Workflow node execution (PRP-0170, UDR-0152 D3/D6).
+
+    ``lane`` is ``workflow`` (the SPA run) or ``workflow-job`` (the Pipeline job type).
+    ``turn`` is that node's OWN normalized summary, so a mixed-provider workflow is
+    normalized per record. Called only from ``RunUsageAccount.drain`` -- the node
+    agent's middleware fills a collector and never writes here itself.
+    """
+    try:
+        provider = _provider_name(model)
+        record = build_record(
+            lane=lane,
+            kind="node",
+            model=model,
+            provider=provider,
+            turn=turn,
+            thread_id=thread_id,
+            temporary=temporary,
+            run_target=run_target,
+            node=node,
+            agent=agent,
+            run_id=run_id,
+            outcome=outcome,
+        )
+    except Exception:
+        logger.warning("usage ledger workflow node record build failed", exc_info=True)
+        return
+    append_record(record)
+
+
 def append_helper_usage(
     *,
     purpose: str,
     usage_details: Any,
     model: str | None,
     thread_id: str | None = None,
+    run_target: str | None = None,
     outcome: str = "completed",
 ) -> None:
     """Record one background helper pass (the six ``get_response`` sites).
@@ -305,6 +363,7 @@ def append_helper_usage(
             provider=provider,
             turn=usage,
             thread_id=thread_id,
+            run_target=run_target,
             outcome=outcome,
         )
     except Exception:

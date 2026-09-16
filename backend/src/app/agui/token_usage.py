@@ -127,3 +127,57 @@ def turn_summary(
 
     summary["model_calls"] = model_calls
     return summary
+
+
+def sum_node_turns(turns: list[Mapping[str, Any] | None]) -> dict[str, int] | None:
+    """The billing axis of a WORKFLOW run: per-node summaries added key by key (PRP-0170).
+
+    Each node summary is already normalized for its own provider by ``turn_summary``, so
+    a mixed-provider run is summed without re-applying any convention. A key appears in
+    the total only when at least one node reported it (UDR-0135 D7).
+
+    ``uncached_input_token_count`` needs one rule: ``turn_summary`` omits it when the
+    provider reported no cache reads, which means the reported input IS the uncached
+    input. The total therefore adds ``uncached ?? input`` per node -- otherwise a run
+    mixing a cached and an uncached node would under-report full-price input.
+    """
+    present = [t for t in turns if t]
+    if not present:
+        return None
+    total: dict[str, int] = {}
+    for key in (INPUT, OUTPUT, CACHE_READ, CACHE_WRITE, REASONING, "model_calls"):
+        values = [v for t in present if (v := _int_or_none(t, key)) is not None]
+        if values:
+            total[key] = sum(values)
+    if any(_int_or_none(t, "uncached_input_token_count") is not None for t in present):
+        uncached: list[int] = []
+        for t in present:
+            value = _int_or_none(t, "uncached_input_token_count")
+            if value is None:
+                value = _int_or_none(t, INPUT)
+            if value is not None:
+                uncached.append(value)
+        if uncached:
+            total["uncached_input_token_count"] = sum(uncached)
+    return total or None
+
+
+def peak_node(nodes: list[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """The node with the highest context OCCUPANCY RATIO (PRP-0170, UDR-0152 D7).
+
+    A workflow's nodes can run different models with different windows and the next
+    workflow turn recompiles, so there is no single "next context". The indicator's real
+    question -- how close did this conversation get to a limit -- is answered by the
+    highest ratio. Returns None when no node measured a context base.
+    """
+    best: Mapping[str, Any] | None = None
+    best_ratio = -1.0
+    for node in nodes:
+        base = _int_or_none(node, "context_base_tokens")
+        window = _int_or_none(node, "max_context_tokens")
+        if base is None or not window:
+            continue
+        ratio = base / window
+        if ratio >= best_ratio:
+            best, best_ratio = node, ratio
+    return best

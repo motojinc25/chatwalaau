@@ -758,7 +758,12 @@ def compile_for_run(workflow_id: str):
 
     from app.agent.declarative.spec import DeclarativeAgentError
     from app.workflow.builder import build_prompt_agent
+    from app.workflow.usage import WorkflowUsageCollector, bind_collector
 
+    # One collector per compiled run (PRP-0170, UDR-0152 D2). Every node agent measures
+    # into it; the lane runner drains it. Bound to the returned workflow below, so it
+    # travels with the workflow -- including a paused HITL run -- without a contextvar.
+    usage_collector = WorkflowUsageCollector()
     lookup = _prompt_agent_lookup()
     agents: dict[str, Any] = {}
     for ref in spec.referenced_agents:
@@ -766,7 +771,7 @@ def compile_for_run(workflow_id: str):
         if agent_id is None:
             raise WorkflowError(f"Referenced agent {ref!r} is not a known Prompt agent.")
         try:
-            agents[ref] = build_prompt_agent(agent_id)
+            agents[ref] = build_prompt_agent(agent_id, usage_collector=usage_collector, node_agent_name=ref)
         except DeclarativeAgentError as exc:
             raise WorkflowError(f"Could not build agent {ref!r}: {exc}") from exc
 
@@ -788,6 +793,7 @@ def compile_for_run(workflow_id: str):
     # above discards its graph and is deliberately left alone -- normalizing something
     # nobody executes would make the guard assert on a code path with no consequence.
     demote_catch_all_handlers(workflow)
+    bind_collector(workflow, usage_collector)
     return workflow
 
 

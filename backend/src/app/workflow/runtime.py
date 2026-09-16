@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.workflow.loader import compile_for_run, node_index_for
 from app.workflow.spec import WorkflowError
+from app.workflow.usage import RunUsageAccount, collector_for
 
 if TYPE_CHECKING:
     import asyncio
@@ -117,6 +118,22 @@ def _take_pending_run(thread_id: str, workflow_id: str) -> dict[str, Any] | None
         return None
     _PENDING_RUNS.pop(thread_id, None)
     return entry
+
+
+def workflow_run_target(workflow_id: str) -> str:
+    """The workflow's NAME for the ledger's ``run_target`` (PRP-0170, UDR-0152 D3).
+
+    A name rather than an id, for the reason PRP-0159 C3 gave for harness agents:
+    statistics grouped by it should read as workflow names. Falls back to the id -- an
+    unreadable spec is not a reason to lose the attribution.
+    """
+    try:
+        from app.workflow.loader import resolve_workflow
+
+        spec = resolve_workflow(workflow_id)
+        return spec.display_name or spec.name or workflow_id
+    except Exception:
+        return workflow_id
 
 
 def _request_prompt(event: Any) -> str | None:
@@ -257,6 +274,7 @@ async def stream_workflow(
     thread_id: str | None = None,
     result: dict[str, Any] | None = None,
     resume: dict[str, Any] | None = None,
+    temporary: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Run ``workflow_id`` and yield encoded AG-UI SSE event strings (UDR-0106).
 
@@ -275,6 +293,12 @@ async def stream_workflow(
     ``{"assistant_text": str, "steps": int, "produced_text": bool, "interrupted": bool}``
     so the endpoint can drive Auto Session Title (generate from output, else clear the
     pending spinner) -- otherwise a first-turn workflow run would spin forever.
+
+    Token usage (PRP-0170, UDR-0152): node agents measure into the compiled workflow's
+    collector; this runner drains it at every executor completion / failure (one ledger
+    record per node execution, lane ``workflow``), emits ONE ``usage`` CUSTOM event for
+    the whole run before RUN_FINISHED / RUN_ERROR, and drains what is left as
+    ``interrupted`` from the ``finally`` when the stream is closed early.
     """
     from ag_ui.core import (
         ActivitySnapshotEvent,
@@ -303,11 +327,15 @@ async def stream_workflow(
     # Steps already completed by this RUN before it paused for input; a resumed turn keeps
     # counting from there instead of restarting at zero.
     prior_steps = 0
+    # The run's token account (UDR-0152 D7). Like `steps`, it belongs to the RUN, so a
+    # resumed turn continues it and its usage event covers the nodes before the pause.
+    account: RunUsageAccount | None = None
     if resume:
         pending = _take_pending_run(thread, workflow_id)
         if pending is not None:
             workflow = pending.get("workflow")
             prior_steps = int(pending.get("steps") or 0)
+            account = pending.get("usage")
         if workflow is None:
             # UDR-0106 D6: never silently start a fresh run -- the paused run's Local.
             # state is gone, so the answer would be applied to the wrong context.
@@ -329,6 +357,23 @@ async def stream_workflow(
         except WorkflowError as exc:
             yield encoder.encode(RunErrorEvent(type=EventType.RUN_ERROR, message=str(exc)))
             return
+
+    collector = collector_for(workflow)
+    if account is None:
+        account = RunUsageAccount(
+            lane="workflow",
+            run_target=workflow_run_target(workflow_id),
+            thread_id=thread,
+            temporary=temporary,
+        )
+    usage_account: RunUsageAccount = account
+
+    def _usage_event() -> Any:
+        """The run's ONE `usage` CUSTOM event, or None when no node measured anything."""
+        value = usage_account.usage_event_value()
+        if value is None:
+            return None
+        return CustomEvent(type=EventType.CUSTOM, name="usage", value=value)
 
     # `resumed` tells the SPA this turn CONTINUES a run rather than starting one, so the
     # in-message indicator keeps every step it has already shown instead of resetting to an
@@ -390,6 +435,13 @@ async def stream_workflow(
     assistant_parts: list[str] = []
     interrupts: list[dict[str, Any]] = []
     awaiting_nodes: set[str] = set()
+    # False until the run reaches an exit this generator reported itself. Anything else --
+    # a user Stop, a dropped connection -- leaves it False for the `finally` (UDR-0136 D8).
+    finished = False
+    # Executors whose output reached the chat message this turn. Their output is saved with
+    # the session and becomes history for the next Prompt turn, which is what the SPA's
+    # context estimate adds up (UDR-0152 D8 amendment).
+    text_executors: set[str] = set()
     try:
         stream = workflow.run(responses=resume, stream=True) if resume else workflow.run(message, stream=True)
         async for event in stream:
@@ -423,6 +475,14 @@ async def stream_workflow(
                 # otherwise REPLACE it) and do not count a paused node as a step; the real
                 # completion arrives on the resume turn.
                 origin, node = _classify(executor_id)
+                # A node agent's run completes BEFORE its executor reports completion, so
+                # what is queued now belongs to this executor (UDR-0152 D3).
+                usage_account.drain(
+                    collector,
+                    node=None if origin == ORIGIN_INTERNAL else node,
+                    label=_label(node),
+                    sent_to_chat=str(executor_id) in text_executors or bool(_event_text(event)),
+                )
                 if node in awaiting_nodes:
                     continue
                 # UDR-0106 D3: a bypassed node was NOT executed. It gets its own status and
@@ -483,6 +543,13 @@ async def stream_workflow(
                 failure = _failure_message(getattr(event, "details", None))
                 details, truncated = bounded_payload(getattr(event, "details", None))
                 origin, node = _classify(executor_id)
+                usage_account.drain(
+                    collector,
+                    node=None if origin == ORIGIN_INTERNAL else node,
+                    label=_label(node),
+                    outcome="error",
+                    sent_to_chat=str(executor_id) in text_executors,
+                )
                 yield encoder.encode(StepFinishedEvent(type=EventType.STEP_FINISHED, step_name=str(executor_id)))
                 # A failure is ALWAYS shown, even from framework plumbing: hiding the only
                 # report of why a run died would be worse than showing an internal id.
@@ -524,6 +591,10 @@ async def stream_workflow(
 
             if etype in ("failed", "error"):
                 failure = _failure_message(getattr(event, "details", None))
+                usage_account.drain(collector, node=None, outcome="error")
+                finished = True
+                if (usage_event := _usage_event()) is not None:
+                    yield encoder.encode(usage_event)
                 yield encoder.encode(
                     CustomEvent(
                         type=EventType.CUSTOM,
@@ -550,6 +621,8 @@ async def stream_workflow(
                         TextMessageContentEvent(type=EventType.TEXT_MESSAGE_CONTENT, message_id=msg_id, delta="\n\n")
                     )
                 last_text_node = executor_id
+                if executor_id is not None:
+                    text_executors.add(str(executor_id))
                 assistant_parts.append(text)
                 yield encoder.encode(
                     TextMessageContentEvent(type=EventType.TEXT_MESSAGE_CONTENT, message_id=msg_id, delta=text)
@@ -560,6 +633,11 @@ async def stream_workflow(
         # is shown by the run indicator (CTR-0185), not a chat message.
         if msg_id is not None:
             yield encoder.encode(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
+        # Anything a node measured after the last executor event (nothing in practice, but a
+        # record may not be lost to event ordering). A pause is NOT an interruption: every
+        # node that ran before it finished (UDR-0152 D5).
+        usage_account.drain(collector, node=None)
+        finished = True
         if result is not None:
             result["assistant_text"] = "".join(assistant_parts).strip()
             result["steps"] = nodes_completed
@@ -570,6 +648,9 @@ async def stream_workflow(
             # UDR-0106 D5: the run pauses as an AG-UI interrupt. Retain the compiled
             # workflow so the next request can resume it with the collected answers.
             _retain_pending_run(thread, workflow_id, workflow, interrupts, nodes_completed)
+            _PENDING_RUNS[thread]["usage"] = usage_account
+            if (usage_event := _usage_event()) is not None:
+                yield encoder.encode(usage_event)
             yield encoder.encode(
                 CustomEvent(
                     type=EventType.CUSTOM,
@@ -604,6 +685,8 @@ async def stream_workflow(
                 value={"workflow_id": workflow_id, "steps": nodes_completed},
             )
         )
+        if (usage_event := _usage_event()) is not None:
+            yield encoder.encode(usage_event)
         yield encoder.encode(
             RunFinishedEvent(
                 type=EventType.RUN_FINISHED,
@@ -615,6 +698,10 @@ async def stream_workflow(
     except Exception as exc:  # a node-agent / runtime failure ends the run
         logger.exception("Workflow run failed: %s", workflow_id)
         failure = _failure_message(exc)
+        usage_account.drain(collector, node=None, outcome="error")
+        finished = True
+        if (usage_event := _usage_event()) is not None:
+            yield encoder.encode(usage_event)
         yield encoder.encode(
             CustomEvent(
                 type=EventType.CUSTOM,
@@ -623,6 +710,11 @@ async def stream_workflow(
             )
         )
         yield encoder.encode(RunErrorEvent(type=EventType.RUN_ERROR, message=failure))
+    finally:
+        if not finished:
+            # Stop / dropped connection: the generator is being closed and may not yield.
+            # The ledger append is synchronous, so the billed spend is still recorded.
+            usage_account.drain(collector, node=None, outcome="interrupted")
 
 
 # ---------------------------------------------------------------------------
@@ -674,30 +766,48 @@ async def run_workflow_job(job: Job, storage: PipelineStore, cancel_event: async
     outputs: list[str] = []
     nodes = 0
     skipped = 0
+    # Token usage of the job lane (PRP-0170, UDR-0152): same collector and drain as the
+    # interactive lane, lane `workflow-job`, no chat, the job id as the run id.
+    collector = collector_for(workflow)
+    account = RunUsageAccount(lane="workflow-job", run_target=workflow_run_target(workflow_id), run_id=str(job.id))
+
+    def _job_node(executor_id: Any) -> str | None:
+        raw = str(executor_id) if executor_id is not None else ""
+        return None if not raw or raw.startswith("_") else raw
+
     try:
         async for event in workflow.run(message, stream=True):
             etype = str(getattr(event, "type", ""))
+            executor_id = getattr(event, "executor_id", None)
             if etype == "executor_completed":
                 nodes += 1
+                account.drain(collector, node=_job_node(executor_id))
             elif etype == "executor_bypassed":
                 # UDR-0106 D3: reported separately, never as a completed step.
                 skipped += 1
+            elif etype == "executor_failed":
+                account.drain(collector, node=_job_node(executor_id), outcome="error")
             if etype in ("failed", "error"):
                 raise WorkflowError(_failure_message(getattr(event, "details", None)))
             text = _event_text(event)
             if text:
                 outputs.append(text)
             if cancel_event.is_set():
+                account.drain(collector, node=None, outcome="interrupted")
                 job.status = JobStatus.cancelled
                 job.completed_at = datetime.now(UTC).isoformat()
                 storage.save(job)
                 return
-    except Exception as exc:
+    except BaseException as exc:
+        account.drain(collector, node=None, outcome="error" if isinstance(exc, Exception) else "interrupted")
+        if not isinstance(exc, Exception):
+            raise
         job.status = JobStatus.failed
         job.error = _failure_message(exc)
         job.completed_at = datetime.now(UTC).isoformat()
         storage.save(job)
         return
+    account.drain(collector, node=None)
 
     job.status = JobStatus.completed
     job.progress = 100

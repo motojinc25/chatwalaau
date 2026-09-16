@@ -148,8 +148,20 @@ def build_regeneration_window(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines)[:_INPUT_CHAR_CAP]
 
 
-async def _generate_title(user_text: str, assistant_text: str, model: str | None) -> str:
-    """Run a single non-streaming completion and return a cleaned title."""
+async def _generate_title(
+    user_text: str,
+    assistant_text: str,
+    model: str | None,
+    *,
+    thread_id: str | None = None,
+    run_target: str | None = None,
+) -> str:
+    """Run a single non-streaming completion and return a cleaned title.
+
+    ``thread_id`` / ``run_target`` attribute the helper record (PRP-0170, UDR-0152 D9):
+    before v0.154.0 the title spend reached day / month totals but no chat, in every
+    lane, and after a workflow turn no workflow either.
+    """
     from agent_framework import Message
 
     from app.agui.agent_registry import _build_chat_client
@@ -172,11 +184,15 @@ async def _generate_title(user_text: str, assistant_text: str, model: str | None
         purpose="session_title",
         usage_details=getattr(response, "usage_details", None),
         model=title_model,
+        thread_id=thread_id,
+        run_target=run_target,
     )
     return _clean_title(getattr(response, "text", "") or "")
 
 
-async def _generate_title_from_conversation(conversation: str, model: str | None) -> str:
+async def _generate_title_from_conversation(
+    conversation: str, model: str | None, *, thread_id: str | None = None
+) -> str:
     """Regeneration variant of :func:`_generate_title` (UDR-0124 D4).
 
     Same system prompt, same single non-streaming completion, same client
@@ -199,6 +215,7 @@ async def _generate_title_from_conversation(conversation: str, model: str | None
         purpose="session_title_regenerate",
         usage_details=getattr(response, "usage_details", None),
         model=title_model,
+        thread_id=thread_id,
     )
     return _clean_title(getattr(response, "text", "") or "")
 
@@ -265,7 +282,13 @@ async def run_session_title_task(ctx: dict[str, Any]) -> None:
 
     title = ""
     try:
-        title = await _generate_title(user_text, assistant_text, model)
+        title = await _generate_title(
+            user_text,
+            assistant_text,
+            model,
+            thread_id=thread_id,
+            run_target=ctx.get("run_target") or None,
+        )
     except Exception:
         # Generation failed -> keep the truncation title, but still finalize
         # (clear the pending spinner) below. The CTR-0108 wrapper would also
@@ -345,7 +368,7 @@ async def run_session_title_regenerate_task(ctx: dict[str, Any]) -> None:
     title = ""
     if conversation:
         try:
-            title = await _generate_title_from_conversation(conversation, model)
+            title = await _generate_title_from_conversation(conversation, model, thread_id=thread_id)
         except Exception:
             # Keep the existing title, but still clear the spinner below.
             logger.warning("title regeneration failed for session %s", thread_id, exc_info=True)

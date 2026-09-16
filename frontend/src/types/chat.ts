@@ -40,6 +40,27 @@ export interface TurnUsage {
   model_calls?: number
 }
 
+/**
+ * One Declarative Workflow node execution's consumption (PRP-0170, UDR-0152 D7).
+ * `turn` is that node's own normalized summary; a node executed in a loop appears once
+ * per execution. `node` / `label` are absent when the backend could not attribute the
+ * execution to an authored action.
+ */
+export interface WorkflowNodeUsage {
+  node?: string
+  label?: string
+  agent?: string
+  model?: string
+  turn?: TurnUsage
+  context_base_tokens?: number
+  /**
+   * The node's output reached the chat message. That text is saved with the session and
+   * carried as history by the next Prompt turn, so the context indicator adds it up.
+   * Absent on rows persisted before the flag existed (all rows are then counted).
+   */
+  sent_to_chat?: boolean
+}
+
 export interface UsageInfo {
   input_token_count?: number
   output_token_count?: number
@@ -77,6 +98,18 @@ export interface UsageInfo {
    * they are unbounded in aggregate and belong to the live run.
    */
   workflow_run?: PersistedWorkflowRun
+  /**
+   * Per-node breakdown of a Declarative Workflow run (PRP-0170). Present only on a
+   * workflow message; there `turn` is the RUN total across all nodes, and the top-level
+   * last-call / context fields describe the node with the highest context occupancy.
+   */
+  workflow_nodes?: WorkflowNodeUsage[]
+  /**
+   * SPA-derived, never persisted: the indicator value is an ESTIMATE built from the last
+   * measured context plus the chat output of later workflow turns (CTR-0041), not a
+   * provider measurement.
+   */
+  context_estimated?: boolean
   /**
    * Soft, non-blocking validation status of the structured answer (UDR-0058 D4).
    * `parsed` false means the JSON was empty (refusal) or unparseable (truncation /

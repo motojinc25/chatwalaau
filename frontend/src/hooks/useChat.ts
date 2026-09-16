@@ -851,6 +851,15 @@ export function useChat(options?: UseChatOptions) {
           // v0.117.1: persist the whole run, not just a completion count, so a reloaded
           // chat rebuilds the same step list and can re-open the diagram.
           const workflowSnapshot = workflowEnded ? (getWorkflowRunSnapshotRef.current?.() ?? null) : null
+          // Keep the finished run ON THIS MESSAGE in memory, exactly as a reload restores it
+          // (useSession). The live progress state follows only the LATEST assistant message,
+          // so without this the next workflow turn took the indicator away from every
+          // earlier one until the page was reloaded.
+          if (workflowSnapshot) {
+            setMessages((prev) =>
+              prev.map((msg) => (msg.id === assistantId ? { ...msg, workflowRun: workflowSnapshot } : msg)),
+            )
+          }
           if (completedUsage || runTargetLabelRef.current || workflowCompleted || workflowSnapshot) {
             assistantMsg.usage = {
               ...(completedUsage ?? {}),

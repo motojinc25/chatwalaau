@@ -12,6 +12,7 @@ with the node's pinned spec.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from agent_framework import Agent
 
@@ -22,6 +23,9 @@ from app.agent.declarative.spec import DeclarativeAgentError, DeclarativeAgentSp
 from app.agent.identity import load_identity
 from app.agui.agent_registry import WEB_SEARCH_INSTRUCTION, _build_chat_client
 from app.demo import is_demo_mode, resolve_demo_models
+
+if TYPE_CHECKING:
+    from app.workflow.usage import WorkflowUsageCollector
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +49,13 @@ def _pick_model(spec: DeclarativeAgentSpec) -> str:
     return default
 
 
-def build_prompt_agent(agent_id: str, spec: DeclarativeAgentSpec | None = None) -> Agent:
+def build_prompt_agent(
+    agent_id: str,
+    spec: DeclarativeAgentSpec | None = None,
+    *,
+    usage_collector: WorkflowUsageCollector | None = None,
+    node_agent_name: str | None = None,
+) -> Agent:
     """Build an ``Agent`` for the declarative Prompt agent ``agent_id`` (UDR-0101 D4).
 
     The agent is constructed with the referenced spec's persona (Identity slot #1),
@@ -53,6 +63,11 @@ def build_prompt_agent(agent_id: str, spec: DeclarativeAgentSpec | None = None) 
     same construction the AgentRegistry performs for the active agent, but pinned to
     THIS spec rather than the globally active one. Raises ``DeclarativeAgentError``
     when the id does not resolve or the spec carries a blocking warning.
+
+    ``usage_collector`` (PRP-0170, UDR-0152 D1): when given, the node agent carries the
+    ``NodeUsageRecorder`` middleware that measures its model calls into that run-scoped
+    collector. This function is the ONLY constructor of workflow node agents, which is
+    what keeps the hook from ever measuring another lane.
     """
     if spec is None:
         spec = resolve_spec(agent_id)
@@ -87,6 +102,12 @@ def build_prompt_agent(agent_id: str, spec: DeclarativeAgentSpec | None = None) 
                 spec.structured_output.get("mode", "json_schema"),
             )
             model_options = providers.merge_generation_options(model_options, so)
+
+    if usage_collector is not None:
+        from app.workflow.usage import NodeUsageRecorder
+
+        recorder = NodeUsageRecorder(usage_collector, agent=node_agent_name or spec.name or agent_id, model=model)
+        middleware = [*(middleware or []), *recorder.middleware()]
 
     # Identity slot #1 (CTR-0104): the spec persona override, else the runtime
     # Global Agent Identity -- byte-for-byte the AgentRegistry._bake_instructions rule.
