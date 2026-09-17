@@ -53,37 +53,76 @@ export function useViewportTier(): ViewportTier {
   return { narrow, touchPrimary }
 }
 
-/** CSS variable carrying the height the browser actually shows (v0.155.1). */
+/** CSS variables carrying the box the browser actually shows (v0.155.1 / v0.155.2). */
 export const VISIBLE_VIEWPORT_HEIGHT_VAR = '--app-visible-height'
+export const VISIBLE_VIEWPORT_TOP_VAR = '--app-visible-top'
+
+/** iOS reports the rotated size late: re-measure on the next frame and after these delays. */
+const ORIENTATION_SETTLE_DELAYS_MS = [100, 300, 600]
 
 /**
- * Publish the VISIBLE viewport height as a CSS variable (PRP-0171 follow-up, v0.155.1).
+ * Pin the chat surface to the VISIBLE viewport (PRP-0171 follow-ups, v0.155.1 / v0.155.2).
  *
- * `100vh` on iPad / iPhone Safari includes the tab bar and toolbar, so a `h-screen`
- * page is taller than what is shown and its bottom (the composer) sits under the
- * browser chrome; `100dvh` does not follow the on-screen keyboard on iOS either.
- * `window.visualViewport` reports what is actually visible. Multiplying by `scale`
- * keeps a pinch-zoom from shrinking the layout; on a desktop browser the value equals
- * the window height, so nothing changes there. Consumers fall back to `100dvh`.
+ * - `100vh` on iPad / iPhone Safari includes the tab bar and toolbar, and `100dvh` does not
+ *   follow the on-screen keyboard, so the height comes from `window.visualViewport`.
+ * - When the keyboard opens, iOS scrolls the page to reveal the focused input, which moves
+ *   the visible area by `visualViewport.offsetTop`. An in-flow page moves with that scroll
+ *   and the conversation leaves the screen, so the surface is `position: fixed` at that
+ *   offset (`--app-visible-top`) instead.
+ * - On rotation iOS fires `orientationchange` / `resize` BEFORE the new size is final, so
+ *   the measurement is repeated until it settles.
+ * - While pinch-zoomed the layout keeps the window size (no shrinking under the finger).
+ *
+ * On a desktop browser the values equal the window's (top 0, window height), so nothing
+ * changes there. Consumers fall back to `100dvh` / `0px`.
  */
 export function useVisibleViewportHeight(): void {
   useEffect(() => {
     if (typeof window === 'undefined') return
     const root = document.documentElement
     const vv = window.visualViewport
-    const update = () => {
-      const height = vv ? vv.height * vv.scale : window.innerHeight
+    const timers = new Set<number>()
+    let frame = 0
+
+    const measure = () => {
+      const zoomed = vv ? Math.abs(vv.scale - 1) > 0.01 : false
+      const height = vv && !zoomed ? vv.height : window.innerHeight
+      const top = vv && !zoomed ? Math.max(0, vv.offsetTop) : 0
       root.style.setProperty(VISIBLE_VIEWPORT_HEIGHT_VAR, `${Math.round(height)}px`)
+      root.style.setProperty(VISIBLE_VIEWPORT_TOP_VAR, `${Math.round(top)}px`)
     }
-    update()
-    vv?.addEventListener('resize', update)
-    window.addEventListener('resize', update)
-    window.addEventListener('orientationchange', update)
+
+    const settle = () => {
+      measure()
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(measure)
+      for (const delay of ORIENTATION_SETTLE_DELAYS_MS) {
+        const id = window.setTimeout(() => {
+          timers.delete(id)
+          measure()
+        }, delay)
+        timers.add(id)
+      }
+    }
+
+    const portrait = typeof window.matchMedia === 'function' ? window.matchMedia('(orientation: portrait)') : null
+
+    measure()
+    vv?.addEventListener('resize', measure)
+    vv?.addEventListener('scroll', measure)
+    window.addEventListener('resize', measure)
+    window.addEventListener('orientationchange', settle)
+    portrait?.addEventListener('change', settle)
     return () => {
-      vv?.removeEventListener('resize', update)
-      window.removeEventListener('resize', update)
-      window.removeEventListener('orientationchange', update)
+      vv?.removeEventListener('resize', measure)
+      vv?.removeEventListener('scroll', measure)
+      window.removeEventListener('resize', measure)
+      window.removeEventListener('orientationchange', settle)
+      portrait?.removeEventListener('change', settle)
+      cancelAnimationFrame(frame)
+      for (const id of timers) window.clearTimeout(id)
       root.style.removeProperty(VISIBLE_VIEWPORT_HEIGHT_VAR)
+      root.style.removeProperty(VISIBLE_VIEWPORT_TOP_VAR)
     }
   }, [])
 }

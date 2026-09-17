@@ -239,7 +239,9 @@ export function ChatPage() {
   return (
     <ChatSurfaceTierContext.Provider value={surface}>
       <WorkspaceLinkProvider value={workspaceLinks}>
-        <div className="flex h-[var(--app-visible-height,100dvh)]">
+        {/* Pinned to the visible viewport (v0.155.2): when the iOS keyboard opens the page
+            is scrolled by the browser, and an in-flow root would scroll out of view. */}
+        <div className="fixed inset-x-0 top-[var(--app-visible-top,0px)] flex h-[var(--app-visible-height,100dvh)]">
           {narrow ? (
             // Narrow viewport: the sidebar is an overlay drawer (PRP-0171, CTR-0016).
             <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>

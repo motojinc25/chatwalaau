@@ -868,9 +868,10 @@ export function ChatPanel({
             )}
           </div>
           <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
-          {/* Bottom safe-area inset on the /chat surface at every width (v0.155.1): an iPad
-              has a home indicator too. env() resolves to 0 on a desktop browser. */}
-          <div className={cn('relative bg-background', surface.managed && 'pb-[env(safe-area-inset-bottom)]')}>
+          {/* No safe-area padding here (v0.155.2): the surface is sized to the visible
+              viewport, which already ends above Safari's toolbar, so an inset added the
+              home-indicator height a second time (most visibly on iPad). */}
+          <div className="relative bg-background">
             <div
               className={cn(
                 'mx-auto flex max-w-3xl items-center justify-end gap-1 px-4',
