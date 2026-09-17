@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from 'react'
+import { useEffect, useSyncExternalStore } from 'react'
 
 /**
  * Viewport tier of the chat surface (PRP-0171, UDR-0153 D1).
@@ -51,4 +51,39 @@ export function useViewportTier(): ViewportTier {
   const narrow = useSyncExternalStore(subscribeNarrow, getNarrow, getServer)
   const touchPrimary = useSyncExternalStore(subscribeTouch, getTouch, getServer)
   return { narrow, touchPrimary }
+}
+
+/** CSS variable carrying the height the browser actually shows (v0.155.1). */
+export const VISIBLE_VIEWPORT_HEIGHT_VAR = '--app-visible-height'
+
+/**
+ * Publish the VISIBLE viewport height as a CSS variable (PRP-0171 follow-up, v0.155.1).
+ *
+ * `100vh` on iPad / iPhone Safari includes the tab bar and toolbar, so a `h-screen`
+ * page is taller than what is shown and its bottom (the composer) sits under the
+ * browser chrome; `100dvh` does not follow the on-screen keyboard on iOS either.
+ * `window.visualViewport` reports what is actually visible. Multiplying by `scale`
+ * keeps a pinch-zoom from shrinking the layout; on a desktop browser the value equals
+ * the window height, so nothing changes there. Consumers fall back to `100dvh`.
+ */
+export function useVisibleViewportHeight(): void {
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const root = document.documentElement
+    const vv = window.visualViewport
+    const update = () => {
+      const height = vv ? vv.height * vv.scale : window.innerHeight
+      root.style.setProperty(VISIBLE_VIEWPORT_HEIGHT_VAR, `${Math.round(height)}px`)
+    }
+    update()
+    vv?.addEventListener('resize', update)
+    window.addEventListener('resize', update)
+    window.addEventListener('orientationchange', update)
+    return () => {
+      vv?.removeEventListener('resize', update)
+      window.removeEventListener('resize', update)
+      window.removeEventListener('orientationchange', update)
+      root.style.removeProperty(VISIBLE_VIEWPORT_HEIGHT_VAR)
+    }
+  }, [])
 }

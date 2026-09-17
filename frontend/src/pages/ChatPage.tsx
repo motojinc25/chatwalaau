@@ -18,7 +18,7 @@ import { useOntologyAvailable } from '@/hooks/useOntologyAvailable'
 import { usePipelineAvailable } from '@/hooks/usePipelineAvailable'
 import { useSession } from '@/hooks/useSession'
 import { useTemporaryChat } from '@/hooks/useTemporaryChat'
-import { useViewportTier } from '@/hooks/useViewportTier'
+import { useViewportTier, useVisibleViewportHeight } from '@/hooks/useViewportTier'
 import { useWebhookAvailable } from '@/hooks/useWebhookAvailable'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { type ChatSurfaceTier, ChatSurfaceTierContext, isEntryVisible } from '@/lib/narrowSurface'
@@ -94,6 +94,9 @@ export function ChatPage() {
   // Chat surface tier (PRP-0171, UDR-0153 D1/D2). This page is the ONLY provider, so
   // the compact ChatPanel on /popup and /sidebar keeps the wide default untouched.
   const { narrow, touchPrimary } = useViewportTier()
+  // The page is sized to what the browser actually shows, at every width (v0.155.1):
+  // iPad / iPhone Safari's 100vh includes its tab bar and toolbar.
+  useVisibleViewportHeight()
   const surface = useMemo<ChatSurfaceTier>(() => ({ managed: true, narrow, touchPrimary }), [narrow, touchPrimary])
 
   // Cron Scheduler portal (CTR-0135, PRP-0089). State is lifted here so both the
@@ -236,7 +239,7 @@ export function ChatPage() {
   return (
     <ChatSurfaceTierContext.Provider value={surface}>
       <WorkspaceLinkProvider value={workspaceLinks}>
-        <div className={cn('flex', narrow ? 'h-dvh' : 'h-screen')}>
+        <div className="flex h-[var(--app-visible-height,100dvh)]">
           {narrow ? (
             // Narrow viewport: the sidebar is an overlay drawer (PRP-0171, CTR-0016).
             <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>

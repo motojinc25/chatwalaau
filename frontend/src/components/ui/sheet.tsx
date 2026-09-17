@@ -19,7 +19,7 @@ const SheetContent = React.forwardRef<
       ref={ref}
       aria-describedby={undefined}
       className={cn(
-        'fixed inset-y-0 left-0 z-50 flex h-dvh flex-col bg-background shadow-lg duration-200 pb-[env(safe-area-inset-bottom)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left',
+        'fixed inset-y-0 left-0 z-50 flex h-[var(--app-visible-height,100dvh)] flex-col bg-background shadow-lg duration-200 pb-[env(safe-area-inset-bottom)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left',
         className,
       )}
       {...props}>

@@ -868,7 +868,9 @@ export function ChatPanel({
             )}
           </div>
           <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
-          <div className={cn('relative bg-background', surface.narrow && 'pb-[env(safe-area-inset-bottom)]')}>
+          {/* Bottom safe-area inset on the /chat surface at every width (v0.155.1): an iPad
+              has a home indicator too. env() resolves to 0 on a desktop browser. */}
+          <div className={cn('relative bg-background', surface.managed && 'pb-[env(safe-area-inset-bottom)]')}>
             <div
               className={cn(
                 'mx-auto flex max-w-3xl items-center justify-end gap-1 px-4',
