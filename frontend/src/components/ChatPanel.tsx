@@ -32,6 +32,7 @@ import { useToolApproval } from '@/hooks/useToolApproval'
 import { useTTS } from '@/hooks/useTTS'
 import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
+import { type EntryId, isEntryVisible, useChatSurfaceTier } from '@/lib/narrowSurface'
 import { getHarnessRunTarget, getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
 import type { ChatMessage, ImageRef, PersistedWorkflowRun, UsageInfo } from '@/types/chat'
@@ -145,22 +146,37 @@ export function ChatPanel({
     window.dispatchEvent(new Event(OPEN_DECLARATIVE_MANAGER_EVENT))
   }, [])
   const runTargetName = selectedWorkflowId ? wfTarget?.name : selectedHarnessId ? hTarget?.name : activeAgent.name
-  const runTargetIndicator = (
+  // Chat surface tier (PRP-0171, UDR-0153). Only the full-page /chat surface provides
+  // one; the compact /popup and /sidebar panels read the wide default.
+  const surface = useChatSurfaceTier()
+  const show = (id: EntryId) => isEntryVisible(surface, id)
+  const runTargetIcon = selectedWorkflowId ? (
+    <WorkflowIcon className="h-3.5 w-3.5" />
+  ) : selectedHarnessId ? (
+    <Hammer className="h-3.5 w-3.5" />
+  ) : (
+    <Bot className="h-3.5 w-3.5" />
+  )
+  // UDR-0153 D5/D6: on a narrow viewport the manager is not reachable, but what runs
+  // must stay visible -- the name renders as a read-only label.
+  const runTargetIndicator = show('toolbar.runTargetAction') ? (
     <button
       type="button"
       onClick={openDeclarativeManager}
       title="Open Declarative Agents & Workflows"
       aria-label={`Run target: ${runTargetName ?? ''}. Open Declarative Agents & Workflows`}
       className="flex items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary transition-colors hover:bg-primary/20">
-      {selectedWorkflowId ? (
-        <WorkflowIcon className="h-3.5 w-3.5" />
-      ) : selectedHarnessId ? (
-        <Hammer className="h-3.5 w-3.5" />
-      ) : (
-        <Bot className="h-3.5 w-3.5" />
-      )}
+      {runTargetIcon}
       {runTargetName}
     </button>
+  ) : (
+    <span
+      role="status"
+      aria-label={`Run target: ${runTargetName ?? ''}`}
+      className="flex min-w-0 items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary">
+      {runTargetIcon}
+      <span className="truncate">{runTargetName}</span>
+    </span>
   )
 
   // Keep the run-target in sync with the modal (workflow selection + agent activation).
@@ -719,9 +735,9 @@ export function ChatPanel({
                 onRegenerateAssistant={regenerateAssistantMessage}
                 onDelete={deleteMessage}
                 onBranch={onBranchFromMessage}
-                onSaveAsTemplate={handleSaveAsTemplate}
-                onMaskEdit={handleMaskEdit}
-                onPaintEdit={handlePaintEditFromHistory}
+                onSaveAsTemplate={show('message.saveAsTemplate') ? handleSaveAsTemplate : undefined}
+                onMaskEdit={show('message.maskEdit') ? handleMaskEdit : undefined}
+                onPaintEdit={show('message.paintEdit') ? handlePaintEditFromHistory : undefined}
                 availableModels={availableModels}
                 onRegenerateWithModel={regenerateWithModel}
                 onToggleMemoryLike={turn ? handleToggleMemoryLike : undefined}
@@ -733,11 +749,14 @@ export function ChatPanel({
                   // Live run: re-open the canvas for the latest run (closing only hides it).
                   // Reloaded chat: rebuild the canvas from the run persisted with THAT message,
                   // so any past workflow turn can be inspected again (v0.117.1).
-                  selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant' && canvas.hasCurrent()
-                    ? canvas.openCurrent
-                    : msg.workflowRun
-                      ? () => canvas.openRestored(msg.workflowRun as PersistedWorkflowRun)
-                      : undefined
+                  // Narrow viewport: no "Diagram" entry; the text progress stays (PRP-0171).
+                  !show('message.workflowDiagram')
+                    ? undefined
+                    : selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant' && canvas.hasCurrent()
+                      ? canvas.openCurrent
+                      : msg.workflowRun
+                        ? () => canvas.openRestored(msg.workflowRun as PersistedWorkflowRun)
+                        : undefined
                 }
               />
             )
@@ -849,8 +868,12 @@ export function ChatPanel({
             )}
           </div>
           <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
-          <div className="relative bg-background">
-            <div className="mx-auto flex max-w-3xl items-center justify-end gap-1 px-4">
+          <div className={cn('relative bg-background', surface.narrow && 'pb-[env(safe-area-inset-bottom)]')}>
+            <div
+              className={cn(
+                'mx-auto flex max-w-3xl items-center justify-end gap-1 px-4',
+                surface.narrow && 'flex-wrap',
+              )}>
               {/* UDR-0101 D7 (extended v0.112.2): hidden under a workflow OR a custom
                   Prompt agent; the Built-in agent keeps the controls. */}
               {hideModelControls && runTargetIndicator}
@@ -862,17 +885,23 @@ export function ChatPanel({
                     selectedModel={selectedModel}
                     onOptionsChange={handleModelOptionsChange}
                   />
-                  <StructuredOutputControl
-                    threadId={threadId ?? ''}
-                    selectedModel={selectedModel}
-                    onChange={handleStructuredChange}
-                  />
+                  {show('toolbar.structuredOutput') && (
+                    <StructuredOutputControl
+                      threadId={threadId ?? ''}
+                      selectedModel={selectedModel}
+                      onChange={handleStructuredChange}
+                    />
+                  )}
                 </>
               )}
-              <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
-              <McpToolManager />
-              <SkillsManager />
-              {!temporary && (
+              {/* Narrow viewport (PRP-0171, UDR-0153 D4): administration entries are not
+                  rendered; whatever they already selected keeps taking effect. */}
+              {show('toolbar.imageOutput') && (
+                <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
+              )}
+              {show('toolbar.mcpTools') && <McpToolManager />}
+              {show('toolbar.skills') && <SkillsManager />}
+              {!temporary && show('toolbar.background') && (
                 <BackgroundResponsesToggle
                   enabled={effectiveBgEnabled}
                   onToggle={handleBgToggle}
@@ -892,11 +921,11 @@ export function ChatPanel({
               getImageRefs={getImageRefs}
               isUploading={isUploading}
               bgEnabled={effectiveBgEnabled}
-              onOpenTemplates={handleOpenTemplates}
-              onOpenPaint={handleOpenPaint}
+              onOpenTemplates={show('attach.templates') ? handleOpenTemplates : undefined}
+              onOpenPaint={show('attach.paint') ? handleOpenPaint : undefined}
               onEditAttachment={handleEditAttachment}
               onSlashModel={handleSlashModel}
-              onSlashHelp={handleSlashHelp}
+              onSlashHelp={show('slash.help') ? handleSlashHelp : undefined}
               onSlashCron={onSlashCron}
               onSlashFiles={onSlashFiles}
               availableModels={availableModels}

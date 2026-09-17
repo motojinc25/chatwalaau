@@ -98,6 +98,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useAuth } from '@/hooks/useAuth'
 import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
 import { formatSessionDateTime } from '@/lib/datetime'
+import { type EntryId, isEntryVisible, useChatSurfaceTier } from '@/lib/narrowSurface'
 import { cn } from '@/lib/utils'
 import {
   DEFAULT_FOLDER_COLOR,
@@ -345,6 +346,9 @@ const SessionRow = memo(function SessionRow({
   // memoization: the context value changes only when the mode is toggled, never
   // per keystroke, so non-renaming rows still bail out of re-render.
   const { enabled: redacted, redact } = usePrivacyScreen()
+  // PRP-0171 (UDR-0153 D7): no hover on a touch-primary device, so the row detail
+  // is always visible there. Read from context; it changes only with the device.
+  const { narrow, touchPrimary } = useChatSurfaceTier()
 
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop requires drag events on the row container
@@ -457,7 +461,7 @@ const SessionRow = memo(function SessionRow({
               <span
                 className={cn(
                   'flex min-w-0 items-center gap-1.5 transition-opacity duration-150',
-                  'opacity-0 group-hover:opacity-100',
+                  touchPrimary ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
                   isActive && 'opacity-100',
                 )}>
                 <SessionMeta session={session} />
@@ -475,7 +479,10 @@ const SessionRow = memo(function SessionRow({
             <span
               role="button"
               tabIndex={-1}
-              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              className={cn(
+                'inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
+                narrow ? 'h-10 w-10' : 'h-6 w-6',
+              )}
               aria-label="Session options">
               <MoreHorizontal className="h-3 w-3" />
             </span>
@@ -669,6 +676,8 @@ interface FolderGroupProps {
   onOpenColor: (folder: SessionFolder) => void
   onDeleteFolder: (folder: SessionFolder) => void
   renderSessionRow: (session: SessionSummary, nested?: boolean) => ReactNode
+  /** Folder drag-reorder is offered (false on a narrow viewport, PRP-0171). */
+  reorderable: boolean
 }
 
 function FolderGroup({
@@ -687,6 +696,7 @@ function FolderGroup({
   onOpenColor,
   onDeleteFolder,
   renderSessionRow,
+  reorderable,
 }: FolderGroupProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id })
   const colorClasses = FOLDER_COLOR_CLASSES[folder.color] ?? FOLDER_COLOR_CLASSES[DEFAULT_FOLDER_COLOR]
@@ -721,14 +731,17 @@ function FolderGroup({
           onDropSession(folder.id)
         }}>
         {/* @dnd-kit drag handle: `attributes` injects role="button" + aria-roledescription at runtime, which Biome cannot see statically. */}
-        {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: role is supplied at runtime by @dnd-kit `attributes` */}
-        <span
-          aria-label="Reorder folder"
-          className="flex h-6 w-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground/60 hover:text-foreground active:cursor-grabbing"
-          {...attributes}
-          {...listeners}>
-          <GripVertical className="h-3.5 w-3.5" />
-        </span>
+        {/* Narrow viewport: no grip; "Move to folder" in the row menu remains (PRP-0171). */}
+        {reorderable && (
+          // biome-ignore lint/a11y/useAriaPropsSupportedByRole: role is supplied at runtime by @dnd-kit `attributes`
+          <span
+            aria-label="Reorder folder"
+            className="flex h-6 w-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground/60 hover:text-foreground active:cursor-grabbing"
+            {...attributes}
+            {...listeners}>
+            <GripVertical className="h-3.5 w-3.5" />
+          </span>
+        )}
         <button
           type="button"
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
@@ -940,6 +953,13 @@ export function SessionSidebar({
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   )
+  // Chat surface tier (PRP-0171, UDR-0153). A narrow viewport gets no folder drag
+  // (it fights vertical scrolling) and none of the wide-only footer launchers.
+  const surface = useChatSurfaceTier()
+  const show = (id: EntryId) => isEntryVisible(surface, id)
+  const reorderable = show('sidebar.folderReorder')
+  const noSensors = useSensors()
+  const headerControl = surface.narrow ? 'h-10 w-10' : 'h-7 w-7'
 
   // Web SPA auth (CTR-0096, PRP-0057): the logout entry is only meaningful
   // when the operator has enabled the ID/PW lane AND the current visitor
@@ -1255,7 +1275,8 @@ export function SessionSidebar({
   )
 
   return (
-    <aside className="flex h-full w-[307px] shrink-0 flex-col border-r bg-muted/30">
+    <aside
+      className={cn('flex h-full shrink-0 flex-col border-r bg-muted/30', surface.narrow ? 'w-full' : 'w-[307px]')}>
       <div className="flex h-12 shrink-0 items-center justify-between border-b px-3">
         <div className="flex items-center gap-2">
           {/*
@@ -1288,26 +1309,26 @@ export function SessionSidebar({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className={headerControl}
             onClick={() => setSearchOpen(true)}
             aria-label="Search sessions">
             <Search className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onCreate} aria-label="New session">
+          <Button variant="ghost" size="icon" className={headerControl} onClick={onCreate} aria-label="New session">
             <Plus className="h-4 w-4" />
           </Button>
           {showLogout && (
             <Button
               variant="ghost"
               size="icon"
-              className="h-7 w-7"
+              className={headerControl}
               onClick={handleLogout}
               aria-label="Sign out"
               title={auth.username ? `Sign out (${auth.username})` : 'Sign out'}>
               <LogOut className="h-4 w-4" />
             </Button>
           )}
-          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClose} aria-label="Close sidebar">
+          <Button variant="ghost" size="icon" className={headerControl} onClick={onClose} aria-label="Close sidebar">
             <X className="h-4 w-4" />
           </Button>
         </div>
@@ -1341,7 +1362,10 @@ export function SessionSidebar({
               {folderGroups.length === 0 && (
                 <div className="px-3 py-2 text-xs text-muted-foreground">No folders yet</div>
               )}
-              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleFolderDragEnd}>
+              <DndContext
+                sensors={reorderable ? sensors : noSensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleFolderDragEnd}>
                 <SortableContext
                   items={folderGroups.map((group) => group.folder.id)}
                   strategy={verticalListSortingStrategy}>
@@ -1363,6 +1387,7 @@ export function SessionSidebar({
                       onOpenColor={setColorTarget}
                       onDeleteFolder={setDeleteFolderTarget}
                       renderSessionRow={renderSessionRow}
+                      reorderable={reorderable}
                     />
                   ))}
                 </SortableContext>
@@ -1439,7 +1464,9 @@ export function SessionSidebar({
         <div className="flex items-center gap-1">
           {/* Ontology manager launcher (CTR-0173, PRP-0105): next to Declarative Agents;
               shown only when ONTOLOGY_ENABLED (probed via GET /api/ontology/catalog). */}
-          {ontologyAvailable && (
+          {/* Narrow viewport (PRP-0171, UDR-0153 D3/D4): every launcher below except About
+              is wide-only and is not rendered; the features keep working. */}
+          {ontologyAvailable && show('sidebar.ontology') && (
             <Button
               variant="ghost"
               size="icon"
@@ -1456,10 +1483,10 @@ export function SessionSidebar({
               and its open-request listener are mounted in ChatPage, because this sidebar
               is collapsible and unmounting it used to delete the listener -- which made
               the chat composer's run-target button silently do nothing. */}
-          <DeclarativeAgentManagerTrigger />
+          {show('sidebar.agents') && <DeclarativeAgentManagerTrigger />}
           {/* Webhook gateway launcher (CTR-0157, PRP-0097): next to Declarative Agents;
               shown only when WEBHOOK_ENABLED. */}
-          {webhookAvailable && (
+          {webhookAvailable && show('sidebar.webhook') && (
             <Button
               variant="ghost"
               size="icon"
@@ -1471,7 +1498,7 @@ export function SessionSidebar({
             </Button>
           )}
           {/* Pipeline jobs launcher (CTR-0148, PRP-0096): shown only when PIPELINE_ENABLED. */}
-          {pipelineAvailable && (
+          {pipelineAvailable && show('sidebar.pipeline') && (
             <Button
               variant="ghost"
               size="icon"
@@ -1483,7 +1510,7 @@ export function SessionSidebar({
             </Button>
           )}
           {/* File Explorer launcher (CTR-0137, PRP-0091): shown only when FILE_EXPLORER_ENABLED. */}
-          {fileExplorerAvailable && (
+          {fileExplorerAvailable && show('sidebar.files') && (
             <Button
               variant="ghost"
               size="icon"
@@ -1495,7 +1522,7 @@ export function SessionSidebar({
             </Button>
           )}
           {/* Cron scheduler launcher (CTR-0135, PRP-0089): shown only when CRON_ENABLED. */}
-          {cronAvailable && (
+          {cronAvailable && show('sidebar.cron') && (
             <Button
               variant="ghost"
               size="icon"
@@ -1508,7 +1535,7 @@ export function SessionSidebar({
           )}
           {/* Memory Management launcher (CTR-0167, PRP-0101): edit the built-in
               IDENTITY / USER / MEMORY files. Always shown (identity always exists). */}
-          {onOpenMemory && (
+          {onOpenMemory && show('sidebar.memory') && (
             <Button
               variant="ghost"
               size="icon"
@@ -1521,7 +1548,7 @@ export function SessionSidebar({
           )}
           {/* Model Settings (CTR-0176, PRP-0111): self-probing icon next to About;
               shown when GET /api/model-offerings is reachable. */}
-          <AppSettingsManager />
+          {show('sidebar.appSettings') && <AppSettingsManager />}
           <Button
             variant="ghost"
             size="icon"

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import { isNarrowViewport } from '@/hooks/useViewportTier'
 import {
   type ActivityEntry,
   type ChatMessage,
@@ -30,15 +31,11 @@ const ROOT_FOLDER = '__root__'
 
 // PRP-0055 follow-up: keep the sidebar open after a session pick on
 // desktop viewports. On narrow viewports the sidebar is an overlay
-// covering most of the chat area, so auto-close is still the right
-// behavior there. The project does not yet ship a mobile layout, but
-// this gate sets the responsive baseline so the desktop fix does not
-// regress a future mobile mode.
-const DESKTOP_BREAKPOINT_PX = 768
-
+// (a Sheet since PRP-0171) covering most of the chat area, so auto-close
+// is still the right behavior there. The breakpoint lives in ONE place,
+// useViewportTier (UDR-0153 D1).
 function shouldAutoCloseSidebar(): boolean {
-  if (typeof window === 'undefined') return false
-  return !window.matchMedia(`(min-width: ${DESKTOP_BREAKPOINT_PX}px)`).matches
+  return isNarrowViewport()
 }
 
 function normalizeSessionSummaries(data: unknown): SessionSummary[] {

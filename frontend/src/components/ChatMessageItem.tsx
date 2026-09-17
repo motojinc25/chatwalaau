@@ -47,6 +47,7 @@ import {
 import { WeatherToolResults } from '@/components/WeatherCard'
 import { WorkflowProgressPanel, type WorkflowRunState } from '@/components/WorkflowProgressPanel'
 import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
+import { useChatSurfaceTier } from '@/lib/narrowSurface'
 import { openUploadFullSize } from '@/lib/uploads'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from '@/types/chat'
@@ -334,6 +335,9 @@ function ChatMessageItemImpl({
 }: ChatMessageItemProps) {
   const isUser = message.role === 'user'
   const hasTextContent = message.content != null && message.content.trim().length > 0
+  // A touch-primary device has no hover, so hover-revealed controls are always
+  // visible there (PRP-0171, UDR-0153 D7). Entry gating arrives as absent callbacks.
+  const { touchPrimary } = useChatSurfaceTier()
   // Privacy Screen (CTR-0190, PRP-0124). Redacts the USER side only: the body,
   // the attached filenames, and (via AuthedImage) the attachments themselves.
   // Assistant output stays legible on purpose -- redacting it would make the
@@ -548,7 +552,10 @@ function ChatMessageItemImpl({
                         <button
                           type="button"
                           onClick={() => onPaintEdit(img.uri)}
-                          className="absolute right-1.5 top-1.5 flex h-7 items-center gap-1 rounded-md bg-foreground/70 px-2 text-xs text-background opacity-0 transition-opacity group-hover/paint:opacity-100"
+                          className={cn(
+                            'absolute right-1.5 top-1.5 flex h-7 items-center gap-1 rounded-md bg-foreground/70 px-2 text-xs text-background transition-opacity',
+                            touchPrimary ? 'opacity-100' : 'opacity-0 group-hover/paint:opacity-100',
+                          )}
                           aria-label="Edit paint">
                           <Pencil className="h-3.5 w-3.5" />
                           Edit
@@ -663,7 +670,11 @@ function ChatMessageItemImpl({
         )}
 
         {!isLoading && !editing && message.content && (
-          <div className="mt-0.5 flex gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100">
+          <div
+            className={cn(
+              'mt-0.5 flex gap-0.5 transition-opacity',
+              touchPrimary ? 'flex-wrap opacity-100' : 'opacity-0 group-hover/msg:opacity-100',
+            )}>
             {/*
               Copy what is DISPLAYED, not what is stored (CTR-0190 / UDR-0107 D2).
               With Privacy Screen on, a user message on screen is scrambled, so
