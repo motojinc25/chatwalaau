@@ -8,12 +8,11 @@ no ``azure_endpoint`` / ``credential`` (UDR-0073 D1).
 
 For v1 the supported scope is REASONING models only (e.g. gpt-5.x / o-series),
 whose generation-option catalog, reasoning-effort handling, hosted web search,
-structured output, and background support are IDENTICAL to the ``azure-openai``
-provider (UDR-0073 D5). The provider therefore subclasses ``AzureOpenAIProvider``
-and overrides only what differs -- ``name`` and ``build_chat_client()`` (the
-API-key credential lane; the model set comes from the catalog, PRP-0113) --
-inheriting the catalog, options, web search, structured output, and
-``supports_background`` unchanged (UDR-0073 D7). This guarantees zero behavioral
+and structured output are IDENTICAL to the ``azure-openai`` provider (UDR-0073
+D5). The provider therefore subclasses ``AzureOpenAIProvider`` and overrides only
+what differs -- ``name`` and ``build_chat_client()`` (the API-key credential
+lane; the model set comes from the catalog, PRP-0113) -- inheriting the catalog,
+options, web search, and structured output unchanged (UDR-0073 D7). This guarantees zero behavioral
 drift from ``azure-openai`` for the reasoning lane while keeping the Azure
 provider byte-for-byte.
 
@@ -53,10 +52,6 @@ class OpenAIProvider(AzureOpenAIProvider):
     """
 
     name = NAME
-    # OpenAI Responses API supports background runs + continuation_token resume,
-    # the same mechanism the azure-openai provider advertises (CTR-0045). Inherited
-    # from AzureOpenAIProvider (True); restated here for clarity (UDR-0073 D6).
-    supports_background = True
 
     def build_chat_client(self, model: str) -> Any:
         # Direct OpenAI lane: api_key (+ optional base_url for OpenAI-compatible

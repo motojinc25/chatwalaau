@@ -1037,25 +1037,6 @@ async def archive_session(thread_id: str) -> dict[str, str]:
     return {"status": "archived", "thread_id": thread_id}
 
 
-class ContinuationTokenRequest(BaseModel):
-    continuation_token: dict[str, Any] | None = None
-
-
-@router.patch("/{thread_id}/continuation-token", dependencies=[Depends(verify_api_key)])
-async def update_continuation_token(thread_id: str, body: ContinuationTokenRequest) -> dict[str, Any]:
-    """Update continuation_token for background response resumption (CTR-0045, PRP-0025)."""
-    data = _read_session_or_404(thread_id)
-
-    data["continuation_token"] = body.continuation_token
-    data["updated_at"] = datetime.now(UTC).isoformat()
-    _write_session_or_500(thread_id, data)
-    logger.info(
-        "Updated continuation_token for session %s: %s", thread_id, "set" if body.continuation_token else "cleared"
-    )
-
-    return {"status": "updated", "thread_id": thread_id}
-
-
 class PinRequest(BaseModel):
     pinned: bool
 

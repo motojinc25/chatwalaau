@@ -210,7 +210,6 @@ export function useSession() {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [folders, setFolders] = useState<SessionFolder[]>([])
   const [initialMessages, setInitialMessages] = useState<ChatMessage[]>([])
-  const [continuationToken, setContinuationToken] = useState<Record<string, unknown> | null>(null)
   const [isSwitching, setIsSwitching] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
@@ -454,10 +453,7 @@ export function useSession() {
         if (!res.ok || cancelled) return
         const data = await res.json()
         const msgs = convertMafMessages(data.messages ?? [])
-        if (!cancelled) {
-          setInitialMessages(msgs)
-          setContinuationToken((data.continuation_token as Record<string, unknown>) ?? null)
-        }
+        if (!cancelled) setInitialMessages(msgs)
       } catch {
         if (!cancelled) setInitialMessages([])
       }
@@ -476,7 +472,6 @@ export function useSession() {
     abortRef.current?.()
     const newId = crypto.randomUUID()
     setInitialMessages([])
-    setContinuationToken(null)
     setThreadId(newId)
     navigate('/chat', { replace: true })
     if (shouldAutoCloseSidebar()) setSidebarOpen(false)
@@ -498,10 +493,8 @@ export function useSession() {
           const data = await res.json()
           const msgs = convertMafMessages(data.messages ?? [])
           setInitialMessages(msgs)
-          setContinuationToken((data.continuation_token as Record<string, unknown>) ?? null)
         } else {
           setInitialMessages([])
-          setContinuationToken(null)
         }
       } catch {
         setInitialMessages([])
@@ -940,7 +933,6 @@ export function useSession() {
     sessions,
     folders,
     initialMessages,
-    continuationToken,
     isSwitching,
     sidebarOpen,
     setSidebarOpen,

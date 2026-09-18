@@ -27,7 +27,6 @@ from app.providers.structured import (
     orphan_outputs,
     pairing_undecidable,
     strip_loop_iteration_marker,
-    strip_skill_tools,
     strip_web_search,
     summarize_removed,
     unanswered_calls,
@@ -77,17 +76,6 @@ class _StructuredOutputMixin:
         text_cfg = run_options.get("text")
         if isinstance(text_cfg, dict) and text_cfg.get("format") is not None:
             strip_web_search(run_options)
-        # Background and Agent Skills are mutually exclusive (PRP-0134, UDR-0116).
-        # A background turn that called a skill failed with "No tool call found for
-        # function call id call_..." -- the framework releases a background run's
-        # continuation token only on its non-streaming path, so after the tool ran the
-        # next step re-read the finished response instead of POSTing the result. The two
-        # features are separated instead of the framework being worked around: Background
-        # wins for the turn and the skill tools are dropped here, at the same request
-        # chokepoint the web-search strip uses (UDR-0058 D2 -- drop, never error). The UI
-        # says so before the turn, so this is not a silent removal.
-        if run_options.get("background"):
-            strip_skill_tools(run_options)
         # Approval-resume tracing (PRP-0141 follow-up): the request as it will go on
         # the wire, ids only. This is the ground truth the three prior fixes lacked.
         #
@@ -119,8 +107,8 @@ class _StructuredOutputMixin:
         return run_options
 
     def _get_conversation_id(self, response: Any, store: Any) -> str | None:
-        """Never treat a response as a resumable server-side conversation unless a
-        background run explicitly asked for one (PRP-0142 follow-up, UDR-0123).
+        """Never treat a response as a resumable server-side conversation unless the
+        request explicitly asked for server-side storage (PRP-0142 follow-up, UDR-0123).
 
         Root cause, reproduced against the installed framework: Azure's
         ``api-version=preview`` Responses endpoint returns a response whose
@@ -237,8 +225,6 @@ class AzureOpenAIProvider:
     """Provider for Azure OpenAI deployments (default provider)."""
 
     name = NAME
-    # Azure OpenAI Responses API supports background runs + resume (CTR-0045).
-    supports_background = True
     # Responses API stores server-side by default and chains via previous_response_id
     # (PRP-0142). Inherited by OpenAIProvider and FoundryProvider.
     stores_responses_server_side = True

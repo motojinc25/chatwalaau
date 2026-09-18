@@ -5,10 +5,10 @@ tasks ON THE MAIN FastAPI event loop, AFTER a chat turn, with total error
 isolation. It exists for short-lived, post-conversation, LLM-driven side work
 that must NOT block or alter the chat path.
 
-Deliberately distinct from the two existing "background" mechanisms:
+Deliberately distinct from the other "background" mechanisms:
 
-- CTR-0045 Background Responses -- MAF resumable agent responses (continuation
-  token). This runner does not touch the agent run lifecycle.
+- CTR-0045 Background Responses -- MAF resumable agent responses, retired in
+  PRP-0172 (UDR-0154). This runner never touched the agent run lifecycle.
 - CTR-0073 Batch Processing -- a separate FastMCP subprocess job queue with
   persistence, progress, cancellation, and a dashboard. This runner is
   ephemeral, in-process, and invisible: no persistence, no dashboard, no

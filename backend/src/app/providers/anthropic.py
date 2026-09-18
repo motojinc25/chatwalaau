@@ -270,9 +270,6 @@ class AnthropicProvider:
     """Provider for Anthropic Claude models (Direct + Foundry hostings)."""
 
     name = NAME
-    # Anthropic (incl. Opus 4.7/4.8) has no background-response equivalent;
-    # background runs are an OpenAI Responses API feature (CTR-0045).
-    supports_background = False
     # Anthropic carries the conversation in the request (no server-side response
     # chaining), so it is already client-managed (PRP-0142).
     stores_responses_server_side = False

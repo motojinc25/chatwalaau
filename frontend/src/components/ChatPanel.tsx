@@ -1,6 +1,5 @@
 import { Bot, Hammer, ImageIcon, Workflow as WorkflowIcon } from 'lucide-react'
 import { type DragEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { BackgroundResponsesToggle } from '@/components/BackgroundResponsesToggle'
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
@@ -37,8 +36,6 @@ import { getHarnessRunTarget, getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } f
 import { cn } from '@/lib/utils'
 import type { ChatMessage, ImageRef, PersistedWorkflowRun, UsageInfo } from '@/types/chat'
 
-const BG_STORAGE_KEY = 'chatwalaau-bg-enabled'
-
 // Lazy-loaded so the fabric.js bundle is fetched only when the Paint editor is
 // first opened (CTR-0160, UDR-0078 D1). lazyWithReload recovers from a stale
 // chunk hash after a rebuild/redeploy.
@@ -50,7 +47,6 @@ interface ChatPanelProps {
   className?: string
   threadId?: string
   initialMessages?: ChatMessage[]
-  continuationToken?: Record<string, unknown> | null
   onStreamComplete?: () => void
   /** New-session created (PRP-0077, CTR-0016): show it in the sidebar immediately. */
   onSessionCreated?: (info: { threadId: string; title: string }) => void
@@ -63,7 +59,7 @@ interface ChatPanelProps {
   attachFile?: File | null
   /** Signals the attachFile was consumed so the parent can clear it. */
   onAttachConsumed?: () => void
-  /** Temporary Chat mode (CTR-0107, PRP-0076): dark input, no BG toggle, no history. */
+  /** Temporary Chat mode (CTR-0107, PRP-0076): dark input, no history. */
   temporary?: boolean
 }
 
@@ -101,7 +97,6 @@ export function ChatPanel({
   className,
   threadId,
   initialMessages,
-  continuationToken,
   onStreamComplete,
   onSessionCreated,
   onBranchFromMessage,
@@ -111,7 +106,6 @@ export function ChatPanel({
   onAttachConsumed,
   temporary = false,
 }: ChatPanelProps) {
-  const [bgEnabled, setBgEnabled] = useState(() => localStorage.getItem(BG_STORAGE_KEY) === 'true')
   const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null)
   const [selectedModel, setSelectedModel] = useState('')
   // Run-target (CTR-0185, PRP-0118, UDR-0101 D5 amended). Decided from the unified
@@ -212,22 +206,6 @@ export function ChatPanel({
   const [selectedImageOptions, setSelectedImageOptions] = useState<Record<string, string>>({})
   const [modelMaxTokens, setModelMaxTokens] = useState(128000)
   const [availableModels, setAvailableModels] = useState<string[]>([])
-  // CTR-0045 / PRP-0073: per-model background-response capability. The toggle
-  // is disabled for models whose provider does not support background runs
-  // (e.g. Anthropic Opus 4.7/4.8); GPT / Azure OpenAI models support it.
-  const [bgSupportedMap, setBgSupportedMap] = useState<Record<string, boolean>>({})
-
-  // Default to supported when the map has no entry for the model (keeps GPT
-  // working before the map loads and avoids hiding the feature on unknowns).
-  const bgSupported = selectedModel ? (bgSupportedMap[selectedModel] ?? true) : true
-  // Never send background=true for an unsupported model even if localStorage
-  // had it enabled from a previous GPT session.
-  const effectiveBgEnabled = bgEnabled && bgSupported
-
-  const handleBgToggle = useCallback((enabled: boolean) => {
-    setBgEnabled(enabled)
-    localStorage.setItem(BG_STORAGE_KEY, String(enabled))
-  }, [])
 
   const handleModelChange = useCallback((model: string, maxTokens: number) => {
     setSelectedModel(model)
@@ -254,14 +232,6 @@ export function ChatPanel({
     }
   }, [notification])
 
-  const handleResumeResult = useCallback((success: boolean) => {
-    if (success) {
-      setNotification({ type: 'success', message: 'Background response resumed' })
-    } else {
-      setNotification({ type: 'error', message: 'Background response expired. Please resend your message.' })
-    }
-  }, [])
-
   // PRP-0067 / CTR-0100: tool approval state lives outside useChat so
   // both ChatPanel and the SSE handler can read it. The hook is also
   // responsible for resetting state on session switch (the parent key={threadId}
@@ -279,13 +249,11 @@ export function ChatPanel({
     regenerateWithModel,
     editAssistantMessage,
     deleteMessage,
-    resumeFromToken,
   } = useChat({
     threadId,
     initialMessages,
     onStreamComplete,
     onSessionCreated,
-    bgEnabled: effectiveBgEnabled,
     selectedModel,
     selectedModelOptions,
     selectedOutputFormat: structured.format,
@@ -317,24 +285,6 @@ export function ChatPanel({
     // there is no proactive liveness monitor (UDR-0088 D5).
     onConnectionRecovered: useCallback(() => setNotification({ type: 'success', message: 'Connection recovered' }), []),
   })
-
-  // Auto-resume from continuation_token (page reload or sidebar switch).
-  // Uses ref for resume/notify to keep dependency array minimal.
-  // No "attempted" flag — React 18 StrictMode double-fires mount effects,
-  // so we rely on cleanup (clearTimeout) + re-set pattern instead.
-  const resumeRef = useRef({ resume: resumeFromToken, notify: handleResumeResult })
-  resumeRef.current.resume = resumeFromToken
-  resumeRef.current.notify = handleResumeResult
-
-  useEffect(() => {
-    if (!continuationToken) return
-    const token = continuationToken
-    const timer = setTimeout(async () => {
-      const success = await resumeRef.current.resume(token)
-      resumeRef.current.notify(success)
-    }, 800)
-    return () => clearTimeout(timer)
-  }, [continuationToken])
 
   const { attachments, addFiles, attachPaintImage, removeAttachment, clearAttachments, getImageRefs, isUploading } =
     useImageAttachment()
@@ -505,7 +455,6 @@ export function ChatPanel({
       .then((data) => {
         if (data?.max_context_tokens) setModelMaxTokens((prev) => (prev === 128000 ? data.max_context_tokens : prev))
         if (data?.models) setAvailableModels(data.models)
-        if (data?.background_supported_map) setBgSupportedMap(data.background_supported_map)
       })
       .catch(() => {})
   }, [])
@@ -814,13 +763,6 @@ export function ChatPanel({
             <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
             <McpToolManager />
             <SkillsManager />
-            {!temporary && (
-              <BackgroundResponsesToggle
-                enabled={effectiveBgEnabled}
-                onToggle={handleBgToggle}
-                disabled={!bgSupported}
-              />
-            )}
             <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
           </div>
           <ChatInput
@@ -833,7 +775,6 @@ export function ChatPanel({
             onRemoveAttachment={removeAttachment}
             getImageRefs={getImageRefs}
             isUploading={isUploading}
-            bgEnabled={bgEnabled}
             onOpenTemplates={handleOpenTemplates}
             onOpenPaint={handleOpenPaint}
             onEditAttachment={handleEditAttachment}
@@ -904,13 +845,6 @@ export function ChatPanel({
               )}
               {show('toolbar.mcpTools') && <McpToolManager />}
               {show('toolbar.skills') && <SkillsManager />}
-              {!temporary && show('toolbar.background') && (
-                <BackgroundResponsesToggle
-                  enabled={effectiveBgEnabled}
-                  onToggle={handleBgToggle}
-                  disabled={!bgSupported}
-                />
-              )}
               <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
             </div>
             <ChatInput
@@ -923,7 +857,6 @@ export function ChatPanel({
               onRemoveAttachment={removeAttachment}
               getImageRefs={getImageRefs}
               isUploading={isUploading}
-              bgEnabled={effectiveBgEnabled}
               onOpenTemplates={show('attach.templates') ? handleOpenTemplates : undefined}
               onOpenPaint={show('attach.paint') ? handleOpenPaint : undefined}
               onEditAttachment={handleEditAttachment}

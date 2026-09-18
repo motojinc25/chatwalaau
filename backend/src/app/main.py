@@ -695,10 +695,6 @@ async def get_model_info():
         # model -> {allowed, default}. Retained as a derived back-compat subset of
         # `model_options` (the effort axis) for clients that still read it.
         "reasoning_options": providers.reasoning_options_map(agent_registry.available_models),
-        # Per-model background-response capability (CTR-0045, PRP-0073):
-        # model -> bool. The UI disables the Background toggle for models
-        # whose provider does not support background runs (e.g. Anthropic).
-        "background_supported_map": providers.background_supported_map(agent_registry.available_models),
         # Per-model structured-output capability (CTR-0069 v5 / CTR-0102 v5,
         # PRP-0082): model -> {supported, native, fallback}. The UI enables /
         # annotates the structured-output control per model (UDR-0058 D6).

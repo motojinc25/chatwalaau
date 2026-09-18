@@ -191,17 +191,6 @@ def merge_generation_options(base: dict[str, Any], extra: dict[str, Any]) -> dic
     return base
 
 
-def background_supported(model: str) -> bool:
-    """Whether ``model``'s provider supports background responses (CTR-0045).
-
-    Azure OpenAI / OpenAI -> True, Anthropic -> False, Foundry -> False
-    (verification-gated, UDR-0085 D6). Unknown models resolve via
-    ``provider_for`` (defaults to azure-openai). Used by the AG-UI run-option
-    guard and the GET /api/model capability map (PRP-0073).
-    """
-    return bool(getattr(provider_for(model), "supports_background", False))
-
-
 def stores_responses_server_side(model: str) -> bool:
     """Whether ``model``'s client stores responses server-side by default (PRP-0142).
 
@@ -225,11 +214,6 @@ def input_tokens_include_cache_read(model: str) -> bool:
     ``provider_for`` (defaults to azure-openai), like every other provider flag.
     """
     return bool(getattr(provider_for(model), "input_tokens_include_cache_read", True))
-
-
-def background_supported_map(models: list[str]) -> dict[str, bool]:
-    """model -> background support flag for the GET /api/model selector (CTR-0041)."""
-    return {model: background_supported(model) for model in models}
 
 
 def get_max_context_tokens(model: str | None = None) -> int:
@@ -262,8 +246,6 @@ __all__ = [
     "PROVIDERS",
     "Provider",
     "anthropic_web_search_tool",
-    "background_supported",
-    "background_supported_map",
     "build_chat_client",
     "build_model_options",
     "build_structured_output",

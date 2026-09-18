@@ -89,7 +89,6 @@ interface UseChatOptions {
    * temporary chats.
    */
   onSessionCreated?: (info: { threadId: string; title: string }) => void
-  bgEnabled?: boolean
   selectedModel?: string
   /**
    * Selected per-message generation options (effort + verbosity) sent as AG-UI
@@ -186,7 +185,6 @@ export function useChat(options?: UseChatOptions) {
   const threadIdRef = useRef(options?.threadId ?? crypto.randomUUID())
   const onStreamCompleteRef = useRef(options?.onStreamComplete)
   const onSessionCreatedRef = useRef(options?.onSessionCreated)
-  const bgEnabledRef = useRef(options?.bgEnabled ?? false)
   const selectedModelRef = useRef(options?.selectedModel ?? '')
   const selectedModelOptionsRef = useRef<Record<string, string>>(options?.selectedModelOptions ?? {})
   const selectedOutputFormatRef = useRef(options?.selectedOutputFormat ?? 'none')
@@ -228,10 +226,6 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     onSessionCreatedRef.current = options?.onSessionCreated
   }, [options?.onSessionCreated])
-
-  useEffect(() => {
-    bgEnabledRef.current = options?.bgEnabled ?? false
-  }, [options?.bgEnabled])
 
   useEffect(() => {
     selectedModelRef.current = options?.selectedModel ?? ''
@@ -292,7 +286,6 @@ export function useChat(options?: UseChatOptions) {
       options?: {
         skipUserMessage?: boolean
         images?: ImageRef[]
-        resumeToken?: Record<string, unknown>
         modelOverride?: string
         // PRP-0073: async preparation that runs AFTER the optimistic user
         // bubble + assistant placeholder render (so the user sees their
@@ -356,7 +349,6 @@ export function useChat(options?: UseChatOptions) {
       setIsLoading(true)
 
       abortRef.current = new AbortController()
-      let continuationTokenReceived = false
       let streamSuccess = true
       // Images dispatched to the agent + persisted. Starts as the optimistic
       // images and is replaced by prepare()'s durable refs when provided.
@@ -385,7 +377,7 @@ export function useChat(options?: UseChatOptions) {
         // Temporary Chat (CTR-0107) skips init: init creates a sidebar-visible
         // .sessions entry, which a temporary chat must never have. The temp_
         // session is created lazily in the .temporary/ quarantine by save_messages.
-        if (!options?.skipUserMessage && !options?.resumeToken && !temporaryRef.current) {
+        if (!options?.skipUserMessage && !temporaryRef.current) {
           const initTitle = userContent.slice(0, 100)
           const initStatus = await fetch(`/api/sessions/${threadIdRef.current}/init`, {
             method: 'POST',
@@ -401,7 +393,7 @@ export function useChat(options?: UseChatOptions) {
           }
         }
 
-        // Build AG-UI request state (CTR-0045 background, CTR-0070 model)
+        // Build AG-UI request state (CTR-0070 model)
         const aguiState: Record<string, unknown> = {}
         const effectiveModel = options?.modelOverride || selectedModelRef.current
         if (effectiveModel) aguiState.model = effectiveModel
@@ -423,7 +415,6 @@ export function useChat(options?: UseChatOptions) {
         // non-default fields are present; absent = backend settings/API default.
         if (Object.keys(selectedImageOptionsRef.current).length > 0)
           aguiState.image_options = selectedImageOptionsRef.current
-        if (bgEnabledRef.current) aguiState.background = true
         if (temporaryRef.current) aguiState.temporary = true
         // Declarative Workflow run-target (PRP-0118, CTR-0009, UDR-0101 D5). When set,
         // the backend streams the compiled workflow instead of the active agent; the
@@ -439,9 +430,8 @@ export function useChat(options?: UseChatOptions) {
         // turn interrupted on. The backend routes them into workflow.run(responses=...).
         if (options?.workflowResume && Object.keys(options.workflowResume).length > 0)
           aguiState.workflow_resume = options.workflowResume
-        if (options?.resumeToken) aguiState.continuation_token = options.resumeToken
 
-        // PRP-0069 follow-up: for regenerate / resume / similar flows
+        // PRP-0069 follow-up: for regenerate / workflow-resume / similar flows
         // (skipUserMessage true), the user message we are responding to is
         // already in the truncated session and will be re-loaded by the
         // backend FileHistoryProvider.before_run on the next agent.run.
@@ -450,17 +440,16 @@ export function useChat(options?: UseChatOptions) {
         // which can stall reasoning models (e.g., gpt-5.5 + web_search) that
         // try to reconcile the apparent repetition. Send an empty messages
         // list instead and rely on the session history.
-        const aguiMessages =
-          options?.resumeToken || options?.skipUserMessage
-            ? []
-            : [
-                {
-                  id: userMessage.id,
-                  role: 'user',
-                  content: userContent,
-                  ...(dispatchImages && dispatchImages.length > 0 ? { images: dispatchImages } : {}),
-                },
-              ]
+        const aguiMessages = options?.skipUserMessage
+          ? []
+          : [
+              {
+                id: userMessage.id,
+                role: 'user',
+                content: userContent,
+                ...(dispatchImages && dispatchImages.length > 0 ? { images: dispatchImages } : {}),
+              },
+            ]
         const response = await fetch('/ag-ui/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -784,15 +773,7 @@ export function useChat(options?: UseChatOptions) {
                       ),
                     )
                   }
-                  if (event.name === 'continuation_token' && event.value) {
-                    continuationTokenReceived = true
-                    // Save continuation_token immediately for mid-stream resilience (PRP-0025)
-                    fetch(`/api/sessions/${threadIdRef.current}/continuation-token`, {
-                      method: 'PATCH',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ continuation_token: event.value }),
-                    }).catch(() => {})
-                  } else if (event.name === 'mcp_app' && event.value) {
+                  if (event.name === 'mcp_app' && event.value) {
                     // MCP Apps: associate UI metadata with the current assistant message (CTR-0068)
                     const mcpAppEvent = event.value as unknown as McpAppEvent
                     setMessages((prev) => {
@@ -942,16 +923,6 @@ export function useChat(options?: UseChatOptions) {
 
         setIsLoading(false)
         abortRef.current = null
-
-        // Always clear continuation_token on completion (CTR-0045, PRP-0025)
-        // Both success and error: token is no longer valid after stream ends
-        if (continuationTokenReceived || options?.resumeToken) {
-          fetch(`/api/sessions/${threadIdRef.current}/continuation-token`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ continuation_token: null }),
-          }).catch(() => {})
-        }
       }
 
       return { committed, success: streamSuccess }
@@ -1198,21 +1169,6 @@ export function useChat(options?: UseChatOptions) {
       .catch(() => {})
   }, [])
 
-  // Resume from continuation_token (CTR-0044, PRP-0025)
-  // Token clearing and result notification are handled in streamResponse's finally block
-  const resumeFromToken = useCallback(
-    async (token: Record<string, unknown>): Promise<boolean> => {
-      // Callers use this to distinguish "background response resumed" from
-      // "expired", i.e. whether the STREAM completed -- not whether it committed.
-      const { success } = await streamResponse('', messagesRef.current, {
-        skipUserMessage: true,
-        resumeToken: token,
-      })
-      return success
-    },
-    [streamResponse],
-  )
-
   const stopGeneration = useCallback(() => {
     abortRef.current?.abort()
   }, [])
@@ -1233,6 +1189,5 @@ export function useChat(options?: UseChatOptions) {
     regenerateWithModel,
     editAssistantMessage,
     deleteMessage,
-    resumeFromToken,
   }
 }

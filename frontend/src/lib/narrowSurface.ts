@@ -41,7 +41,6 @@ export type EntryId =
   | 'toolbar.imageOutput'
   | 'toolbar.mcpTools'
   | 'toolbar.skills'
-  | 'toolbar.background'
   // composer
   | 'attach.file'
   | 'attach.paint'
@@ -96,7 +95,6 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   'toolbar.imageOutput': 'wide-only',
   'toolbar.mcpTools': 'wide-only',
   'toolbar.skills': 'wide-only',
-  'toolbar.background': 'wide-only',
   'attach.file': 'all',
   'attach.paint': 'wide-only',
   'attach.templates': 'wide-only',

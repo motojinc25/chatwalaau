@@ -55,10 +55,8 @@ Verification status (UDR-0085 D6/D8, PRP-0106 completion notes):
 - ``web_search_tool()`` returns the country-scoped hosted tool (UDR-0085 D8
   VERIFIED live 2026-07-05: hosted web_search completed on a non-OpenAI
   deployment; the tool is platform-level on the Foundry Responses lane).
-- ``supports_background = False`` (UDR-0085 D6): ``background=true`` was
-  ACCEPTED live (status=queued), but the CTR-0045 contract also requires
-  continuation_token resume through the app lane, which is not yet verified
-  end-to-end. Flip to True once resume is verified.
+- Background responses (UDR-0085 D6) were never enabled here, and the pending
+  verification was closed when the feature was retired (PRP-0172, UDR-0154 D7).
 """
 
 from __future__ import annotations
@@ -218,12 +216,6 @@ class FoundryProvider(AzureOpenAIProvider):
     """
 
     name = NAME
-    # UDR-0085 D6: background=true is ACCEPTED by the Foundry Responses lane
-    # (verified live, status=queued), but continuation_token resume through the
-    # app lane (CTR-0045) is not yet verified end-to-end, so v1 keeps False --
-    # the Background toggle stays disabled for Foundry models. Flipping to True
-    # after the resume E2E is additive.
-    supports_background = False
 
     def build_chat_client(self, model: str) -> Any:
         # Foundry project lane (UDR-0085 D1/D4): project endpoint + the

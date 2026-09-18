@@ -51,7 +51,6 @@ export function ChatPage() {
     sessions,
     folders,
     initialMessages,
-    continuationToken,
     isSwitching,
     sidebarOpen,
     setSidebarOpen,
@@ -330,7 +329,6 @@ export function ChatPage() {
                 key={effectiveThreadId}
                 threadId={effectiveThreadId}
                 initialMessages={temp.isTemporary ? [] : initialMessages}
-                continuationToken={temp.isTemporary ? null : continuationToken}
                 onStreamComplete={handleStreamComplete}
                 onSessionCreated={handleSessionCreated}
                 onBranchFromMessage={temp.isTemporary ? undefined : handleBranch}

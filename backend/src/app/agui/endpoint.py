@@ -207,7 +207,6 @@ def _is_transient_upstream_error(exc: BaseException) -> bool:
 # (e.g. anthropic.BadRequestError, which is NOT wrapped in ChatClientException)
 # gets the same actionable treatment as an OpenAI-wrapped one.
 
-_MSG_CONTINUATION = "Background response token not found or expired. Please resend your message."
 _MSG_PREV_RESPONSE = (
     "The conversation's server-side response reference expired or "
     "was not found. Please resend your message to continue."
@@ -571,7 +570,7 @@ def _is_invalid_schema_error(exc: BaseException) -> bool:
     return False
 
 
-def _classify_run_error(exc: BaseException, *, continuation_token: bool, harness_run: bool = False) -> tuple[str, bool]:
+def _classify_run_error(exc: BaseException, *, harness_run: bool = False) -> tuple[str, bool]:
     """Return (user-facing RUN_ERROR message, is_known) for a mid-stream error.
 
     ``is_known`` False means the cause is unexpected and the caller should log a
@@ -580,8 +579,6 @@ def _classify_run_error(exc: BaseException, *, continuation_token: bool, harness
     OpenAI ``insufficient_quota`` 429 is reported as a billing issue, not as a
     transient rate limit.
     """
-    if continuation_token:
-        return _MSG_CONTINUATION, True
     if _is_previous_response_not_found(exc):
         return _MSG_PREV_RESPONSE, True
     if _is_billing_or_quota_error(exc):
@@ -1212,16 +1209,6 @@ async def _stream_with_reasoning(
     last_usage: dict[str, Any] | None = None
     model_calls = 0
 
-    # Both `except` handlers below read `continuation_token`, and it was bound ~30
-    # lines INSIDE the try -- after message normalization, image/PDF injection and
-    # the session setup. Anything that raised before that point produced
-    # `UnboundLocalError` from the error handler itself, replacing the classified
-    # RUN_ERROR with an unrelated crash and hiding the real cause. Declared here for
-    # the same reason `run_stats` is (PRP-0155 / UDR-0133 C3): a value the failure
-    # path reads must be bound on every path that can reach it. The assignment inside
-    # the try stays -- it re-binds the same None before the state is parsed.
-    continuation_token: Any = None
-
     try:
         # Pre-process: strip PDF image_url entries from messages before normalization.
         # normalize_agui_input_messages converts image_url content to MAF Content,
@@ -1248,12 +1235,12 @@ async def _stream_with_reasoning(
             "ag_ui_run_id": run_id,
         }
 
-        # Read model, reasoning, and background options from AG-UI state
-        # (CTR-0070, CTR-0045, CTR-0009 reasoning PRP-0071)
+        # Read model and reasoning options from AG-UI state (CTR-0070, CTR-0009
+        # reasoning PRP-0071). Legacy `state.background` / `state.continuation_token`
+        # keys are not read: Background Responses was retired and a stale client's
+        # keys are ignored, never rejected (PRP-0172, UDR-0154 D2).
         selected_model = None
         requested_options: dict[str, Any] = {}
-        background = False
-        continuation_token = None
         temporary = False
         image_options: dict[str, Any] = {}
         if request_body.state:
@@ -1275,8 +1262,6 @@ async def _stream_with_reasoning(
             legacy_reasoning = request_body.state.get("reasoning")
             if legacy_reasoning and "effort" not in requested_options:
                 requested_options["effort"] = legacy_reasoning
-            background = request_body.state.get("background", False)
-            continuation_token = request_body.state.get("continuation_token")
             # Temporary Chat (PRP-0076, CTR-0106, UDR-0052). When the SPA marks
             # the run temporary the thread_id is temp_-prefixed and routes to the
             # .temporary/ quarantine (CTR-0014); below we skip the Memory snapshot
@@ -1291,15 +1276,13 @@ async def _stream_with_reasoning(
         structured_active = output_format != "none"
 
         # Harness run-target (PRP-0135, UDR-0119 D3): the per-message Model /
-        # options / Structured Output / Background controls do NOT apply -- the
+        # options / Structured Output controls do NOT apply -- the
         # harness YAML fixes the model and the factory fixes the policies
         # (CTR-0193). CTR-0197 hides the controls; ignoring the state here is
         # defense-in-depth so a stale client value can never leak into the run.
         if harness_run:
             selected_model = None
             requested_options = {}
-            background = False
-            continuation_token = None
             output_schema, output_format = None, "none"
             structured_active = False
 
@@ -1352,28 +1335,10 @@ async def _stream_with_reasoning(
 
         resolved_reasoning = resolved_options.get("effort", providers.resolve_effort(effective_model, None))
 
-        # Validate continuation_token format: MAF expects dict with "response_id"
-        if continuation_token and isinstance(continuation_token, str):
-            continuation_token = {"response_id": continuation_token}
-
+        # Never a background run, and never a per-request `store` override: the Prompt
+        # lane stays CLIENT-MANAGED (default_options store=False, PRP-0142) on every
+        # turn (PRP-0172, UDR-0154 D1).
         run_options: dict[str, Any] = {}
-        # CTR-0045 / PRP-0073: background runs are an OpenAI Responses API
-        # feature. Drop the flag for providers that do not support it (e.g.
-        # Anthropic Opus 4.7/4.8) so a stale client toggle can never produce a
-        # provider validation error. The UI also disables the toggle for these
-        # models, so this is defense-in-depth.
-        if background and providers.background_supported(effective_model):
-            run_options["background"] = True
-            # A background response is stored and polled server-side, so it needs
-            # store=True. The Prompt-lane agent is built CLIENT-MANAGED
-            # (default_options store=False, PRP-0142); this per-request override
-            # restores server-side storage for the background turn (run options win
-            # in MAF _merge_options). Non-background turns keep store=False.
-            run_options["store"] = True
-        elif background:
-            background = False
-        if continuation_token:
-            run_options["continuation_token"] = continuation_token
         # Per-request generation options override the Agent's startup
         # default_options via MAF _merge_options (per key). Only when the client
         # explicitly chose at least one option; otherwise the Agent's
@@ -1656,18 +1621,6 @@ async def _stream_with_reasoning(
                         )
                     )
                     continue
-
-                # Emit continuation_token if present (CTR-0045, PRP-0025)
-                if background:
-                    update_ct = getattr(update, "continuation_token", None)
-                    if update_ct is not None:
-                        yield encoder.encode(
-                            CustomEvent(
-                                type=EventType.CUSTOM,
-                                name="continuation_token",
-                                value=dict(update_ct) if hasattr(update_ct, "__iter__") else {"token": update_ct},
-                            )
-                        )
 
                 contents = getattr(update, "contents", None) or []
                 for content in contents:
@@ -2308,9 +2261,7 @@ async def _stream_with_reasoning(
 
     except (OpenAINotFoundError, ChatClientException, TypeError) as exc:
         run_error = True
-        error_message, known = _classify_run_error(
-            exc, continuation_token=bool(continuation_token), harness_run=harness_run
-        )
+        error_message, known = _classify_run_error(exc, harness_run=harness_run)
         if known:
             logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:
@@ -2335,9 +2286,7 @@ async def _stream_with_reasoning(
         # it through the same classifier so billing / rate-limit / transient
         # causes still surface an actionable message instead of the generic one.
         run_error = True
-        error_message, known = _classify_run_error(
-            exc, continuation_token=bool(continuation_token), harness_run=harness_run
-        )
+        error_message, known = _classify_run_error(exc, harness_run=harness_run)
         if known:
             logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:
