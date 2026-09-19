@@ -26,21 +26,26 @@ from app.session.storage import (
     DEFAULT_FOLDER_COLOR,
     FOLDER_COLORS,
     FOLDER_NAME_MAX_LENGTH,
+    SessionCorruptError,
+    SessionMutator,
+    SessionUnavailableError,
     create_folder_record,
-    ensure_session_defaults,
+    create_session_json,
     iter_session_files,
     list_folder_ids,
     read_folder_index,
+    read_session_file,
     read_session_json,
     reorder_folders,
     session_path,
     sessions_dir,
     touch_folder_record,
     update_folder_record,
+    update_session_file,
+    update_session_json,
     write_folder_index,
-    write_json_atomic,
-    write_session_json,
 )
+from app.session.upload_refs import copy_referenced_uploads, rewrite_upload_refs
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +127,7 @@ async def init_session(thread_id: str, body: InitSessionRequest) -> dict[str, An
     path = session_path(thread_id)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    if path.is_file():
+    if path.exists():
         return {"status": "exists", "thread_id": thread_id}
 
     now = datetime.now(UTC).isoformat()
@@ -151,7 +156,14 @@ async def init_session(thread_id: str, body: InitSessionRequest) -> dict[str, An
     # the next list refresh). Temporary chats are never auto-titled.
     if settings.session_title_mode == "llm" and not is_temporary(thread_id):
         data["auto_title_pending"] = True
-    write_session_json(thread_id, data)
+    # Never replaces a record (UDR-0156 D1): a concurrent creator that won the race
+    # keeps its file, and this request reports "exists" exactly as above.
+    try:
+        created = create_session_json(thread_id, data)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail="Failed to write session") from e
+    if not created:
+        return {"status": "exists", "thread_id": thread_id}
     logger.info("Initialized session %s", thread_id)
     return {"status": "created", "thread_id": thread_id}
 
@@ -183,23 +195,49 @@ def _read_folder_records() -> list[dict[str, Any]]:
     return read_folder_index()
 
 
+def _unavailable(exc: SessionUnavailableError) -> HTTPException:
+    """Map an unreadable session to an HTTP error (PRP-0174, UDR-0156 D2).
+
+    A corrupt file is a 500 the operator must look at; anything else is a transient
+    conflict the client may retry. The file is left untouched in both cases.
+    """
+    if isinstance(exc, SessionCorruptError):
+        return HTTPException(status_code=500, detail="Failed to read session")
+    return HTTPException(
+        status_code=503,
+        detail="Session is temporarily unavailable; retry.",
+        headers={"Retry-After": "1"},
+    )
+
+
 def _read_session_or_404(thread_id: str) -> dict[str, Any]:
     """Read session JSON or raise HTTP errors."""
     try:
         data = read_session_json(thread_id)
-    except (OSError, json.JSONDecodeError) as e:
+    except SessionUnavailableError as e:
+        raise _unavailable(e) from e
+    except OSError as e:
         raise HTTPException(status_code=500, detail="Failed to read session") from e
     if data is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return data
 
 
-def _write_session_or_500(thread_id: str, data: dict[str, Any]) -> None:
-    """Persist session JSON or raise HTTP errors."""
+def _update_session_or_error(thread_id: str, mutate: SessionMutator) -> dict[str, Any]:
+    """Serialised read-modify-write of an EXISTING session (UDR-0156 D1/D2).
+
+    404 when absent, 503 / 500 when unreadable (nothing written), 500 when the write
+    itself fails.
+    """
     try:
-        write_session_json(thread_id, data)
+        data = update_session_json(thread_id, mutate)
+    except SessionUnavailableError as e:
+        raise _unavailable(e) from e
     except OSError as e:
         raise HTTPException(status_code=500, detail="Failed to write session") from e
+    if data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return data
 
 
 @router.get("/folders")
@@ -315,19 +353,20 @@ async def delete_folder(folder_id: str) -> dict[str, Any]:
     if folder_id not in {folder["id"] for folder in folders}:
         raise HTTPException(status_code=404, detail="Folder not found")
 
+    def unassign(data: dict[str, Any]) -> bool:
+        if data.get("folder_id") != folder_id:
+            return False
+        data["folder_id"] = None
+        data["updated_at"] = datetime.now(UTC).isoformat()
+        return True
+
     for base_dir in (_sessions_dir(), _archived_dir()):
         # iter_session_files excludes the metadata index (UDR-0091 D6).
         for file in iter_session_files(base_dir):
             try:
-                data = ensure_session_defaults(json.loads(file.read_text(encoding="utf-8")))
-            except (json.JSONDecodeError, OSError) as e:
-                raise HTTPException(status_code=500, detail="Failed to read session") from e
-            if data.get("folder_id") != folder_id:
-                continue
-            data["folder_id"] = None
-            data["updated_at"] = datetime.now(UTC).isoformat()
-            try:
-                write_json_atomic(file, data)
+                update_session_file(file, unassign)
+            except SessionUnavailableError as e:
+                raise _unavailable(e) from e
             except OSError as e:
                 raise HTTPException(status_code=500, detail="Failed to write session") from e
 
@@ -462,8 +501,10 @@ async def search_sessions(q: str = "") -> list[dict[str, Any]]:
     # iterator so the index file itself is not searched as if it were a chat.
     for file in iter_session_files(_sessions_dir()):
         try:
-            data = ensure_session_defaults(json.loads(file.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
+            data = read_session_file(file)
+        except OSError:
+            continue
+        if data is None:
             continue
 
         snippet = ""
@@ -549,6 +590,8 @@ async def export_session(thread_id: str) -> Response:
         zip_bytes, filename, filename_utf8 = build_export_bundle(thread_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
+    except SessionUnavailableError as exc:
+        raise _unavailable(exc) from exc
     # `filename` is latin-1-safe (header-encodable); `filename*` carries the full
     # possibly-non-ASCII name per RFC 5987 so browsers show the real title.
     disposition = f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename_utf8)}"
@@ -562,14 +605,16 @@ async def export_session(thread_id: str) -> Response:
 @router.patch("/{thread_id}/folder", dependencies=[Depends(verify_api_key)])
 async def assign_session_folder(thread_id: str, body: AssignFolderRequest) -> dict[str, Any]:
     """Assign or unassign a session to a folder."""
-    data = _read_session_or_404(thread_id)
+    _read_session_or_404(thread_id)
 
     if body.folder_id is not None and body.folder_id not in {folder["id"] for folder in _read_folder_records()}:
         raise HTTPException(status_code=400, detail="Folder not found")
 
-    data["folder_id"] = body.folder_id
-    data["updated_at"] = datetime.now(UTC).isoformat()
-    _write_session_or_500(thread_id, data)
+    def assign(data: dict[str, Any]) -> None:
+        data["folder_id"] = body.folder_id
+        data["updated_at"] = datetime.now(UTC).isoformat()
+
+    data = _update_session_or_error(thread_id, assign)
 
     if body.folder_id:
         try:
@@ -720,50 +765,69 @@ async def save_messages(thread_id: str, body: SaveMessagesRequest) -> dict[str, 
     AG-UI bypasses MAF's ResponseStream finalizers, so after_run
     on context providers is never called. This endpoint provides
     an alternative persistence path.
-    """
-    sessions_path = _sessions_dir()
-    sessions_path.mkdir(parents=True, exist_ok=True)
-    path = session_path(thread_id)
 
+    PRP-0174 / UDR-0156:
+    - D2: an existing file that cannot be read is NEVER replaced. It used to be
+      treated as "no session", and the fresh record written in its place erased the
+      whole history and moved the chat out of its folder. Now: 503, nothing written.
+    - D4: idempotent by ``message_id``. A message whose id is already stored is
+      skipped, so the SPA can retry a save without duplicating the turn.
+    """
     new_message_dicts = [_to_maf_message_dict(m) for m in body.messages]
     now = datetime.now(UTC).isoformat()
 
-    if path.is_file():
-        try:
-            data = ensure_session_defaults(json.loads(path.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
-            data = None
-    else:
-        data = None
+    def create() -> dict[str, Any]:
+        return {
+            "thread_id": thread_id,
+            "title": "",
+            "created_at": now,
+            "updated_at": now,
+            "message_count": 0,
+            "image_count": 0,
+            "folder_id": None,
+            "messages": [],
+        }
 
-    if data:
-        existing = data.get("messages", [])
-        existing.extend(new_message_dicts)
+    def append(data: dict[str, Any]) -> bool:
+        existing = data.get("messages")
+        if not isinstance(existing, list):
+            existing = []
+        stored_ids = {m.get("message_id") for m in existing if isinstance(m, dict) and m.get("message_id")}
+        fresh = [m for m in new_message_dicts if not m.get("message_id") or m["message_id"] not in stored_ids]
+        if not fresh and existing:
+            return False
+        existing.extend(fresh)
         data["messages"] = existing
         data["updated_at"] = now
         data["message_count"] = len(existing)
         data["image_count"] = _count_images(existing)
-    else:
-        data = {
-            "thread_id": thread_id,
-            "title": body.messages[0].content[:100] if body.messages else "",
-            "created_at": now,
-            "updated_at": now,
-            "message_count": len(new_message_dicts),
-            "image_count": _count_images(new_message_dicts),
-            "folder_id": None,
-            "messages": new_message_dicts,
-        }
+        if not data.get("title"):
+            for m in fresh:
+                if m["role"] == "user":
+                    data["title"] = _message_text(m)[:100]
+                    break
+        return True
 
-    if not data.get("title") and new_message_dicts:
-        for m in new_message_dicts:
-            if m["role"] == "user":
-                data["title"] = m["contents"][0]["text"][:100]
-                break
-
-    _write_session_or_500(thread_id, data)
+    _sessions_dir().mkdir(parents=True, exist_ok=True)
+    try:
+        data = update_session_json(thread_id, append, create=create)
+    except SessionUnavailableError as e:
+        raise _unavailable(e) from e
+    except OSError as e:
+        raise HTTPException(status_code=500, detail="Failed to write session") from e
+    assert data is not None  # create= guarantees a record
     logger.info("Saved %d messages to session %s via API", len(new_message_dicts), thread_id)
     return {"status": "saved", "thread_id": thread_id, "message_count": data["message_count"]}
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    """First text content of a stored message ("" when it has none)."""
+    for content in message.get("contents", []):
+        if isinstance(content, dict) and content.get("type") in ("text", "text_content"):
+            text = content.get("text")
+            if isinstance(text, str):
+                return text
+    return ""
 
 
 class TruncateRequest(BaseModel):
@@ -806,16 +870,19 @@ async def truncate_session(thread_id: str, body: TruncateRequest) -> dict[str, A
     Used for message edit/regenerate: removes messages from
     delete_from onward so the frontend can re-request.
     """
-    data = _read_session_or_404(thread_id)
 
-    messages = data.get("messages", [])
-    if body.delete_from < len(messages):
+    def truncate(data: dict[str, Any]) -> bool:
+        messages = data.get("messages", [])
+        if body.delete_from >= len(messages):
+            return False
         data["messages"] = messages[: body.delete_from]
         data["message_count"] = len(data["messages"])
         data["image_count"] = _count_images(data["messages"])
         data["updated_at"] = datetime.now(UTC).isoformat()
-        _write_session_or_500(thread_id, data)
         logger.info("Truncated session %s from index %d", thread_id, body.delete_from)
+        return True
+
+    data = _update_session_or_error(thread_id, truncate)
 
     # UDR-0119 D11: the visible conversation was rewound, so the invisible one must
     # agree. Unconditional -- a truncate request that changed nothing still means the
@@ -829,55 +896,69 @@ async def truncate_session(thread_id: str, body: TruncateRequest) -> dict[str, A
 @router.delete("/{thread_id}/messages/{index}", dependencies=[Depends(verify_api_key)])
 async def delete_message(thread_id: str, index: int) -> dict[str, Any]:
     """Delete a single message at the given index from a session."""
-    data = _read_session_or_404(thread_id)
+    out_of_range = False
 
-    messages = data.get("messages", [])
-    if index < 0 or index >= len(messages):
+    def remove(data: dict[str, Any]) -> bool:
+        nonlocal out_of_range
+        messages = data.get("messages", [])
+        if index < 0 or index >= len(messages):
+            out_of_range = True
+            return False
+        messages.pop(index)
+        data["messages"] = messages
+        data["message_count"] = len(messages)
+        data["image_count"] = _count_images(messages)
+        data["updated_at"] = datetime.now(UTC).isoformat()
+        return True
+
+    data = _update_session_or_error(thread_id, remove)
+    if out_of_range:
         raise HTTPException(status_code=400, detail="Index out of range")
-
-    messages.pop(index)
-    data["messages"] = messages
-    data["message_count"] = len(messages)
-    data["image_count"] = _count_images(messages)
-    data["updated_at"] = datetime.now(UTC).isoformat()
-    _write_session_or_500(thread_id, data)
     logger.info("Deleted message at index %d from session %s", index, thread_id)
 
     # UDR-0119 D11 -- same divergence as truncate.
     await _reset_harness_conversation(thread_id, reason="message_deleted")
 
-    return {"status": "deleted", "thread_id": thread_id, "message_count": len(messages)}
+    return {"status": "deleted", "thread_id": thread_id, "message_count": data["message_count"]}
 
 
 class ForkRequest(BaseModel):
     up_to_index: int
 
 
+# Conversation state a branch carries over from its source (PRP-0174, UDR-0156 D6).
+# The frozen memory snapshots belong to the conversation (UDR-0051 D3, UDR-0079 D6),
+# and a branch continues that conversation. Everything else that is not listed here
+# or set explicitly below -- pinned_at, auto_title_pending, memory_liked, source,
+# runtime / retired fields -- belongs to the source ITEM and is not copied.
+_FORK_INHERITED_FIELDS = ("user_profile_snapshot", "agent_memory_snapshot")
+
+
 @router.post("/{thread_id}/fork", dependencies=[Depends(verify_api_key)])
 async def fork_session(thread_id: str, body: ForkRequest) -> dict[str, Any]:
-    """Fork a session up to a given message index.
+    """Fork a session up to a given message index ("Branch in new chat").
 
-    Creates a new session file containing messages[0:up_to_index+1]
-    from the source session. Used by "Branch in new chat" feature.
+    Creates a COMPLETE, independent session holding messages[0:up_to_index+1]
+    (PRP-0174 / UDR-0156 D6): it keeps the source's title and folder, inherits the
+    frozen memory snapshots, claims the title slot so automatic titling never
+    renames it, records ``forked_from``, and owns copies of the uploads the slice
+    references -- so deleting the source no longer breaks the branch's images.
     """
     data = _read_session_or_404(thread_id)
 
     messages = data.get("messages", [])
+    if body.up_to_index < 0 or body.up_to_index >= len(messages):
+        raise HTTPException(status_code=400, detail="Index out of range")
     forked_messages = messages[: body.up_to_index + 1]
 
     new_thread_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
 
-    # Derive title from first user message in forked messages
-    title = ""
-    for m in forked_messages:
-        if m.get("role") == "user":
-            contents = m.get("contents", [])
-            if contents and isinstance(contents[0], dict):
-                title = contents[0].get("text", "")[:100]
-            break
+    title = data.get("title") or ""
+    if not title:
+        title = next((_message_text(m)[:100] for m in forked_messages if m.get("role") == "user"), "")
 
-    new_data = {
+    new_data: dict[str, Any] = {
         "thread_id": new_thread_id,
         "title": title,
         "created_at": now,
@@ -886,17 +967,41 @@ async def fork_session(thread_id: str, body: ForkRequest) -> dict[str, Any]:
         "image_count": _count_images(forked_messages),
         "folder_id": data.get("folder_id"),
         "messages": forked_messages,
+        "forked_from": {"thread_id": thread_id, "up_to_index": body.up_to_index},
     }
+    for field in _FORK_INHERITED_FIELDS:
+        if field in data:
+            new_data[field] = data[field]
+    if title:
+        new_data["auto_title_done"] = True
+    cursor = data.get("memory_extracted_index")
+    if isinstance(cursor, int) and not isinstance(cursor, bool):
+        user_turns = sum(1 for m in forked_messages if m.get("role") == "user")
+        new_data["memory_extracted_index"] = min(cursor, user_turns)
 
-    sessions_path = _sessions_dir()
-    sessions_path.mkdir(parents=True, exist_ok=True)
-    _write_session_or_500(new_thread_id, new_data)
-    logger.info("Forked session %s -> %s (up to index %d)", thread_id, new_thread_id, body.up_to_index)
+    upload_dir = Path(settings.upload_dir) / new_thread_id
+    try:
+        copied = copy_referenced_uploads(forked_messages, thread_id, new_thread_id)
+        new_data["messages"] = rewrite_upload_refs(forked_messages, thread_id, new_thread_id)
+        _sessions_dir().mkdir(parents=True, exist_ok=True)
+        create_session_json(new_thread_id, new_data)
+    except OSError as e:
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail="Failed to write session") from e
+    logger.info(
+        "Forked session %s -> %s (up to index %d, %d uploads copied)",
+        thread_id,
+        new_thread_id,
+        body.up_to_index,
+        copied,
+    )
 
     return {
         "status": "forked",
         "new_thread_id": new_thread_id,
         "message_count": len(forked_messages),
+        # Which sidebar scope the new row lives in, so the SPA refreshes it (D7).
+        "folder_id": new_data["folder_id"],
     }
 
 
@@ -907,16 +1012,17 @@ class RenameRequest(BaseModel):
 @router.patch("/{thread_id}/rename", dependencies=[Depends(verify_api_key)])
 async def rename_session(thread_id: str, body: RenameRequest) -> dict[str, Any]:
     """Rename a session title."""
-    data = _read_session_or_404(thread_id)
 
-    data["title"] = body.title.strip()[:100]
-    # Auto Session Title (PRP-0077, CTR-0109): a manual rename claims the title
-    # slot so a late-completing background title task never overwrites the
-    # user-chosen title (UDR-0053 D9), and clears any pending spinner.
-    data["auto_title_done"] = True
-    data["auto_title_pending"] = False
-    data["updated_at"] = datetime.now(UTC).isoformat()
-    _write_session_or_500(thread_id, data)
+    def rename(data: dict[str, Any]) -> None:
+        data["title"] = body.title.strip()[:100]
+        # Auto Session Title (PRP-0077, CTR-0109): a manual rename claims the title
+        # slot so a late-completing background title task never overwrites the
+        # user-chosen title (UDR-0053 D9), and clears any pending spinner.
+        data["auto_title_done"] = True
+        data["auto_title_pending"] = False
+        data["updated_at"] = datetime.now(UTC).isoformat()
+
+    data = _update_session_or_error(thread_id, rename)
     logger.info("Renamed session %s to '%s'", thread_id, data["title"])
 
     return {"status": "renamed", "thread_id": thread_id, "title": data["title"]}
@@ -983,9 +1089,12 @@ async def regenerate_session_title(thread_id: str) -> dict[str, Any]:
             # thread is already in flight. Nothing was started, so nothing may
             # claim the spinner.
             return {"status": "unchanged", "thread_id": thread_id, "title": data.get("title", "")}
-        data["auto_title_pending"] = True
-        data["updated_at"] = datetime.now(UTC).isoformat()
-        _write_session_or_500(thread_id, data)
+
+        def mark_pending(record: dict[str, Any]) -> None:
+            record["auto_title_pending"] = True
+            record["updated_at"] = datetime.now(UTC).isoformat()
+
+        data = _update_session_or_error(thread_id, mark_pending)
         logger.info("Dispatched title regeneration for session %s", thread_id)
         return {"status": "pending", "thread_id": thread_id, "title": data.get("title", "")}
 
@@ -994,13 +1103,16 @@ async def regenerate_session_title(thread_id: str) -> dict[str, Any]:
     source = latest_user_text(messages)
     if not source:
         raise HTTPException(status_code=422, detail="no message to title")
-    data["title"] = source[:100]
-    # An explicit regeneration claims the slot exactly as a rename does, so the
-    # automatic path stays locked out afterwards (UDR-0124 D3).
-    data["auto_title_done"] = True
-    data["auto_title_pending"] = False
-    data["updated_at"] = datetime.now(UTC).isoformat()
-    _write_session_or_500(thread_id, data)
+
+    def apply_title(record: dict[str, Any]) -> None:
+        record["title"] = source[:100]
+        # An explicit regeneration claims the slot exactly as a rename does, so the
+        # automatic path stays locked out afterwards (UDR-0124 D3).
+        record["auto_title_done"] = True
+        record["auto_title_pending"] = False
+        record["updated_at"] = datetime.now(UTC).isoformat()
+
+    data = _update_session_or_error(thread_id, apply_title)
     logger.info("Regenerated title for session %s: %r", thread_id, data["title"])
     return {"status": "applied", "thread_id": thread_id, "title": data["title"]}
 
@@ -1081,14 +1193,11 @@ class PinRequest(BaseModel):
 @router.patch("/{thread_id}/pin", dependencies=[Depends(verify_api_key)])
 async def pin_session(thread_id: str, body: PinRequest) -> dict[str, Any]:
     """Pin or unpin a session."""
-    data = _read_session_or_404(thread_id)
 
-    if body.pinned:
-        data["pinned_at"] = datetime.now(UTC).isoformat()
-    else:
-        data["pinned_at"] = None
+    def pin(data: dict[str, Any]) -> None:
+        data["pinned_at"] = datetime.now(UTC).isoformat() if body.pinned else None
 
-    _write_session_or_500(thread_id, data)
+    data = _update_session_or_error(thread_id, pin)
     logger.info("Pin session %s: pinned=%s", thread_id, body.pinned)
 
     return {"status": "pinned" if body.pinned else "unpinned", "thread_id": thread_id, "pinned_at": data["pinned_at"]}

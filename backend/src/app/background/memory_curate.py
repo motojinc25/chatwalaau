@@ -129,41 +129,40 @@ async def _reconcile(memory_body: str, turn_text: str, model: str | None) -> lis
 # ---------------------------------------------------------------------------
 def set_liked(thread_id: str, turn_key: str, status: str) -> None:
     """Upsert a ``memory_liked`` entry for ``turn_key`` (RMW; best-effort)."""
-    from app.session.storage import read_session_json, write_session_json
+    from app.session.storage import update_session_json
 
-    data = read_session_json(thread_id)
-    if data is None:
-        return
-    liked = data.get("memory_liked")
-    if not isinstance(liked, list):
-        liked = []
-    updated = [e for e in liked if isinstance(e, dict) and e.get("turn_key") != turn_key]
-    updated.append({"turn_key": turn_key, "status": status})
-    data["memory_liked"] = updated
-    data["updated_at"] = datetime.now(UTC).isoformat()
+    def upsert(data: dict[str, Any]) -> None:
+        liked = data.get("memory_liked")
+        if not isinstance(liked, list):
+            liked = []
+        updated = [e for e in liked if isinstance(e, dict) and e.get("turn_key") != turn_key]
+        updated.append({"turn_key": turn_key, "status": status})
+        data["memory_liked"] = updated
+        data["updated_at"] = datetime.now(UTC).isoformat()
+
     try:
-        write_session_json(thread_id, data)
+        update_session_json(thread_id, upsert)
     except OSError:
         logger.warning("Could not persist memory_liked for session %s", thread_id, exc_info=True)
 
 
 def clear_liked(thread_id: str, turn_key: str) -> None:
     """Remove the ``memory_liked`` entry for ``turn_key`` (RMW; best-effort)."""
-    from app.session.storage import read_session_json, write_session_json
+    from app.session.storage import update_session_json
 
-    data = read_session_json(thread_id)
-    if data is None:
-        return
-    liked = data.get("memory_liked")
-    if not isinstance(liked, list):
-        return
-    updated = [e for e in liked if isinstance(e, dict) and e.get("turn_key") != turn_key]
-    if len(updated) == len(liked):
-        return
-    data["memory_liked"] = updated
-    data["updated_at"] = datetime.now(UTC).isoformat()
+    def remove(data: dict[str, Any]) -> bool:
+        liked = data.get("memory_liked")
+        if not isinstance(liked, list):
+            return False
+        updated = [e for e in liked if isinstance(e, dict) and e.get("turn_key") != turn_key]
+        if len(updated) == len(liked):
+            return False
+        data["memory_liked"] = updated
+        data["updated_at"] = datetime.now(UTC).isoformat()
+        return True
+
     try:
-        write_session_json(thread_id, data)
+        update_session_json(thread_id, remove)
     except OSError:
         logger.warning("Could not clear memory_liked for session %s", thread_id, exc_info=True)
 

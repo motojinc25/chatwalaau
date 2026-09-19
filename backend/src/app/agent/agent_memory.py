@@ -43,7 +43,7 @@ import logging
 import os
 from pathlib import Path
 import time
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import Field
 
@@ -488,40 +488,41 @@ def session_agent_memory_snapshot(thread_id: str) -> str | None:
     return it (frozen -- never re-read mid-session, UDR-0079 D6); else render the
     block from the live MEMORY.md, best-effort persist it into the session JSON so
     it survives reload, and return it.
+
+    PRP-0174 / UDR-0156 D2: when the session file exists but cannot be read, the
+    block is used for this run only and NOTHING is written. This path used to
+    replace the unreadable file with an empty record, erasing the conversation.
     """
     if not settings.agent_memory_enabled:
         return None
 
     # Lazy import avoids import-order coupling between agent and session subpackages.
-    from app.session.storage import read_session_json, write_session_json
+    from app.session.storage import SessionUnavailableError, empty_session_record, update_session_json
+
+    captured: list[str | None] = []
+
+    def capture(data: dict[str, Any]) -> bool:
+        stored = data.get("agent_memory_snapshot")
+        if isinstance(stored, str) and stored:
+            captured.append(stored)
+            return False
+        block = current_agent_memory_block()
+        captured.append(block)
+        if block is None:
+            # Empty memory -> no block, and nothing to freeze (a later curated entry
+            # is captured by the NEXT session, UDR-0079 D6/D8).
+            return False
+        data["agent_memory_snapshot"] = block
+        return True
 
     try:
-        data = read_session_json(thread_id)
-    except (OSError, ValueError, json.JSONDecodeError):
-        data = None
-
-    if data and data.get("agent_memory_snapshot"):
-        return data["agent_memory_snapshot"]
-
-    block = current_agent_memory_block()
-    if block is None:
-        # Empty memory -> no block, and nothing to freeze (a later curated entry
-        # is captured by the NEXT session, UDR-0079 D6/D8).
-        return None
-
-    record = data or {
-        "thread_id": thread_id,
-        "title": "",
-        "created_at": datetime.now(UTC).isoformat(),
-        "updated_at": datetime.now(UTC).isoformat(),
-        "message_count": 0,
-        "image_count": 0,
-        "folder_id": None,
-        "messages": [],
-    }
-    record["agent_memory_snapshot"] = block
-    try:
-        write_session_json(thread_id, record)
+        if update_session_json(thread_id, capture) is None:
+            # No session file yet. Create one only when there is something to freeze.
+            if current_agent_memory_block() is None:
+                return None
+            update_session_json(thread_id, capture, create=lambda: empty_session_record(thread_id))
+    except SessionUnavailableError:
+        logger.warning("Session %s is unreadable; agent memory snapshot not persisted", thread_id, exc_info=True)
     except OSError:
         logger.warning("Could not persist agent memory snapshot for session %s", thread_id, exc_info=True)
-    return block
+    return captured[-1] if captured else current_agent_memory_block()

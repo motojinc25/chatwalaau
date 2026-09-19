@@ -44,7 +44,7 @@ from typing import Any
 
 from app.session.storage import (
     SESSION_INDEX_FILENAME,
-    ensure_session_defaults,
+    read_session_file,
     sessions_dir,
     write_json_atomic,
 )
@@ -99,9 +99,12 @@ def read_session_metadata(path: Path) -> dict[str, Any] | None:
     runs only for files the index does not already know at their current mtime.
     """
     try:
-        data = ensure_session_defaults(json.loads(path.read_text(encoding="utf-8")))
-    except (json.JSONDecodeError, OSError):
+        # Retries a transient sharing violation (PRP-0174, UDR-0156 D3).
+        data = read_session_file(path)
+    except OSError:
         logger.warning("Failed to read session file: %s", path)
+        return None
+    if data is None:
         return None
 
     messages = data.get("messages", [])
@@ -212,6 +215,11 @@ async def list_session_metadata() -> list[dict[str, Any]]:
 
             meta = read_session_metadata(Path(entry.path))
             if meta is None:
+                # The file exists but could not be read right now (typically a write in
+                # progress). Keep the last known row rather than dropping the chat from
+                # the sidebar; it is reparsed on the next list (PRP-0174).
+                if hit is not None:
+                    fresh[thread_id] = hit
                 continue
             meta[_MTIME_KEY] = mtime_ns
             fresh[thread_id] = meta

@@ -1,11 +1,15 @@
 """Session and folder storage helpers for file-based persistence."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 import json
 import logging
 from pathlib import Path
+import threading
+import time
 from typing import Any
 import uuid
+import weakref
 
 from app.core.config import settings
 
@@ -87,26 +91,195 @@ def folder_index_path() -> Path:
     return folders_dir() / "index.json"
 
 
+# ---------------------------------------------------------------------------
+# Transient sharing violations (PRP-0174, UDR-0156 D3)
+# ---------------------------------------------------------------------------
+# On Windows a file that another handle is replacing cannot be opened for a moment,
+# and the atomic replace itself fails while a reader holds the file. Both surface as
+# PermissionError. Measured locally, one reader racing one writer lost a third of its
+# reads, so every session read and replace retries a few times before giving up.
+# Code constants, not settings: no operator decision depends on them.
+TRANSIENT_IO_ATTEMPTS = 6
+TRANSIENT_IO_FIRST_DELAY_S = 0.01
+TRANSIENT_IO_MAX_DELAY_S = 0.16
+
+
+def _retry_transient[T](operation: Callable[[], T]) -> T:
+    """Run ``operation``, retrying PermissionError with a bounded backoff."""
+    delay = TRANSIENT_IO_FIRST_DELAY_S
+    for attempt in range(TRANSIENT_IO_ATTEMPTS):
+        try:
+            return operation()
+        except PermissionError:
+            if attempt == TRANSIENT_IO_ATTEMPTS - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, TRANSIENT_IO_MAX_DELAY_S)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+class SessionUnavailableError(OSError):
+    """A session file EXISTS but could not be read (UDR-0156 D2).
+
+    Deliberately distinct from "absent" (``None``): a caller that receives this must
+    not create or replace the session, because the history is still on disk.
+    """
+
+
+class SessionCorruptError(SessionUnavailableError):
+    """A session file exists and was read, but is not a JSON object."""
+
+
 def write_json_atomic(path: Path, payload: Any) -> None:
     """Write JSON atomically using a temp file and replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp_path.replace(path)
+    try:
+        _retry_transient(lambda: temp_path.replace(path))
+    except OSError:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
-def read_session_json(thread_id: str) -> dict[str, Any] | None:
-    """Read a session JSON file if present."""
-    path = session_path(thread_id)
+def read_session_file(path: Path) -> dict[str, Any] | None:
+    """Read one session file: ``None`` ONLY when it does not exist (UDR-0156 D2).
+
+    Raises ``SessionUnavailableError`` when the file exists but cannot be opened
+    after the transient retries, and ``SessionCorruptError`` when it does not parse.
+    """
     if not path.is_file():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        text = _retry_transient(lambda: path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None  # deleted between the check and the read
+    except OSError as e:
+        raise SessionUnavailableError(f"Session file is temporarily unreadable: {path.name}") from e
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise SessionCorruptError(f"Session file is not valid JSON: {path.name}") from e
+    if not isinstance(data, dict):
+        raise SessionCorruptError(f"Session file is not a JSON object: {path.name}")
     return ensure_session_defaults(data)
 
 
+def read_session_json(thread_id: str) -> dict[str, Any] | None:
+    """Read a session by thread id (see ``read_session_file`` for the error rules)."""
+    return read_session_file(session_path(thread_id))
+
+
 def write_session_json(thread_id: str, data: dict[str, Any]) -> None:
-    """Persist a session JSON file with default fields populated."""
+    """Persist a WHOLE session record, replacing whatever is there.
+
+    Application code MUST NOT call this directly (UDR-0156 D1): changes go through
+    ``update_session_json`` and new records through ``create_session_json``. It stays
+    public for test fixtures that seed a session.
+    """
     write_json_atomic(session_path(thread_id), ensure_session_defaults(data))
+
+
+# ---------------------------------------------------------------------------
+# Serialised session writes (PRP-0174, UDR-0156 D1)
+# ---------------------------------------------------------------------------
+class _SessionLock:
+    """A re-entrant lock that can live in a WeakValueDictionary."""
+
+    __slots__ = ("__weakref__", "_lock")
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+
+    def __enter__(self) -> "_SessionLock":
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._lock.release()
+
+
+_session_locks: "weakref.WeakValueDictionary[str, _SessionLock]" = weakref.WeakValueDictionary()
+_session_locks_guard = threading.Lock()
+
+
+def session_lock(key: str) -> _SessionLock:
+    """Process-local lock for one session file.
+
+    Held only around synchronous file I/O -- never across an ``await``. The entry
+    disappears once nobody references it, so the map does not grow with history.
+    """
+    with _session_locks_guard:
+        lock = _session_locks.get(key)
+        if lock is None:
+            lock = _SessionLock()
+            _session_locks[key] = lock
+        return lock
+
+
+#: ``mutate`` returns ``False`` to say "nothing changed, do not write"; any other
+#: return value (including ``None``) writes.
+SessionMutator = Callable[[dict[str, Any]], bool | None]
+
+
+def update_session_file(
+    path: Path,
+    mutate: SessionMutator,
+    *,
+    create: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Read-modify-write one session file under its lock (UDR-0156 D1/D2).
+
+    - absent: ``create()`` builds the record (then ``mutate`` runs and it is
+      written); without ``create`` nothing is written and ``None`` is returned.
+    - unreadable: ``SessionUnavailableError`` propagates and NOTHING is written.
+    """
+    with session_lock(str(path)):
+        data = read_session_file(path)
+        if data is None:
+            if create is None:
+                return None
+            data = create()
+            mutate(data)
+        elif mutate(data) is False:
+            return data
+        write_json_atomic(path, ensure_session_defaults(data))
+        return data
+
+
+def update_session_json(
+    thread_id: str,
+    mutate: SessionMutator,
+    *,
+    create: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """``update_session_file`` addressed by thread id."""
+    return update_session_file(session_path(thread_id), mutate, create=create)
+
+
+def empty_session_record(thread_id: str) -> dict[str, Any]:
+    """A new session record with no messages (the shape every creator starts from)."""
+    now = datetime.now(UTC).isoformat()
+    return {
+        "thread_id": thread_id,
+        "title": "",
+        "created_at": now,
+        "updated_at": now,
+        "message_count": 0,
+        "image_count": 0,
+        "folder_id": None,
+        "messages": [],
+    }
+
+
+def create_session_json(thread_id: str, data: dict[str, Any]) -> bool:
+    """Write a NEW session record; never replaces one. Returns False if it exists."""
+    path = session_path(thread_id)
+    with session_lock(str(path)):
+        if path.exists():
+            return False
+        write_json_atomic(path, ensure_session_defaults(data))
+        return True
 
 
 def ensure_session_defaults(data: dict[str, Any]) -> dict[str, Any]:

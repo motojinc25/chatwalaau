@@ -238,25 +238,30 @@ def _finalize(thread_id: str, title: str | None, *, force: bool = False) -> str 
     not the automatic path.
     """
     from app.agent.temporary import is_temporary
-    from app.session.storage import read_session_json, write_session_json
+    from app.session.storage import update_session_json
 
     if is_temporary(thread_id):
         return None
-    data = read_session_json(thread_id)
+
+    def finalize(data: dict[str, Any]) -> bool:
+        changed = False
+        if data.get("auto_title_pending"):
+            data["auto_title_pending"] = False
+            changed = True
+        if title and (force or not data.get("auto_title_done")):
+            data["title"] = title
+            data["auto_title_done"] = True
+            changed = True
+        if changed:
+            data["updated_at"] = datetime.now(UTC).isoformat()
+            logger.info("Auto-title finalized for session %s: %r", thread_id, data.get("title", ""))
+        return changed
+
+    # Serialised with every other session writer (PRP-0174 / UDR-0156 D1). An
+    # unreadable file raises and is never rewritten (D2); the caller logs it.
+    data = update_session_json(thread_id, finalize)
     if data is None:
         return None  # session deleted between dispatch and write
-    changed = False
-    if data.get("auto_title_pending"):
-        data["auto_title_pending"] = False
-        changed = True
-    if title and (force or not data.get("auto_title_done")):
-        data["title"] = title
-        data["auto_title_done"] = True
-        changed = True
-    if changed:
-        data["updated_at"] = datetime.now(UTC).isoformat()
-        write_session_json(thread_id, data)
-        logger.info("Auto-title finalized for session %s: %r", thread_id, data.get("title", ""))
     return data.get("title", "")
 
 

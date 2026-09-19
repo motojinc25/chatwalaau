@@ -1,4 +1,4 @@
-import { Loader2, Menu } from 'lucide-react'
+import { AlertTriangle, Loader2, Menu } from 'lucide-react'
 import { Suspense, useCallback, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
@@ -58,6 +58,8 @@ export function ChatPage() {
     folders,
     initialMessages,
     isSwitching,
+    loadFailed,
+    retryLoadSession,
     sidebarOpen,
     setSidebarOpen,
     isCreatingFolder,
@@ -341,6 +343,19 @@ export function ChatPage() {
               <div className="flex flex-1 items-center justify-center">
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
                 <span className="ml-2 text-sm text-muted-foreground">Loading session...</span>
+              </div>
+            ) : loadFailed && !temp.isTemporary ? (
+              // PRP-0174 / UDR-0156 D8: never render an unreadable chat as an empty one --
+              // a message sent there would be the only thing the user sees of it.
+              <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
+                <AlertTriangle className="h-6 w-6 text-amber-500" aria-hidden="true" />
+                <p className="text-sm font-medium">This chat could not be loaded.</p>
+                <p className="max-w-sm text-xs text-muted-foreground">
+                  Its history is still saved. The server could not read it just now.
+                </p>
+                <Button variant="outline" size="sm" onClick={() => void retryLoadSession()}>
+                  Retry
+                </Button>
               </div>
             ) : (
               <ChatPanel

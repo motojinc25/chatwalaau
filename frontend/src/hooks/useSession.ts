@@ -195,6 +195,33 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
   return result
 }
 
+// A chat load that fails for a reason other than 404 is retried once after this delay
+// before the failure is shown (PRP-0174, UDR-0156 D8).
+const LOAD_RETRY_DELAY_MS = 1000
+
+type SessionLoadResult = { status: 'ok'; messages: ChatMessage[] } | { status: 'not_found' } | { status: 'failed' }
+
+/**
+ * Fetch a chat's history. `not_found` means a fresh chat; `failed` means the history
+ * exists (or may exist) but could not be read, and must NOT be shown as an empty chat.
+ */
+async function fetchSessionMessages(threadId: string): Promise<SessionLoadResult> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`/api/sessions/${threadId}`)
+      if (res.ok) {
+        const data = await res.json()
+        return { status: 'ok', messages: convertMafMessages(data.messages ?? []) }
+      }
+      if (res.status === 404) return { status: 'not_found' }
+    } catch {
+      // network error -> retry once
+    }
+    if (attempt === 0) await new Promise((resolve) => window.setTimeout(resolve, LOAD_RETRY_DELAY_MS))
+  }
+  return { status: 'failed' }
+}
+
 export function useSession() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -211,6 +238,8 @@ export function useSession() {
   const [folders, setFolders] = useState<SessionFolder[]>([])
   const [initialMessages, setInitialMessages] = useState<ChatMessage[]>([])
   const [isSwitching, setIsSwitching] = useState(false)
+  // The chat whose history could not be loaded (PRP-0174, UDR-0156 D8), or null.
+  const [loadFailedThreadId, setLoadFailedThreadId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null)
@@ -284,7 +313,7 @@ export function useSession() {
    * page), so a refresh triggered by a rename / pin / delete does not yank a user
    * who has scrolled deep back up to page one.
    */
-  const refreshSessions = useCallback(async () => {
+  const refreshRootSessions = useCallback(async () => {
     try {
       const loadedRoot = rootLoadedCountRef.current
       const limit = Math.max(SESSION_PAGE_SIZE, loadedRoot)
@@ -297,6 +326,21 @@ export function useSession() {
     } catch {
       // ignore fetch errors
     }
+  }, [fetchSessionPage, mergeSessions])
+
+  /** Re-fetch every folder the client has already loaded, each one complete (UDR-0091 D4). */
+  const refreshLoadedFolderSessions = useCallback(async () => {
+    const folderIds = [...loadedFolderIdsRef.current]
+    await Promise.all(
+      folderIds.map(async (folderId) => {
+        try {
+          const page = await fetchSessionPage({ folderId })
+          if (page) mergeSessions(page.items, (s) => s.folder_id === folderId)
+        } catch {
+          // ignore fetch errors -- the rows already shown stay
+        }
+      }),
+    )
   }, [fetchSessionPage, mergeSessions])
 
   /** Append the next page of root chats (infinite scroll). */
@@ -352,9 +396,22 @@ export function useSession() {
     }
   }, [])
 
+  /**
+   * Refresh the session list (PRP-0174, UDR-0156 D7).
+   *
+   * Covers EVERY scope the client has loaded -- the root pages, each loaded folder,
+   * and the folder records with their counts. Refreshing only the root left foldered
+   * rows stale: a branch of a foldered chat never appeared, and message / image counts
+   * kept their old values until a reload. Scopes never loaded stay unloaded (D3).
+   */
+  const refreshSessions = useCallback(async () => {
+    await Promise.all([refreshRootSessions(), refreshLoadedFolderSessions(), refreshFolders()])
+  }, [refreshRootSessions, refreshLoadedFolderSessions, refreshFolders])
+
+  // Initial load: the root pages and the folder records (folders load on expand).
   useEffect(() => {
-    refreshSessions()
-  }, [refreshSessions])
+    refreshRootSessions()
+  }, [refreshRootSessions])
 
   useEffect(() => {
     refreshFolders()
@@ -440,6 +497,8 @@ export function useSession() {
 
   // Load initial messages when URL has ?session= parameter (page load only).
   // switchSession already loads data before navigating, so skip the re-fetch.
+  // A load that fails for any reason other than 404 is reported, never rendered as an
+  // empty chat (PRP-0174, UDR-0156 D8).
   useEffect(() => {
     if (!sessionParam) return
     if (switchedRef.current) {
@@ -447,22 +506,37 @@ export function useSession() {
       return
     }
     let cancelled = false
-    async function load() {
-      try {
-        const res = await fetch(`/api/sessions/${sessionParam}`)
-        if (!res.ok || cancelled) return
-        const data = await res.json()
-        const msgs = convertMafMessages(data.messages ?? [])
-        if (!cancelled) setInitialMessages(msgs)
-      } catch {
-        if (!cancelled) setInitialMessages([])
+    async function load(id: string) {
+      const result = await fetchSessionMessages(id)
+      if (cancelled) return
+      if (result.status === 'ok') {
+        setLoadFailedThreadId(null)
+        setInitialMessages(result.messages)
+      } else if (result.status === 'failed') {
+        setLoadFailedThreadId(id)
       }
     }
-    load()
+    load(sessionParam)
     return () => {
       cancelled = true
     }
   }, [sessionParam])
+
+  /** Retry loading the chat that could not be loaded (UDR-0156 D8). */
+  const retryLoadSession = useCallback(async () => {
+    const id = loadFailedThreadId
+    if (!id) return
+    setIsSwitching(true)
+    const result = await fetchSessionMessages(id)
+    if (result.status === 'ok') {
+      setInitialMessages(result.messages)
+      setLoadFailedThreadId(null)
+    } else if (result.status === 'not_found') {
+      setInitialMessages([])
+      setLoadFailedThreadId(null)
+    }
+    setIsSwitching(false)
+  }, [loadFailedThreadId])
 
   const registerAbort = useCallback((abortFn: () => void) => {
     abortRef.current = abortFn
@@ -471,6 +545,7 @@ export function useSession() {
   const createSession = useCallback(() => {
     abortRef.current?.()
     const newId = crypto.randomUUID()
+    setLoadFailedThreadId(null)
     setInitialMessages([])
     setThreadId(newId)
     navigate('/chat', { replace: true })
@@ -487,18 +562,9 @@ export function useSession() {
       abortRef.current?.()
       setIsSwitching(true)
 
-      try {
-        const res = await fetch(`/api/sessions/${targetThreadId}`)
-        if (res.ok) {
-          const data = await res.json()
-          const msgs = convertMafMessages(data.messages ?? [])
-          setInitialMessages(msgs)
-        } else {
-          setInitialMessages([])
-        }
-      } catch {
-        setInitialMessages([])
-      }
+      const result = await fetchSessionMessages(targetThreadId)
+      setInitialMessages(result.status === 'ok' ? result.messages : [])
+      setLoadFailedThreadId(result.status === 'failed' ? targetThreadId : null)
 
       setThreadId(targetThreadId)
       switchedRef.current = true
@@ -514,16 +580,19 @@ export function useSession() {
       try {
         const res = await fetch(`/api/sessions/${targetThreadId}`, { method: 'DELETE' })
         if (res.ok) {
+          const deleted = sessions.find((s) => s.thread_id === targetThreadId)
           setSessions((prev) => prev.filter((s) => s.thread_id !== targetThreadId))
           if (targetThreadId === threadId) {
             createSession()
           }
+          // The folder's chat count is server-derived (UDR-0156 D7).
+          if (deleted?.folder_id) void refreshFolders()
         }
       } catch {
         // ignore
       }
     },
-    [threadId, createSession],
+    [threadId, createSession, sessions, refreshFolders],
   )
 
   const forkSession = useCallback(
@@ -540,8 +609,11 @@ export function useSession() {
           console.error(`Branch failed: POST /api/sessions/${sourceThreadId}/fork returned ${res.status}`)
           return null
         }
-        const data = await res.json()
-        const newThreadId = data.new_thread_id as string
+        const data = (await res.json()) as { new_thread_id: string; folder_id?: string | null }
+        const newThreadId = data.new_thread_id
+        // A branch of a foldered chat lands in the same folder (PRP-0174, UDR-0156 D7):
+        // mark that folder as a loaded scope so the refresh below fetches its new row.
+        if (data.folder_id) loadedFolderIdsRef.current.add(data.folder_id)
         await switchSession(newThreadId)
         await refreshSessions()
         return newThreadId
@@ -934,6 +1006,9 @@ export function useSession() {
     folders,
     initialMessages,
     isSwitching,
+    /** The open chat's history could not be loaded (UDR-0156 D8). */
+    loadFailed: loadFailedThreadId !== null && loadFailedThreadId === threadId,
+    retryLoadSession,
     sidebarOpen,
     setSidebarOpen,
     isCreatingFolder,

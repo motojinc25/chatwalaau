@@ -1005,16 +1005,31 @@ def _arguments_to_dict(raw: Any) -> dict[str, Any]:
     return {}
 
 
-def _is_first_assistant_turn(messages: list[dict[str, Any]]) -> bool:
-    """True when the request carries no prior assistant message (CTR-0109).
+def _is_first_assistant_turn(thread_id: str) -> bool:
+    """True when the PERSISTED session holds no assistant message yet (CTR-0109).
 
-    The SPA sends the full message history on each turn, so an absent assistant
-    role marks the conversation's first turn -- the only turn that should trigger
-    Auto Session Title. This also makes the trigger fire at most once (later
-    turns carry an assistant message), so a failed first attempt is not retried
-    (UDR-0053 D5/D9).
+    The conversation's first turn is the only one that triggers Auto Session Title,
+    so a failed first attempt is not retried (UDR-0053 D5/D9).
+
+    PRP-0174 / UDR-0156 D5: decided from the session file, not from the request. The
+    SPA sends only the NEW user message (the history provider loads the rest), so a
+    request-based check was true on EVERY turn and dispatched a title task -- an LLM
+    call plus a session write -- after each one. Must be evaluated BEFORE the run:
+    the SPA saves this turn's reply only after the stream ends. An unreadable file
+    counts as "not first", so nothing is dispatched and the existing title stays.
     """
-    return not any(m.get("role") == "assistant" for m in messages)
+    from app.session.storage import read_session_json
+
+    try:
+        data = read_session_json(thread_id)
+    except OSError:
+        return False
+    if data is None:
+        return True
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return True
+    return not any(isinstance(m, dict) and m.get("role") == "assistant" for m in messages)
 
 
 def _first_user_text(messages: list[dict[str, Any]]) -> str:
@@ -1055,6 +1070,8 @@ async def _stream_with_reasoning(
     encoder = EventEncoder()
     thread_id = request_body.thread_id or _generate_id()
     run_id = request_body.run_id or _generate_id()
+    # Auto Session Title gate (CTR-0109, PRP-0174 D5): read once, before anything runs.
+    is_first_turn = _is_first_assistant_turn(thread_id)
 
     # Declarative Workflow run-target (PRP-0118, CTR-0181, UDR-0101 D5). When the AG-UI
     # request selects a workflow (state.workflow_id), stream the compiled workflow graph
@@ -1088,11 +1105,7 @@ async def _stream_with_reasoning(
         # otherwise a FIRST-turn workflow run leaves auto_title_pending set and the
         # sidebar spinner animates forever (v0.115.1). Generate a title from the
         # workflow's output when it produced text; otherwise clear the pending spinner.
-        if (
-            settings.session_title_mode == "llm"
-            and not _wf_temporary
-            and _is_first_assistant_turn(request_body.messages)
-        ):
+        if settings.session_title_mode == "llm" and not _wf_temporary and is_first_turn:
             _wf_assistant = str(_wf_result.get("assistant_text") or "")
             _wf_user = _first_user_text(request_body.messages)
             try:
@@ -1174,7 +1187,6 @@ async def _stream_with_reasoning(
     # task. If that task never runs for the FIRST turn -- a run error, a user abort /
     # client disconnect, or a first turn with no assistant text -- the spinner would
     # animate forever, so we dispatch a lightweight clear task in those cases.
-    is_first_turn = _is_first_assistant_turn(request_body.messages)
     title_dispatched = False
 
     def _dispatch_title_clear() -> None:

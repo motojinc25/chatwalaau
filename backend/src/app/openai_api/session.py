@@ -12,11 +12,11 @@ from typing import Any
 import uuid
 
 from app.session.storage import (
-    ensure_session_defaults,
+    create_session_json,
     iter_session_files,
     read_session_json,
     sessions_dir,
-    write_session_json,
+    update_session_json,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,11 +38,6 @@ def _read_session(thread_id: str) -> dict[str, Any] | None:
     except (json.JSONDecodeError, OSError):
         logger.warning("Failed to read session: %s", thread_id)
         return None
-
-
-def _write_session(thread_id: str, data: dict[str, Any]) -> None:
-    """Write session JSON."""
-    write_session_json(thread_id, data)
 
 
 def resolve_thread_id(previous_response_id: str) -> str | None:
@@ -87,7 +82,7 @@ def create_api_session(thread_id: str, response_id: str, title: str = "") -> dic
         "folder_id": None,
         "messages": [],
     }
-    _write_session(thread_id, data)
+    create_session_json(thread_id, data)
     logger.info("Created API session %s", thread_id)
     return data
 
@@ -99,33 +94,31 @@ def update_api_session(
     assistant_message: dict[str, Any],
 ) -> None:
     """Update an existing API session with new messages and response_id."""
-    data = _read_session(thread_id)
-    if data is None:
+
+    def append(data: dict[str, Any]) -> None:
+        messages = data.get("messages", [])
+        messages.append(user_message)
+        messages.append(assistant_message)
+        data["messages"] = messages
+        data["message_count"] = len(messages)
+        data["updated_at"] = datetime.now(UTC).isoformat()
+
+        # Update response chain
+        chain = data.get("response_chain", [])
+        chain.append(new_response_id)
+        data["response_chain"] = chain
+        data["latest_response_id"] = new_response_id
+
+        # Update title if empty
+        if not data.get("title"):
+            for msg in messages:
+                if msg.get("role") == "user":
+                    for c in msg.get("contents", []):
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            data["title"] = c.get("text", "")[:100]
+                            break
+                    break
+
+    # Serialised; an unreadable file raises and is never replaced (UDR-0156 D1/D2).
+    if update_session_json(thread_id, append) is None:
         logger.warning("Session not found for update: %s", thread_id)
-        return
-    data = ensure_session_defaults(data)
-
-    messages = data.get("messages", [])
-    messages.append(user_message)
-    messages.append(assistant_message)
-    data["messages"] = messages
-    data["message_count"] = len(messages)
-    data["updated_at"] = datetime.now(UTC).isoformat()
-
-    # Update response chain
-    chain = data.get("response_chain", [])
-    chain.append(new_response_id)
-    data["response_chain"] = chain
-    data["latest_response_id"] = new_response_id
-
-    # Update title if empty
-    if not data.get("title"):
-        for msg in messages:
-            if msg.get("role") == "user":
-                for c in msg.get("contents", []):
-                    if isinstance(c, dict) and c.get("type") == "text":
-                        data["title"] = c.get("text", "")[:100]
-                        break
-                break
-
-    _write_session(thread_id, data)

@@ -171,6 +171,27 @@ interface UseChatOptions {
    * signal is the user-initiated request itself (UDR-0088 D5).
    */
   onConnectionRecovered?: () => void
+  /**
+   * PRP-0174 / UDR-0156 D4: a change to the saved conversation (a reply, an edit, a
+   * delete) could not be persisted. Shown as an error; the message says what is lost.
+   */
+  onPersistError?: (message: string) => void
+}
+
+/**
+ * Delays between the attempts to save a finished turn (PRP-0174, UDR-0156 D4): three
+ * retries after the first attempt. Safe because the server stores a message id once.
+ */
+export const SAVE_RETRY_DELAYS_MS = [1000, 2000, 4000] as const
+
+/** A save that is being retried: which retry is running, out of how many. */
+export interface SaveRetryStatus {
+  attempt: number
+  total: number
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
 /**
@@ -278,6 +299,76 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     onNoticeRef.current = options?.onNotice
   }, [options?.onNotice])
+
+  const onPersistErrorRef = useRef(options?.onPersistError)
+  useEffect(() => {
+    onPersistErrorRef.current = options?.onPersistError
+  }, [options?.onPersistError])
+
+  // Save retry state (PRP-0174, UDR-0156 D4). While a save is being retried the chat is
+  // locked: the panel shows a centered indicator and every conversation action is refused,
+  // so nothing can be sent against a history the server does not have yet.
+  const [saveRetry, setSaveRetry] = useState<SaveRetryStatus | null>(null)
+  const savingRef = useRef(false)
+
+  /**
+   * Persist a finished turn. Retries a 5xx / network failure with SAVE_RETRY_DELAYS_MS;
+   * a 4xx is final. Always reports completion so the session list refreshes.
+   */
+  const persistTurn = useCallback(async (threadId: string, saveMessages: Record<string, unknown>[]) => {
+    const body = JSON.stringify({ messages: saveMessages })
+    let saved = false
+    try {
+      for (let attempt = 0; ; attempt++) {
+        let retryable = true
+        try {
+          const res = await fetch(`/api/sessions/${threadId}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+          })
+          if (res.ok) {
+            saved = true
+            break
+          }
+          retryable = res.status >= 500
+        } catch {
+          // network error -> retryable
+        }
+        if (!retryable || attempt >= SAVE_RETRY_DELAYS_MS.length) break
+        if (!savingRef.current) {
+          savingRef.current = true
+          // Nothing keeps focus under the lock (the composer would still take Enter).
+          if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+        }
+        setSaveRetry({ attempt: attempt + 1, total: SAVE_RETRY_DELAYS_MS.length })
+        await sleep(SAVE_RETRY_DELAYS_MS[attempt])
+      }
+    } finally {
+      savingRef.current = false
+      setSaveRetry(null)
+    }
+    if (!saved) {
+      onPersistErrorRef.current?.('This reply could not be saved. It will be missing after a reload.')
+    }
+    onStreamCompleteRef.current?.()
+  }, [])
+
+  /** Rewind the saved conversation; reports and returns false when the server refused. */
+  const truncateSaved = useCallback(async (idx: number): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),
+      })
+      if (res.ok || res.status === 404) return true // 404: nothing saved yet to rewind
+    } catch {
+      // fall through
+    }
+    onPersistErrorRef.current?.('The conversation could not be updated. Please try again.')
+    return false
+  }, [])
 
   const streamResponse = useCallback(
     async (
@@ -871,13 +962,10 @@ export function useChat(options?: UseChatOptions) {
               ? [userMsg]
               : [userMsg, assistantMsg]
           if (saveMessages.length > 0) {
-            fetch(`/api/sessions/${threadIdRef.current}/messages`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ messages: saveMessages }),
-            })
-              .then(() => onStreamCompleteRef.current?.())
-              .catch(() => {})
+            // Awaited (PRP-0174): the next turn's history is read from this save, so the
+            // chat stays busy -- and is locked while a failed save is retried -- until it
+            // is on disk or has definitively failed.
+            await persistTurn(threadIdRef.current, saveMessages)
           }
         }
       } catch (error) {
@@ -927,7 +1015,7 @@ export function useChat(options?: UseChatOptions) {
 
       return { committed, success: streamSuccess }
     },
-    [],
+    [persistTurn],
   )
 
   const messagesRef = useRef<ChatMessage[]>(options?.initialMessages ?? [])
@@ -955,6 +1043,9 @@ export function useChat(options?: UseChatOptions) {
       // Nothing to send -> report "committed" so the composer does not try to
       // restore an empty string. A workflow resume legitimately carries no text.
       if (!content.trim() && (!images || images.length === 0) && !opts?.prepare && !opts?.workflowResume) return true
+      // Locked while a failed save is retried (UDR-0156 D4): not committed, so the
+      // composer keeps the text.
+      if (savingRef.current) return false
       const { committed } = await streamResponse(content.trim(), messagesRef.current, {
         images,
         prepare: opts?.prepare,
@@ -980,6 +1071,7 @@ export function useChat(options?: UseChatOptions) {
    */
   const retryTurn = useCallback(
     async (messageId: string) => {
+      if (savingRef.current) return
       const current = messagesRef.current
       const idx = current.findIndex((m) => m.id === messageId)
       if (idx === -1) return
@@ -1002,6 +1094,7 @@ export function useChat(options?: UseChatOptions) {
 
   const editUserMessage = useCallback(
     async (messageId: string, newContent: string) => {
+      if (savingRef.current) return
       const current = messagesRef.current
       const idx = current.findIndex((m) => m.id === messageId)
       if (idx === -1) return
@@ -1016,12 +1109,9 @@ export function useChat(options?: UseChatOptions) {
       // streamResponse triggers POST /ag-ui/ -> before_run reads the file.
       // Otherwise the two requests race and before_run can load stale,
       // un-truncated history (duplicate / out-of-order turns), which the
-      // Azure OpenAI Responses API can reject mid-stream.
-      await fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),
-      }).catch(() => {})
+      // Azure OpenAI Responses API can reject mid-stream. A refused truncate
+      // stops the edit (PRP-0174): re-sending would append after stale history.
+      if (!(await truncateSaved(idx))) return
 
       await streamResponse(
         newContent,
@@ -1029,11 +1119,12 @@ export function useChat(options?: UseChatOptions) {
         originalImages && originalImages.length > 0 ? { images: originalImages } : undefined,
       )
     },
-    [streamResponse],
+    [streamResponse, truncateSaved],
   )
 
   const regenerateAssistantMessage = useCallback(
     async (messageId: string) => {
+      if (savingRef.current) return
       const current = messagesRef.current
       const idx = current.findIndex((m) => m.id === messageId)
       if (idx === -1) return
@@ -1057,21 +1148,18 @@ export function useChat(options?: UseChatOptions) {
       // Otherwise the two requests race and before_run can load stale,
       // un-truncated history (duplicate / out-of-order turns), which the
       // Azure OpenAI Responses API can reject mid-stream.
-      await fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),
-      }).catch(() => {})
+      if (!(await truncateSaved(idx))) return
 
       // Re-stream without adding a new user message (user message already in truncated)
       await streamResponse(userContent, truncated, { skipUserMessage: true })
     },
-    [streamResponse],
+    [streamResponse, truncateSaved],
   )
 
   /** Regenerate with a specific model (CTR-0071, PRP-0035). */
   const regenerateWithModel = useCallback(
     async (messageId: string, model: string) => {
+      if (savingRef.current) return
       const current = messagesRef.current
       const idx = current.findIndex((m) => m.id === messageId)
       if (idx === -1) return
@@ -1092,32 +1180,38 @@ export function useChat(options?: UseChatOptions) {
       // Otherwise the two requests race and before_run can load stale,
       // un-truncated history (duplicate / out-of-order turns), which the
       // Azure OpenAI Responses API can reject mid-stream.
-      await fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),
-      }).catch(() => {})
+      if (!(await truncateSaved(idx))) return
 
       await streamResponse(userContent, truncated, { skipUserMessage: true, modelOverride: model })
     },
-    [streamResponse],
+    [streamResponse, truncateSaved],
   )
 
   const deleteMessage = useCallback((messageId: string) => {
+    if (savingRef.current) return
     const current = messagesRef.current
     const idx = current.findIndex((m) => m.id === messageId)
     if (idx === -1) return
 
     setMessages((prev) => prev.filter((m) => m.id !== messageId))
 
+    // Not retried: a delete is addressed by index and is not idempotent. A refusal
+    // puts the message back so the screen matches what is saved (PRP-0174).
     fetch(`/api/sessions/${threadIdRef.current}/messages/${idx}`, {
       method: 'DELETE',
     })
-      .then(() => onStreamCompleteRef.current?.())
-      .catch(() => {})
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      })
+      .catch(() => {
+        setMessages(current)
+        onPersistErrorRef.current?.('The message could not be deleted. Please try again.')
+      })
+      .finally(() => onStreamCompleteRef.current?.())
   }, [])
 
   const editAssistantMessage = useCallback((messageId: string, newContent: string) => {
+    if (savingRef.current) return
     setMessages((prev) => prev.map((msg) => (msg.id === messageId ? { ...msg, content: newContent } : msg)))
 
     // Update backend session - we need to find the index and rewrite
@@ -1154,19 +1248,26 @@ export function useChat(options?: UseChatOptions) {
       assistantMsg.usage = original.usage
     }
 
-    fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
+    const threadId = threadIdRef.current
+    fetch(`/api/sessions/${threadId}/truncate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),
     })
-      .then(() =>
-        fetch(`/api/sessions/${threadIdRef.current}/messages`, {
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return fetch(`/api/sessions/${threadId}/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ messages: [assistantMsg] }),
-        }),
-      )
-      .catch(() => {})
+        })
+      })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      })
+      .catch(() => {
+        onPersistErrorRef.current?.('The edit could not be saved. It will be missing after a reload.')
+      })
   }, [])
 
   const stopGeneration = useCallback(() => {
@@ -1180,6 +1281,8 @@ export function useChat(options?: UseChatOptions) {
   return {
     messages,
     isLoading,
+    /** A failed save is being retried; the chat is locked meanwhile (UDR-0156 D4). */
+    saveRetry,
     sendMessage,
     retryTurn,
     stopGeneration,

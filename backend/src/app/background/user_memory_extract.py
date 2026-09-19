@@ -207,16 +207,17 @@ def _advance_cursor(thread_id: str, user_turns: int) -> None:
     deleted between dispatch and write. Best-effort: a lost update (racing the
     frontend save) only causes one extra pass later.
     """
-    from app.session.storage import read_session_json, write_session_json
+    from app.session.storage import update_session_json
 
-    data = read_session_json(thread_id)
-    if data is None:
-        return
-    if data.get("memory_extracted_index") == user_turns:
-        return
-    data["memory_extracted_index"] = user_turns
+    def advance(data: dict[str, Any]) -> bool:
+        if data.get("memory_extracted_index") == user_turns:
+            return False
+        data["memory_extracted_index"] = user_turns
+        return True
+
+    # Serialised with the other session writers (PRP-0174 / UDR-0156 D1).
     try:
-        write_session_json(thread_id, data)
+        update_session_json(thread_id, advance)
     except OSError:
         logger.warning("Could not persist memory cursor for session %s", thread_id, exc_info=True)
 

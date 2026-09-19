@@ -1,4 +1,4 @@
-import { Bot, Hammer, ImageIcon, Workflow as WorkflowIcon } from 'lucide-react'
+import { Bot, Hammer, ImageIcon, Loader2, Workflow as WorkflowIcon } from 'lucide-react'
 import { type DragEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
@@ -241,6 +241,7 @@ export function ChatPanel({
   const {
     messages,
     isLoading,
+    saveRetry,
     sendMessage,
     retryTurn,
     stopGeneration,
@@ -284,6 +285,8 @@ export function ChatPanel({
     // server is back. Reassure the user through the existing notification surface;
     // there is no proactive liveness monitor (UDR-0088 D5).
     onConnectionRecovered: useCallback(() => setNotification({ type: 'success', message: 'Connection recovered' }), []),
+    // PRP-0174 / UDR-0156 D4: a reply / edit / delete that could not be saved.
+    onPersistError: useCallback((message: string) => setNotification({ type: 'error', message }), []),
   })
 
   const { attachments, addFiles, attachPaintImage, removeAttachment, clearAttachments, getImageRefs, isUploading } =
@@ -725,10 +728,31 @@ export function ChatPanel({
         <MessageNavigator turns={messageNav.turns} activeId={messageNav.activeId} onJump={messageNav.scrollToTurn} />
       )}
 
+      {/* PRP-0174 / UDR-0156 D4: a failed save is being retried. The chat is locked
+          (covered, inert to pointer and keyboard) until the save lands or gives up. */}
+      {saveRetry && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          aria-live="assertive"
+          aria-label="Saving the reply"
+          className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
+          <div className="flex items-center gap-3 rounded-lg border bg-card px-5 py-4 text-sm shadow-lg">
+            <Loader2 className="h-5 w-5 animate-spin text-primary" aria-hidden="true" />
+            <div>
+              <p className="font-medium">Saving the reply...</p>
+              <p className="text-xs text-muted-foreground">
+                Retry {saveRetry.attempt} of {saveRetry.total}. Please wait.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {notification && (
         <div
           className={cn(
-            'absolute right-3 top-3 z-30 rounded-md px-4 py-2 text-sm shadow-md',
+            'absolute right-3 top-3 z-50 rounded-md px-4 py-2 text-sm shadow-md',
             notification.type === 'success' && 'bg-green-500/10 text-green-600 border border-green-500/20',
             notification.type === 'error' && 'bg-red-500/10 text-red-600 border border-red-500/20',
             notification.type === 'info' && 'bg-amber-500/10 text-amber-600 border border-amber-500/20',

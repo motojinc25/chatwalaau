@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 import logging
 from typing import Any
 
-from app.session.storage import ensure_session_defaults, read_session_json, write_session_json
+from app.session.storage import update_session_json
 
 logger = logging.getLogger(__name__)
 
@@ -45,26 +45,26 @@ def persist_turn(
     the SPA can render generated images from /api/uploads). Best-effort: a storage
     failure is logged and swallowed so it never breaks the Teams reply.
     """
-    try:
-        now = datetime.now(UTC).isoformat()
-        data = read_session_json(thread_id)
-        if data is None:
-            data = {
-                "thread_id": thread_id,
-                "title": (user_text or "").strip()[:100],
-                "source": "teams",
-                "teams_conversation_type": conversation_type,
-                "created_at": now,
-                "updated_at": now,
-                "message_count": 0,
-                "image_count": 0,
-                "folder_id": None,
-                "messages": [],
-            }
-        data = ensure_session_defaults(data)
+    now = datetime.now(UTC).isoformat()
+    user_clean = (user_text or "").strip()
+
+    def create() -> dict[str, Any]:
+        return {
+            "thread_id": thread_id,
+            "title": user_clean[:100],
+            "source": "teams",
+            "teams_conversation_type": conversation_type,
+            "created_at": now,
+            "updated_at": now,
+            "message_count": 0,
+            "image_count": 0,
+            "folder_id": None,
+            "messages": [],
+        }
+
+    def append(data: dict[str, Any]) -> None:
         data["source"] = "teams"  # ensure the badge survives older files
         messages = data.get("messages", [])
-        user_clean = (user_text or "").strip()
         if user_clean:
             messages.append(_text_message("user", user_clean))
         messages.append(_text_message("assistant", assistant_text or ""))
@@ -73,7 +73,11 @@ def persist_turn(
         data["updated_at"] = now
         if not data.get("title") and user_clean:
             data["title"] = user_clean[:100]
-        write_session_json(thread_id, data)
-        logger.info("Persisted Teams turn to session %s (%d messages)", thread_id, len(messages))
+
+    try:
+        # Serialised; an unreadable file raises and is never replaced (UDR-0156 D1/D2).
+        data = update_session_json(thread_id, append, create=create)
+        count = len(data["messages"]) if data else 0
+        logger.info("Persisted Teams turn to session %s (%d messages)", thread_id, count)
     except Exception:  # persistence must never break the reply
         logger.warning("Failed to persist Teams turn for %s", thread_id, exc_info=True)

@@ -34,7 +34,7 @@ import json
 import logging
 from pathlib import Path
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import Field
 
@@ -474,36 +474,36 @@ def session_user_profile_snapshot(thread_id: str) -> str | None:
       (frozen -- never re-read from USER.md mid-session, UDR-0051 D3);
     - else render the block from the live USER.md, best-effort persist it into
       the session JSON so it survives reload, and return it.
+
+    PRP-0174 / UDR-0156: a stored snapshot is recognised by KEY PRESENCE, so an
+    empty profile is frozen once instead of being rewritten on every run (D1); and
+    when the session file exists but cannot be read, the block is used for this run
+    only and NOTHING is written -- this path used to replace the unreadable file
+    with an empty record, erasing the conversation (D2).
     """
     if not settings.user_profile_enabled:
         return None
 
     # Lazy import avoids any import-order coupling between the agent and session
     # subpackages.
-    from app.session.storage import read_session_json, write_session_json
+    from app.session.storage import SessionUnavailableError, empty_session_record, update_session_json
+
+    captured: list[str] = []
+
+    def capture(data: dict[str, Any]) -> bool:
+        stored = data.get("user_profile_snapshot")
+        if isinstance(stored, str):
+            captured.append(stored)
+            return False
+        block = current_user_profile_block()
+        data["user_profile_snapshot"] = block
+        captured.append(block)
+        return True
 
     try:
-        data = read_session_json(thread_id)
-    except (OSError, ValueError, json.JSONDecodeError):
-        data = None
-
-    if data and data.get("user_profile_snapshot"):
-        return data["user_profile_snapshot"]
-
-    block = current_user_profile_block()
-    record = data or {
-        "thread_id": thread_id,
-        "title": "",
-        "created_at": datetime.now(UTC).isoformat(),
-        "updated_at": datetime.now(UTC).isoformat(),
-        "message_count": 0,
-        "image_count": 0,
-        "folder_id": None,
-        "messages": [],
-    }
-    record["user_profile_snapshot"] = block
-    try:
-        write_session_json(thread_id, record)
+        update_session_json(thread_id, capture, create=lambda: empty_session_record(thread_id))
+    except SessionUnavailableError:
+        logger.warning("Session %s is unreadable; user profile snapshot not persisted", thread_id, exc_info=True)
     except OSError:
         logger.warning("Could not persist user profile snapshot for session %s", thread_id, exc_info=True)
-    return block
+    return captured[-1] if captured else current_user_profile_block()

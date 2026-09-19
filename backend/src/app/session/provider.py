@@ -6,7 +6,6 @@ by the AG-UI thread_id (accessed via session.metadata["ag_ui_thread_id"]).
 """
 
 from collections.abc import Sequence
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -80,14 +79,12 @@ class FileHistoryProvider(HistoryProvider):
         return self._sessions_dir / f"{thread_id}.json"
 
     def _read_session_data(self, thread_id: str) -> dict[str, Any] | None:
-        path = self._session_path(thread_id)
-        if not path.exists():
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        # Through the storage reader so a transient sharing violation is retried and an
+        # unreadable file raises instead of passing for an empty one (UDR-0156 D2/D3).
+        # This provider never writes: saving is POST /api/sessions/{id}/messages.
+        from app.session.storage import read_session_file
 
-    def _write_session_data(self, thread_id: str, data: dict[str, Any]) -> None:
-        path = self._session_path(thread_id)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return read_session_file(self._session_path(thread_id))
 
     @staticmethod
     def _extract_title(messages: list[dict[str, Any]]) -> str:

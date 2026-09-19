@@ -43,10 +43,11 @@ import zipfile
 from app.core.config import settings
 from app.core.version import get_app_version
 from app.session.storage import (
+    create_session_json,
     ensure_session_defaults,
     read_session_json,
-    write_session_json,
 )
+from app.session.upload_refs import rewrite_upload_refs
 from app.upload.validation import ALLOWED_MEDIA_TYPES, guess_upload_content_type, max_upload_size_bytes
 
 logger = logging.getLogger(__name__)
@@ -217,7 +218,7 @@ def import_bundle(zip_bytes: bytes) -> dict[str, Any]:
                 (upload_root / basename).write_bytes(payload)
 
         new_data = _build_imported_session(session_data, old_thread_id, new_thread_id)
-        write_session_json(new_thread_id, new_data)
+        create_session_json(new_thread_id, new_data)
     except OSError as exc:
         # Roll back any uploads written for this id so nothing is left behind.
         shutil.rmtree(upload_root, ignore_errors=True)
@@ -383,7 +384,7 @@ def _build_imported_session(session_data: dict[str, Any], old_thread_id: str, ne
     # one. Both uploaded and generated images reference /api/uploads/<id>/<file>
     # (image_gen reuses the upload infra), so a single segment rewrite covers all.
     if old_thread_id:
-        data = _rewrite_upload_refs(data, old_thread_id, new_thread_id)
+        data = rewrite_upload_refs(data, old_thread_id, new_thread_id)
 
     now = datetime.now(UTC).isoformat()
     data["thread_id"] = new_thread_id
@@ -400,23 +401,6 @@ def _build_imported_session(session_data: dict[str, Any], old_thread_id: str, ne
     # Mark provenance so the chat is recognizably an import (non-breaking extra).
     data["source"] = "import"
     return data
-
-
-def _rewrite_upload_refs(data: dict[str, Any], old_id: str, new_id: str) -> dict[str, Any]:
-    """Recursively rewrite /api/uploads/<old_id>/ references to <new_id>."""
-    old_seg = f"/api/uploads/{old_id}/"
-    new_seg = f"/api/uploads/{new_id}/"
-
-    def walk(node: Any) -> Any:
-        if isinstance(node, str):
-            return node.replace(old_seg, new_seg)
-        if isinstance(node, list):
-            return [walk(item) for item in node]
-        if isinstance(node, dict):
-            return {key: walk(value) for key, value in node.items()}
-        return node
-
-    return walk(data)
 
 
 def _count_images(messages: list[dict[str, Any]]) -> int:
