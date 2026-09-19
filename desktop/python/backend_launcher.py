@@ -11,6 +11,11 @@ Protocol (JSON Lines):
   The token travels on this pipe and NEVER through the environment, so no process the
   backend spawns can inherit it (UDR-0151 D6).
 - stdin, later:       {"type":"shutdown"}  -- or EOF (the Desktop died): graceful stop.
+  The control pipe is PRIVATE (UDR-0157 D1/D2): it is moved to a non-inheritable handle
+  before anything is read, and the process's standard input becomes the null device, so
+  no child the backend starts can inherit it. On Windows a child touching a pipe on which
+  this process has a pending synchronous read blocks until that read completes -- i.e.
+  until the window closes (PRP-0175).
 - stdout events:      "@@CWDESKTOP@@ " + {"launchId", "type": bound|ready|startup-error|stopping|stopped, ...}
   Any other stdout/stderr output is ordinary backend logging.
 """
@@ -26,7 +31,7 @@ import socket
 import sys
 import threading
 import traceback
-from typing import Any
+from typing import Any, TextIO
 
 EVENT_PREFIX = "@@CWDESKTOP@@ "
 LOOPBACK = "127.0.0.1"
@@ -152,8 +157,62 @@ def bind_loopback(preferred: int) -> socket.socket:
     raise OSError("no loopback port could be bound")
 
 
-def read_start_command() -> dict[str, Any]:
-    line = sys.stdin.readline()
+# ---- control pipe isolation (UDR-0157 D1/D2) --------------------------------------------
+
+
+def _set_windows_std_input(fd: int) -> None:
+    """Point the Win32 STD_INPUT_HANDLE at ``fd``'s handle.
+
+    ``subprocess`` on Windows takes an unspecified stdin from GetStdHandle, not from
+    fd 0, so rebinding the C descriptor alone is not enough.
+    """
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetStdHandle.restype = wintypes.BOOL
+    kernel32.SetStdHandle.argtypes = [wintypes.DWORD, wintypes.HANDLE]
+    std_input_handle = wintypes.DWORD(-10 & 0xFFFFFFFF)
+    if not kernel32.SetStdHandle(std_input_handle, msvcrt.get_osfhandle(fd)):
+        raise OSError(ctypes.get_last_error(), "SetStdHandle failed")
+
+
+def isolate_control_stdin() -> TextIO:
+    """Move the control pipe to a private stream; make standard input the null device.
+
+    Returns the ONLY reader of the control pipe. ``os.dup`` creates a non-inheritable
+    descriptor (PEP 446), so no child process receives the pipe.
+    """
+    control = open(os.dup(0), encoding="utf-8")  # noqa: PTH123, SIM115 -- fd or device, lives for the process
+    nul_fd = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(nul_fd, 0)
+    os.close(nul_fd)
+    if sys.platform == "win32":
+        _set_windows_std_input(0)
+    sys.stdin = open(os.devnull, encoding="utf-8")  # noqa: PTH123, SIM115 -- fd or device, lives for the process
+    return control
+
+
+def load_profile_env(profile: Path) -> int:
+    """Load ``<profile>/.env`` into os.environ without overriding (UDR-0157 D4).
+
+    ``load_dotenv()`` in app.main searches from the installed package's folder, which
+    under the Desktop is site-packages, so it finds nothing. Returns the number of keys
+    added; names and values are never logged.
+    """
+    env_file = profile / ".env"
+    if not env_file.is_file():
+        return 0
+    from dotenv import load_dotenv
+
+    before = set(os.environ)
+    load_dotenv(env_file, override=False, encoding="utf-8")
+    return len(set(os.environ) - before)
+
+
+def read_start_command(control: TextIO) -> dict[str, Any]:
+    line = control.readline()
     if not line:
         fail("BACKEND_START_FAILED", "no start command on stdin")
     try:
@@ -166,10 +225,10 @@ def read_start_command() -> dict[str, Any]:
     return cmd
 
 
-def watch_stdin(loop: asyncio.AbstractEventLoop, server: Any) -> None:
+def watch_stdin(control: TextIO, loop: asyncio.AbstractEventLoop, server: Any) -> None:
     """Graceful stop on {"type":"shutdown"} or on EOF (the Desktop is gone)."""
     while True:
-        line = sys.stdin.readline()
+        line = control.readline()
         if not line:
             break
         with contextlib.suppress(json.JSONDecodeError):
@@ -179,7 +238,7 @@ def watch_stdin(loop: asyncio.AbstractEventLoop, server: Any) -> None:
     loop.call_soon_threadsafe(setattr, server, "should_exit", True)
 
 
-async def serve(cmd: dict[str, Any]) -> int:
+async def serve(cmd: dict[str, Any], control: TextIO) -> int:
     import uvicorn
 
     sock = bind_loopback(int(cmd["port"]))
@@ -191,6 +250,16 @@ async def serve(cmd: dict[str, Any]) -> int:
     os.environ["APP_HOST"] = LOOPBACK
     os.environ["APP_PORT"] = str(port)
     os.environ["MCP_APPS_SANDBOX_PORT"] = str(int(cmd["sandboxPort"]))
+
+    # After the Desktop-owned keys, before app.main: os.environ consumers (catalog ${VAR}
+    # references, environment-reading libraries) see the profile .env (UDR-0157 D4).
+    try:
+        added = load_profile_env(Path.cwd())
+    except Exception:
+        traceback.print_exc()
+        fail("BACKEND_START_FAILED", "loading the profile .env failed; see the backend log")
+        return 2
+    print(f"profile .env loaded: {added} keys added", file=sys.stderr, flush=True)
 
     try:
         from app.core.config import settings
@@ -212,7 +281,7 @@ async def serve(cmd: dict[str, Any]) -> int:
     config = uvicorn.Config(guarded, host=LOOPBACK, port=port, lifespan="on", log_level="info")
     server = uvicorn.Server(config)
     loop = asyncio.get_running_loop()
-    threading.Thread(target=watch_stdin, args=(loop, server), daemon=True, name="desktop-control").start()
+    threading.Thread(target=watch_stdin, args=(control, loop, server), daemon=True, name="desktop-control").start()
 
     try:
         from app.core.version import get_app_version
@@ -241,7 +310,12 @@ async def serve(cmd: dict[str, Any]) -> int:
 
 def main() -> None:
     global _launch_id
-    cmd = read_start_command()
+    try:
+        control = isolate_control_stdin()
+    except OSError as exc:
+        fail("BACKEND_START_FAILED", f"could not isolate the control pipe: {exc}")
+        return
+    cmd = read_start_command(control)
     _launch_id = str(cmd["launchId"])
     try:
         join_kill_on_close_job()
@@ -252,7 +326,7 @@ def main() -> None:
         fail("PERMISSION_DENIED", f"profile directory missing: {profile}")
     os.chdir(profile)
     try:
-        code = asyncio.run(serve(cmd))
+        code = asyncio.run(serve(cmd, control))
     except OSError as exc:
         fail("PORT_CONFLICT", str(exc))
         return

@@ -152,6 +152,8 @@ def _bash_execute_sync(command: str, cwd: str) -> str:
         result = subprocess.run(
             command,
             shell=True,
+            # No inherited stdin: a host may keep the backend's stdin open (UDR-0157 D3).
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             # Decode child output as UTF-8 with replacement instead of the process
             # locale default. On Windows that default is cp1252, which raises a

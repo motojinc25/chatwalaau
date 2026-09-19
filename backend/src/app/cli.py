@@ -25,6 +25,7 @@ def _check_azure_login() -> bool:
     try:
         result = subprocess.run(
             "az account show",
+            stdin=subprocess.DEVNULL,  # UDR-0157 D3
             capture_output=True,
             text=True,
             encoding="utf-8",

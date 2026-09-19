@@ -143,6 +143,8 @@ def _run_skill_script_sync(skill: Any, script: Any, args: dict[str, Any] | list[
     try:
         result = subprocess.run(
             cmd,
+            # No inherited stdin: a host may keep the backend's stdin open (UDR-0157 D3).
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",

@@ -176,6 +176,8 @@ class WorkspaceShellTool(LocalShellTool):
         try:
             completed = subprocess.run(
                 self._resolved_argv(command),
+                # No inherited stdin: a host may keep the backend's stdin open (UDR-0157 D3).
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 # Decode as UTF-8 with replacement rather than the process locale.
                 # On Windows that default is cp1252 and raises UnicodeDecodeError on

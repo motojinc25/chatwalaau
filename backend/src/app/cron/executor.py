@@ -106,6 +106,8 @@ def _run_sync(cmd: list[str], cwd: str, interpreter_label: str, timeout: int) ->
         proc = subprocess.run(
             cmd,
             cwd=cwd,
+            # No inherited stdin: a host may keep the backend's stdin open (UDR-0157 D3).
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             encoding="utf-8",
             errors="replace",
