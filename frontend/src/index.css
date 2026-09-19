@@ -83,6 +83,14 @@
 		--input: 0 0% 89.8%;
 		--ring: 0 0% 3.9%;
 		--radius: 0.5rem;
+		/* Chart series colours (shadcn Charts, PRP-0173 Usage Dashboard). The five
+		   token kinds keep these colours in every view (UDR-0155 D4):
+		   1 uncached input, 2 cache read, 3 cache write, 4 output, 5 reasoning. */
+		--chart-1: 217 91% 60%;
+		--chart-2: 173 58% 39%;
+		--chart-3: 43 96% 56%;
+		--chart-4: 262 52% 55%;
+		--chart-5: 330 81% 60%;
 		/* Width of the always-visible scrollbar (see scrollbar block below).
 		   The floating ChatInput insets its right edge by this value so the
 		   chat scrollbar is never covered by the input overlay (CTR-0092). */

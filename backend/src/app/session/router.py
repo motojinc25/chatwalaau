@@ -407,6 +407,43 @@ async def list_sessions(
     return sessions[start : start + max(0, limit)]
 
 
+# PRP-0173 (UDR-0155 D6): the Usage Dashboard names the chats its ledger rows point at,
+# and checks they still exist before opening one. Bounded so one request cannot ask
+# about the whole ledger.
+LOOKUP_MAX_IDS = 200
+
+
+@router.get("/lookup", dependencies=[Depends(verify_api_key)])
+async def lookup_sessions(ids: str = "") -> dict[str, Any]:
+    """Resolve thread ids to titles, and say which no longer exist (CTR-0015, PRP-0173).
+
+    Reads the session INDEX only -- no session file and no message is opened. Declared
+    before ``/{thread_id}`` so ``lookup`` is never taken for a thread id. A Temporary
+    Chat is not in the index, so its id is reported as missing (the ledger records
+    those with a null id anyway).
+    """
+    wanted = list(dict.fromkeys(part.strip() for part in ids.split(",") if part.strip()))
+    if len(wanted) > LOOKUP_MAX_IDS:
+        raise HTTPException(status_code=400, detail=f"at most {LOOKUP_MAX_IDS} ids per request")
+    if not wanted:
+        return {"found": {}, "missing": []}
+
+    index = {meta.get("thread_id"): meta for meta in await index_store.list_session_metadata()}
+    found: dict[str, dict[str, Any]] = {}
+    missing: list[str] = []
+    for thread_id in wanted:
+        meta = index.get(thread_id)
+        if meta is None:
+            missing.append(thread_id)
+            continue
+        found[thread_id] = {
+            "title": meta.get("title", ""),
+            "updated_at": meta.get("updated_at", ""),
+            "folder_id": meta.get("folder_id"),
+        }
+    return {"found": found, "missing": missing}
+
+
 @router.get("/search")
 async def search_sessions(q: str = "") -> list[dict[str, Any]]:
     """Search sessions by message content (full-text) and title.

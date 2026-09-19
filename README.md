@@ -95,7 +95,7 @@ See the [Configuration guide](https://www.chatwalaau.com/docs/getting-started/co
 | **Agents & workflows** | Define agents in YAML or a GUI. Compose workflows in a visual DAG editor with branching, loops, tool calls, human input, and live execution views. Run in chat or as background jobs. |
 | **Harness agents** | Run autonomous coding agents with planning, todo lists, session memory, workspace-scoped file and shell access, Skills, and context compaction. |
 | **Automation & Teams** | Schedule workspace scripts, chat with agents in Microsoft Teams, and summarize meeting transcripts through Microsoft Graph webhooks or on demand. |
-| **API & usage** | Connect OpenAI-SDK applications through `/v1/responses`. Track token usage by day, month, chat, model, lane, or workflow node; token counts are not billing totals. |
+| **API & usage** | Connect OpenAI-SDK applications through `/v1/responses`. See token usage on a built-in dashboard, by day, month, type, model, or chat, in your own time zone. Break down input, cache reads, cache writes, output, and reasoning, and export the raw records as CSV for BI. Token counts are not billing totals. |
 | **Settings & diagnostics** | Manage models and runtime settings in the app, with clear notices about when changes take effect. Inspect prompts and tool availability with opt-in Prompt Dump. |
 | **Local-first storage & access** | Keep sessions, vectors, and uploads on your machine. Use API-key authentication, optional web sign-in, session-protected images, and restart-persistent sign-in. |
 
@@ -127,7 +127,7 @@ Full guides are available in **English and 日本語**, with full-text search.
 - **Get started:** [Installation](https://www.chatwalaau.com/docs/getting-started/installation) · [Desktop app (Windows)](https://www.chatwalaau.com/docs/getting-started/desktop) · [Configuration](https://www.chatwalaau.com/docs/getting-started/configuration) · [Authentication](https://www.chatwalaau.com/docs/api-and-cli/authentication)
 - **Use the app:** [Chat & UI](https://www.chatwalaau.com/docs/features/chat-and-ui) · [Models & Reasoning](https://www.chatwalaau.com/docs/features/models-and-reasoning) · [Memory & Sessions](https://www.chatwalaau.com/docs/features/memory-and-sessions)
 - **Build agents:** [Tools & Skills](https://www.chatwalaau.com/docs/features/agents-and-tools) · [Knowledge & MCP](https://www.chatwalaau.com/docs/features/knowledge-and-mcp) · [Declarative Agents](https://www.chatwalaau.com/docs/features/declarative-agents)
-- **Integrate:** [OpenAI-compatible API](https://www.chatwalaau.com/docs/api-and-cli/openai-compatible-api) · [CLI](https://www.chatwalaau.com/docs/api-and-cli/cli) · [Usage Statistics](https://www.chatwalaau.com/docs/api-and-cli/usage-statistics)
+- **Integrate:** [OpenAI-compatible API](https://www.chatwalaau.com/docs/api-and-cli/openai-compatible-api) · [CLI](https://www.chatwalaau.com/docs/api-and-cli/cli) · [Usage Statistics](https://www.chatwalaau.com/docs/api-and-cli/usage-statistics) · [Token Usage Dashboard](https://www.chatwalaau.com/docs/features/token-usage-dashboard)
 - **Develop & deploy:** [Development Setup](https://www.chatwalaau.com/docs/deployment/development) · [Networking & Operations](https://www.chatwalaau.com/docs/deployment/operations)
 
 ## Development

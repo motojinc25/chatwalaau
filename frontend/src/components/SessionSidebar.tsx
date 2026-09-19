@@ -18,6 +18,7 @@ import { CSS } from '@dnd-kit/utilities'
 import {
   Archive,
   Brain,
+  ChartColumn,
   Check,
   ChevronDown,
   ChevronRight,
@@ -162,6 +163,8 @@ interface SessionSidebarProps {
   /** Ontology manager launcher (CTR-0173, PRP-0105): footer icon next to Declarative Agents. */
   ontologyAvailable?: boolean
   onOpenOntology?: () => void
+  /** Token Usage Dashboard launcher (CTR-0215, PRP-0173): footer icon right of Ontology; no probe, wide-only. */
+  onOpenUsage?: () => void
 }
 
 // Per-device open/closed state (UDR-0046 D4): the set of explicitly-expanded
@@ -863,6 +866,7 @@ export function SessionSidebar({
   onOpenMemory,
   ontologyAvailable,
   onOpenOntology,
+  onOpenUsage,
 }: SessionSidebarProps) {
   // Privacy Screen (CTR-0190, PRP-0124). Both delete confirmations quote the
   // title / folder name they are about to remove, so they are session-title render
@@ -1475,6 +1479,20 @@ export function SessionSidebar({
               aria-label="Ontology"
               title="Ontology (concept models)">
               <Network className="h-4 w-4" />
+            </Button>
+          )}
+          {/* Token Usage Dashboard launcher (CTR-0215, PRP-0173): immediately right of
+              Ontology; needs no probe, because the usage API is always mounted. Wide-only
+              like the other management launchers (UDR-0153 D3). */}
+          {onOpenUsage && show('sidebar.usage') && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-muted-foreground"
+              onClick={() => onOpenUsage()}
+              aria-label="Token usage"
+              title="Token usage (statistics)">
+              <ChartColumn className="h-4 w-4" />
             </Button>
           )}
           {/* Declarative Agents & Workflows management (CTR-0144 v3, PRP-0094 / PRP-0118):

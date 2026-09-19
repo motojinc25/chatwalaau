@@ -44,6 +44,12 @@ const OntologyManager = lazyWithReload(() =>
   import('@/components/OntologyManager').then((m) => ({ default: m.OntologyManager })),
 )
 
+// Token Usage Dashboard (CTR-0215, PRP-0173). Lazy-loaded because it pulls in
+// recharts; opened from the sidebar-footer ChartColumn icon next to Ontology.
+const UsageDashboard = lazyWithReload(() =>
+  import('@/components/UsageDashboard').then((m) => ({ default: m.UsageDashboard })),
+)
+
 export function ChatPage() {
   const navigate = useNavigate()
   const {
@@ -146,6 +152,10 @@ export function ChatPage() {
   const ontologyAvailable = useOntologyAvailable()
   const [ontologyOpen, setOntologyOpen] = useState(false)
 
+  // Token Usage Dashboard (CTR-0215, PRP-0173). Always available: the usage API is
+  // always mounted, so the launcher needs no probe.
+  const [usageOpen, setUsageOpen] = useState(false)
+
   const handleStreamComplete = useCallback(() => {
     // Temporary chats are never listed and never exposed in the URL (UDR-0052
     // D5): skip the history refresh + ?session= navigation entirely.
@@ -225,6 +235,7 @@ export function ChatPage() {
       onOpenMemory={() => setMemoryOpen(true)}
       ontologyAvailable={ontologyAvailable}
       onOpenOntology={() => setOntologyOpen(true)}
+      onOpenUsage={() => setUsageOpen(true)}
     />
   )
 
@@ -278,6 +289,13 @@ export function ChatPage() {
           {ontologyAvailable && ontologyOpen && (
             <Suspense fallback={null}>
               <OntologyManager open={ontologyOpen} onOpenChange={setOntologyOpen} />
+            </Suspense>
+          )}
+
+          {usageOpen && (
+            <Suspense fallback={null}>
+              {/* The dashboard checks the chat still exists before calling this (UDR-0155 D6). */}
+              <UsageDashboard open={usageOpen} onOpenChange={setUsageOpen} onOpenChat={handleSwitch} />
             </Suspense>
           )}
 
