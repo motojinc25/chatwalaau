@@ -864,6 +864,27 @@ export function useChat(options?: UseChatOptions) {
                       ),
                     )
                   }
+                  if (event.name === 'citation_markers_stripped' && event.value) {
+                    // CTR-0218 / UDR-0160 D3: the backend removed the model's private
+                    // citation markup from this answer. Kept on the message for the note
+                    // under it; deliberately NOT persisted (D4).
+                    const stripped = event.value as Record<string, unknown>
+                    setMessages((prev) =>
+                      prev.map((msg) =>
+                        msg.id === assistantId
+                          ? {
+                              ...msg,
+                              citationMarkersStripped: {
+                                count: Number(stripped.count ?? 0),
+                                markers: Array.isArray(stripped.markers) ? (stripped.markers as string[]) : [],
+                                annotationsPresent: stripped.annotations_present === true,
+                                runId: String(stripped.run_id ?? ''),
+                              },
+                            }
+                          : msg,
+                      ),
+                    )
+                  }
                   if (event.name === 'mcp_app' && event.value) {
                     // MCP Apps: associate UI metadata with the current assistant message (CTR-0068)
                     const mcpAppEvent = event.value as unknown as McpAppEvent

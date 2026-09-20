@@ -799,6 +799,16 @@ function ChatMessageItemImpl({
                 {message.runTarget}
               </span>
             )}
+            {/* CTR-0218 / UDR-0160 D3: say what was removed, so an affected turn can be
+                recognised and matched to its log line by run id. Render-time only (D4). */}
+            {!isUser && message.citationMarkersStripped && (
+              <span
+                className="ml-1 text-[11px] text-muted-foreground/60"
+                title={`The model wrote its private citation markup instead of links. It was removed from this answer. Run ${message.citationMarkersStripped.runId} -- see the backend log (annotations ${message.citationMarkersStripped.annotationsPresent ? 'present' : 'absent'}).`}>
+                Citation markers removed: {message.citationMarkersStripped.markers.join(', ') || '-'} (
+                {message.citationMarkersStripped.count})
+              </span>
+            )}
             {!isUser && message.model && (
               <span className="ml-1 text-[11px] text-muted-foreground/50">{message.model}</span>
             )}

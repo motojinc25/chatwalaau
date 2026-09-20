@@ -186,6 +186,10 @@ export interface ChatMessage {
   mcpApp?: McpAppEvent
   /** Model that generated this assistant message (CTR-0071, PRP-0035) */
   model?: string
+  /** Citation markup the backend removed from this turn (CTR-0218, PRP-0178, UDR-0160
+   * D3/D4). RENDER-TIME only: it comes from the `citation_markers_stripped` CUSTOM event
+   * and is never persisted, so a reloaded chat shows the clean answer without the note. */
+  citationMarkersStripped?: { count: number; markers: string[]; annotationsPresent: boolean; runId: string }
   /** Run-target that produced this turn: a workflow name or a non-default agent name
    * (CTR-0185, PRP-0118). Shown in the action bar so the operator sees which agent /
    * workflow answered. */

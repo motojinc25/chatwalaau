@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Any
 
 from agent_framework import add_usage_details
 
+from app.agui.sanitize import sanitize_text
+
 if TYPE_CHECKING:
     from app.teams.message import TeamsMessage
 
@@ -174,7 +176,16 @@ async def run_turn(
     generated_image_uris: list[str] = []
 
     def _finish() -> str:
-        final_text = "".join(assistant_text_parts).strip()
+        # Model-private citation markup never reaches a reply (CTR-0218, UDR-0160 D1).
+        # This channel has no surface for the report, so the removal is logged only.
+        cleaned, stripped = sanitize_text("".join(assistant_text_parts))
+        if stripped:
+            logger.warning(
+                "Removed model-private citation markup from a Teams reply: count=%d markers=%s",
+                len(stripped),
+                stripped[:10],
+            )
+        final_text = cleaned.strip()
         # Append each generated image as Markdown so the persisted message renders the
         # image on the Web SPA, and the Teams adapter can extract + attach the bytes.
         for uri in generated_image_uris:

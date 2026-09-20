@@ -77,6 +77,7 @@ from app.agent.prompt_dump import dump_prompt
 from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_path
 from app.agent.user_memory import session_user_profile_snapshot
 from app.agui.agent_registry import AgentRegistry
+from app.agui.sanitize import TextSanitizer
 from app.agui.token_usage import context_base_tokens, turn_summary
 from app.auth import verify_api_key
 from app.core import provider_errors
@@ -88,6 +89,9 @@ from app.providers.structured import resolve_request as resolve_structured_reque
 from app.providers.structured import soft_validate
 
 logger = logging.getLogger(__name__)
+
+# How many marker payloads travel in the report (UDR-0160 D3); the count is exact.
+CITATION_MARKER_REPORT_LIMIT = 10
 
 # ag-ui-protocol changed ReasoningMessageStartEvent.role from
 # Literal["assistant"] (<= 0.1.13) to Literal["reasoning"] (newer releases).
@@ -1180,6 +1184,15 @@ async def _stream_with_reasoning(
     # the (frontend-saved) session file. Pre-initialized here so they are always
     # bound on the normal-completion path below.
     assistant_text_parts: list[str] = []
+    # Model-private citation markup (CTR-0218, PRP-0178, UDR-0160 D1/D2). A GPT-family
+    # model writes U+E200 cite U+E202 turn0search0 U+E201 instead of the Markdown link the
+    # prompt asks for; the characters have no glyph, so the reader sees boxes around
+    # "citeturn0search0". The filter is stateful because a marker is regularly split
+    # across deltas. `annotations_seen` records whether the turn ALSO carried real
+    # url_citation annotations -- the number that decides whether resolving them into
+    # links is worth building (D5).
+    text_sanitizer = TextSanitizer()
+    annotations_seen = False
     temporary = False
     effective_model = ""
     # Auto Session Title spinner reconciliation (UDR-0053 D17). `auto_title_pending`
@@ -1666,6 +1679,17 @@ async def _stream_with_reasoning(
                         # PRP-0069 follow-up: capture each delta for iter N+1.
                         iter_accumulator.observe_text(content)
                         text = getattr(content, "text", None)
+                        if not text:
+                            # MAF delivers url_citation annotations as a text content with
+                            # an EMPTY text. Stage 1 does not consume them (UDR-0160 D5);
+                            # it only records that they arrived.
+                            if getattr(content, "annotations", None):
+                                annotations_seen = True
+                            continue
+                        # UDR-0160 D1/D2: the markup never leaves the backend, so the SPA,
+                        # the session file, the search index, the export and the title /
+                        # memory tasks are all clean without touching their own code.
+                        text, _stripped = text_sanitizer.feed(text)
                         if not text:
                             continue
                         # Accumulate visible assistant text for Auto Session
@@ -2344,11 +2368,59 @@ async def _stream_with_reasoning(
                 message_id=reasoning_msg_id,
             )
         )
+    # Release anything the sanitiser held for a closer that never arrived (UDR-0160 D2).
+    tail, _ = text_sanitizer.flush()
+    if tail:
+        assistant_text_parts.append(tail)
+        if msg_id is None:
+            msg_id = _generate_id()
+            yield encoder.encode(
+                TextMessageStartEvent(
+                    type=EventType.TEXT_MESSAGE_START,
+                    message_id=msg_id,
+                    role="assistant",
+                )
+            )
+        yield encoder.encode(
+            TextMessageContentEvent(
+                type=EventType.TEXT_MESSAGE_CONTENT,
+                message_id=msg_id,
+                delta=tail,
+            )
+        )
     if msg_id is not None:
         yield encoder.encode(
             TextMessageEndEvent(
                 type=EventType.TEXT_MESSAGE_END,
                 message_id=msg_id,
+            )
+        )
+
+    # UDR-0160 D3: a removal is reported, never silent -- one additive CUSTOM event for
+    # the SPA's note, and one log line carrying the same run_id so an operator who sees
+    # the note can find the entry (and vice versa). Nothing is emitted for a clean turn.
+    if text_sanitizer.removed:
+        markers = text_sanitizer.removed[:CITATION_MARKER_REPORT_LIMIT]
+        logger.warning(
+            "Removed model-private citation markup: thread=%s run=%s model=%s count=%d "
+            "markers=%s annotations_present=%s",
+            thread_id,
+            run_id,
+            effective_model,
+            len(text_sanitizer.removed),
+            markers,
+            annotations_seen,
+        )
+        yield encoder.encode(
+            CustomEvent(
+                type=EventType.CUSTOM,
+                name="citation_markers_stripped",
+                value={
+                    "count": len(text_sanitizer.removed),
+                    "markers": markers,
+                    "annotations_present": annotations_seen,
+                    "run_id": run_id,
+                },
             )
         )
 
