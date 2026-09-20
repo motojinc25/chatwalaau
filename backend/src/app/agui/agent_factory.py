@@ -75,14 +75,24 @@ def _workspace_file_reference_note() -> str:
     registered. The absolute workspace path is disclosed because a skill script runs
     in its OWN directory (UDR-0145 D4) and needs an absolute output path to deliver
     into the workspace; the same model already runs bash_execute inside it.
+
+    PRP-0177 / UDR-0159 D1 scopes the rule to what the agent PRODUCES with these tools.
+    A generated image is NOT that: generate_image saves it under UPLOAD_DIR and returns
+    /api/uploads/..., which the chat renders itself (CTR-0049 / CTR-0051), so this text
+    used to make the model shell-copy an already delivered image into the workspace and
+    hand back a workspace: link. Everything PRP-0166 promised is kept verbatim in
+    effect: the form, the banned targets, and the skill-script absolute output path.
     """
     raw = (settings.coding_workspace_dir or "").strip()
     workspace = str(Path(raw).resolve()) if raw else "the workspace directory"
     return (
-        "When you create a file for the user, save it inside the workspace and reference it in your "
-        "answer as a Markdown link whose target is workspace:<path relative to the workspace>, for example "
-        "[hello_world.pdf](workspace:output/pdf/hello_world.pdf). Use this form for images too: "
-        "![chart](workspace:output/chart.png). Never use sandbox:, file:, or an absolute path as a link "
+        "When you create a file for the user WITH THE CODING OR SKILL TOOLS, save it inside the workspace "
+        "and reference it in your answer as a Markdown link whose target is workspace:<path relative to the "
+        "workspace>, for example [hello_world.pdf](workspace:output/pdf/hello_world.pdf). The same applies to "
+        "an image YOU produce that way, for example a chart your code writes: "
+        "![chart](workspace:output/chart.png). It does NOT apply to an image returned by the "
+        "image-generation tools: that image is already saved and shown to the user, so never copy it into "
+        "the workspace and never link it. Never use sandbox:, file:, or an absolute path as a link "
         "target; the user cannot open those. run_skill_script runs a skill's script inside the skill's own "
         "directory, so a relative output path there does NOT land in the workspace. When a skill script "
         f"writes a file for the user, pass it an absolute output path under the workspace: {workspace}"
@@ -273,7 +283,12 @@ def _build_tools_and_instructions(
                     "You can generate images from text descriptions using generate_image. "
                     "You can also edit existing images using edit_image by providing the filename "
                     "of an uploaded or previously generated image. "
-                    "After generating or editing an image, describe what was created.",
+                    "After generating or editing an image, describe what was created. "
+                    # UDR-0159 D2: a tool whose result the chat renders says so itself,
+                    # or another tool-guide's file rule takes over (PRP-0177).
+                    "The image is already saved and shown to the user in the chat: do not save it again, "
+                    "do not copy it into the workspace, do not offer a download link, and do not run shell "
+                    "or file commands for it.",
                 )
             )
             logger.info(

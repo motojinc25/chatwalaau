@@ -336,6 +336,16 @@ def _image_error(action: str, exc: Exception) -> str:
     )
 
 
+# PRP-0177 / UDR-0159 D3: the success path says delivery is DONE, mirroring the failure
+# path's guidance above. The image is written under UPLOAD_DIR and rendered by the chat
+# (CTR-0051), so copying it into the coding workspace and linking it there (which the
+# CTR-0032 tool-guide's file rule used to invite) is wasted work.
+DELIVERED_GUIDANCE = (
+    "The image is already saved and shown to the user in the chat. Do not copy it into the "
+    "workspace, do not offer a download link, and do not run shell commands for it."
+)
+
+
 def _save_image(thread_id: str, image_b64: str, output_format: str) -> tuple[str, str]:
     """Decode base64 image data and save to the upload directory.
 
@@ -456,6 +466,7 @@ def _generate_image_sync(
         "count": len(images),
         "tool": "generate_image",
         "parameters": used,
+        "guidance": DELIVERED_GUIDANCE,
     }
     if warnings:
         payload["warnings"] = warnings
@@ -551,6 +562,7 @@ def _edit_image_sync(
         "tool": "edit_image",
         "source_image": image_filename,
         "parameters": used,
+        "guidance": DELIVERED_GUIDANCE,
     }
     if warnings:
         payload["warnings"] = warnings

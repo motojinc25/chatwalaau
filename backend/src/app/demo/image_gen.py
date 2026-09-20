@@ -22,6 +22,7 @@ from typing import Any
 import uuid
 
 from app.core.config import settings
+from app.image_gen.tools import DELIVERED_GUIDANCE
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,9 @@ def _build_payload(thread_id: str, prompt: str, n: int, *, tool: str, generate: 
             "count": len(images),
             "tool": tool,
             "demo": True,
+            # Same delivery statement as the live tools (PRP-0177 / UDR-0159 D3), so a
+            # demo deployment teaches the model the same thing.
+            "guidance": DELIVERED_GUIDANCE,
         }
     )
 
