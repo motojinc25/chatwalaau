@@ -14,15 +14,10 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { type HarnessEntry, type HarnessPolicy, useHarnessAuthoring } from '@/hooks/useHarnessAuthoring'
+import { ACTIVE_AGENT_CHANGED_EVENT, type PromptAgentEntry, useRunTargets } from '@/hooks/useRunTargets'
 import { useWorkflowAuthoring, type WorkflowEntry } from '@/hooks/useWorkflowAuthoring'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
-import {
-  getHarnessRunTarget,
-  getWorkflowRunTarget,
-  RUN_TARGET_CHANGED_EVENT,
-  setHarnessRunTarget,
-  setWorkflowRunTarget,
-} from '@/lib/runTarget'
+import { getHarnessRunTarget, getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
 
 // Heavy editors (React Flow + monaco) are lazy so they stay out of the main bundle
@@ -52,24 +47,13 @@ const HarnessAgentEditor = lazyWithReload(() =>
  * full-screen screen.
  */
 
-interface AgentEntry {
-  id: string
-  name: string
-  display_name?: string
-  description?: string
-  group_path: string[]
-  source: 'core' | 'custom'
-  active: boolean
-  loaded: boolean
-  error?: string | null
-  warnings?: string[]
-  editable?: boolean
-  tool_allowlist?: string[] | null
-}
+/** The Prompt-agent inventory row; its shape is owned by the shared switch module. */
+type AgentEntry = PromptAgentEntry
 
 /** Dispatched on the window after the active declarative agent changes, so the
- * model selector / options panels re-read /api/model (CTR-0144, PRP-0094). */
-export const ACTIVE_AGENT_CHANGED_EVENT = 'chatwalaau:active-agent-changed'
+ * model selector / options panels re-read /api/model (CTR-0144, PRP-0094). Defined by
+ * the shared switch module (CTR-0217) and re-exported here for its existing importers. */
+export { ACTIVE_AGENT_CHANGED_EVENT }
 
 /** Dispatched on the window to REQUEST that the Declarative Agents & Workflows modal
  * open (CTR-0144, PRP-0128, UDR-0111 D5/D6). Dispatchers: the chat composer's run-target
@@ -124,6 +108,8 @@ function agentGroup(entry: AgentEntry): string {
 export function DeclarativeAgentManager() {
   const wfApi = useWorkflowAuthoring()
   const hApi = useHarnessAuthoring()
+  // One module owns "what can run" and "apply a choice" (CTR-0217, UDR-0158 D2).
+  const runTargets = useRunTargets()
   const [available, setAvailable] = useState(false)
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -180,20 +166,16 @@ export function DeclarativeAgentManager() {
     setLoading(true)
     setError(null)
     try {
-      const [aRes, wRes, hRes] = await Promise.all([
-        fetch('/api/agents').then((r) => (r.ok ? r.json() : { agents: [] })),
-        fetch('/api/workflows').then((r) => (r.ok ? r.json() : { workflows: [] })),
-        hApi.list(),
-      ])
-      adoptAgents(aRes)
-      setWorkflows((wRes.workflows ?? []) as WorkflowEntry[])
-      setHarnesses(hRes)
+      const inv = await runTargets.loadInventory()
+      adoptAgents({ active: inv.activeId, agents: inv.prompts })
+      setWorkflows(inv.workflows)
+      setHarnesses(inv.harnesses)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load')
     } finally {
       setLoading(false)
     }
-  }, [adoptAgents, hApi])
+  }, [adoptAgents, runTargets])
 
   const openModal = useCallback(() => {
     setOpen(true)
@@ -264,62 +246,25 @@ export function DeclarativeAgentManager() {
     setBusy(true)
     setError(null)
     try {
-      if (selected.kind === 'Prompt') {
-        const res = await fetch('/api/agents/active', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: selected.id }),
-        })
-        if (!res.ok) {
-          const d = await res.json().catch(() => null)
-          throw new Error(d?.detail?.message || d?.detail?.error || 'Failed to activate agent')
-        }
-        adoptAgents(await res.json())
-        // Activating a Prompt agent makes it the effective run-target -- clear any
-        // workflow / harness run-target so chat runs the agent (UDR-0101 D5, UDR-0119 D3).
-        setWorkflowRunTarget(null)
-        setWfTarget(null)
-        setHarnessRunTarget(null)
-        setHTarget(null)
-        window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
-      } else if (selected.kind === 'Harness') {
-        // Re-validate the STORED harness agent (map + factory preflight) before it
-        // becomes the run-target, so a non-runnable spec can never be selected
-        // (UDR-0119 D8; the workflow precedent).
-        const result = await hApi.validateStored(selected.id)
-        if (!result.valid) throw new Error(result.error || 'Harness agent failed validation')
-        if (result.warnings.length) throw new Error(`Resolve the warnings first: ${result.warnings[0]}`)
-        const h = harnesses.find((x) => x.id === selected.id)
-        if (h && h.runnable === false) throw new Error('This harness agent is not runnable (demo mode).')
-        const target = { id: selected.id, name: h?.name ?? selected.id }
-        // The store clears any workflow run-target (one effective axis, UDR-0119 D3).
-        setHarnessRunTarget(target)
-        setHTarget(target)
-        setWfTarget(getWorkflowRunTarget())
-      } else {
-        // Compile/validate the STORED workflow (the "build" step) before it goes live,
-        // so an unrunnable workflow can never become the run-target.
-        const res = await fetch(`/api/workflows/${encodeURI(selected.id)}/validate`, { method: 'POST' })
-        if (!res.ok) {
-          const d = await res.json().catch(() => null)
-          throw new Error(d?.detail?.message || d?.detail?.error || 'Workflow failed to compile')
-        }
-        const result = (await res.json()) as { valid: boolean; error: string | null; warnings: string[] }
-        if (!result.valid) throw new Error(result.error || 'Workflow failed to compile')
-        if (result.warnings.length) throw new Error(`Resolve the warnings first: ${result.warnings[0]}`)
-        const w = workflows.find((x) => x.id === selected.id)
-        const target = { id: selected.id, name: w?.name ?? selected.id }
-        // The store clears any harness run-target (one effective axis, UDR-0119 D3).
-        setWorkflowRunTarget(target)
-        setWfTarget(target)
-        setHTarget(null)
-      }
+      const kind = selected.kind === 'Prompt' ? 'prompt' : selected.kind === 'Harness' ? 'harness' : 'workflow'
+      const name =
+        kind === 'harness'
+          ? (harnesses.find((x) => x.id === selected.id)?.name ?? selected.id)
+          : kind === 'workflow'
+            ? (workflows.find((x) => x.id === selected.id)?.name ?? selected.id)
+            : undefined
+      const result = await runTargets.applyChoice({ kind, id: selected.id, name })
+      if (result.agents) adoptAgents({ active: result.activeId, agents: result.agents })
+      // The store is the source of truth for both client-side axes; re-read it rather
+      // than mirroring what was just written (the hook clears the other axis).
+      setWfTarget(getWorkflowRunTarget())
+      setHTarget(getHarnessRunTarget())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to activate')
     } finally {
       setBusy(false)
     }
-  }, [selected, adoptAgents, workflows, harnesses, hApi])
+  }, [selected, adoptAgents, workflows, harnesses, runTargets])
 
   const doReload = useCallback(async () => {
     setConfirmMode(null)
@@ -353,10 +298,10 @@ export function DeclarativeAgentManager() {
         window.dispatchEvent(new Event(ACTIVE_AGENT_CHANGED_EVENT))
       } else if (selected.kind === 'Harness') {
         await hApi.remove(selected.id)
-        if (hTarget?.id === selected.id) setHarnessRunTarget(null)
+        if (hTarget?.id === selected.id) runTargets.clearRunTarget('harness')
       } else {
         await wfApi.remove(selected.id)
-        if (wfTarget?.id === selected.id) setWorkflowRunTarget(null)
+        if (wfTarget?.id === selected.id) runTargets.clearRunTarget('workflow')
       }
       setSelected(null)
       await fetchInventory()
@@ -365,7 +310,7 @@ export function DeclarativeAgentManager() {
     } finally {
       setBusy(false)
     }
-  }, [selected, adoptAgents, wfApi, wfTarget, hApi, hTarget, fetchInventory])
+  }, [selected, adoptAgents, wfApi, wfTarget, hApi, hTarget, fetchInventory, runTargets])
 
   const openAgentEditor = useCallback((id: string | null) => {
     setCreateMenu(false)

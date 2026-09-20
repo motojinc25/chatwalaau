@@ -6,6 +6,7 @@ import { CronManager } from '@/components/CronManager'
 import { DeclarativeAgentManager } from '@/components/DeclarativeAgentManager'
 import { PipelineManager } from '@/components/PipelineManager'
 import { PrivacyScreenToggle } from '@/components/PrivacyScreenToggle'
+import { RunTargetSheet } from '@/components/RunTargetSheet'
 import { SessionSidebar } from '@/components/SessionSidebar'
 import { TemporaryChatToggle } from '@/components/TemporaryChatToggle'
 import { Button } from '@/components/ui/button'
@@ -383,6 +384,10 @@ export function ChatPage() {
           (PRP-0134 / UDR-0115 D1/D3). Renders null until it is opened or its
           availability probe succeeds, so an unconfigured deployment costs nothing. */}
           <DeclarativeAgentManager />
+          {/* The narrow switching surface (CTR-0216). Mounted beside the manager, outside
+            every conditional, so no layout state can unmount its open listener
+            (UDR-0115 D1, UDR-0158 D7). */}
+          <RunTargetSheet />
         </div>
       </WorkspaceLinkProvider>
     </ChatSurfaceTierContext.Provider>

@@ -93,7 +93,9 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   'toolbar.modelOptions': 'all',
   'toolbar.contextWindow': 'all',
   'toolbar.runTargetLabel': 'all',
-  'toolbar.runTargetAction': 'wide-only',
+  // PRP-0176 / UDR-0158 D1: the action exists on both tiers; only its DESTINATION
+  // differs (the wide manager modal, or the narrow run-target picker, CTR-0216).
+  'toolbar.runTargetAction': 'all',
   'toolbar.structuredOutput': 'wide-only',
   'toolbar.imageOutput': 'wide-only',
   'toolbar.mcpTools': 'wide-only',

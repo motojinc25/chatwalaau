@@ -12,6 +12,7 @@ import { MessageNavigator } from '@/components/MessageNavigator'
 import { MessageStepButton } from '@/components/MessageStepButton'
 import { ModelOptionsSelector } from '@/components/ModelOptionsSelector'
 import { ModelSelector, type ModelSelectorHandle } from '@/components/ModelSelector'
+import { OPEN_RUN_TARGET_PICKER_EVENT } from '@/components/RunTargetSheet'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
 import { SkillsManager } from '@/components/SkillsManager'
 import { StructuredOutputControl, type StructuredSelection } from '@/components/StructuredOutputControl'
@@ -133,16 +134,30 @@ export function ChatPanel({
   const hideModelControls =
     Boolean(selectedWorkflowId) || Boolean(selectedHarnessId) || (activeAgent.id !== '' && activeAgent.id !== 'core')
 
-  // UDR-0111 D5/D6: the run-target name is the entry point to its manager. A real
-  // button (keyboard-reachable) that dispatches the open request on the existing
-  // window seam -- the modal lives in the sidebar footer and takes no props.
-  const openDeclarativeManager = useCallback(() => {
-    window.dispatchEvent(new Event(OPEN_DECLARATIVE_MANAGER_EVENT))
-  }, [])
   const runTargetName = selectedWorkflowId ? wfTarget?.name : selectedHarnessId ? hTarget?.name : activeAgent.name
+  // On a phone the button exists before /api/model has answered (D9), so it never renders
+  // an empty label.
+  const runTargetText = runTargetName || 'Agent'
   // Chat surface tier (PRP-0171, UDR-0153). Only the full-page /chat surface provides
   // one; the compact /popup and /sidebar panels read the wide default.
   const surface = useChatSurfaceTier()
+  const narrowSurfaceTier = surface.narrow
+  // UDR-0158 D9: WHERE the indicator leads is the tier's choice (above); WHEN it is
+  // rendered is too. On a wide viewport it still stands in place of the per-message model
+  // controls, so the Built-in agent shows none (UDR-0101 D7) -- the sidebar-footer entry
+  // to the manager serves that case. On a phone `sidebar.agents` is gated, so this button
+  // is the ONLY way to change who answers: it is rendered in EVERY run-target state,
+  // beside the model controls when the Built-in agent runs.
+  const showRunTarget = hideModelControls || narrowSurfaceTier
+
+  // UDR-0111 D5/D6 + UDR-0158 D1: the run-target name is the entry point to a
+  // switching surface on EVERY tier. A real button (keyboard-reachable) that dispatches
+  // the open request on the existing window seam -- neither surface takes props. The
+  // TIER decides the destination: the wide manager modal (CTR-0144), or the narrow
+  // run-target picker (CTR-0216), which is the phone's switching surface.
+  const openRunTargetSurface = useCallback(() => {
+    window.dispatchEvent(new Event(narrowSurfaceTier ? OPEN_RUN_TARGET_PICKER_EVENT : OPEN_DECLARATIVE_MANAGER_EVENT))
+  }, [narrowSurfaceTier])
   const show = (id: EntryId) => isEntryVisible(surface, id)
   const runTargetIcon = selectedWorkflowId ? (
     <WorkflowIcon className="h-3.5 w-3.5" />
@@ -151,27 +166,22 @@ export function ChatPanel({
   ) : (
     <Bot className="h-3.5 w-3.5" />
   )
-  // UDR-0153 D5/D6: on a narrow viewport the manager is not reachable, but what runs
-  // must stay visible -- the name renders as a read-only label.
+  // UDR-0158 D1: ONE button on both tiers; only where it leads differs. (Before
+  // PRP-0176 the narrow tier rendered a read-only label, because the phone had no
+  // switching surface at all -- UDR-0153 D6, now refined.)
   const runTargetIndicator = show('toolbar.runTargetAction') ? (
     <button
       type="button"
-      onClick={openDeclarativeManager}
-      title="Open Declarative Agents & Workflows"
-      aria-label={`Run target: ${runTargetName ?? ''}. Open Declarative Agents & Workflows`}
-      className="flex items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary transition-colors hover:bg-primary/20">
+      onClick={openRunTargetSurface}
+      title={narrowSurfaceTier ? 'Choose the agent' : 'Open Declarative Agents & Workflows'}
+      aria-label={`Run target: ${runTargetText}. ${
+        narrowSurfaceTier ? 'Choose the agent' : 'Open Declarative Agents & Workflows'
+      }`}
+      className="flex min-w-0 items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary transition-colors hover:bg-primary/20">
       {runTargetIcon}
-      {runTargetName}
+      <span className="truncate">{runTargetText}</span>
     </button>
-  ) : (
-    <span
-      role="status"
-      aria-label={`Run target: ${runTargetName ?? ''}`}
-      className="flex min-w-0 items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary">
-      {runTargetIcon}
-      <span className="truncate">{runTargetName}</span>
-    </span>
-  )
+  ) : null
 
   // Keep the run-target in sync with the modal (workflow selection + agent activation).
   useEffect(() => {
@@ -768,7 +778,7 @@ export function ChatPanel({
                 agent -- fix their own model + options, so the per-message model / options /
                 structured controls are hidden and the active run-target is named instead.
                 The Built-in agent keeps the controls. */}
-            {hideModelControls && runTargetIndicator}
+            {showRunTarget && runTargetIndicator}
             {!hideModelControls && (
               <>
                 <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
@@ -844,7 +854,7 @@ export function ChatPanel({
               )}>
               {/* UDR-0101 D7 (extended v0.112.2): hidden under a workflow OR a custom
                   Prompt agent; the Built-in agent keeps the controls. */}
-              {hideModelControls && runTargetIndicator}
+              {showRunTarget && runTargetIndicator}
               {!hideModelControls && (
                 <>
                   <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
