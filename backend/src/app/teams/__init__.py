@@ -13,8 +13,8 @@ Design (UDR-0070):
   handling (JWT validation, activity dispatch). The SDK never runs its own server (D2).
 - The inbound POST is ACKed promptly; the agent turn runs on the Background Task
   Runner (CTR-0108) and the reply is sent PROACTIVELY (typing + chunking + image) (D6).
-- Tool approval renders an Adaptive Card (Allow Once / Allow Session / Deny) mapped to
-  the CTR-0099 approval store; Teams never auto-approves (D8).
+- A turn is one agent run with no approval step (PRP-0179, UDR-0161); who can start
+  one is decided by TEAMS_ALLOWED_USERS, which tools it reaches by configuration.
 - The whole package is INERT unless ``TEAMS_ENABLED`` (D10): ``register_teams`` is a
   no-op when disabled, so the router is not mounted and the SDK is not imported.
 
@@ -25,7 +25,6 @@ Module layout (SDK-independent core is unit-testable without the SDK installed):
 - ``authz``     -- per-sender TEAMS_ALLOWED_USERS authorization
 - ``store``     -- process-local dedup + conversation-reference stores (D11)
 - ``reply``     -- outbound chunking at TEAMS_MAX_REPLY_CHARS
-- ``approval``  -- Adaptive Card payload + Action.Submit -> approval decision (CTR-0141)
 - ``agent_run`` -- run one agent turn through the registry chokepoint
 - ``adapter``   -- the SDK host + 8-step inbound pipeline (CTR-0140; lazy SDK import)
 - ``router``    -- the inbound FastAPI router + ``register_teams(app, ...)`` (CTR-0138)

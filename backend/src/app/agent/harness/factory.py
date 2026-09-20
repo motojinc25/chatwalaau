@@ -26,9 +26,13 @@ ChatWalaʻau owns every INPUT --
   directory -- the condition UDR-0119 D7 states and the shape MAF's
   ``if skills_provider:`` opt-in expects, so the wiring stays conditional with no
   helper of its own. The skills APPROVAL middleware is deliberately NOT attached
-  here -- UDR-0119 D6 keeps one approval coordinator, so skill tools stay
-  ``always_require`` and every request reaches the FEAT-0028 card
-  (UDR-0130 D5).
+  here -- the provider builds its three tools approval-free (UDR-0161 D1), so
+  there is nothing for a middleware to do on any lane.
+* No harness tool asks for approval (PRP-0179, UDR-0161 D1/D2): the shell is
+  built ``never_require`` (with MAF's required ``acknowledge_unsafe=True``),
+  file-access writes run with approval disabled (FIXED, not a YAML field), and
+  MAF's own approval coordinator stays unwired. A turn is ONE run, bounded by the
+  loop cap times MAF's function-invocation cap (UDR-0161 D8).
 * The per-offering web-search capability gate (UDR-0119 D5) forces
   ``disable_web_search=True`` when the offering is withheld.
 """
@@ -336,10 +340,19 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
             # NotImplementedError for subprocess transports -- and the shell
             # environment probe runs in before_run, so an asyncio shell killed
             # EVERY harness turn before the first token. See app.agent.harness.shell
-            # (the app.cron.executor / CTR-0031 technique). Default
-            # approval_mode="always_require" keeps shell commands on the FEAT-0028
-            # approval card (UDR-0119 D6).
-            shell_executor = WorkspaceShellTool(workdir=workspace)
+            # (the app.cron.executor / CTR-0031 technique).
+            #
+            # PRP-0179 / UDR-0161 D1: built never_require. MAF's default is
+            # always_require, and MAF REFUSES never_require without
+            # acknowledge_unsafe=True -- its ShellPolicy is a UX guard, not a sandbox.
+            # The boundary is whether the harness HAS a shell at all
+            # (CODING_WORKSPACE_DIR, UDR-0161 D4); the shell stays confined to the
+            # workspace directory.
+            shell_executor = WorkspaceShellTool(
+                workdir=workspace,
+                approval_mode="never_require",
+                acknowledge_unsafe=True,
+            )
         except Exception:
             logger.warning("Workspace shell unavailable; harness runs without shell.", exc_info=True)
 
@@ -401,26 +414,23 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         file_memory_store=file_memory_store,
         file_access_store=file_access_store,
         file_access_disable_write_tools=spec.file_access_disable_write_tools,
-        # EXPLICIT True (the MAF default is False): readonly tools never prompt (D4/D6).
+        # EXPLICIT True (the MAF default is False) for BOTH: no file tool asks for
+        # approval (UDR-0161 D1). Writes are still governed by whether they exist at
+        # all (fileAccess.disableWriteTools, UDR-0161 D4).
         file_access_disable_readonly_tool_approval=True,
-        file_access_disable_write_tool_approval=spec.file_access_disable_write_tool_approval,
+        file_access_disable_write_tool_approval=True,
         # UDR-0130 D1: the SHARED provider, never skills_paths (see module doc).
         skills_provider=skills_provider,
         shell_executor=shell_executor,
         disable_web_search=disable_web_search,
-        # ONE approval coordinator, always (UDR-0119 D6). MAF's harness
-        # ToolApprovalMiddleware is a SECOND, session-state-backed coordinator: it
-        # queues approval requests and RE-INJECTS collected approval responses into
-        # the next call's messages. ChatWalaʻau's AG-UI approval loop (FEAT-0028)
-        # does the same job on the same conversation, so wiring both makes the two
-        # replay the same approvals -- and the Responses API rejects the result:
+        # NO approval coordinator (UDR-0161 D2). MAF's harness ToolApprovalMiddleware
+        # is a session-state-backed coordinator that queues approval requests and
+        # re-injects collected responses into the next call's messages. No harness
+        # tool asks for approval, so it would have nothing to coordinate -- and wiring
+        # it is what once produced
         #   400 "The following MCP approval requests have approval responses but
         #        weren't passed as input: call_..."
-        # (reproduced via "approve for this session", which resolves instantly and
-        # collides reliably). The tools keep approval_mode="always_require", so
-        # every request still reaches the FEAT-0028 card; the harness loop
-        # middleware's approval escape hatch returns the pending request to us,
-        # which is exactly the host-driven flow D6 specifies.
+        # (UDR-0119 D6). It stays unwired; a turn is ONE run (UDR-0161 D8).
         disable_tool_auto_approval=True,
         loop_should_continue=todos_remaining(),
         loop_max_iterations=min(spec.loop_max_iterations or HARNESS_MAX_ITERATIONS, HARNESS_MAX_ITERATIONS),

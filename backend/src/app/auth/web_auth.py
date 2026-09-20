@@ -169,11 +169,6 @@ class StatusResponse(BaseModel):
     # can render a "DEMO" badge. Always serialised; defaults to false so
     # older SPA builds that ignore the field are unaffected.
     demo_mode: bool = False
-    # PRP-0067 / CTR-0094 v4 / UDR-0043 D3: report the currently active
-    # tool-approval mode so the SPA can render the
-    # PermissionsDisabledBanner when the value is "skip". Always
-    # serialised; v3 clients that ignore the field see no behaviour change.
-    tool_approval_mode: Literal["skip", "auto", "always"] = "auto"
     # PRP-0068 / CTR-0094 v5 / UDR-0044 D1: running app version (equals
     # backend/pyproject.toml [project].version). Always serialised; v4
     # clients that ignore the field see no behaviour change. The SPA
@@ -280,9 +275,6 @@ async def status(request: Request) -> StatusResponse:
     of the ``DEMO_MODE`` setting) so the SPA can render a "DEMO" badge.
     """
     demo = bool(settings.demo_mode)
-    # PRP-0067 / CTR-0094 v4: settings.tool_approval_mode is normalized
-    # to one of {"skip", "auto", "always"} by the Settings validator.
-    approval_mode = settings.tool_approval_mode  # type: ignore[assignment]
     # PRP-0077 / CTR-0094 v6: normalize the title mode to a known value.
     title_mode = "llm" if settings.session_title_mode == "llm" else "truncate"
     if settings.web_auth_enabled:
@@ -296,14 +288,12 @@ async def status(request: Request) -> StatusResponse:
                     authenticated=True,
                     username=record.username,
                     demo_mode=demo,
-                    tool_approval_mode=approval_mode,
                     session_title_mode=title_mode,
                 )
         return StatusResponse(
             mode="login-required",
             authenticated=False,
             demo_mode=demo,
-            tool_approval_mode=approval_mode,
         )
 
     client_host = request.client.host if request.client else None
@@ -315,7 +305,6 @@ async def status(request: Request) -> StatusResponse:
             authenticated=True,
             username=None,
             demo_mode=demo,
-            tool_approval_mode=approval_mode,
         )
 
     # No web auth lane; Bearer API_KEY required for non-loopback callers.
@@ -323,7 +312,6 @@ async def status(request: Request) -> StatusResponse:
         mode="api-key-only",
         authenticated=False,
         demo_mode=demo,
-        tool_approval_mode=approval_mode,
     )
 
 

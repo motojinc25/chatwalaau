@@ -161,7 +161,7 @@ def _bash_execute_sync(command: str, cwd: str) -> str:
             # cannot map (e.g. 0x81 in non-ASCII tool output). That crash left the
             # captured streams as None, so the concatenation below then failed with
             # a NoneType-plus-str TypeError, surfacing the tool as a hard failure
-            # and spinning the Tool Approval loop until it aborted at 16 rounds.
+            # and the agent retried it until its tool loop gave up.
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
@@ -177,9 +177,9 @@ def _bash_execute_sync(command: str, cwd: str) -> str:
     except OSError as e:
         return f"Error executing command: {e}"
     except Exception as e:
-        # A coding tool that RAISES makes MAF mark the function failed and can spin
-        # the Tool Approval loop (FEAT-0028) until it aborts at 16 rounds. Always
-        # return the error as the tool result so the agent can recover instead.
+        # A coding tool that RAISES makes MAF mark the function failed, and the agent
+        # retries it until its tool loop gives up. Always return the error as the tool
+        # result so the agent can recover instead.
         return f"Error executing command: {type(e).__name__}: {e}"
 
 

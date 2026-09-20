@@ -39,7 +39,6 @@ import logging
 from typing import Any
 
 from app import models_catalog
-from app.agent.approval_debug import record_wire_function_results
 from app.core.config import settings
 from app.providers.base import hosted_tool_withheld
 from app.providers.structured import (
@@ -211,18 +210,6 @@ class _PromptCacheMixin:
         # list MAF 1.15.0's harness-loop marker either, so this lane leaks it too
         # (measured). Removed at the same kind of chokepoint; inert when absent.
         strip_loop_iteration_marker(run_options)
-        # Deferred-call wire capture (PRP-0141 multi-iteration follow-up, UDR-0123
-        # D8). MAF resumes a deferred function_call INSIDE the next outer-loop
-        # iteration and produces its function_result on THAT iteration's provider
-        # request -- here -- but never streams it back, so the accumulator misses it
-        # and the outer loop's replay leaves the call bare. The endpoint heals that
-        # gap from wire-captured results before the re-run, but the capture must run
-        # on THIS lane too: without it a resumed file_read stays unpaired and
-        # Anthropic rejects the follow-up turn ("tool_use ids ... without tool_result
-        # blocks"). This is the Anthropic mirror of the azure_openai capture; it must
-        # sit at the same request chokepoint the OpenAI family records at. Ids/shapes
-        # only, best-effort, never raises.
-        record_wire_function_results(messages)
         # Structured output vs hosted web search (PRP-0082, UDR-0058 D2): web search
         # is incompatible with a JSON output_config.format; drop it for that turn so
         # the request never fails. Inert when no structured format is set.

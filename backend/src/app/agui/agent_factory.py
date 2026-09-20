@@ -23,7 +23,6 @@ from typing import Any
 from agent_framework import Agent
 
 from app import models_catalog, providers
-from app.agent.approval import resolve_require_set, wrap_with_approval
 from app.agent.capability_guidance import ToolGuidance, render_capability_guidance
 from app.agent.compaction import resolve_compaction_strategy
 from app.agent.identity import build_system_prompt
@@ -33,7 +32,7 @@ from app.demo import is_demo_mode, resolve_demo_models
 from app.mcp.lifecycle import get_mcp_tools, get_server_tool_names
 from app.mcp.overrides import get_override_store
 from app.session.provider import FileHistoryProvider
-from app.skills.provider import create_skills_approval_middleware, create_skills_provider
+from app.skills.provider import create_skills_provider
 from app.weather.tools import weather_geocode_city, weather_get_current, weather_get_forecast
 
 logger = logging.getLogger(__name__)
@@ -128,7 +127,6 @@ def _build_tools_and_instructions(
     *,
     include_mcp: bool,
     include_rag: bool,
-    apply_approval: bool = True,
     spec: Any = None,
 ) -> tuple[list[Any], list[Any], str, list[Any]]:
     """Assemble (tools, context_providers, instructions, middleware) from current settings.
@@ -137,19 +135,10 @@ def _build_tools_and_instructions(
     DevUI can build an agent without the loop-bound MCP tools and
     ChromaDB-backed rag_search tool.
 
-    PRP-0067 / UDR-0043 D1+D5 adds ``apply_approval``: when ``True``
-    (default), tools whose ``__name__`` is in
-    ``app.agent.approval.resolve_require_set()`` are wrapped with
-    ``@tool(approval_mode="always_require")``. When ``False``, no tool
-    is wrapped -- used by ``build_devui_agent()`` so the DevUI loop
-    (which has no human-in-the-loop UI) keeps the pre-PRP-0067
-    behaviour (UDR-0043 D5 DevUI clause).
-
-    PRP-0108 / UDR-0086 D2 adds the fourth return element ``middleware``:
-    when a SkillsProvider is present it carries the skills auto-approval
-    ToolApprovalMiddleware that maps MAF 1.10's approval-by-default skill
-    tools back onto the TOOL_APPROVAL_MODE semantics (read-only tools
-    silent; ``run_skill_script`` gated unless skip / DevUI).
+    The fourth return element ``middleware`` is the agent-level middleware list
+    shared by every per-model Agent. It is EMPTY since PRP-0179 (UDR-0161 D1/D2):
+    no tool is approval-gated, so no approval middleware exists. The seam stays so a
+    future non-approval middleware has a place to go.
     """
     history_provider = FileHistoryProvider(
         sessions_dir=Path(settings.sessions_dir),
@@ -369,8 +358,7 @@ def _build_tools_and_instructions(
 
     # User Preference Memory tool (PRP-0075, CTR-0105, UDR-0051 D5/D10).
     # Registered on the shared agent at this single chokepoint when enabled, so
-    # it is available to every consumer. It is NOT in the approval require-set
-    # (UDR-0051 D9), so the wrap below is a no-op for it. The Memory Block itself
+    # it is available to every consumer. The Memory Block itself
     # (slot #2) is a per-session frozen snapshot injected per run by the AG-UI
     # endpoint, not baked here.
     if settings.user_profile_enabled and _fn_ok("manage_user_memory"):
@@ -381,8 +369,8 @@ def _build_tools_and_instructions(
 
     # Agent Curated Memory tool (PRP-0100, CTR-0162, UDR-0079 D7). Registered on
     # the shared agent at this single chokepoint when AGENT_MEMORY_ENABLED, so the
-    # LLM can save durable environment/project facts mid-conversation. NOT in the
-    # approval require-set (UDR-0079 D11). The <agent-memory> Block itself (slot
+    # LLM can save durable environment/project facts mid-conversation. The
+    # <agent-memory> Block itself (slot
     # #2b) is a per-session frozen snapshot injected per run by the AG-UI endpoint,
     # not baked here.
     if settings.agent_memory_enabled and _fn_ok("manage_memory"):
@@ -392,9 +380,9 @@ def _build_tools_and_instructions(
         guidance.append(ToolGuidance("agent-memory", AGENT_MEMORY_INSTRUCTION))
 
     # Cron management tool (PRP-0089, CTR-0134, UDR-0067 D7). Registered on the
-    # shared agent only when CRON_ENABLED so the LLM can schedule script jobs. It
-    # is NOT in the approval require-set; the workspace jail + CODING_ENABLED gate
-    # are enforced at run time by the executor (CTR-0132).
+    # shared agent only when CRON_ENABLED so the LLM can schedule script jobs. The
+    # workspace jail + CODING_ENABLED gate are enforced at run time by the executor
+    # (CTR-0132).
     if settings.cron_enabled and _fn_ok("manage_cron"):
         from app.cron.tool import CRON_TOOL_INSTRUCTION, manage_cron
 
@@ -404,13 +392,11 @@ def _build_tools_and_instructions(
     # Pipeline management tool (PRP-0096, CTR-0147, UDR-0074 D9). Registered on the
     # shared agent only when PIPELINE_ENABLED so the LLM can submit data-processing jobs
     # (rag-ingest). Replaces the former batch MCP tools; writes through the same engine +
-    # store as the REST API (CTR-0146). NOT in the approval require-set (curated job
-    # types, no shell).
+    # store as the REST API (CTR-0146). Curated job types, no shell.
     # NOT registered under DEMO_MODE (PRP-0138 / UDR-0122): the tool is the SECOND write
     # path into the pipeline, and closing only the REST endpoint would leave "ingest this
-    # PDF for me" working in chat -- with no approval card, since this tool is outside the
-    # require-set. A capability is closed at the API AND at tool registration, never at
-    # the UI alone.
+    # PDF for me" working in chat. A capability is closed at the API AND at tool
+    # registration, never at the UI alone (the same rule UDR-0161 D4 makes general).
     if settings.pipeline_enabled and not is_demo_mode() and _fn_ok("manage_pipeline"):
         from app.pipeline.tool import PIPELINE_TOOL_INSTRUCTION, manage_pipeline
 
@@ -420,7 +406,7 @@ def _build_tools_and_instructions(
     # Webhook management tool (PRP-0097, CTR-0155, UDR-0075). Registered on the shared
     # agent only when WEBHOOK_ENABLED so the LLM can manage Graph subscriptions and run
     # the Teams meeting pipeline on demand. Writes through the same store + Graph client +
-    # pipeline engine as the REST API (CTR-0154). NOT in the approval require-set.
+    # pipeline engine as the REST API (CTR-0154).
     if settings.webhook_enabled and _fn_ok("manage_webhook"):
         from app.webhook.tool import WEBHOOK_TOOL_INSTRUCTION, manage_webhook
 
@@ -430,7 +416,7 @@ def _build_tools_and_instructions(
     # Ontology query tool (PRP-0105, CTR-0172, UDR-0084 D9). Registered on the
     # shared agent only when ONTOLOGY_ENABLED so the LLM can answer questions from
     # the operator's RDF concept models (catalog + CONSTRUCT-only NL query answering
-    # fenced Turtle). Read-only by construction; NOT in the approval require-set.
+    # fenced Turtle). Read-only by construction.
     if settings.ontology_enabled and _fn_ok("query_ontology"):
         from app.ontology.tool import ONTOLOGY_TOOL_INSTRUCTION, query_ontology
 
@@ -443,15 +429,10 @@ def _build_tools_and_instructions(
     # DevUI / headless path is byte-for-byte "no capability guidance".
     instructions = render_capability_guidance(guidance)
 
-    # Tool approval gating (PRP-0067, CTR-0099, UDR-0043 D1).
-    # The agent factory is the single chokepoint where bare Python
-    # callables are turned into MAF tool surfaces; this is the right
-    # place to decorate destructive tools with approval_mode. Skip mode
-    # / DevUI bypass produce an empty require-set so wrap_with_approval
-    # is a no-op for every entry.
-    if apply_approval:
-        require_set = resolve_require_set()
-        tools = [wrap_with_approval(t, require_set) for t in tools]
+    # No approval wrapping (PRP-0179, UDR-0161 D1): every tool is registered as the
+    # plain callable, which MAF builds as never_require. Whether an agent HAS a
+    # destructive tool is decided above -- CODING_ENABLED, the per-agent allow-list
+    # (UDR-0161 D4) -- not by a runtime prompt.
 
     # Context providers (CTR-0043, PRP-0024)
     context_providers: list[Any] = [history_provider]
@@ -461,18 +442,10 @@ def _build_tools_and_instructions(
     # skill entries yields the empty set -> no skills). None => inherit all.
     skills_provider = create_skills_provider(allowlist_names=(_allow.skills if _allow is not None else None))
     if skills_provider:
+        # The provider's three tools are built approval-free at construction
+        # (disable_*_approval, PRP-0179 / UDR-0161 D1), so no auto-approval
+        # middleware is attached on any lane (D2).
         context_providers.append(skills_provider)
-        # PRP-0108 / UDR-0086 D2: MAF 1.10 skill tools are approval-required
-        # unconditionally; this middleware restores the TOOL_APPROVAL_MODE
-        # mapping. DevUI (apply_approval=False, no human-in-the-loop UI) and
-        # skip mode auto-approve everything; the default lane auto-approves
-        # only the read-only tools so run_skill_script keeps raising the
-        # FEAT-0028 approval card.
-        middleware.append(
-            create_skills_approval_middleware(
-                auto_approve_all=(not apply_approval) or settings.tool_approval_mode == "skip",
-            )
-        )
 
     # Return the RAW capability instructions (slot #3..). The Identity (slot #1)
     # and -- when enabled -- the per-session Memory Block (slot #2) are assembled
@@ -488,7 +461,6 @@ def create_agent_registry() -> AgentRegistry:
     tools, context_providers, instructions, middleware = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
-        apply_approval=True,
     )
     compaction_strategy = resolve_compaction_strategy()
     return AgentRegistry(
@@ -519,7 +491,6 @@ async def rebuild_agent_registry(registry: AgentRegistry) -> None:
     tools, context_providers, instructions, middleware = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
-        apply_approval=True,
     )
     await registry.rebuild(
         tools=tools,
@@ -561,17 +532,11 @@ def build_devui_agent() -> Agent | None:
     include_mcp = not settings.devui_disable_mcp
     include_rag = not settings.devui_disable_rag
 
-    # UDR-0043 D5 (DevUI clause): DevUI runs in a daemon thread with no
-    # human-in-the-loop approval UI, so we register the unwrapped tools
-    # regardless of TOOL_APPROVAL_MODE. The factory still applies
-    # compaction (UDR-0042 D1) -- compaction has no UI dependency.
-    # PRP-0108: apply_approval=False also selects the all-tools skills
-    # auto-approval rule, and the middleware is session-tolerant because
-    # DevUI can run entities without an AgentSession.
+    # The factory applies compaction (UDR-0042 D1) -- compaction has no UI
+    # dependency. No tool is approval-gated on any lane (UDR-0161 D1).
     tools, context_providers, instructions, middleware = _build_tools_and_instructions(
         include_mcp=include_mcp,
         include_rag=include_rag,
-        apply_approval=False,
     )
 
     # DEMO_MODE: DemoChatClient; LIVE: provider dispatch (CTR-0102).

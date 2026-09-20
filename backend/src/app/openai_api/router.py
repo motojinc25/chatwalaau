@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any
 
-from agent_framework import AgentSession, Message, add_usage_details
+from agent_framework import AgentSession, add_usage_details
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -160,8 +160,8 @@ async def _stream_responses(
     # Select agent from registry based on model parameter (CTR-0070, PRP-0035)
     agent = agent_registry.get(request.model if request.model != "chatwalaau" else None)
 
-    # Token Usage Ledger accumulation (CTR-0200, PRP-0158). Outside the approval
-    # round loop below, so the total spans the whole turn.
+    # Token Usage Ledger accumulation (CTR-0200, PRP-0158), summed over every model
+    # call of the run below, so the total spans the whole turn.
     turn_usage: dict[str, Any] | None = None
     model_calls = 0
 
@@ -204,131 +204,127 @@ async def _stream_responses(
     msg_started = False
 
     try:
-        # PRP-0067 / UDR-0043 D5: headless consumer auto-approve loop.
-        # The OpenAI Responses API has no human-in-the-loop UI. If MAF
-        # emits function_approval_request we approve it inline with a
-        # WARNING log line so the audit trail survives in process logs,
-        # then re-run with the appended approval_response. The loop is
-        # bounded the same way as the AG-UI side to defend against
-        # pathological tool chains.
-        iteration_messages = list(messages)
-        max_iter = 16
-        completed_naturally = False
-        for _ in range(max_iter):
-            pending_responses = []
-            response_stream = agent.run(
-                iteration_messages,
-                stream=True,
-                session=session,
-                options=run_options or None,
-            )
-            stream = await _normalize_response_stream(response_stream)
+        # ONE run per response (PRP-0179, UDR-0161 D2): no tool is approval-gated, so
+        # the former headless auto-approve loop (UDR-0043 D5) is gone.
+        unexpected_approval_tool: str | None = None
+        response_stream = agent.run(
+            messages,
+            stream=True,
+            session=session,
+            options=run_options or None,
+        )
+        stream = await _normalize_response_stream(response_stream)
 
-            async for update in stream:
-                contents = getattr(update, "contents", None) or []
-                for content in contents:
-                    content_type = getattr(content, "type", None)
+        async for update in stream:
+            contents = getattr(update, "contents", None) or []
+            for content in contents:
+                content_type = getattr(content, "type", None)
 
-                    if content_type == "function_approval_request":
-                        # Auto-approve. Log so a release-time audit can find it.
-                        fn_call = getattr(content, "function_call", None)
-                        tool_name = getattr(fn_call, "name", "<unknown>") if fn_call else "<unknown>"
-                        call_id_log = getattr(fn_call, "call_id", "") if fn_call else ""
-                        logger.warning(
-                            "approval auto-granted for tool=%s by API consumer (call_id=%s)",
-                            tool_name,
-                            call_id_log,
-                        )
-                        pending_responses.append(content.to_function_approval_response(approved=True))
+                if content_type == "function_approval_request":
+                    # UDR-0161 D3: no tool is approval-gated since PRP-0179, so this is a
+                    # construction defect. It is not auto-approved (the old headless
+                    # behaviour) -- the response ends with a named error.
+                    fn_call = getattr(content, "function_call", None)
+                    unexpected_approval_tool = getattr(fn_call, "name", "") or "<unknown>"
+                    logger.error(
+                        "Tool %r asked for approval (call_id=%s) on the OpenAI API lane, but no "
+                        "tool is approval-gated since PRP-0179 (UDR-0161 D3).",
+                        unexpected_approval_tool,
+                        getattr(fn_call, "call_id", None),
+                    )
+                    break
 
-                    elif content_type == "text":
-                        text = getattr(content, "text", "")
-                        if not text:
-                            continue
-                        if not msg_started:
-                            msg_started = True
-                            item_added = {
-                                "type": "response.output_item.added",
-                                "output_index": len(output_items),
-                                "item": {"type": "message", "role": "assistant", "content": []},
-                            }
-                            yield f"event: response.output_item.added\ndata: {json.dumps(item_added)}\n\n"
-                            part_added = {
-                                "type": "response.content_part.added",
-                                "output_index": len(output_items),
-                                "content_index": 0,
-                                "part": {"type": "output_text", "text": ""},
-                            }
-                            yield f"event: response.content_part.added\ndata: {json.dumps(part_added)}\n\n"
-                        text_parts.append(text)
-                        delta_event = {
-                            "type": "response.output_text.delta",
+                if content_type == "text":
+                    text = getattr(content, "text", "")
+                    if not text:
+                        continue
+                    if not msg_started:
+                        msg_started = True
+                        item_added = {
+                            "type": "response.output_item.added",
+                            "output_index": len(output_items),
+                            "item": {"type": "message", "role": "assistant", "content": []},
+                        }
+                        yield f"event: response.output_item.added\ndata: {json.dumps(item_added)}\n\n"
+                        part_added = {
+                            "type": "response.content_part.added",
                             "output_index": len(output_items),
                             "content_index": 0,
-                            "delta": text,
+                            "part": {"type": "output_text", "text": ""},
                         }
-                        yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
+                        yield f"event: response.content_part.added\ndata: {json.dumps(part_added)}\n\n"
+                    text_parts.append(text)
+                    delta_event = {
+                        "type": "response.output_text.delta",
+                        "output_index": len(output_items),
+                        "content_index": 0,
+                        "delta": text,
+                    }
+                    yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
 
-                    elif content_type == "function_call":
-                        call_id = getattr(content, "call_id", "")
-                        name = getattr(content, "name", "")
-                        arguments = getattr(content, "arguments", "")
-                        if isinstance(arguments, dict):
-                            arguments = json.dumps(arguments)
-                        if name:
-                            fc_item = {
-                                "type": "function_call",
-                                "name": name,
-                                "arguments": arguments or "",
-                                "call_id": call_id,
-                            }
-                            output_items.append(fc_item)
-                            fc_added = {
-                                "type": "response.output_item.added",
-                                "output_index": len(output_items) - 1,
-                                "item": fc_item,
-                            }
-                            yield f"event: response.output_item.added\ndata: {json.dumps(fc_added)}\n\n"
-
-                    elif content_type == "function_result":
-                        call_id = getattr(content, "call_id", "")
-                        result = getattr(content, "result", "")
-                        if not isinstance(result, str):
-                            result = json.dumps(result)
-                        fr_item = {"type": "function_call_output", "call_id": call_id, "output": result}
-                        output_items.append(fr_item)
-                        fr_added = {
+                elif content_type == "function_call":
+                    call_id = getattr(content, "call_id", "")
+                    name = getattr(content, "name", "")
+                    arguments = getattr(content, "arguments", "")
+                    if isinstance(arguments, dict):
+                        arguments = json.dumps(arguments)
+                    if name:
+                        fc_item = {
+                            "type": "function_call",
+                            "name": name,
+                            "arguments": arguments or "",
+                            "call_id": call_id,
+                        }
+                        output_items.append(fc_item)
+                        fc_added = {
                             "type": "response.output_item.added",
                             "output_index": len(output_items) - 1,
-                            "item": fr_item,
+                            "item": fc_item,
                         }
-                        yield f"event: response.output_item.added\ndata: {json.dumps(fr_added)}\n\n"
+                        yield f"event: response.output_item.added\ndata: {json.dumps(fc_added)}\n\n"
 
-                    elif content_type == "usage":
-                        usage_details = getattr(content, "usage_details", None) or {}
-                        # CTR-0200 (PRP-0158, UDR-0136 D5). The `usage` dict below keeps
-                        # its existing last-call semantics -- changing this lane's
-                        # RESPONSE shape is a wire change nobody approved -- so the
-                        # ledger gets its own turn accumulator, summed the same way
-                        # CTR-0009 sums it.
-                        turn_usage = dict(add_usage_details(turn_usage, dict(usage_details)))
-                        model_calls += 1
-                        usage["input_tokens"] = getattr(usage_details, "input_token_count", 0) or usage_details.get(
-                            "input_token_count", 0
-                        )
-                        usage["output_tokens"] = getattr(usage_details, "output_token_count", 0) or usage_details.get(
-                            "output_token_count", 0
-                        )
-                        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+                elif content_type == "function_result":
+                    call_id = getattr(content, "call_id", "")
+                    result = getattr(content, "result", "")
+                    if not isinstance(result, str):
+                        result = json.dumps(result)
+                    fr_item = {"type": "function_call_output", "call_id": call_id, "output": result}
+                    output_items.append(fr_item)
+                    fr_added = {
+                        "type": "response.output_item.added",
+                        "output_index": len(output_items) - 1,
+                        "item": fr_item,
+                    }
+                    yield f"event: response.output_item.added\ndata: {json.dumps(fr_added)}\n\n"
 
-            if not pending_responses:
-                completed_naturally = True
+                elif content_type == "usage":
+                    usage_details = getattr(content, "usage_details", None) or {}
+                    # CTR-0200 (PRP-0158, UDR-0136 D5). The `usage` dict below keeps
+                    # its existing last-call semantics -- changing this lane's
+                    # RESPONSE shape is a wire change nobody approved -- so the
+                    # ledger gets its own turn accumulator, summed the same way
+                    # CTR-0009 sums it.
+                    turn_usage = dict(add_usage_details(turn_usage, dict(usage_details)))
+                    model_calls += 1
+                    usage["input_tokens"] = getattr(usage_details, "input_token_count", 0) or usage_details.get(
+                        "input_token_count", 0
+                    )
+                    usage["output_tokens"] = getattr(usage_details, "output_token_count", 0) or usage_details.get(
+                        "output_token_count", 0
+                    )
+                    usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+            if unexpected_approval_tool is not None:
                 break
 
-            iteration_messages = [*iteration_messages, Message(role="user", contents=pending_responses)]
-
-        if not completed_naturally:
-            logger.warning("OpenAI API approval loop exceeded %d iterations; returning partial response", max_iter)
+        if unexpected_approval_tool is not None:
+            error_data = {
+                "type": "error",
+                "message": (
+                    f"Tool '{unexpected_approval_tool}' asked for approval, which this version no "
+                    "longer supports. This is a defect -- please report it."
+                ),
+            }
+            yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
 
     except (OpenAINotFoundError, ChatClientException, TypeError, Exception):
         logger.exception("OpenAI API stream error")
@@ -489,44 +485,47 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
         _image_gen_thread_id.set(thread_id)
 
         try:
-            # PRP-0067 / UDR-0043 D5: non-streaming consumer auto-approve.
-            # Same shape as the streaming branch: re-run agent.run() with
-            # appended function_approval_response messages until no
-            # approval request is left.
-            iteration_messages = list(messages)
-            max_iter = 16
+            # ONE run (PRP-0179, UDR-0161 D2): no tool is approval-gated, so the former
+            # headless auto-approve loop (UDR-0043 D5) is gone.
             all_contents: list[Any] = []
-            for _ in range(max_iter):
-                pending_responses: list[Any] = []
-                response_stream = agent.run(
-                    iteration_messages,
-                    stream=True,
-                    session=session,
-                    options=run_options or None,
-                )
-                stream = await _normalize_response_stream(response_stream)
-                async for update in stream:
-                    contents = getattr(update, "contents", None) or []
-                    for content in contents:
-                        if getattr(content, "type", None) == "function_approval_request":
-                            fn_call = getattr(content, "function_call", None)
-                            tool_name = getattr(fn_call, "name", "<unknown>") if fn_call else "<unknown>"
-                            call_id_log = getattr(fn_call, "call_id", "") if fn_call else ""
-                            logger.warning(
-                                "approval auto-granted for tool=%s by API consumer (call_id=%s)",
-                                tool_name,
-                                call_id_log,
-                            )
-                            pending_responses.append(content.to_function_approval_response(approved=True))
-                            continue
-                        all_contents.append(content)
-                if not pending_responses:
+            unexpected_approval_tool: str | None = None
+            response_stream = agent.run(
+                messages,
+                stream=True,
+                session=session,
+                options=run_options or None,
+            )
+            stream = await _normalize_response_stream(response_stream)
+            async for update in stream:
+                contents = getattr(update, "contents", None) or []
+                for content in contents:
+                    if getattr(content, "type", None) == "function_approval_request":
+                        # UDR-0161 D3: a construction defect, surfaced by name.
+                        fn_call = getattr(content, "function_call", None)
+                        unexpected_approval_tool = getattr(fn_call, "name", "") or "<unknown>"
+                        logger.error(
+                            "Tool %r asked for approval (call_id=%s) on the OpenAI API lane, but no "
+                            "tool is approval-gated since PRP-0179 (UDR-0161 D3).",
+                            unexpected_approval_tool,
+                            getattr(fn_call, "call_id", None),
+                        )
+                        break
+                    all_contents.append(content)
+                if unexpected_approval_tool is not None:
                     break
-                iteration_messages = [*iteration_messages, Message(role="user", contents=pending_responses)]
 
         except (OpenAINotFoundError, ChatClientException, TypeError, Exception) as exc:
             logger.exception("OpenAI API error")
             raise HTTPException(status_code=500, detail="Agent execution failed.") from exc
+
+        if unexpected_approval_tool is not None:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Tool '{unexpected_approval_tool}' asked for approval, which this version no "
+                    "longer supports. This is a defect -- please report it."
+                ),
+            )
 
         output_items, usage = maf_contents_to_openai_output(all_contents)
         # CTR-0200 append (PRP-0158, UDR-0136 D5). Folded over the same contents the

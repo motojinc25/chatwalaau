@@ -16,7 +16,6 @@ import { OPEN_RUN_TARGET_PICKER_EVENT } from '@/components/RunTargetSheet'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
 import { SkillsManager } from '@/components/SkillsManager'
 import { StructuredOutputControl, type StructuredSelection } from '@/components/StructuredOutputControl'
-import { ToolApprovalList } from '@/components/ToolApprovalCard'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { EMPTY_WORKFLOW_RUN, reduceWorkflowEvent, type WorkflowRunState } from '@/components/WorkflowProgressPanel'
@@ -28,7 +27,6 @@ import { useMemoryCuration } from '@/hooks/useMemoryCuration'
 import { useMessageNavigator } from '@/hooks/useMessageNavigator'
 import { useMessageStepNav } from '@/hooks/useMessageStepNav'
 import { useTemplates } from '@/hooks/useTemplates'
-import { useToolApproval } from '@/hooks/useToolApproval'
 import { useTTS } from '@/hooks/useTTS'
 import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
@@ -242,12 +240,6 @@ export function ChatPanel({
     }
   }, [notification])
 
-  // PRP-0067 / CTR-0100: tool approval state lives outside useChat so
-  // both ChatPanel and the SSE handler can read it. The hook is also
-  // responsible for resetting state on session switch (the parent key={threadId}
-  // remount handles that automatically here).
-  const approvalApi = useToolApproval()
-
   const {
     messages,
     isLoading,
@@ -274,15 +266,12 @@ export function ChatPanel({
     selectedWorkflowId,
     selectedHarnessId,
     runTargetLabel,
-    // Fan the AG-UI CUSTOM events to the tool-approval consumer AND fold the additive
-    // workflow_* progress events into the live workflow run state (PRP-0118, CTR-0185).
-    onCustomEvent: useCallback(
-      (name: string | undefined, value: Record<string, unknown> | undefined) => {
-        approvalApi.ingestCustomEvent(name, value)
-        if (name?.startsWith('workflow_')) setWorkflowRun((s) => reduceWorkflowEvent(s, name, value))
-      },
-      [approvalApi],
-    ),
+    // Fold the additive workflow_* progress events into the live workflow run state
+    // (PRP-0118, CTR-0185). The tool-approval consumer that used to share this fan-out
+    // was removed with the approval flow (PRP-0179, UDR-0161).
+    onCustomEvent: useCallback((name: string | undefined, value: Record<string, unknown> | undefined) => {
+      if (name?.startsWith('workflow_')) setWorkflowRun((s) => reduceWorkflowEvent(s, name, value))
+    }, []),
     // Standard AG-UI workflow-run events (PRP-0123, CTR-0009 v19). Workflow branch only;
     // a Prompt-agent turn never emits them, so this is inert for every other run.
     onWorkflowEvent: canvas.ingest,
@@ -723,10 +712,6 @@ export function ChatPanel({
               />
             )
           })}
-          {/* CTR-0100: approval cards render inline at the tail of the
-              message flow (the tool-call position) so they scroll with
-              the conversation instead of covering the scroll area. */}
-          <ToolApprovalList api={approvalApi} />
           {/* CTR-0092 bottom spacer: keeps the final message visible above the floating ChatInput. */}
           {!compact && <div aria-hidden="true" style={{ height: bottomSpacerHeightPx }} />}
         </div>

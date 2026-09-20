@@ -22,16 +22,15 @@ ONE construction path (PRP-0152, UDR-0130 D1/D2):
     2. the six-extension script filter (``_SCRIPT_EXTENSIONS``, UDR-0086 D3),
     3. the Skills Management disabled set (UDR-0065 D2),
     4. the per-agent allow-list (UDR-0100 D3).
-  What does NOT follow the provider is approval coordination: the harness lane
-  must not attach ``create_skills_approval_middleware()`` (UDR-0119 D6 keeps one
-  coordinator; UDR-0130 D5).
+  Approval is not a lane concern either: the provider's tools are built
+  approval-free here, so no lane attaches an approval middleware (UDR-0161 D1/D2).
 
 Script execution (v0.75.x defect fix):
   Current agent-framework builds advertise a ``run_skill_script`` tool and instruct
   the agent to use it whenever a discovered skill ships scripts (e.g. the document
   ``pptx`` skill). MAF does NOT ship a script runner -- without one, every script
   call raises ``ValueError: ... requires a runner``, which the agent retries until
-  the tool-approval loop aborts ("exceeded 16 rounds"). We supply a subprocess
+  its tool loop gives up. We supply a subprocess
   runner that reuses the existing local-code-execution posture:
     - Execution is gated by ``CODING_ENABLED`` (the operator's existing opt-in for
       running local code, CTR-0031). When off, the runner declines with a clear,
@@ -40,15 +39,13 @@ Script execution (v0.75.x defect fix):
       timeout and output cap, runs in the skill's own directory, and decodes output
       as UTF-8 (errors replaced) so non-ASCII script output is Windows-safe.
 
-Approval model (PRP-0108, UDR-0086 D2 -- MAF 1.10):
-  MAF 1.10 registers all three skill tools (``load_skill``, ``read_skill_resource``,
-  ``run_skill_script``) with ``approval_mode="always_require"`` unconditionally; the
-  former ``require_script_approval`` constructor parameter no longer exists. The
-  EXISTING ``TOOL_APPROVAL_MODE`` semantics are preserved by attaching a
-  ``ToolApprovalMiddleware`` (built by ``create_skills_approval_middleware()``) at
-  the agent factory chokepoint: read-only tools are auto-approved before they ever
-  surface, while ``run_skill_script`` keeps flowing through the existing Tool
-  Approval flow (FEAT-0028) unless ``TOOL_APPROVAL_MODE=skip`` auto-approves it too.
+Approval model (PRP-0179, UDR-0161 D1):
+  MAF registers all three skill tools (``load_skill``, ``read_skill_resource``,
+  ``run_skill_script``) as ``approval_mode="always_require"`` BY DEFAULT. The provider
+  is constructed with the three native ``disable_*_approval`` flags, so every tool is
+  ``never_require`` on every lane and no auto-approval middleware exists. Whether a
+  script can run at all is decided by ``CODING_ENABLED`` (the runner below), not by a
+  prompt. This replaces the PRP-0108 middleware mapping (UDR-0086 D2, superseded).
 
 Discovery (PRP-0108, UDR-0086 D3 -- MAF 1.10):
   ``FileSkillsSource`` no longer whitelists ``references/`` / ``assets/`` /
@@ -72,7 +69,6 @@ from agent_framework import (
     FilteringSkillsSource,
     SkillsProvider,
     SkillsSourceContext,
-    ToolApprovalMiddleware,
 )
 
 from app.core.config import settings
@@ -308,11 +304,6 @@ def create_skills_provider(allowlist_names: set[str] | None = None) -> SkillsPro
     # so the override filter can be injected over the same deduplicated file
     # source. A script runner is supplied so skills that ship scripts (e.g. pptx)
     # actually run instead of raising "requires a runner".
-    #
-    # PRP-0108 / UDR-0086 D2: MAF 1.10 removed ``require_script_approval`` -- the
-    # three skill tools are approval-required unconditionally. The TOOL_APPROVAL_MODE
-    # mapping now lives in the ToolApprovalMiddleware attached by the agent factory
-    # (create_skills_approval_middleware below), not in this constructor.
     disabled = frozenset(get_skills_override_store().disabled_names())
     source = build_skill_source()
     if disabled or allowlist_names is not None:
@@ -332,224 +323,21 @@ def create_skills_provider(allowlist_names: set[str] | None = None) -> SkillsPro
 
         source = FilteringSkillsSource(source, predicate=_predicate)
 
-    provider = SkillsProvider(source)
+    # PRP-0179 / UDR-0161 D1: the three tools are built approval-free. MAF's default is
+    # always_require for all three; leaving any flag off would bring the approval
+    # request back on every lane (and the R3 canary would fail).
+    provider = SkillsProvider(
+        source,
+        disable_load_skill_approval=True,
+        disable_read_skill_resource_approval=True,
+        disable_run_skill_script_approval=True,
+    )
     logger.info(
-        "SkillsProvider created (skills_dir=%s, disabled_skills=%d [%s], allowlist=%s, "
-        "script_execution=%s, script_approval=%s)",
+        "SkillsProvider created (skills_dir=%s, disabled_skills=%d [%s], allowlist=%s, script_execution=%s)",
         skills_path,
         len(disabled),
         ", ".join(sorted(disabled)) if disabled else "none",
         "all" if allowlist_names is None else f"{len(allowlist_names)} selected",
         "on" if settings.coding_enabled else "off (CODING_ENABLED=false)",
-        settings.tool_approval_mode != "skip",
     )
     return provider
-
-
-class SessionTolerantToolApprovalMiddleware(ToolApprovalMiddleware):
-    """ToolApprovalMiddleware constrained to AUTO-APPROVAL only (UDR-0086 D2).
-
-    Three deviations from the MAF base class, each protecting an existing
-    ChatWalaʻau approval behavior:
-
-    1. Session-tolerant: the base raises ``RuntimeError`` on a session-less run,
-       and DevUI can run its entities session-less (a raw API call without a
-       conversation id). Such runs pass through untouched -- the approval
-       request surfaces to the consumer instead of crashing, the same fail-open
-       shape as an unmatched rule.
-    2. Inbound passthrough: the base EXTRACTS ``function_approval_response``
-       contents from inbound messages and re-injects them PREPENDED before the
-       message list. That inverts ChatWalaʻau's approval-resume replay
-       (``[assistant(function_call), user(approval_response)]`` becomes
-       ``[function_result, assistant(function_call)]`` after function
-       execution), and the OpenAI Responses API rejects a function_call whose
-       output precedes it: ``400 No tool output found for function call ...``
-       (v0.102.0 field defect, first coding-tool approval after the upgrade).
-       Inbound messages are therefore passed through untouched -- the
-       FEAT-0028 replay owns approval responses, not this middleware.
-    3. All-or-nothing, no queueing: the base auto-approves the matching subset
-       of a round and hides all but the first unresolved request in SESSION
-       state. ChatWalaʻau renders PARALLEL approval cards (ToolApprovalList)
-       and builds a fresh ``AgentSession`` per HTTP request, so a queued
-       request would be lost forever -- and hiding an auto-approved request
-       whose function_call already streamed desynchronizes the FEAT-0028
-       accumulator. A round is auto-approved only when EVERY pending request
-       matches a rule; otherwise the round is left completely untouched.
-
-    4. Rebuild the assistant turn on re-entry (v0.131.3, UDR-0123): the base resets
-       ``context.messages`` and re-enters with only the collected approval responses,
-       relying on server-side storage to carry the original ``function_call``. Under
-       client-managed OpenAI runs (store=False) with a cross-turn-only
-       ``FileHistoryProvider`` nothing does, so the re-run sent a bare
-       ``function_call_output`` and Azure rejected it (400 "No tool call found for
-       function call output"). ``_inject_collected_responses`` now emits the paired
-       ``function_call`` (server id stripped) ahead of the responses.
-
-    What remains of the base behavior is exactly the intended scope: matching
-    ``function_approval_request`` contents are auto-approved in-stream (the
-    collected responses re-enter via the base loop) and everything else flows
-    to the existing FEAT-0028 surfaces unchanged.
-    """
-
-    async def process(self, context: Any, call_next: Any) -> None:
-        if getattr(context, "session", None) is None:
-            await call_next()
-            return
-        await super().process(context, call_next)
-
-    def _prepare_inbound_messages(self, messages: Any, state: Any, *args: Any, **kwargs: Any) -> list[Any]:
-        """Deviation 2: never hijack inbound approval responses (see class doc).
-
-        ``*args``/``**kwargs`` absorb parameters the base hook gains. MAF 1.15.0
-        added a third positional argument (``session``) to this hook (PRP-0151,
-        UDR-0129), and because the override ignores everything but ``messages`` the
-        extras are genuinely irrelevant here -- but an exact-arity override turns an
-        upstream signature widening into a TypeError mid-turn. UDR-0109 A2 recorded
-        this failure mode once already (the ``FilteringSkillsSource`` predicate
-        widening from ``(skill)`` to ``(skill, context)``); this is the same class of
-        break, so the override is made tolerant rather than re-pinned every release.
-        The tolerance is safe ONLY because this override discards its inputs; a hook
-        that used them would have to be updated deliberately instead.
-        """
-        return list(messages)
-
-    def _inject_collected_responses(self, messages: Any, state: Any, *args: Any, **kwargs: Any) -> list[Any]:
-        """Deviation 4: APPEND the auto-approved responses, never PREPEND them.
-
-        ``*args``/``**kwargs``: see ``_prepare_inbound_messages``. This hook's arity
-        did NOT change in 1.15.0, but the sibling's did, and an override that uses
-        only ``messages`` and ``state`` gains nothing from refusing extras.
-
-        The base class re-enters the loop with::
-
-            [Message(role="user", contents=collected_approval_responses), *messages]
-
-        (``_harness/_tool_approval.py:552-555``). A ``function_approval_response``
-        serializes to a ``tool_result``, so prepending puts the result BEFORE the
-        assistant message carrying its ``tool_use``. Anthropic rejects that outright::
-
-            400 messages.0.content.0: unexpected `tool_use_id` found in `tool_result`
-            blocks: toolu_...  Each `tool_result` block must have a corresponding
-            `tool_use` block in the previous message.
-
-        which made EVERY Agent Skill turn fail on an Anthropic model, because the
-        read-only skill tools are exactly the ones this middleware auto-approves.
-
-        This is the same upstream defect deviation 2 already documents on the INBOUND
-        path -- where the identical prepend produced the OpenAI mirror-image error
-        ("400 No tool output found for function call ..."). That one was fixed; the
-        AUTO-APPROVAL path was not, and it is the same one-line inversion. Appending
-        places each response after the assistant turn that requested it, which is the
-        order both APIs specify.
-
-        Deviation 5 (v0.131.3 follow-up, UDR-0123): REBUILD the assistant turn that
-        issued the approved calls, ahead of the responses. The base ``_process_stream``
-        resets ``context.messages = []`` after an auto-approval and re-enters the loop
-        with only the collected responses, expecting SERVER-SIDE storage (or a
-        per-service-call history provider) to still carry the original
-        ``function_call``. This app runs the Prompt lane CLIENT-MANAGED (store=False,
-        UDR-0123), and its ``FileHistoryProvider`` loads cross-turn history only -- it
-        does NOT re-inject the in-flight assistant turn, and being ``load_messages=True``
-        it also blocks MAF from auto-appending an ``InMemoryHistoryProvider`` that
-        would. So the re-run reached the model as a bare ``function_call_output`` with
-        no preceding ``function_call``::
-
-            400 No tool call found for function call output with call_id call_...
-
-        reproduced against the installed framework with a skill tool auto-approved on a
-        reasoning model. Each collected ``function_approval_response`` still carries its
-        originating ``function_call``, so the pairing is recoverable: emit an assistant
-        message with those calls REBUILT WITHOUT the provider server item id (matched by
-        ``call_id`` only), the same shape ``app.agent.approval_iteration`` replays on the
-        OpenAI operator-approval path -- a fresh ``function_call`` needs no paired
-        reasoning item, so the Responses API accepts it.
-        """
-        collected = getattr(state, "collected_approval_responses", None)
-        if not collected:
-            return list(messages)
-        from agent_framework import Content, Message
-
-        # Only rebuild calls the surviving messages do NOT already carry: under
-        # server-side storage (or when history still holds the assistant turn) the
-        # function_call is present and re-adding it would duplicate the tool_use. The
-        # rebuild is needed only when the base loop reset the transcript to bare
-        # approval responses (client-managed, see the method docstring).
-        present_call_ids = {
-            getattr(content, "call_id", None)
-            for message in messages
-            for content in getattr(message, "contents", [])
-            if getattr(content, "type", None) == "function_call"
-        }
-        assistant_calls: list[Any] = []
-        for response in collected:
-            function_call = getattr(response, "function_call", None)
-            call_id = getattr(function_call, "call_id", None)
-            if function_call is None or not call_id or call_id in present_call_ids:
-                continue
-            assistant_calls.append(
-                Content.from_function_call(
-                    call_id=call_id,
-                    name=getattr(function_call, "name", None),
-                    arguments=getattr(function_call, "arguments", None),
-                )
-            )
-        out = [*messages]
-        if assistant_calls:
-            out.append(Message(role="assistant", contents=assistant_calls))
-        out.append(Message(role="user", contents=list(collected)))
-        return out
-
-    async def _process_outbound_messages(self, messages: Any, state: Any) -> bool:
-        # Deviation 3: ALL-OR-NOTHING auto-approval, and NEVER queue (see class
-        # doc). The round is auto-approved only when EVERY pending request
-        # matches a rule; a MIXED round (e.g. load_skill + file_write in one
-        # model turn) is left completely untouched so every request surfaces to
-        # the operator. Auto-approving just the matching subset would hide a
-        # request whose function_call content ALREADY streamed to the consumer:
-        # the FEAT-0028 accumulator would then replay a bare function_call
-        # while this middleware holds the response in session state -- either a
-        # Responses API 400 (unpaired call) or a double execution on resume.
-        # Standing session rules (``state.rules``) cannot accumulate in
-        # per-request sessions, so only the constructor rules are consulted.
-        approval_requests = [
-            content
-            for message in messages
-            for content in message.contents
-            if content.type == "function_approval_request"
-        ]
-        if not approval_requests:
-            return False
-
-        for request in approval_requests:
-            if not await self._matches_auto_rule(request):
-                return False  # mixed or fully-human round: touch nothing
-
-        for request in approval_requests:
-            state.collected_approval_responses.append(request.to_function_approval_response(approved=True))
-        self._remove_approval_requests(messages, {id(r) for r in approval_requests})
-        return True
-
-
-def create_skills_approval_middleware(*, auto_approve_all: bool) -> ToolApprovalMiddleware:
-    """Build the skills auto-approval middleware (PRP-0108, UDR-0086 D2).
-
-    Maps the EXISTING ``TOOL_APPROVAL_MODE`` semantics onto MAF 1.10's
-    approval-by-default skill tools, preserving v0.101.0 operator-visible
-    behavior byte-for-byte:
-
-    - ``auto_approve_all=False`` (TOOL_APPROVAL_MODE != "skip"): auto-approve
-      only the read-only tools (``load_skill`` / ``read_skill_resource``);
-      ``run_skill_script`` keeps raising the FEAT-0028 approval card.
-    - ``auto_approve_all=True`` (skip mode, or the DevUI agent whose loop has
-      no human-in-the-loop UI per UDR-0043 D5): auto-approve every skill tool.
-
-    The rules are the SkillsProvider-shipped static callbacks, so they stay
-    scoped to this provider's local tools (hosted ``server_label`` calls are
-    never auto-approved) and track upstream tool renames automatically.
-    """
-    rule = (
-        SkillsProvider.all_tools_auto_approval_rule
-        if auto_approve_all
-        else SkillsProvider.read_only_tools_auto_approval_rule
-    )
-    return SessionTolerantToolApprovalMiddleware(auto_approval_rules=[rule])

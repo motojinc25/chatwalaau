@@ -18,8 +18,8 @@ export interface ImageRef {
 }
 
 /**
- * The BILLING axis of a turn (PRP-0157, UDR-0135 D1): every model call of every
- * approval round, summed. Distinct from the sibling fields on `UsageInfo`, which
+ * The BILLING axis of a turn (PRP-0157, UDR-0135 D1): every model call of the
+ * turn, summed. Distinct from the sibling fields on `UsageInfo`, which
  * describe the LAST model call only. Price points are kept separate because cache
  * reads and writes are billed at different rates from ordinary input; no
  * `total_token_count` is published because the Anthropic client reports none and a

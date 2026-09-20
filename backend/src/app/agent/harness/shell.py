@@ -24,8 +24,8 @@ instead of only where the event loop happens to cooperate.
 
 The class SUBCLASSES ``LocalShellTool`` so the model-facing surface stays
 upstream's: ``as_function()`` supplies the ``kind="shell"`` marker that
-``client.get_shell_tool()`` recognizes, and the ``always_require`` approval mode
-that routes every command through the FEAT-0028 approval card (UDR-0119 D6).
+``client.get_shell_tool()`` recognizes, and the approval mode the factory passes
+in (``never_require`` since PRP-0179, UDR-0161 D1).
 Only the three coroutines that touch asyncio subprocesses are overridden, and
 they read this class's OWN copies of the configuration -- with ONE enumerated
 private-attribute traversal (``_stateless_argv``, see below), registered under
@@ -138,8 +138,8 @@ class WorkspaceShellTool(LocalShellTool):
         """Execute ``command`` in the workspace and return its ``ShellResult``.
 
         Policy is evaluated exactly as upstream does (deny -> ``ShellCommandError``);
-        approval is NOT handled here -- the framework applies it around the tool
-        produced by ``as_function()`` (UDR-0119 D6).
+        approval is NOT handled here -- the tool is built ``never_require`` by the
+        factory (UDR-0161 D1).
         """
         decision = self._cw_policy.evaluate(ShellRequest(command=command, workdir=self._cw_workdir))
         if decision.decision == "deny":

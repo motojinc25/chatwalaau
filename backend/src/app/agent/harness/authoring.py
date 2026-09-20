@@ -100,7 +100,7 @@ def build_harness_yaml(document: dict[str, Any]) -> str:
     _switch_block("todo", {"disabled": False})
     _switch_block("mode", {"disabled": False, "initial": None})
     _switch_block("fileMemory", {"disabled": False})
-    _switch_block("fileAccess", {"disableWriteTools": False, "disableWriteToolApproval": False})
+    _switch_block("fileAccess", {"disableWriteTools": False})
     _switch_block("webSearch", {"disabled": False})
     _switch_block("loop", {"maxIterations": None})
 
@@ -161,7 +161,6 @@ def document_from_yaml(text: str) -> dict[str, Any]:
         "fileMemory": {"disabled": bool(_block("fileMemory").get("disabled"))},
         "fileAccess": {
             "disableWriteTools": bool(file_access.get("disableWriteTools")),
-            "disableWriteToolApproval": bool(file_access.get("disableWriteToolApproval")),
         },
         "webSearch": {"disabled": bool(_block("webSearch").get("disabled"))},
         "loop": {"maxIterations": loop.get("maxIterations")},

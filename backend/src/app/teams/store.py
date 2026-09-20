@@ -1,7 +1,8 @@
 """Process-local, non-persisted Teams adapter state (CTR-0140, UDR-0070 D11).
 
 Two short-lived working stores, consistent with the MCP override store (CTR-0122)
-and the approval store (CTR-0099): nothing is persisted, a restart clears them.
+(the tool-approval store it once mirrored was removed by PRP-0179): nothing is
+persisted, a restart clears them.
 
 - ``DedupStore``       -- remembers recently-seen activity ids so a Bot Framework
   redelivery does not re-run the agent within the dedup window (UDR-0070 D4 step 2).

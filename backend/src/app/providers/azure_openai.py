@@ -14,7 +14,7 @@ from typing import Any
 from agent_framework_openai import OpenAIChatClient
 
 from app import models_catalog
-from app.agent.approval_debug import describe_wire_input_full, log_wire_request, wire_pairing_report
+from app.agent.wire_trace import describe_wire_input_full, log_wire_request, wire_pairing_report
 from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
 from app.providers.base import hosted_tool_withheld
@@ -76,8 +76,8 @@ class _StructuredOutputMixin:
         text_cfg = run_options.get("text")
         if isinstance(text_cfg, dict) and text_cfg.get("format") is not None:
             strip_web_search(run_options)
-        # Approval-resume tracing (PRP-0141 follow-up): the request as it will go on
-        # the wire, ids only. This is the ground truth the three prior fixes lacked.
+        # Wire tracing (PRP-0141 follow-up; app.agent.wire_trace since PRP-0179): the
+        # request as it will go on the wire, ids only.
         #
         # ORDER IS NORMATIVE (PRP-0147, UDR-0126 D5): the trace -- and with it the
         # pairing verdict -- is computed on the input as MAF assembled it, BEFORE the
@@ -97,9 +97,8 @@ class _StructuredOutputMixin:
                 summarize_removed(before_items, after if isinstance(after, list) else []),
             )
         # Pairing is SYMMETRIC (PRP-0149 C2, UDR-0126 D8). An output whose call is not
-        # in the same request is a guaranteed 400 -- and, unlike an unanswered CALL, it
-        # carries no FEAT-0028 risk, because no approval item is ever expressed as a
-        # bare output. So this direction is REMOVED, not merely reported.
+        # in the same request is a guaranteed 400, and no item legitimately answers a
+        # call with a bare output. So this direction is REMOVED, not merely reported.
         orphaned = drop_orphan_outputs(run_options)
         if orphaned:
             logger.info("[wire pairing] removed %d orphan output item(s) with no matching call", orphaned)
@@ -144,12 +143,12 @@ def _report_pairing(run_options: dict[str, Any]) -> None:
     arrives PRE-EXPLAINED, one line above the traceback, instead of being deduced
     afterwards from a log that already contained the answer (RES-0003 Finding B).
 
-    Removing unanswered CALLS runs in REPORT-ONLY mode. PRP-0148 Section 6.4 makes an
-    approval-gated wire trace a release GATE for that removal, because a wrong orphan
-    rule breaks FEAT-0028 for every gated tool. Reporting collects that evidence from
-    real traffic at zero risk; enabling the removal is then one change at this call
-    site, taken on measured data rather than on reasoning about a seam that has already
-    produced two wrong fixes.
+    Removing unanswered CALLS runs in REPORT-ONLY mode (PRP-0148 Section 6.4, UDR-0132
+    D3). Its original reason -- a wrong orphan rule would break the tool-approval flow
+    -- went away with that flow (PRP-0179, UDR-0161 D9), but the gate is kept on
+    purpose: enabling the removal is one change at this call site, to be taken on
+    measured traffic rather than on reasoning about a seam that has already produced
+    two wrong fixes.
 
     The OUTPUT direction is different and is judged the same way here (UDR-0126 D8).
     Before PRP-0149 this function judged on ``unanswered_calls()`` alone, so a request

@@ -180,7 +180,6 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
         "mode_initial": spec.mode_initial,
         "compaction": compaction,
         "loop_max_iterations": min(spec.loop_max_iterations or HARNESS_MAX_ITERATIONS, HARNESS_MAX_ITERATIONS),
-        "write_tool_approval": not spec.file_access_disable_write_tool_approval,
     }
 
 

@@ -253,13 +253,16 @@ def map_document(
     file_memory = _block(data, "fileMemory", warnings)
     file_access = _block(data, "fileAccess", warnings)
     web_search = _block(data, "webSearch", warnings)
-    # `toolApproval` was removed from the schema: the harness's own approval
-    # coordinator is now always off so ChatWalaʻau's approval card is the single
-    # surface (UDR-0119 D6). A stale key is reported rather than silently ignored.
+    # `fileAccess.disableWriteToolApproval` is no longer read (PRP-0179, UDR-0161 D6):
+    # no harness tool asks for approval, so the key asks for what the harness already
+    # does. It is ignored WITHOUT a warning -- a warning would make the agent
+    # non-runnable (UDR-0119 D8) for a key that is harmless.
+    # `toolApproval` was removed from the schema in v0.128.0 (UDR-0119 D6); a stale
+    # block is still reported rather than silently ignored. Since PRP-0179 no harness
+    # tool asks for approval at all (UDR-0161 D1).
     if "toolApproval" in data:
         warnings.append(
-            "toolApproval is no longer a harness field: tool approval is handled solely by "
-            "ChatWalaʻau's approval card. Remove the block."
+            "toolApproval is no longer a harness field: harness tools run without an approval step. Remove the block."
         )
 
     loop = _block(data, "loop", warnings)
@@ -288,7 +291,6 @@ def map_document(
         mode_initial=mode_initial,
         file_memory_disabled=_bool(file_memory, "disabled", "fileMemory", warnings),
         file_access_disable_write_tools=_bool(file_access, "disableWriteTools", "fileAccess", warnings),
-        file_access_disable_write_tool_approval=_bool(file_access, "disableWriteToolApproval", "fileAccess", warnings),
         web_search_disabled=_bool(web_search, "disabled", "webSearch", warnings),
         loop_max_iterations=loop_max,
         warnings=warnings,

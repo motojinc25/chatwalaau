@@ -143,8 +143,7 @@ def _tool_name(obj: Any) -> str:
     """Resolve a MAF tool object's name.
 
     MAF converts a plain callable passed to ``Agent(tools=...)`` into a
-    ``FunctionTool`` carrying ``.name``; an approval-wrapped tool
-    (``wrap_with_approval`` -> ``@tool(approval_mode=...)``) is already a
+    ``FunctionTool`` carrying ``.name``; a ``@tool``-decorated callable is already a
     ``FunctionTool``. A bare function keeps ``__name__``. Both shapes are handled so
     the match never depends on which path a tool took (PRP-0119 risk note).
     """
@@ -284,6 +283,8 @@ def _function_rows(agent: Any, allow: ResolvedAllowlist | None) -> tuple[list[To
         present = name in actual
 
         note = ""
+        # No tool should carry an approval mode since PRP-0179 (UDR-0161 D1); the note
+        # stays so a regression is visible in the prompt dump, not only in a failed turn.
         approval = actual.get(name, "")
         if present and approval and approval != "never_require":
             note = f"approval: {approval}"

@@ -81,7 +81,6 @@ def build_prompt_agent(
     tools, context_providers, instructions, middleware = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
-        apply_approval=True,
         spec=spec,
     )
 

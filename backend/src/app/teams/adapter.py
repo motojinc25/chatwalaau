@@ -2,7 +2,7 @@
 
 Hosts the ``microsoft-teams-apps`` SDK (Teams AI Library v2) IN-PROCESS and ties
 the SDK-independent pipeline (``app.teams.pipeline``) to the agent core
-(``app.teams.agent_run``) and the proactive reply path (UDR-0070 D2/D4/D6/D8).
+(``app.teams.agent_run``) and the proactive reply path (UDR-0070 D2/D4/D6).
 
 How the SDK is wired (validated against microsoft-teams-apps 2.0.13.x):
 
@@ -21,13 +21,11 @@ How the SDK is wired (validated against microsoft-teams-apps 2.0.13.x):
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 from app.core.config import settings
 from app.teams import authz, reply
-from app.teams.approval import build_approval_card, parse_submit
 from app.teams.message import TeamsMessage
 from app.teams.pipeline import InboundView, build_teams_message
 from app.teams.store import conversation_refs
@@ -147,9 +145,17 @@ class TeamsAdapter:
 
     async def on_message(self, view: InboundView) -> None:
         """Pipeline -> authz -> dispatch; reply proactively (UDR-0070 D4/D5/D6)."""
-        # An Adaptive Card Action.Submit (tool approval decision) arrives as a
-        # message activity with `value` set -- resolve it and stop (CTR-0141).
-        if view.submit_value and await self.handle_submit(view.submit_value):
+        # An Adaptive Card Action.Submit arrives as a message activity with `value`
+        # set. This adapter posts no card since PRP-0179 (the approval card, CTR-0141,
+        # was retired), so a submit can only come from a card posted before the
+        # upgrade. It is CONSUMED without an agent run and without a reply --
+        # stale input is ignored, not rejected (UDR-0161 D6).
+        if view.submit_value:
+            logger.info(
+                "Teams Action.Submit ignored (no card is posted since PRP-0179; a pre-upgrade "
+                "approval card was clicked): keys=%s",
+                sorted(view.submit_value) if isinstance(view.submit_value, dict) else type(view.submit_value).__name__,
+            )
             return
         msg = build_teams_message(view)
         if msg is None:
@@ -172,20 +178,8 @@ class TeamsAdapter:
         """Run the agent turn and send the chunked reply (background-task body)."""
         from app.teams.agent_run import run_turn
 
-        async def _renderer(
-            record_id: str,
-            thread_id: str,
-            tool_name: str,
-            preview: dict[str, Any],
-            iteration: int,
-            max_iterations: int,
-        ) -> bool:
-            return await self._render_approval(
-                msg.conversation_ref, record_id, thread_id, tool_name, preview, iteration, max_iterations
-            )
-
         try:
-            text = await run_turn(msg, agent_registry=self._agent_registry, approval_renderer=_renderer)
+            text = await run_turn(msg, agent_registry=self._agent_registry)
         except Exception:
             logger.warning("Teams agent turn failed for %s", msg.thread_id, exc_info=True)
             await self.send_text(msg.conversation_ref, "Sorry, something went wrong while answering.")
@@ -207,47 +201,6 @@ class TeamsAdapter:
             await self.send_reply(msg, chunk, mention=mention and index == 0)
         for image in images:
             await self.send_image(msg, image)
-
-    async def _render_approval(
-        self,
-        conversation_id: Any,
-        record_id: str,
-        thread_id: str,
-        tool_name: str,
-        preview: dict[str, Any],
-        iteration: int,
-        max_iterations: int,
-    ) -> bool:
-        """Render an Adaptive Card and park until the user decides (UDR-0070 D8)."""
-        from app.agent.approval import approval_store
-
-        card = build_approval_card(
-            record_id=record_id,
-            thread_id=thread_id,
-            tool_name=tool_name,
-            arguments_preview=preview,
-            iteration=iteration,
-            max_iterations=max_iterations,
-        )
-        await self.send_card(conversation_id, card)
-        record = await approval_store.get(record_id)
-        if record is None:
-            return False
-        try:
-            await asyncio.wait_for(record.event.wait(), timeout=float(settings.tool_approval_timeout_sec))
-        except TimeoutError:
-            return False
-        return bool(record.resolution and record.resolution.approved)
-
-    async def handle_submit(self, value: dict[str, Any]) -> bool:
-        """Resolve a tool-approval Adaptive Card Action.Submit (CTR-0141)."""
-        from app.teams.approval import apply_decision
-
-        submit = parse_submit(value)
-        if submit is None:
-            return False
-        await apply_decision(submit)
-        return True
 
     # ---- proactive send (SDK app.send chokepoint) ----
 
@@ -294,22 +247,6 @@ class TeamsAdapter:
         from microsoft_teams.api import TypingActivityInput  # type: ignore[import-not-found]
 
         await self._teams_app.send(conversation_id, TypingActivityInput())
-
-    async def send_card(self, conversation_id: Any, card: dict[str, Any]) -> None:  # pragma: no cover -- SDK-driven
-        if self._teams_app is None or not conversation_id:
-            return
-        try:
-            from microsoft_teams.cards import AdaptiveCard  # type: ignore[import-not-found]
-
-            await self._teams_app.send(conversation_id, AdaptiveCard.model_validate(card))
-        except Exception:
-            # Best-effort: fall back to a text prompt if the card cannot be built.
-            logger.debug("Teams Adaptive Card send failed; falling back to text", exc_info=True)
-            tool = card.get("body", [{}])[1].get("text", "a tool") if card.get("body") else "a tool"
-            await self._teams_app.send(
-                conversation_id,
-                f"Approval required to run {tool}. Reply 'allow' or 'deny'.",
-            )
 
 
 async def _run_teams_turn_task(ctx: dict[str, Any]) -> None:

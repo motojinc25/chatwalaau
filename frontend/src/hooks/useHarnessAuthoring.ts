@@ -24,7 +24,7 @@ export interface HarnessDocument {
   todo: { disabled?: boolean }
   mode: { disabled?: boolean; initial?: string | null }
   fileMemory: { disabled?: boolean }
-  fileAccess: { disableWriteTools?: boolean; disableWriteToolApproval?: boolean }
+  fileAccess: { disableWriteTools?: boolean }
   webSearch: { disabled?: boolean }
   loop: { maxIterations?: number | null }
 }
@@ -51,7 +51,6 @@ export interface HarnessPolicy {
     source?: 'catalog' | 'yaml' | 'mixed'
   }
   loop_max_iterations: number
-  write_tool_approval: boolean
 }
 
 export interface HarnessValidationResult {

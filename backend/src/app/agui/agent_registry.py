@@ -83,13 +83,11 @@ class AgentRegistry:
         middleware: list[Any] | None = None,
     ) -> None:
         self._compaction_strategy = compaction_strategy
-        # Agent-level middleware shared by every per-model Agent (PRP-0108,
-        # UDR-0086 D2): currently the skills auto-approval ToolApprovalMiddleware.
-        # Stateless per run (rules are static callbacks), so sharing one list
-        # across models is safe, matching the compaction strategy pattern.
+        # Agent-level middleware shared by every per-model Agent. Empty since
+        # PRP-0179 (UDR-0161 D2: no approval middleware on any lane); kept as a seam
+        # for a future non-approval middleware. Every model gets the same list --
+        # the per-model Anthropic withholding of UDR-0118 went with the middleware.
         self._middleware = list(middleware or [])
-        # Provider lanes already told about a withheld middleware (one INFO each).
-        self._logged_withheld_middleware: set[str] = set()
         # Serialises runtime rebuilds (PRP-0086, UDR-0064 D5). asyncio.Lock can be
         # constructed without a running event loop on Python 3.12 (it binds lazily),
         # which matters because the registry is created at import time.
@@ -120,81 +118,6 @@ class AgentRegistry:
         if is_demo_mode():
             return self._build_demo_agents(tools, context_providers, instructions)
         return self._build_live_agents(tools, context_providers, instructions)
-
-    # Provider lanes that serve ANTHROPIC models and therefore reject an unpaired
-    # tool_result (PRP-0134, UDR-0118). `anthropic` covers BOTH of its hostings
-    # (direct and the Foundry endpoint); `foundry` serves many families, so it is
-    # decided per model rather than per lane -- see _serves_anthropic.
-    _APPROVAL_HARNESS_INCOMPATIBLE = frozenset({"anthropic"})
-
-    @staticmethod
-    def _serves_anthropic(model: str, provider_name: str) -> bool:
-        """True when this (model, lane) pair reaches an Anthropic model (UDR-0118 D1).
-
-        Two routes exist and BOTH were reported failing:
-
-        - ``provider: anthropic`` -- either hosting. `hosting: foundry` still speaks the
-          Anthropic Messages API through the Anthropic SDK, so the message contract, and
-          the rejection, are identical to the direct lane.
-        - ``provider: foundry`` with a Claude deployment. That lane serves many families
-          (DeepSeek, Grok, Llama, ...), so withholding for the whole lane would charge
-          every one of them for Anthropic's contract. It is decided per model instead.
-
-        The Foundry test is a DEPLOYMENT-NAME heuristic, the same shape
-        ``foundry.is_openai_reasoning_deployment`` already uses for its family routing,
-        and it carries that technique's weakness: a Claude deployment named something
-        else is not recognised. That is why the withholding is logged (D3) -- an operator
-        seeing skill approval cards on one model and a 400 on another has the log line to
-        connect them. A catalog ``family: anthropic`` override is honored first so such a
-        deployment can be declared explicitly rather than renamed.
-        """
-        if provider_name in AgentRegistry._APPROVAL_HARNESS_INCOMPATIBLE:
-            return True
-        if provider_name != "foundry":
-            return False
-        from app import models_catalog
-
-        if (models_catalog.offering_family(model) or "").strip().lower() == "anthropic":
-            return True
-        offering = models_catalog.offering_for(model)
-        name = f"{getattr(offering, 'model_ref', '') or ''} {model}".lower()
-        return "claude" in name
-
-    def _middleware_for(self, model: str, provider_name: str) -> list[Any]:
-        """Per-model middleware list (PRP-0134, UDR-0118).
-
-        The Skills auto-approval middleware is withheld wherever the model is an
-        Anthropic one. MAF's ``ToolApprovalMiddleware`` auto-approves by REMOVING the
-        ``function_approval_request`` from the assistant turn -- which takes the
-        ``tool_use`` with it (``_harness/_tool_approval.py:603-616``) -- and then
-        re-enters the loop with the approval responses as a separate user message. The
-        result is a ``tool_result`` with nothing to pair against, which Anthropic rejects
-        with 400 and which made EVERY Agent Skill turn fail on those lanes.
-
-        Withholding it does not disable Skills: the skill tools keep MAF 1.10's
-        approval-required default and surface as ordinary FEAT-0028 approval cards, which
-        travel through this product's own outer approval loop -- the path that already
-        builds correctly paired assistant/user messages for Anthropic (CTR-0099) and that
-        the coding tools use on those models today. The operator pays an approval card
-        (once per session per tool, via the UDR-0043 D8 session cache) instead of a
-        broken turn.
-        """
-        if not self._serves_anthropic(model, provider_name):
-            return list(self._middleware)
-
-        from app.skills.provider import SessionTolerantToolApprovalMiddleware
-
-        kept = [m for m in self._middleware if not isinstance(m, SessionTolerantToolApprovalMiddleware)]
-        if len(kept) != len(self._middleware) and model not in self._logged_withheld_middleware:
-            self._logged_withheld_middleware.add(model)
-            logger.info(
-                "Skills auto-approval middleware withheld for '%s' on the '%s' lane (UDR-0118): "
-                "Anthropic rejects the unpaired tool_result the framework's approval harness "
-                "produces. Skill tools use the standard approval cards instead.",
-                model,
-                provider_name,
-            )
-        return kept
 
     def _install(
         self,
@@ -228,9 +151,7 @@ class AgentRegistry:
         PRP-0086 / UDR-0064 D2/D5: builds a brand-new per-model map off to the
         side, then installs it under a single lock. ``get()`` always returns a
         fully-built agent; if the build raises, the prior agents stay installed (no
-        partial swap). The middleware list is refreshed (PRP-0108 -- skills can
-        appear/disappear on a Skills Reload, and the auto-approval middleware must
-        track that).
+        partial swap). The middleware list is refreshed with the other inputs.
 
         PRP-0162 / UDR-0140 D2: ``compaction_strategy`` is a REQUIRED keyword. It
         used to be reused from construction, which made the three ``rebuild``-scope
@@ -366,7 +287,7 @@ class AgentRegistry:
 
         for model, provider_name in resolved:
             client = _build_chat_client(model)
-            model_middleware = self._middleware_for(model, provider_name)
+            model_middleware = list(self._middleware)
             web_search = providers.web_search_tool(model)
             model_tools = [web_search, *tools] if web_search is not None else list(tools)
             model_caps = instructions + (WEB_SEARCH_INSTRUCTION if web_search is not None else "")
@@ -386,8 +307,8 @@ class AgentRegistry:
             # On Azure's Responses endpoint that resp_ id is not reliably
             # retrievable on the IMMEDIATE follow-up, so an inner tool-loop step
             # (e.g. after a file_glob) fails with 400 previous_response_not_found
-            # -- inside a single agent.run, before our outer approval loop or the
-            # first-update retry can intervene. store=False carries the whole
+            # -- inside a single agent.run, before the first-update retry can
+            # intervene. store=False carries the whole
             # conversation in the request instead, the same decision the harness
             # lane made (UDR-0119 D4). A background run overrides this per-request
             # (it REQUIRES server-side storage; see the AG-UI endpoint).

@@ -8,15 +8,10 @@ Session management is enabled via FileHistoryProvider (CTR-0014).
 Agent selection is done via AgentRegistry using state.model (CTR-0070, PRP-0035).
 Background Responses support via CTR-0045 (PRP-0025).
 
-PRP-0067 / UDR-0043 (CTR-0009 v12): the endpoint also translates MAF's
-``function_approval_request`` content into a CUSTOM
-``tool_approval_request`` event, parks the stream on an
-``asyncio.Event`` from ``app.agent.approval.approval_store``, and after
-the operator POSTs to ``/api/tool-approval`` (or the timeout fires)
-re-runs the agent with an appended ``function_approval_response``
-message so MAF resumes execution / short-circuits with the rejection
-text. The full handshake is ephemeral -- nothing about the approval
-request/response is persisted to session JSON.
+PRP-0179 / UDR-0161: a turn is ONE agent run. No tool is approval-gated, so the
+former tool-approval loop (PRP-0067 -- park on a ``function_approval_request``,
+wait for ``POST /api/tool-approval``, rebuild the conversation, run again) is
+gone; a residual approval request ends the turn with a named error (D3).
 """
 
 import asyncio
@@ -47,7 +42,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 from ag_ui.encoder import EventEncoder
-from agent_framework import AgentSession, Content, Message, add_usage_details
+from agent_framework import AgentSession, Content, add_usage_details
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -57,20 +52,8 @@ from openai import NotFoundError as OpenAINotFoundError
 from pydantic import AliasChoices, BaseModel, Field
 
 from app import providers
-from app.agent import approval_debug
+from app.agent import wire_trace
 from app.agent.agent_memory import session_agent_memory_snapshot
-from app.agent.approval import (
-    ApprovalRecord,
-    approval_store,
-    truncate_arguments_preview,
-)
-from app.agent.approval_iteration import (
-    IterationContentAccumulator,
-    agent_self_reinvokes,
-    history_is_self_persisting,
-    maf_resumable_call_ids,
-    round_is_productive,
-)
 from app.agent.declarative import active_spec
 from app.agent.identity import load_identity
 from app.agent.prompt_dump import dump_prompt
@@ -140,8 +123,8 @@ def _is_previous_response_not_found(exc: BaseException) -> bool:
     """Detect an Azure/OpenAI 400 ``previous_response_not_found`` in the chain.
 
     The Responses API raises this when a ``previous_response_id`` points at a
-    response the service can no longer find -- e.g. an approval-interrupted
-    response that was never committed server-side, server-side eviction, or a
+    response the service can no longer find -- e.g. an interrupted response that
+    was never committed server-side, server-side eviction, or a
     cross-resource reference. agent-framework wraps it in ChatClientException,
     so inspect the whole ``__cause__`` / ``__context__`` chain by error code
     and message text.
@@ -807,7 +790,7 @@ async def _resilient_run(
                 exc,
             )
             # Clear any uncommitted server-side response id so the retry relies on
-            # the explicit context (mirrors the post-approval reset).
+            # the explicit context.
             session.service_session_id = None
             yield _RetryNotice(attempt, _MAX_TRANSIENT_RETRIES, int(delay * 1000))
             await asyncio.sleep(delay)
@@ -991,24 +974,6 @@ def _inject_image_content(
                 target.contents.append(Content.from_text(text=pdf_info))
 
 
-def _arguments_to_dict(raw: Any) -> dict[str, Any]:
-    """Best-effort decode of FunctionCallContent.arguments to a dict.
-
-    MAF emits arguments either as a parsed dict or as a streaming JSON
-    string; the approval preview wants a dict so the SPA can render
-    structured fields.
-    """
-    if isinstance(raw, dict):
-        return dict(raw)
-    if isinstance(raw, str):
-        try:
-            decoded = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            return {"_raw": raw}
-        return decoded if isinstance(decoded, dict) else {"_value": decoded}
-    return {}
-
-
 def _is_first_assistant_turn(thread_id: str) -> bool:
     """True when the PERSISTED session holds no assistant message yet (CTR-0109).
 
@@ -1065,11 +1030,8 @@ async def _stream_with_reasoning(
     that agent-framework-ag-ui's _emit_content() would otherwise skip.
     Selects the Agent from the registry based on state.model (CTR-0070).
 
-    PRP-0067 (CTR-0009 v12): when MAF emits ``function_approval_request``
-    content the loop translates it to a CUSTOM
-    ``tool_approval_request`` event, parks on the approval store, and
-    re-runs the agent with an appended ``function_approval_response``
-    message once the approval is resolved (UDR-0043 D1+D6+D7).
+    One run per turn (PRP-0179, UDR-0161 D2); a ``function_approval_request`` is a
+    named defect that ends the turn (D3).
     """
     encoder = EventEncoder()
     thread_id = request_body.thread_id or _generate_id()
@@ -1138,8 +1100,8 @@ async def _stream_with_reasoning(
     # Harness Agent run-target (PRP-0135, CTR-0009 v-next, UDR-0119 D3/D4). When the
     # request selects a harness agent (state.harness_id), the run streams the cached
     # per-conversation harness agent through the SAME loop below -- the harness returns
-    # a standard MAF Agent, so the existing TEXT/REASONING/TOOL_CALL translation and
-    # the FEAT-0028 approval handshake apply unchanged. Absent the flag (and absent
+    # a standard MAF Agent, so the existing TEXT/REASONING/TOOL_CALL translation
+    # applies unchanged. Absent the flag (and absent
     # state.workflow_id above) the endpoint runs the active Prompt agent byte-for-byte.
     _harness_id = (request_body.state or {}).get("harness_id") if request_body.state else None
     _harness_ctx: tuple[Any, Any, str] | None = None
@@ -1222,9 +1184,9 @@ async def _stream_with_reasoning(
     run_stats = _RunStats()
 
     # Two-axis token measurement (PRP-0157, UDR-0135 D1/D2). A turn emits one MAF
-    # usage content per MODEL CALL, and the approval loop below runs one stream per
-    # ROUND, so these are declared HERE -- outside the round loop -- and are never
-    # reset mid-turn. `turn_usage` accumulates the billing axis with the public
+    # usage content per MODEL CALL (the run below makes as many calls as its tool
+    # loop needs), so these are declared HERE, once per turn, and are never reset
+    # mid-turn. `turn_usage` accumulates the billing axis with the public
     # `add_usage_details`, NOT via `ResponseStream.get_final_response()`, which
     # covers a single round and, on a stream that was not fully consumed, drains the
     # remainder -- resuming and billing a run the operator stopped (UDR-0135 D2).
@@ -1324,7 +1286,7 @@ async def _stream_with_reasoning(
         # ignores them. `resolved_reasoning` is kept as the effort alias used by
         # the usage event's back-compat `reasoning` field.
         # A harness run reports the YAML-bound offering as the effective model
-        # (usage events, provider-aware approval reconstruction); the per-message
+        # (usage events); the per-message
         # option resolution below stays inert for it ({} everywhere).
         effective_model = _harness_ctx[2] if harness_run else (selected_model or agent_registry.default_model)
         resolved_options = {} if harness_run else providers.resolve_options(effective_model, requested_options)
@@ -1519,59 +1481,17 @@ async def _stream_with_reasoning(
         # read this as their default when the LLM omits a value.
         _image_gen_options.set(image_options)
 
-        # PRP-0067 approval loop. The first iteration runs the original
-        # messages. If MAF emits function_approval_request contents, the
-        # inner loop collects them, parks on the asyncio.Event for each,
-        # then appends a fresh "user" message bundling the resolved
-        # responses and re-runs the agent. The loop terminates when an
-        # iteration finishes without producing any approval request.
-        iteration_messages: list[Any] = list(messages)
-        # PRP-0144 / UDR-0125 D1/D2: does this agent's own history already hold
-        # the turn, or does the re-run have to carry it? Read ONCE per run from
-        # the agent's persistence configuration -- never from `harness_run`, so a
-        # future lane that adopts per-service-call persistence inherits the
-        # correct behaviour without an edit here (D2).
-        self_persisting = history_is_self_persisting(agent)
-        # PRP-0103 / UDR-0082 D1/D2: the approval re-run loop is bounded by two
-        # operator-configurable counters. `interactive_rounds` only advances for
-        # a round that required a human decision (source != "session-cache"), so
-        # a blanket "approve for session" grant no longer burns the budget;
-        # `total_rounds` advances for every round and is the runaway backstop.
-        max_approval_iterations = settings.tool_approval_max_iterations
-        # PRP-0146 / UDR-0082 D7/D8/D9: HOW the runaway backstop is budgeted depends
-        # on whether this agent RE-RUNS ITSELF -- read once, from the agent, never
-        # from `harness_run` (D8, following UDR-0125 D2). On a self-re-invoking
-        # agent every gated tool call is an approval round, so a flat round ceiling
-        # measures productivity: an observed harness turn died at total=201/200 with
-        # interactive=0/33, without one human decision. That lane is bounded by LACK
-        # OF PROGRESS instead, with a far higher round backstop behind it. An agent
-        # that does not re-invoke itself keeps the historical budget byte-for-byte.
-        autonomous = agent_self_reinvokes(agent)
-        absolute_max_iterations = (
-            settings.autonomous_loop_max_rounds if autonomous else settings.tool_approval_absolute_max_iterations
-        )
-        no_progress_limit = settings.autonomous_loop_no_progress_rounds if autonomous else None
-        interactive_rounds = 0
-        total_rounds = 0
-        # Consecutive rounds that executed no tool and produced no text; reset by
-        # every productive round (UDR-0082 D7). Only counted on the autonomous lane.
-        no_progress_rounds = 0
-        # Cumulative executed-tool count, so an exhausted budget can report the work
-        # the turn actually performed instead of only naming a number (D10).
-        tools_executed_total = 0
-        approval_loop_exceeded = False
-        loop_stop_reason: str | None = None
+        # ONE run per turn (PRP-0179, UDR-0161 D2). No tool is approval-gated, so
+        # there is no outer re-run loop: the turn is bounded by the framework's own
+        # caps (function-invocation max_iterations; the harness loop cap on a harness
+        # run, UDR-0161 D8). A residual approval request is a named defect (D3).
+        unexpected_approval_tool: str | None = None
         logger.info(
-            "AG-UI run start: thread=%s model=%s harness=%s input_msgs=%d self_persisting_history=%s "
-            "self_reinvoking=%s round_budget=%s no_progress_limit=%s",
+            "AG-UI run start: thread=%s model=%s harness=%s input_msgs=%d",
             thread_id,
             effective_model if harness_run else (selected_model or "<default>"),
             _harness_id or "-",
-            len(iteration_messages),
-            self_persisting,
-            autonomous,
-            absolute_max_iterations,
-            no_progress_limit if no_progress_limit is not None else "-",
+            len(messages),
         )
         # PRP-0148 Section 4.3: did this turn START polluted? A harness conversation
         # keeps its history in a cached MAF session the operator cannot see, and an
@@ -1607,692 +1527,319 @@ async def _stream_with_reasoning(
                     },
                 )
             )
-        while True:
-            pending_approvals: list[tuple[ApprovalRecord, Content]] = []
-            # PRP-0069 follow-up: capture this iteration's stream content so
-            # the next iteration's agent.run input pairs the originating
-            # function_call (assistant role) with the approval response (user
-            # role). Without it, MAF's Anthropic connector emits an orphan
-            # tool_result -> HTTP 400. See app.agent.approval_iteration.
-            iter_accumulator = IterationContentAccumulator()
-            # PRP-0141 tracing: the input this iteration hands to agent.run, and
-            # what MAF holds on the session going in.
-            approval_debug.logger.info(
-                "[iter %d/%d start] thread=%s input_msgs=%d service_session_id=%s %s\n  input: %s",
-                total_rounds,
-                interactive_rounds,
-                thread_id,
-                len(iteration_messages),
-                getattr(session, "service_session_id", None),
-                approval_debug.describe_session_state(session),
-                " | ".join(approval_debug.describe_messages(iteration_messages)),
-            )
+        async for update in _resilient_run(agent, messages, session, run_options, stats=run_stats):
+            # v0.77.1: a transient upstream 5xx before any output triggers an
+            # automatic retry. The helper yields a _RetryNotice so we can tell
+            # the SPA a retry is happening (the run continues; no RUN_ERROR).
+            if isinstance(update, _RetryNotice):
+                yield encoder.encode(
+                    CustomEvent(
+                        type=EventType.CUSTOM,
+                        name="run_retry",
+                        value={
+                            "attempt": update.attempt,
+                            "max_attempts": update.max_attempts,
+                            "delay_ms": update.delay_ms,
+                            "reason": "transient_upstream_error",
+                        },
+                    )
+                )
+                continue
 
-            async for update in _resilient_run(agent, iteration_messages, session, run_options, stats=run_stats):
-                # v0.77.1: a transient upstream 5xx before any output triggers an
-                # automatic retry. The helper yields a _RetryNotice so we can tell
-                # the SPA a retry is happening (the run continues; no RUN_ERROR).
-                if isinstance(update, _RetryNotice):
+            contents = getattr(update, "contents", None) or []
+            for content in contents:
+                content_type = getattr(content, "type", None)
+
+                if content_type == "text_reasoning":
+                    text = getattr(content, "text", None)
+                    if not text:
+                        continue
+                    if reasoning_msg_id is None:
+                        reasoning_msg_id = _generate_id()
+                        yield encoder.encode(
+                            ReasoningMessageStartEvent(
+                                type=EventType.REASONING_MESSAGE_START,
+                                message_id=reasoning_msg_id,
+                                role=_REASONING_MESSAGE_ROLE,
+                            )
+                        )
+                    yield encoder.encode(
+                        ReasoningMessageContentEvent(
+                            type=EventType.REASONING_MESSAGE_CONTENT,
+                            message_id=reasoning_msg_id,
+                            delta=text,
+                        )
+                    )
+
+                elif content_type == "text":
+                    text = getattr(content, "text", None)
+                    if not text:
+                        # MAF delivers url_citation annotations as a text content with
+                        # an EMPTY text. Stage 1 does not consume them (UDR-0160 D5);
+                        # it only records that they arrived.
+                        if getattr(content, "annotations", None):
+                            annotations_seen = True
+                        continue
+                    # UDR-0160 D1/D2: the markup never leaves the backend, so the SPA,
+                    # the session file, the search index, the export and the title /
+                    # memory tasks are all clean without touching their own code.
+                    text, _stripped = text_sanitizer.feed(text)
+                    if not text:
+                        continue
+                    # Accumulate visible assistant text for Auto Session
+                    # Title (PRP-0077, CTR-0109).
+                    assistant_text_parts.append(text)
+                    # Close any open reasoning block before text
+                    if reasoning_msg_id is not None:
+                        yield encoder.encode(
+                            ReasoningMessageEndEvent(
+                                type=EventType.REASONING_MESSAGE_END,
+                                message_id=reasoning_msg_id,
+                            )
+                        )
+                        reasoning_msg_id = None
+                    if msg_id is None:
+                        msg_id = _generate_id()
+                        yield encoder.encode(
+                            TextMessageStartEvent(
+                                type=EventType.TEXT_MESSAGE_START,
+                                message_id=msg_id,
+                                role="assistant",
+                            )
+                        )
+                    yield encoder.encode(
+                        TextMessageContentEvent(
+                            type=EventType.TEXT_MESSAGE_CONTENT,
+                            message_id=msg_id,
+                            delta=text,
+                        )
+                    )
+
+                elif content_type == "function_call":
+                    # Close reasoning block before tool call
+                    if reasoning_msg_id is not None:
+                        yield encoder.encode(
+                            ReasoningMessageEndEvent(
+                                type=EventType.REASONING_MESSAGE_END,
+                                message_id=reasoning_msg_id,
+                            )
+                        )
+                        reasoning_msg_id = None
+
+                    tc_id = getattr(content, "call_id", None) or _generate_id()
+                    tc_name = getattr(content, "name", None)
+                    if tc_name and tc_id != tool_call_id:
+                        tool_call_id = tc_id
+                        tc_name_current = tc_name
+                        yield encoder.encode(
+                            ToolCallStartEvent(
+                                type=EventType.TOOL_CALL_START,
+                                tool_call_id=tc_id,
+                                tool_call_name=tc_name,
+                                parent_message_id=msg_id,
+                            )
+                        )
+                    tc_args = getattr(content, "arguments", None)
+                    if tc_args:
+                        delta = tc_args if isinstance(tc_args, str) else json.dumps(tc_args)
+                        yield encoder.encode(
+                            ToolCallArgsEvent(
+                                type=EventType.TOOL_CALL_ARGS,
+                                tool_call_id=tc_id,
+                                delta=delta,
+                            )
+                        )
+
+                elif content_type == "function_approval_request":
+                    # UDR-0161 D3: no tool is built approval-gated (D1), so a request
+                    # reaching here is a construction defect -- an upstream default
+                    # that changed, or a tool added with the framework default. It is
+                    # NOT parked, auto-approved, denied or dropped: the turn ends with
+                    # an error that names the tool.
+                    fn_call = getattr(content, "function_call", None)
+                    unexpected_approval_tool = getattr(fn_call, "name", "") or "<unknown>"
+                    logger.error(
+                        "Tool %r asked for approval (call_id=%s, thread=%s), but no tool is "
+                        "approval-gated since PRP-0179; ending the turn (UDR-0161 D3).",
+                        unexpected_approval_tool,
+                        getattr(fn_call, "call_id", None),
+                        thread_id,
+                    )
+                    break
+
+                elif content_type == "function_result":
+                    tc_id = getattr(content, "call_id", None)
+                    if tc_id:
+                        yield encoder.encode(
+                            ToolCallEndEvent(
+                                type=EventType.TOOL_CALL_END,
+                                tool_call_id=tc_id,
+                            )
+                        )
+                        raw_result = getattr(content, "result", "") or ""
+                        result_str = raw_result if isinstance(raw_result, str) else json.dumps(raw_result)
+                        yield encoder.encode(
+                            ToolCallResultEvent(
+                                type=EventType.TOOL_CALL_RESULT,
+                                message_id=_generate_id(),
+                                tool_call_id=tc_id,
+                                content=result_str,
+                                role="tool",
+                            )
+                        )
+                        # MCP Apps: check if this tool has UI resource (CTR-0067, PRP-0034)
+                        from app.mcp_apps.manager import fetch_ui_resource, get_ui_tool_metadata, store_app_html
+
+                        ui_meta = get_ui_tool_metadata(tc_name_current)
+                        if ui_meta:
+                            try:
+                                # Find the MCP tool instance
+                                from app.mcp.lifecycle import _mcp_server_status, _mcp_tools
+
+                                mcp_tool = None
+                                for idx, status in enumerate(_mcp_server_status):
+                                    if status["name"] == ui_meta.server_name and idx < len(_mcp_tools):
+                                        mcp_tool = _mcp_tools[idx]
+                                        break
+
+                                if mcp_tool:
+                                    ui_resource = await fetch_ui_resource(mcp_tool, ui_meta.resource_uri)
+                                    if ui_resource:
+                                        ref_id = tc_id or _generate_id()
+                                        html_filename = store_app_html(thread_id, ref_id, ui_resource.html)
+                                        yield encoder.encode(
+                                            CustomEvent(
+                                                type=EventType.CUSTOM,
+                                                name="mcp_app",
+                                                value={
+                                                    "server_name": ui_meta.server_name,
+                                                    "tool_name": ui_meta.tool_name,
+                                                    "resource_uri": ui_meta.resource_uri,
+                                                    "html_ref": f"/api/mcp-apps/html/{thread_id}/{html_filename}",
+                                                    "csp": ui_resource.csp,
+                                                    "permissions": ui_resource.permissions,
+                                                    "call_id": ref_id,
+                                                },
+                                            )
+                                        )
+                            except Exception:
+                                logger.warning("Failed to fetch MCP App UI for %s", tc_name_current, exc_info=True)
+
+                        tool_call_id = None
+                        # Reset text message after tool result (allows new text block)
+                        if msg_id is not None:
+                            yield encoder.encode(
+                                TextMessageEndEvent(
+                                    type=EventType.TEXT_MESSAGE_END,
+                                    message_id=msg_id,
+                                )
+                            )
+                            msg_id = None
+
+                elif content_type == "usage":
+                    usage_details = getattr(content, "usage_details", None) or {}
+                    usage_value = dict(usage_details)
+                    # Two-axis accumulation (PRP-0157, UDR-0135 D1/D2). This
+                    # content is ONE model call; the billing axis is the sum of
+                    # every one of them in the turn, and the
+                    # context axis is this call alone when it turns out to be
+                    # the last. `add_usage_details` sums every integer key,
+                    # including the provider-prefixed extras, and is exactly
+                    # what `AgentResponse.from_updates` would have summed --
+                    # arithmetically identical, without the finalizer's
+                    # stream-draining behaviour.
+                    turn_usage = dict(add_usage_details(turn_usage, dict(usage_details)))
+                    last_usage = dict(usage_details)
+                    model_calls += 1
+                    # PRP-0144 / UDR-0125 D5: attribute usage to the offering
+                    # that actually SERVED the turn. `effective_model` already
+                    # resolves to the harness run-target's bound offering for a
+                    # harness run and to the selected/default model otherwise;
+                    # reading `selected_model` back here reported another
+                    # model's context window, because a harness run
+                    # deliberately clears it (the per-message controls must not
+                    # leak into a run-target run).
+                    model_name = effective_model
+                    # Catalog context window (CTR-0069, PRP-0113): an offering's
+                    # declared context_window wins, else DEFAULT_CONTEXT_WINDOW.
+                    usage_value["max_context_tokens"] = providers.get_max_context_tokens(model_name)
+                    usage_value["model"] = model_name
+                    # Per-message generation options (PRP-0071 / PRP-0081,
+                    # CTR-0030). The effort keeps its back-compat field name
+                    # `reasoning`; every other advertised option (e.g.
+                    # `verbosity`) is echoed under its own key. Emitted for
+                    # every provider (incl. demo) so the SPA can label and
+                    # persist the selections next to the model name. Anthropic
+                    # advertises effort only, so no extra key appears there.
+                    # None = the model advertises no effort axis (e.g. a
+                    # non-OpenAI-family Foundry deployment, UDR-0085 A1);
+                    # omit the key rather than echo null.
+                    if resolved_reasoning is not None:
+                        usage_value["reasoning"] = resolved_reasoning
+                    usage_value.update({k: v for k, v in resolved_options.items() if k != "effort"})
+                    # Structured output status (PRP-0082, CTR-0009 v14, UDR-0058
+                    # D4/D9). Soft, non-blocking: parse the accumulated answer and
+                    # surface a status; never reject / regenerate. Persisted by the
+                    # SPA inside the usage object so the structured flag survives
+                    # reload. Skipped in DEMO_MODE (no structured resolution).
+                    if structured_active and not is_demo_mode():
+                        usage_value["structured"] = True
+                        usage_value["output_status"] = soft_validate("".join(assistant_text_parts))
+                    # Provider-agnostic prompt-cache metrics (PRP-0080,
+                    # CTR-0009 / FEAT-0038 / UDR-0056 D6). Normalize the
+                    # provider-specific cache token keys to a stable
+                    # cache_read_input_tokens / cache_write_input_tokens pair
+                    # so the SPA / operator can see the savings regardless of
+                    # provider. Anthropic reports anthropic.cache_read /
+                    # cache_creation; OpenAI reports a *cached_tokens detail.
+                    # Additive: absent when the provider reports no cache use.
+                    cache_read = usage_value.get("anthropic.cache_read_input_tokens")
+                    cache_write = usage_value.get("anthropic.cache_creation_input_tokens")
+                    if cache_read is None:
+                        cache_read = next(
+                            (v for k, v in usage_value.items() if isinstance(k, str) and k.endswith("cached_tokens")),
+                            None,
+                        )
+                    if cache_read is not None:
+                        usage_value["cache_read_input_tokens"] = cache_read
+                    if cache_write is not None:
+                        usage_value["cache_write_input_tokens"] = cache_write
+                    # Two-axis publication (PRP-0157, UDR-0135 D3/D4/D6/D7).
+                    # ADDITIVE: every key above keeps the meaning it has always
+                    # had -- the most recent model call -- because sessions
+                    # persisted since v0.18.0 store them under that meaning and
+                    # a stored key cannot be re-measured. `context_base_tokens`
+                    # is the context axis, normalized here because the
+                    # correction depends on the provider's reporting convention
+                    # (CTR-0102), which does not belong in a React component.
+                    # `turn` is the billing axis. Both are omitted when nothing
+                    # was measured; zero never stands in for unknown.
+                    includes_cache_read = providers.input_tokens_include_cache_read(model_name)
+                    base_tokens = context_base_tokens(last_usage, includes_cache_read=includes_cache_read)
+                    if base_tokens is not None:
+                        usage_value["context_base_tokens"] = base_tokens
+                    turn_value = turn_summary(
+                        turn_usage,
+                        model_calls=model_calls,
+                        includes_cache_read=includes_cache_read,
+                    )
+                    if turn_value is not None:
+                        usage_value["turn"] = turn_value
                     yield encoder.encode(
                         CustomEvent(
                             type=EventType.CUSTOM,
-                            name="run_retry",
-                            value={
-                                "attempt": update.attempt,
-                                "max_attempts": update.max_attempts,
-                                "delay_ms": update.delay_ms,
-                                "reason": "transient_upstream_error",
-                            },
+                            name="usage",
+                            value=usage_value,
                         )
                     )
-                    continue
-
-                contents = getattr(update, "contents", None) or []
-                for content in contents:
-                    content_type = getattr(content, "type", None)
-
-                    if content_type == "text_reasoning":
-                        # PRP-0069 follow-up: capture each delta (and the
-                        # Anthropic thinking signature) for iter N+1 reconstruction.
-                        iter_accumulator.observe_text_reasoning(content)
-                        text = getattr(content, "text", None)
-                        if not text:
-                            continue
-                        if reasoning_msg_id is None:
-                            reasoning_msg_id = _generate_id()
-                            yield encoder.encode(
-                                ReasoningMessageStartEvent(
-                                    type=EventType.REASONING_MESSAGE_START,
-                                    message_id=reasoning_msg_id,
-                                    role=_REASONING_MESSAGE_ROLE,
-                                )
-                            )
-                        yield encoder.encode(
-                            ReasoningMessageContentEvent(
-                                type=EventType.REASONING_MESSAGE_CONTENT,
-                                message_id=reasoning_msg_id,
-                                delta=text,
-                            )
-                        )
-
-                    elif content_type == "text":
-                        # PRP-0069 follow-up: capture each delta for iter N+1.
-                        iter_accumulator.observe_text(content)
-                        text = getattr(content, "text", None)
-                        if not text:
-                            # MAF delivers url_citation annotations as a text content with
-                            # an EMPTY text. Stage 1 does not consume them (UDR-0160 D5);
-                            # it only records that they arrived.
-                            if getattr(content, "annotations", None):
-                                annotations_seen = True
-                            continue
-                        # UDR-0160 D1/D2: the markup never leaves the backend, so the SPA,
-                        # the session file, the search index, the export and the title /
-                        # memory tasks are all clean without touching their own code.
-                        text, _stripped = text_sanitizer.feed(text)
-                        if not text:
-                            continue
-                        # Accumulate visible assistant text for Auto Session
-                        # Title (PRP-0077, CTR-0109).
-                        assistant_text_parts.append(text)
-                        # Close any open reasoning block before text
-                        if reasoning_msg_id is not None:
-                            yield encoder.encode(
-                                ReasoningMessageEndEvent(
-                                    type=EventType.REASONING_MESSAGE_END,
-                                    message_id=reasoning_msg_id,
-                                )
-                            )
-                            reasoning_msg_id = None
-                        if msg_id is None:
-                            msg_id = _generate_id()
-                            yield encoder.encode(
-                                TextMessageStartEvent(
-                                    type=EventType.TEXT_MESSAGE_START,
-                                    message_id=msg_id,
-                                    role="assistant",
-                                )
-                            )
-                        yield encoder.encode(
-                            TextMessageContentEvent(
-                                type=EventType.TEXT_MESSAGE_CONTENT,
-                                message_id=msg_id,
-                                delta=text,
-                            )
-                        )
-
-                    elif content_type == "function_call":
-                        # Close reasoning block before tool call
-                        if reasoning_msg_id is not None:
-                            yield encoder.encode(
-                                ReasoningMessageEndEvent(
-                                    type=EventType.REASONING_MESSAGE_END,
-                                    message_id=reasoning_msg_id,
-                                )
-                            )
-                            reasoning_msg_id = None
-
-                        tc_id = getattr(content, "call_id", None) or _generate_id()
-                        tc_name = getattr(content, "name", None)
-                        if tc_name and tc_id != tool_call_id:
-                            tool_call_id = tc_id
-                            tc_name_current = tc_name
-                            yield encoder.encode(
-                                ToolCallStartEvent(
-                                    type=EventType.TOOL_CALL_START,
-                                    tool_call_id=tc_id,
-                                    tool_call_name=tc_name,
-                                    parent_message_id=msg_id,
-                                )
-                            )
-                        # PRP-0069 follow-up: capture every non-gated function_call
-                        # for iter N+1 so the model does not re-execute it (avoids
-                        # an agent loop that exhausts Anthropic's rate limit).
-                        iter_accumulator.observe_function_call(content)
-                        tc_args = getattr(content, "arguments", None)
-                        if tc_args:
-                            delta = tc_args if isinstance(tc_args, str) else json.dumps(tc_args)
-                            yield encoder.encode(
-                                ToolCallArgsEvent(
-                                    type=EventType.TOOL_CALL_ARGS,
-                                    tool_call_id=tc_id,
-                                    delta=delta,
-                                )
-                            )
-
-                    elif content_type == "function_approval_request":
-                        # PRP-0067 / UDR-0043 D1: MAF paused before executing
-                        # this tool. Register the approval, emit a CUSTOM
-                        # event with the parsed arguments preview, and
-                        # accumulate the record so the post-stream phase
-                        # parks on its asyncio.Event.
-                        fn_call = getattr(content, "function_call", None)
-                        if fn_call is None:
-                            logger.warning("function_approval_request without function_call payload; skipping")
-                            continue
-                        # PRP-0069 follow-up: keep the originating function_call so
-                        # iter N+1's input has the matching tool_use (Anthropic
-                        # rejects orphan tool_results from approval responses).
-                        iter_accumulator.observe_function_call_from_approval(fn_call)
-                        tool_name_pending = getattr(fn_call, "name", "") or "<unknown>"
-                        call_id_pending = getattr(fn_call, "call_id", "") or _generate_id()
-                        raw_args = getattr(fn_call, "arguments", None)
-                        full_args = _arguments_to_dict(raw_args)
-                        preview_args = truncate_arguments_preview(full_args)
-                        record = await approval_store.register(
-                            thread_id=thread_id,
-                            tool_name=tool_name_pending,
-                            call_id=call_id_pending,
-                            arguments_preview=preview_args,
-                        )
-                        # Check session-scoped cache (UDR-0043 D8). A hit
-                        # bypasses the UI roundtrip: we resolve the record
-                        # immediately with source="session-cache".
-                        cached = await approval_store.lookup_session_cache(
-                            thread_id=thread_id,
-                            tool_name=tool_name_pending,
-                        )
-                        if cached is not None:
-                            await approval_store.resolve(record.id, approved=cached, source="session-cache")
-                        yield encoder.encode(
-                            CustomEvent(
-                                type=EventType.CUSTOM,
-                                name="tool_approval_request",
-                                value={
-                                    "id": record.id,
-                                    "call_id": call_id_pending,
-                                    "tool_name": tool_name_pending,
-                                    "arguments": preview_args,
-                                    "expires_at_unix": record.expires_at,
-                                    "cached_decision": cached,
-                                    # PRP-0103 / UDR-0082 D3: the 1-based
-                                    # interactive-round number this card belongs
-                                    # to, and the configured budget. Frozen
-                                    # during cached rounds (interactive_rounds
-                                    # does not advance), so the SPA counter stops
-                                    # while a blanket session grant is active.
-                                    "iteration": interactive_rounds + 1,
-                                    "max_iterations": max_approval_iterations,
-                                },
-                            )
-                        )
-                        pending_approvals.append((record, content))
-
-                    elif content_type == "function_result":
-                        # PRP-0069 follow-up: capture every executed result for
-                        # iter N+1 (pairs with the matching function_call so
-                        # Anthropic sees complete tool_use/tool_result pairs).
-                        iter_accumulator.observe_function_result(content)
-                        tc_id = getattr(content, "call_id", None)
-                        if tc_id:
-                            yield encoder.encode(
-                                ToolCallEndEvent(
-                                    type=EventType.TOOL_CALL_END,
-                                    tool_call_id=tc_id,
-                                )
-                            )
-                            raw_result = getattr(content, "result", "") or ""
-                            result_str = raw_result if isinstance(raw_result, str) else json.dumps(raw_result)
-                            yield encoder.encode(
-                                ToolCallResultEvent(
-                                    type=EventType.TOOL_CALL_RESULT,
-                                    message_id=_generate_id(),
-                                    tool_call_id=tc_id,
-                                    content=result_str,
-                                    role="tool",
-                                )
-                            )
-                            # MCP Apps: check if this tool has UI resource (CTR-0067, PRP-0034)
-                            from app.mcp_apps.manager import fetch_ui_resource, get_ui_tool_metadata, store_app_html
-
-                            ui_meta = get_ui_tool_metadata(tc_name_current)
-                            if ui_meta:
-                                try:
-                                    # Find the MCP tool instance
-                                    from app.mcp.lifecycle import _mcp_server_status, _mcp_tools
-
-                                    mcp_tool = None
-                                    for idx, status in enumerate(_mcp_server_status):
-                                        if status["name"] == ui_meta.server_name and idx < len(_mcp_tools):
-                                            mcp_tool = _mcp_tools[idx]
-                                            break
-
-                                    if mcp_tool:
-                                        ui_resource = await fetch_ui_resource(mcp_tool, ui_meta.resource_uri)
-                                        if ui_resource:
-                                            ref_id = tc_id or _generate_id()
-                                            html_filename = store_app_html(thread_id, ref_id, ui_resource.html)
-                                            yield encoder.encode(
-                                                CustomEvent(
-                                                    type=EventType.CUSTOM,
-                                                    name="mcp_app",
-                                                    value={
-                                                        "server_name": ui_meta.server_name,
-                                                        "tool_name": ui_meta.tool_name,
-                                                        "resource_uri": ui_meta.resource_uri,
-                                                        "html_ref": f"/api/mcp-apps/html/{thread_id}/{html_filename}",
-                                                        "csp": ui_resource.csp,
-                                                        "permissions": ui_resource.permissions,
-                                                        "call_id": ref_id,
-                                                    },
-                                                )
-                                            )
-                                except Exception:
-                                    logger.warning("Failed to fetch MCP App UI for %s", tc_name_current, exc_info=True)
-
-                            tool_call_id = None
-                            # Reset text message after tool result (allows new text block)
-                            if msg_id is not None:
-                                yield encoder.encode(
-                                    TextMessageEndEvent(
-                                        type=EventType.TEXT_MESSAGE_END,
-                                        message_id=msg_id,
-                                    )
-                                )
-                                msg_id = None
-
-                    elif content_type == "usage":
-                        usage_details = getattr(content, "usage_details", None) or {}
-                        usage_value = dict(usage_details)
-                        # Two-axis accumulation (PRP-0157, UDR-0135 D1/D2). This
-                        # content is ONE model call; the billing axis is the sum of
-                        # every one of them across every approval round, and the
-                        # context axis is this call alone when it turns out to be
-                        # the last. `add_usage_details` sums every integer key,
-                        # including the provider-prefixed extras, and is exactly
-                        # what `AgentResponse.from_updates` would have summed --
-                        # arithmetically identical, without the finalizer's
-                        # stream-draining behaviour.
-                        turn_usage = dict(add_usage_details(turn_usage, dict(usage_details)))
-                        last_usage = dict(usage_details)
-                        model_calls += 1
-                        # PRP-0144 / UDR-0125 D5: attribute usage to the offering
-                        # that actually SERVED the turn. `effective_model` already
-                        # resolves to the harness run-target's bound offering for a
-                        # harness run and to the selected/default model otherwise;
-                        # reading `selected_model` back here reported another
-                        # model's context window, because a harness run
-                        # deliberately clears it (the per-message controls must not
-                        # leak into a run-target run).
-                        model_name = effective_model
-                        # Catalog context window (CTR-0069, PRP-0113): an offering's
-                        # declared context_window wins, else DEFAULT_CONTEXT_WINDOW.
-                        usage_value["max_context_tokens"] = providers.get_max_context_tokens(model_name)
-                        usage_value["model"] = model_name
-                        # Per-message generation options (PRP-0071 / PRP-0081,
-                        # CTR-0030). The effort keeps its back-compat field name
-                        # `reasoning`; every other advertised option (e.g.
-                        # `verbosity`) is echoed under its own key. Emitted for
-                        # every provider (incl. demo) so the SPA can label and
-                        # persist the selections next to the model name. Anthropic
-                        # advertises effort only, so no extra key appears there.
-                        # None = the model advertises no effort axis (e.g. a
-                        # non-OpenAI-family Foundry deployment, UDR-0085 A1);
-                        # omit the key rather than echo null.
-                        if resolved_reasoning is not None:
-                            usage_value["reasoning"] = resolved_reasoning
-                        usage_value.update({k: v for k, v in resolved_options.items() if k != "effort"})
-                        # Structured output status (PRP-0082, CTR-0009 v14, UDR-0058
-                        # D4/D9). Soft, non-blocking: parse the accumulated answer and
-                        # surface a status; never reject / regenerate. Persisted by the
-                        # SPA inside the usage object so the structured flag survives
-                        # reload. Skipped in DEMO_MODE (no structured resolution).
-                        if structured_active and not is_demo_mode():
-                            usage_value["structured"] = True
-                            usage_value["output_status"] = soft_validate("".join(assistant_text_parts))
-                        # Provider-agnostic prompt-cache metrics (PRP-0080,
-                        # CTR-0009 / FEAT-0038 / UDR-0056 D6). Normalize the
-                        # provider-specific cache token keys to a stable
-                        # cache_read_input_tokens / cache_write_input_tokens pair
-                        # so the SPA / operator can see the savings regardless of
-                        # provider. Anthropic reports anthropic.cache_read /
-                        # cache_creation; OpenAI reports a *cached_tokens detail.
-                        # Additive: absent when the provider reports no cache use.
-                        cache_read = usage_value.get("anthropic.cache_read_input_tokens")
-                        cache_write = usage_value.get("anthropic.cache_creation_input_tokens")
-                        if cache_read is None:
-                            cache_read = next(
-                                (
-                                    v
-                                    for k, v in usage_value.items()
-                                    if isinstance(k, str) and k.endswith("cached_tokens")
-                                ),
-                                None,
-                            )
-                        if cache_read is not None:
-                            usage_value["cache_read_input_tokens"] = cache_read
-                        if cache_write is not None:
-                            usage_value["cache_write_input_tokens"] = cache_write
-                        # Two-axis publication (PRP-0157, UDR-0135 D3/D4/D6/D7).
-                        # ADDITIVE: every key above keeps the meaning it has always
-                        # had -- the most recent model call -- because sessions
-                        # persisted since v0.18.0 store them under that meaning and
-                        # a stored key cannot be re-measured. `context_base_tokens`
-                        # is the context axis, normalized here because the
-                        # correction depends on the provider's reporting convention
-                        # (CTR-0102), which does not belong in a React component.
-                        # `turn` is the billing axis. Both are omitted when nothing
-                        # was measured; zero never stands in for unknown.
-                        includes_cache_read = providers.input_tokens_include_cache_read(model_name)
-                        base_tokens = context_base_tokens(last_usage, includes_cache_read=includes_cache_read)
-                        if base_tokens is not None:
-                            usage_value["context_base_tokens"] = base_tokens
-                        turn_value = turn_summary(
-                            turn_usage,
-                            model_calls=model_calls,
-                            includes_cache_read=includes_cache_read,
-                        )
-                        if turn_value is not None:
-                            usage_value["turn"] = turn_value
-                        yield encoder.encode(
-                            CustomEvent(
-                                type=EventType.CUSTOM,
-                                name="usage",
-                                value=usage_value,
-                            )
-                        )
-
-            # End of inner async-for. If no approvals are pending the agent
-            # finished naturally and we exit the outer loop. Otherwise wait
-            # on each pending record, build approval-response contents, and
-            # append a fresh "user" message so MAF resumes on the next
-            # iteration (PRP-0067 / UDR-0043 D1).
-            approval_debug.logger.info(
-                "[iter %d end] thread=%s pending_approvals=%d %s\n  %s",
-                total_rounds,
-                thread_id,
-                len(pending_approvals),
-                approval_debug.describe_session_state(session),
-                iter_accumulator.observation_summary(),
-            )
-            if not pending_approvals:
+            if unexpected_approval_tool is not None:
                 break
 
-            approval_response_contents: list[Content] = []
-            # PRP-0103 / UDR-0082 D2: record each resolution source so the round
-            # can be classified as cached (all "session-cache") or interactive.
-            round_sources: list[str] = []
-            for record, request_content in pending_approvals:
-                if record.resolution is None:
-                    try:
-                        await asyncio.wait_for(
-                            record.event.wait(),
-                            timeout=float(settings.tool_approval_timeout_sec),
-                        )
-                    except TimeoutError:
-                        await approval_store.resolve(record.id, approved=False, source="timeout")
-                resolution = record.resolution
-                approved = bool(resolution and resolution.approved)
-                source = resolution.source if resolution else "timeout"
-                round_sources.append(source)
-                if source == "timeout":
-                    logger.warning(
-                        "approval timed out after %ds for tool=%s (call_id=%s, thread_id=%s)",
-                        settings.tool_approval_timeout_sec,
-                        record.tool_name,
-                        record.call_id,
-                        thread_id,
-                    )
-                # Emit the AG-UI tool_approval_response event so the SPA
-                # collapses the inline card into a chip immediately, even
-                # before MAF re-streams the function_result.
-                yield encoder.encode(
-                    CustomEvent(
-                        type=EventType.CUSTOM,
-                        name="tool_approval_response",
-                        value={
-                            "id": record.id,
-                            "approved": approved,
-                            "source": source,
-                        },
-                    )
-                )
-                # Build the MAF response content from the original request
-                # so MAF can match by content.id on the next agent.run().
-                approval_response_contents.append(request_content.to_function_approval_response(approved=approved))
-                # The approval is fully resolved; the parked Event is no
-                # longer needed. Drop the record so the GC sweeper has
-                # less work to do.
-                await approval_store.drop(record.id)
-
-            # PRP-0144 / UDR-0125 D1: on a lane whose history has ALREADY
-            # persisted this turn, the replay below is not merely unnecessary --
-            # it is the defect. MAF's per-service-call persistence writes every
-            # model call's inputs and outputs to the history provider as the run
-            # proceeds, and `_split_service_call_messages` files our synthetic
-            # messages as NEW INPUT (they carry no `_attribution`), so each
-            # round's replay of rounds 1..N-1 is written into a history that
-            # already holds it. MAF then re-streams those calls, the accumulator
-            # observes them, and an even larger replay is appended: a closed
-            # feedback loop that took a three-message conversation to 200
-            # messages / 926 wire items in seven rounds and overran the model's
-            # context window. Send this round's approval responses ALONE and let
-            # MAF load the rest from the history it has been writing.
-            #
-            # Everything below this branch -- the provider-aware reconstruction,
-            # the deferred-call replay gate, the dangling-result healer -- exists
-            # to rebuild messages a lane cannot supply, so none of it applies
-            # here. It is untouched on the lane that needs it.
-            if self_persisting:
-                iteration_messages = [Message(role="user", contents=approval_response_contents)]
-                approval_debug.logger.info(
-                    "[iter %d replay] thread=%s self-persisting history: sending %d approval "
-                    "response(s) ALONE, no synthetic replay (UDR-0125 D1). sources=%s\n  responses: %s",
-                    total_rounds,
-                    thread_id,
-                    len(approval_response_contents),
-                    round_sources,
-                    ", ".join(approval_debug.describe_content(c) for c in approval_response_contents),
-                )
-                # NOT `continue`: the shared tail below (service_session_id reset,
-                # UDR-0082 round accounting and budget enforcement) applies to
-                # every lane and must not be skipped.
-                _build_replay = False
-            else:
-                _build_replay = True
-
-            # PRP-0069 follow-up: append BOTH the iter-N synthetic assistant
-            # message (carrying the originating function_call(s) plus the
-            # accumulated text -- and, for Anthropic, the signed reasoning) AND
-            # the user message bundling every approval response. Without the
-            # synthetic assistant, MAF's Anthropic connector emits a tool_result
-            # block with no preceding tool_use (HTTP 400 orphan tool_result).
-            #
-            # Reconstruction is provider-aware (defect fix): OpenAI reasoning
-            # models (gpt-5.x Responses API) link each function_call server item
-            # (fc_...) to the reasoning item (rs_...) emitted with it. We cannot
-            # replay that exact rs_ item, so replaying the original function_call
-            # (with its fc_ id) returns HTTP 400 "function_call ... provided
-            # without its required 'reasoning' item". For OpenAI we therefore
-            # drop the reasoning and rebuild function_calls without server item
-            # ids (matched by call_id). Anthropic keeps the signed reasoning +
-            # original tool_use Content the API requires.
-            if _build_replay:
-                # PRP-0154 / UDR-0132 D1. SETTLE BEFORE APPENDING. Everything already
-                # in `iteration_messages` has been through at least one agent.run, so
-                # every approval response it carries has been offered to MAF and its
-                # ticket is SPENT -- MAF pops the pending entry on the first bind
-                # (_tools._bind_approval_response_to_pending_request, consume=True) and
-                # silently discards a later replay of the same response while leaving
-                # OUR function_call in the request. From round 3 on, that reached the
-                # provider as a call with no output (400 "No tool output found for
-                # function call ..."), on every provider, because the consumption
-                # happens inside MAF ahead of any connector.
-                #
-                # This runs BEFORE the append below, so the round being submitted --
-                # `approval_response_contents`, not yet in the list -- is untouched by
-                # construction. Spentness is established by POSITION in the loop, not
-                # by a liveness heuristic, so no live approval can be damaged.
-                iteration_messages, settled_ids, dropped_ids = approval_debug.settle_consumed_approvals(
-                    iteration_messages
-                )
-                if settled_ids or dropped_ids:
-                    approval_debug.logger.info(
-                        "[iter %d settle] thread=%s settled=%s dropped-with-call=%s",
-                        total_rounds,
-                        thread_id,
-                        sorted(settled_ids),
-                        sorted(dropped_ids),
-                    )
-                is_anthropic = providers.provider_for(effective_model).name == "anthropic"
-                iter_synthetic_messages = iter_accumulator.build_iteration_messages(
-                    approval_response_contents,
-                    include_reasoning=is_anthropic,
-                    strip_function_call_ids=not is_anthropic,
-                    # PRP-0141 / UDR-0119 D6: replay the calls MAF deferred ONLY when
-                    # MAF will resume them, and never answer for them. Read BEFORE the
-                    # re-run below, which is where MAF pops the group.
-                    resumable_call_ids=(resumable_ids := maf_resumable_call_ids(session)),
-                )
-                approval_debug.logger.info(
-                    "[iter %d replay] thread=%s provider=%s sources=%s resumable_call_ids=%s\n"
-                    "  responses: %s\n  replay: %s",
-                    total_rounds,
-                    thread_id,
-                    "anthropic" if is_anthropic else "openai-family",
-                    round_sources,
-                    sorted(resumable_ids),
-                    ", ".join(approval_debug.describe_content(c) for c in approval_response_contents),
-                    " | ".join(approval_debug.describe_messages(iter_synthetic_messages)),
-                )
-                iteration_messages = [*iteration_messages, *iter_synthetic_messages]
-            # PRP-0141 multi-iteration follow-up: a call MAF DEFERRED in an earlier
-            # round is resumed by MAF in the FOLLOWING iteration, which produces its
-            # result on that iteration's request but never streams it back -- so the
-            # accumulator cannot capture it and this replay leaves the function_call
-            # bare. A LATER iteration then re-sends it with no matching output and the
-            # provider rejects the turn (400 "No tool output found for function call
-            # ..."). Heal by appending the result captured from the wire, so every
-            # replayed function_call carries its output.
-            # Only meaningful where a replay was built: the healer repairs
-            # REPLAYED function_calls left without their output. A self-persisting
-            # lane replays nothing, so there is nothing to heal (UDR-0125 D1).
-            if _build_replay:
-                # UDR-0132 D2: the calls answered by THIS round are the only approvals
-                # whose ticket is unspent, so they are the only ones that predict an
-                # output. Passed in explicitly -- the healer must never re-derive this
-                # by scanning the messages, which is what let a spent response from an
-                # earlier round pass as an answer.
-                iteration_messages, healed_ids = approval_debug.heal_dangling_tool_calls(
-                    iteration_messages,
-                    live_approval_call_ids=[
-                        cid
-                        for cid in (approval_debug.approval_response_call_id(c) for c in approval_response_contents)
-                        if cid
-                    ],
-                )
-                if healed_ids:
-                    approval_debug.logger.info(
-                        "[iter %d heal] thread=%s appended captured results for deferred call(s) whose "
-                        "output MAF produced but never streamed: %s",
-                        total_rounds,
-                        thread_id,
-                        sorted(healed_ids),
-                    )
-            # Reset server-side response chaining before the post-approval
-            # re-run. The approval handshake interrupts the iteration-N
-            # response stream, so the resp_... id MAF stored on the session
-            # (store=True is OpenAIChatClient.STORES_BY_DEFAULT) may name a
-            # response Azure never committed -> the next agent.run sends it as
-            # previous_response_id and the Responses API returns 400
-            # previous_response_not_found. The next iteration already carries
-            # the full, explicit context (iteration_messages built above +
-            # FileHistoryProvider history injected by before_run), so clearing
-            # service_session_id makes the re-run rely on that explicit context
-            # for every provider -- the same structurally-explicit path the
-            # PRP-0069 follow-up established for Anthropic.
-            session.service_session_id = None
-
-            # PRP-0103 / UDR-0082 D2: account this round AFTER it resolved. A
-            # round whose approvals were ALL resolved from the session cache is
-            # free with respect to the human-interactive budget; every round
-            # still counts toward the absolute backstop. Aborting when either
-            # ceiling is crossed preserves the runaway "last stop".
-            total_rounds += 1
-            round_cached = bool(round_sources) and all(s == "session-cache" for s in round_sources)
-            if not round_cached:
-                interactive_rounds += 1
-            # PRP-0146 / UDR-0082 D7: a runaway is characterised by not getting
-            # anywhere, so the autonomous lane counts CONSECUTIVE unproductive
-            # rounds -- no tool executed and no text emitted. Reasoning is not
-            # progress. A gated flow alternates ("request approval" then "execute
-            # it and request the next"), so healthy operation never exceeds one.
-            productive = round_is_productive(iter_accumulator)
-            if iter_accumulator.executed_any():
-                tools_executed_total += len(iter_accumulator.executed_call_ids())
-            no_progress_rounds = 0 if productive else no_progress_rounds + 1
-            if interactive_rounds > max_approval_iterations:
-                approval_loop_exceeded = True
-                loop_stop_reason = "interactive"
-                break
-            if total_rounds > absolute_max_iterations:
-                approval_loop_exceeded = True
-                loop_stop_reason = "absolute"
-                break
-            if no_progress_limit is not None and no_progress_rounds >= no_progress_limit:
-                approval_loop_exceeded = True
-                loop_stop_reason = "no_progress"
-                break
-
-        if approval_loop_exceeded:
-            # The budget was exhausted without the agent settling. Defensive:
-            # emit a RUN_ERROR so the SPA surfaces the run as failed instead of
-            # silently terminating.
+        if unexpected_approval_tool is not None:
             run_error = True
-            # PRP-0146 / UDR-0082 D10: on a self-re-invoking lane the side effects
-            # of the turn are ALREADY on disk -- todos completed, files edited,
-            # commands run -- and only the account of them is being discarded. The
-            # message therefore reports the work rather than only naming the number
-            # that was crossed. The non-autonomous texts are UNCHANGED.
-            _worked = f" {tools_executed_total} tool(s) executed in this turn; that work is not rolled back."
-            if loop_stop_reason == "no_progress":
-                error_message = (
-                    f"This autonomous run was stopped because {no_progress_rounds} consecutive rounds "
-                    f"executed no tool and produced no output -- the agent appears stuck."
-                    f"{_worked} Start a new turn to continue, or narrow the request."
-                )
-            elif loop_stop_reason == "absolute" and autonomous:
-                error_message = (
-                    f"This autonomous run was stopped after {absolute_max_iterations} approval rounds."
-                    f"{_worked} Start a new turn to continue, or narrow the request."
-                )
-            elif loop_stop_reason == "absolute":
-                error_message = (
-                    f"Tool approval loop exceeded the absolute ceiling of "
-                    f"{absolute_max_iterations} rounds; aborting run."
-                )
-            else:
-                error_message = (
-                    f"Tool approval loop exceeded {max_approval_iterations} interactive rounds; aborting run."
-                )
-            if autonomous:
-                # Additive CUSTOM event so the SPA can render the counts; no new
-                # event TYPE and nothing changes on the non-autonomous path.
-                yield encoder.encode(
-                    CustomEvent(
-                        type=EventType.CUSTOM,
-                        name="autonomous_run_stopped",
-                        value={
-                            "reason": loop_stop_reason,
-                            "rounds": total_rounds,
-                            "tools_executed": tools_executed_total,
-                            "no_progress_rounds": no_progress_rounds,
-                        },
-                    )
-                )
-            logger.warning(
-                "approval loop exceeded for thread %s (reason=%s interactive=%d/%d total=%d/%d "
-                "no_progress=%d/%s tools_executed=%d autonomous=%s)",
-                thread_id,
-                loop_stop_reason,
-                interactive_rounds,
-                max_approval_iterations,
-                total_rounds,
-                absolute_max_iterations,
-                no_progress_rounds,
-                no_progress_limit if no_progress_limit is not None else "-",
-                tools_executed_total,
-                autonomous,
+            error_message = (
+                f"Tool '{unexpected_approval_tool}' asked for approval, which this version no "
+                "longer supports. This is a defect -- please report it."
             )
 
     except (OpenAINotFoundError, ChatClientException, TypeError) as exc:
@@ -2302,14 +1849,10 @@ async def _stream_with_reasoning(
             logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:
             logger.exception("AG-UI stream error")
-        # PRP-0141 tracing: which approval iteration died. The preceding
-        # "[wire]" line from app.agent.approval_trace holds the request body shape.
-        approval_debug.logger.error(
-            "[run failed] thread=%s rounds total=%s interactive=%s error=%s "
-            "attempt=%s elapsed=%.1fs updates=%d -- see the last [wire] line above",
+        # The preceding "[wire]" line (app.agent.wire_trace) holds the request shape.
+        wire_trace.logger.error(
+            "[run failed] thread=%s error=%s attempt=%s elapsed=%.1fs updates=%d -- see the last [wire] line above",
             thread_id,
-            locals().get("total_rounds"),
-            locals().get("interactive_rounds"),
             type(exc).__name__,
             run_stats.attempt,
             run_stats.elapsed,

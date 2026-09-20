@@ -554,8 +554,7 @@ export function DeclarativeAgentManager() {
                           </p>
                           <p>
                             Todo {current.policy.todo ? 'on' : 'off'} · Mode{' '}
-                            {current.policy.mode ? (current.policy.mode_initial ?? 'on') : 'off'} · Write approval{' '}
-                            {current.policy.write_tool_approval ? 'required' : 'OFF (opt-in)'}
+                            {current.policy.mode ? (current.policy.mode_initial ?? 'on') : 'off'}
                           </p>
                           {/*
                             PRP-0144 / UDR-0125 D4: report the RESOLVED budget, not
@@ -653,7 +652,7 @@ export function DeclarativeAgentManager() {
                         ? current?.kind === 'Workflow'
                           ? 'This builds the workflow and makes it the run-target; your next message runs it instead of the active agent.'
                           : current?.kind === 'Harness'
-                            ? 'This validates the harness agent and makes it the run-target; your next message runs it instead of the active agent. It can execute shell commands and write files in the workspace (with approval).'
+                            ? 'This validates the harness agent and makes it the run-target; your next message runs it instead of the active agent. It can execute shell commands and write files in the workspace, without an approval step.'
                             : 'This rebuilds the agents; the next message, the API, and Teams use the selected agent.'
                         : confirmMode === 'delete'
                           ? 'This permanently deletes the YAML file.'

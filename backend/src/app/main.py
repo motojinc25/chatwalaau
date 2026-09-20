@@ -76,7 +76,6 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import providers
-from app.agent.router import router as tool_approval_router
 from app.agui.agent_factory import build_devui_agent, create_agent_registry
 from app.agui.endpoint import register_agui_endpoints
 from app.auth.web_auth import router as web_auth_router
@@ -242,6 +241,75 @@ def _warn_removed_role_model_env() -> None:
             )
 
 
+# Env vars retired with the tool-approval flow (PRP-0179, UDR-0161 D5/D7).
+RETIRED_TOOL_APPROVAL_ENV_VARS = (
+    "TOOL_APPROVAL_MODE",
+    "TOOL_APPROVAL_REQUIRE_LIST",
+    "TOOL_APPROVAL_TIMEOUT_SEC",
+    "TOOL_APPROVAL_ARG_MAX_CHARS",
+    "TOOL_APPROVAL_MAX_ITERATIONS",
+    "TOOL_APPROVAL_ABSOLUTE_MAX_ITERATIONS",
+    "AUTONOMOUS_LOOP_NO_PROGRESS_ROUNDS",
+    "AUTONOMOUS_LOOP_MAX_ROUNDS",
+)
+
+
+def _retired_tool_approval_env() -> dict[str, str]:
+    """Return {key: value} for every retired tool-approval key that is still SET.
+
+    Read from the process environment first, then from the backend ``.env`` -- the
+    same file Settings reads (``env_file=".env"``). Settings ignores these keys
+    (``extra="ignore"``), so this is the only place they are still looked at.
+    """
+    import os as _os
+
+    found: dict[str, str] = {}
+    env_file = Path(".env")
+    file_values: dict[str, str | None] = {}
+    if env_file.is_file():
+        from dotenv import dotenv_values
+
+        file_values = dict(dotenv_values(env_file))
+    for key in RETIRED_TOOL_APPROVAL_ENV_VARS:
+        value = _os.environ.get(key)
+        if value is None:
+            value = file_values.get(key)
+        if value is not None and value.strip():
+            found[key] = value.strip()
+    return found
+
+
+def _warn_retired_tool_approval_env() -> None:
+    """Startup advisory for the retired tool-approval keys (PRP-0179, UDR-0161 D7).
+
+    Tool approval was removed on every lane, so the eight keys have no effect. An
+    operator who chose ``TOOL_APPROVAL_MODE=auto`` / ``always`` for safety must learn
+    that it no longer applies, so each key present is named once at WARNING. Log-only
+    and non-failing: an advisory must never block startup (the PRP-0115 pattern).
+    """
+    import logging as _logging
+
+    _logger = _logging.getLogger(__name__)
+    try:
+        found = _retired_tool_approval_env()
+    except Exception:  # advisory must never block startup
+        _logger.debug("retired tool-approval env advisory skipped", exc_info=True)
+        return
+    for key, value in found.items():
+        extra = ""
+        if key == "TOOL_APPROVAL_MODE" and value.lower() in ("auto", "always"):
+            extra = (
+                " Tools now run without an approval step; remove a tool you do not want to "
+                "run by configuration (CODING_ENABLED, tool_allowlist)."
+            )
+        _logger.warning(
+            "%s is set but no longer read (PRP-0179: tool approval was removed). "
+            "Drop it with `chatwalaau env sync --write`.%s",
+            key,
+            extra,
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Application lifespan: startup and shutdown hooks."""
@@ -249,6 +317,8 @@ async def lifespan(_app: FastAPI):
     _warn_unconfigured_model_offerings()
     # Advisory for removed per-task model env vars (PRP-0115, UDR-0096 D1).
     _warn_removed_role_model_env()
+    # Advisory for the retired tool-approval env vars (PRP-0179, UDR-0161 D7).
+    _warn_retired_tool_approval_env()
     # Session token store rehydrate (PRP-0110, CTR-0095 v2, UDR-0089 D4). Building
     # the singleton loads the digest projection from disk when the web auth lane is
     # enabled and AUTH_SESSION_PERSIST is true, so a restart no longer signs users
@@ -425,9 +495,6 @@ app.add_middleware(
 # Web SPA Authentication API (CTR-0094, PRP-0057) -- mounted before session
 # routes so /api/auth/* takes priority over the catch-all SPA fallback.
 app.include_router(web_auth_router)
-
-# Tool Approval REST endpoint (CTR-0099, PRP-0067)
-app.include_router(tool_approval_router)
 
 # Memory Curation API (CTR-0164, PRP-0100) -- per-turn "like" trigger for the
 # Agent Curated Memory (CTR-0162).

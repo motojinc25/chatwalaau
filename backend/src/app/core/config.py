@@ -770,76 +770,12 @@ class Settings(BaseSettings):
     # system MESSAGE in the compacted list (UDR-0138, unchanged by PRP-0163).
     compaction_preserve_system: bool = True
 
-    # ---- Tool Approval (CTR-0006 v23, PRP-0067, UDR-0043) ----
-    # Resolved by app.agent.approval.resolve_require_set() at tool-
-    # registration time inside app.agui.agent_factory. The resolved set
-    # is passed to wrap_with_approval() which decorates matching tool
-    # functions with @tool(approval_mode="always_require") (CTR-0099).
-    #
-    # Modes (case-insensitive, unknown -> auto):
-    # - "skip"   -- NO tool wrapped; pre-PRP-0067 byte-for-byte behaviour.
-    #               SPA renders PermissionsDisabledBanner (UDR-0043 D3).
-    # - "auto"   -- (default) Tools listed in TOOL_APPROVAL_REQUIRE_LIST
-    #               wrapped; the default list is "bash_execute,file_write".
-    # - "always" -- Every non-readonly tool on the agent is wrapped;
-    #               TOOL_APPROVAL_REQUIRE_LIST is ignored.
-    tool_approval_mode: str = "auto"
-
-    # Comma-separated tool __name__ list. Only consumed when
-    # tool_approval_mode == "auto". Empty / whitespace-only falls back to
-    # the documented default ("bash_execute,file_write").
-    tool_approval_require_list: str = "bash_execute,file_write"
-
-    # Maximum seconds the parked AG-UI stream waits for a matching
-    # POST /api/tool-approval before auto-rejecting with source="timeout"
-    # (UDR-0043 D7). Range 5..86400. The asyncio.Event resolver removes
-    # the approval record within this window + 60s grace.
-    tool_approval_timeout_sec: int = 300
-
-    # Per-argument-field truncation cap on the tool_approval_request
-    # CUSTOM event preview (PRP-0067 risk-assessment mitigation). The
-    # full argument value still reaches the tool on approval; only the
-    # operator-visible preview is shortened to avoid AG-UI events that
-    # carry e.g. a 1 MiB file_write content string. Range 64..65536.
-    tool_approval_arg_max_chars: int = 4096
-
-    # Human-interactive approval-round budget (PRP-0103, UDR-0082 D1/D2).
-    # Replaces the previously hardcoded 16-round bound on the AG-UI /
-    # Teams approval re-run loop. Only rounds that required a human
-    # decision (source != "session-cache") count against this budget, so
-    # a blanket "approve for session" grant no longer consumes it. When
-    # exceeded the run aborts with a "Tool approval loop exceeded"
-    # RUN_ERROR. Range 1..1000.
-    tool_approval_max_iterations: int = 33
-
-    # Absolute approval-round backstop (PRP-0103, UDR-0082 D2). Counts
-    # EVERY round (interactive + session-cached) and bounds a runaway
-    # agent that loops on tool calls forever even under a blanket session
-    # grant. MUST be >= TOOL_APPROVAL_MAX_ITERATIONS. Range 1..100000.
-    tool_approval_absolute_max_iterations: int = 200
-
-    # ---- Autonomous (self-re-invoking) agent loop bounds (PRP-0146, UDR-0082 D7/D9) ----
-    # These govern an agent that RE-RUNS ITSELF in a loop -- today a Harness agent
-    # (AgentLoopMiddleware). On such an agent every gated tool call is an approval
-    # round, so a flat round ceiling measures PRODUCTIVITY, not risk: a real turn
-    # was killed at total=201/200 with interactive=0/33, i.e. without a single
-    # human decision. TOOL_APPROVAL_ABSOLUTE_MAX_ITERATIONS therefore applies ONLY
-    # where the agent does NOT re-invoke itself; the two keys below govern the
-    # autonomous lane instead. The interactive budget above still applies to both.
-    #
-    # A runaway is characterised by NOT GETTING ANYWHERE. The primary stop counts
-    # CONSECUTIVE rounds that executed no tool and produced no text (reasoning does
-    # NOT count -- a model can think forever without advancing). The counter resets
-    # on every productive round, and a gated flow's normal shape alternates, so
-    # healthy operation never exceeds one. Range 1..1000.
-    autonomous_loop_no_progress_rounds: int = 25
-
-    # Hard backstop for the same lane, counting EVERY round, for a runaway that
-    # manages to look productive forever. Deliberately far above any observed turn
-    # (the failing one reached 201); the no-progress detector is the sensitive
-    # trigger and this is the backstop behind it. MUST be >=
-    # TOOL_APPROVAL_MAX_ITERATIONS. Range 1..100000.
-    autonomous_loop_max_rounds: int = 2000
+    # ---- Tool approval: REMOVED (PRP-0179, UDR-0161) ----
+    # TOOL_APPROVAL_MODE / _REQUIRE_LIST / _TIMEOUT_SEC / _ARG_MAX_CHARS /
+    # _MAX_ITERATIONS / _ABSOLUTE_MAX_ITERATIONS and AUTONOMOUS_LOOP_NO_PROGRESS_ROUNDS /
+    # _MAX_ROUNDS no longer exist: no lane has an approval step, and a turn is one
+    # agent run bounded by the framework's own caps (UDR-0161 D8). A leftover key is
+    # ignored (extra="ignore") and named once at startup (main._warn_retired_tool_approval_env).
 
     # ---- Multi-Model helpers ----
     # PRP-0113 / UDR-0094 removed the legacy env-namespace model-list accessors
@@ -1078,74 +1014,6 @@ class Settings(BaseSettings):
             ttl = "5m"
         self.anthropic_prompt_cache_ttl = ttl
         return self
-
-    @model_validator(mode="after")
-    def _validate_tool_approval(self) -> "Settings":
-        """Normalize tool-approval settings and reject out-of-range values."""
-        mode = (self.tool_approval_mode or "").strip().lower()
-        allowed = {"skip", "auto", "always"}
-        if mode and mode not in allowed:
-            _logger.warning(
-                "TOOL_APPROVAL_MODE=%r is not recognised; will fall back to 'auto'. Allowed: %s",
-                self.tool_approval_mode,
-                sorted(allowed),
-            )
-            mode = "auto"
-        self.tool_approval_mode = mode or "auto"
-        if not (5 <= self.tool_approval_timeout_sec <= 86400):
-            msg = f"TOOL_APPROVAL_TIMEOUT_SEC must be in 5..86400; got {self.tool_approval_timeout_sec}"
-            raise ValueError(msg)
-        if not (64 <= self.tool_approval_arg_max_chars <= 65536):
-            msg = f"TOOL_APPROVAL_ARG_MAX_CHARS must be in 64..65536; got {self.tool_approval_arg_max_chars}"
-            raise ValueError(msg)
-        # PRP-0103 / UDR-0082 D2: the interactive budget bounds human
-        # decisions; the absolute backstop bounds total rounds and MUST
-        # sit at or above it so a runaway loop always has a ceiling.
-        if not (1 <= self.tool_approval_max_iterations <= 1000):
-            msg = f"TOOL_APPROVAL_MAX_ITERATIONS must be in 1..1000; got {self.tool_approval_max_iterations}"
-            raise ValueError(msg)
-        if not (1 <= self.tool_approval_absolute_max_iterations <= 100000):
-            msg = (
-                "TOOL_APPROVAL_ABSOLUTE_MAX_ITERATIONS must be in 1..100000; "
-                f"got {self.tool_approval_absolute_max_iterations}"
-            )
-            raise ValueError(msg)
-        if not (1 <= self.autonomous_loop_no_progress_rounds <= 1000):
-            msg = (
-                f"AUTONOMOUS_LOOP_NO_PROGRESS_ROUNDS must be in 1..1000; got {self.autonomous_loop_no_progress_rounds}"
-            )
-            raise ValueError(msg)
-        if not (1 <= self.autonomous_loop_max_rounds <= 100000):
-            msg = f"AUTONOMOUS_LOOP_MAX_ROUNDS must be in 1..100000; got {self.autonomous_loop_max_rounds}"
-            raise ValueError(msg)
-        if self.autonomous_loop_max_rounds < self.tool_approval_max_iterations:
-            msg = (
-                f"AUTONOMOUS_LOOP_MAX_ROUNDS ({self.autonomous_loop_max_rounds}) must be >= "
-                f"TOOL_APPROVAL_MAX_ITERATIONS ({self.tool_approval_max_iterations})"
-            )
-            raise ValueError(msg)
-        if self.tool_approval_absolute_max_iterations < self.tool_approval_max_iterations:
-            msg = (
-                "TOOL_APPROVAL_ABSOLUTE_MAX_ITERATIONS "
-                f"({self.tool_approval_absolute_max_iterations}) must be >= "
-                f"TOOL_APPROVAL_MAX_ITERATIONS ({self.tool_approval_max_iterations})"
-            )
-            raise ValueError(msg)
-        return self
-
-    @property
-    def tool_approval_require_set(self) -> frozenset[str]:
-        """Parse TOOL_APPROVAL_REQUIRE_LIST into a frozenset (skip mode -> empty)."""
-        if self.tool_approval_mode == "skip":
-            return frozenset()
-        raw = (self.tool_approval_require_list or "").strip()
-        items = [s.strip() for s in raw.split(",") if s.strip()] if raw else []
-        # Empty / whitespace-only falls back to the documented default
-        # ("bash_execute,file_write"). The default is itself two entries
-        # so this returns a non-empty frozenset.
-        if not items:
-            items = ["bash_execute", "file_write"]
-        return frozenset(items)
 
     @model_validator(mode="after")
     def _validate_ssl_pair(self) -> "Settings":

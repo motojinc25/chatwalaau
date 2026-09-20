@@ -4,8 +4,8 @@ A turn emits ONE MAF usage content per MODEL CALL, not per turn. The two numbers
 reader wants from that stream are different quantities and cannot be served by one
 field (UDR-0135 D1):
 
-* the BILLING axis is the turn CUMULATIVE -- every model call of every approval
-  round -- and is what a cost ledger and day/month statistics need;
+* the BILLING axis is the turn CUMULATIVE -- every model call of the turn --
+  and is what a cost ledger and day/month statistics need;
 * the CONTEXT axis is the OCCUPANCY the NEXT message starts from, and is derived
   from the LAST model call only.
 
@@ -89,8 +89,8 @@ def turn_summary(
 ) -> dict[str, int] | None:
     """The billing axis: what the WHOLE turn consumed (UDR-0135 D1/D6).
 
-    ``turn`` is the accumulated ``UsageDetails`` -- every model call of every
-    approval round, summed at the seam with ``add_usage_details``.
+    ``turn`` is the accumulated ``UsageDetails`` -- every model call of the
+    turn, summed at the seam with ``add_usage_details``.
 
     Price points are kept SEPARATE, not merged: cache reads and cache writes are
     billed at different rates from ordinary input, so a ledger cannot recover them

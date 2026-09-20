@@ -37,7 +37,7 @@ class HarnessAgentSpec:
     Field defaults mirror the phase-1 policy set (UDR-0119 D4): everything the
     YAML omits inherits the harness default; the factory (CTR-0193) supplies the
     FIXED policies (InMemory history, default Todo / Mode providers,
-    ``todos_remaining()`` loop, readonly approvals off) that are never spec
+    ``todos_remaining()`` loop, file / shell approvals off) that are never spec
     fields at all.
     """
 
@@ -75,9 +75,6 @@ class HarnessAgentSpec:
     mode_initial: str | None = None  # "plan" | "execute" | None (MAF default)
     file_memory_disabled: bool = False
     file_access_disable_write_tools: bool = False
-    # True => write / delete / replace run WITHOUT host approval -- an explicit,
-    # file-persisted operator opt-in (UDR-0119 D6).
-    file_access_disable_write_tool_approval: bool = False
     web_search_disabled: bool = False
     # None => MAF harness DEFAULT_MAX_ITERATIONS; always clamped to it (D4).
     loop_max_iterations: int | None = None

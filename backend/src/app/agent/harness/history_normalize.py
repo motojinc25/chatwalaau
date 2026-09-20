@@ -26,7 +26,7 @@ is gone. So the repair belongs here, at the producer (UDR-0127 D1).
 This module MUTATES what is stored, which is why it is NOT in ``history_debug``:
 that module promises its readers "counts, ids and shapes" and a module that also
 mutates its subject loses the guarantee that makes its own output trustworthy
-(UDR-0127 D4, the rule UDR-0126 already applied to ``approval_debug``).
+(UDR-0127 D4, the rule UDR-0126 already applied to ``wire_trace``).
 
 Nothing here may raise. On any internal error the messages are saved UNCHANGED: a
 hygiene pass at the store must not become a new way for a turn to fail (UDR-0126 D5

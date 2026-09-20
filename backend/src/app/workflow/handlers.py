@@ -266,9 +266,7 @@ def _agent_equivalent_tools() -> dict[str, Any]:
     try:
         from app.agui.agent_factory import _build_tools_and_instructions
 
-        tools, _cp, _instr, _mw = _build_tools_and_instructions(
-            include_mcp=False, include_rag=False, apply_approval=False
-        )
+        tools, _cp, _instr, _mw = _build_tools_and_instructions(include_mcp=False, include_rag=False)
     except Exception:
         logger.debug("could not assemble function tools for workflow jail", exc_info=True)
         return out

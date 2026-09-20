@@ -84,7 +84,7 @@ function emptyDocument(): HarnessDocument {
     todo: { disabled: false },
     mode: { disabled: false, initial: null },
     fileMemory: { disabled: false },
-    fileAccess: { disableWriteTools: false, disableWriteToolApproval: false },
+    fileAccess: { disableWriteTools: false },
     webSearch: { disabled: false },
     loop: { maxIterations: null },
   }
@@ -193,7 +193,7 @@ function blockParts(doc: HarnessDocument): Array<{ id: string; label: string; su
   parts.push({
     id: 'b-facc',
     label: 'File access',
-    sub: doc.fileAccess.disableWriteTools ? 'read-only' : 'read + write (approval)',
+    sub: doc.fileAccess.disableWriteTools ? 'read-only' : 'read + write',
     icon: <FolderCog className="h-4 w-4" />,
   })
   parts.push({ id: 'b-shell', label: 'Shell', sub: 'workspace-scoped', icon: <TerminalSquare className="h-4 w-4" /> })
@@ -528,12 +528,7 @@ export function HarnessAgentEditor({ open, onOpenChange, editId, onSaved }: Prop
                   label="File write tools"
                   checked={!doc.fileAccess.disableWriteTools}
                   onChange={(on) => patch({ fileAccess: { ...doc.fileAccess, disableWriteTools: !on } })}
-                />
-                <SwitchField
-                  label="Write approval required"
-                  checked={!doc.fileAccess.disableWriteToolApproval}
-                  onChange={(on) => patch({ fileAccess: { ...doc.fileAccess, disableWriteToolApproval: !on } })}
-                  note="Turning this OFF lets writes run without the approval card (explicit opt-in)."
+                  note="Writes run without an approval step; turn this off to keep the agent read-only."
                 />
                 <SwitchField
                   label="Web search"

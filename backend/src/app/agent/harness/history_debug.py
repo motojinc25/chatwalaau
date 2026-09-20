@@ -8,7 +8,7 @@ log, even though the code path is understood.
 
 This module closes that gap on the harness lane and nowhere else. Everything here
 is counts, ids and shapes -- never arguments, results, or prompt text -- matching
-the posture ``app.agent.approval_debug`` sets for the request seam.
+the posture ``app.agent.wire_trace`` sets for the request seam.
 
 Nothing here may raise. A broken instrument must degrade to silence, never to a
 failed turn (UDR-0126 D5 posture, PRP-0148 Section 4.5).

@@ -7,7 +7,7 @@ portal never diverge -- mirroring the manage_cron / Cron API relationship.
 
 Registered on the shared agent only when PIPELINE_ENABLED (agent_factory). Replaces the
 former batch MCP tools (submit_job / list_jobs / get_job / cancel_job / delete_job). It
-is NOT in the approval require-set; pipeline jobs run curated in-process job types only.
+runs curated in-process job types only.
 """
 
 from __future__ import annotations

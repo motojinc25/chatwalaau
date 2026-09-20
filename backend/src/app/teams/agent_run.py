@@ -1,28 +1,22 @@
-"""Run one agent turn for a Teams message (CTR-0140, PRP-0092, UDR-0070 D6/D8).
+"""Run one agent turn for a Teams message (CTR-0140, PRP-0092, UDR-0070 D6).
 
-Reuses the EXACT agent core and approval machinery the AG-UI endpoint (CTR-0009)
-uses -- the registry chokepoint agent, the resilient streaming run
-(``_resilient_run``), the per-iteration ``IterationContentAccumulator``, and the
-provider-aware approval continuation (``build_iteration_messages`` +
-``to_function_approval_response``). The only difference from the AG-UI path is the
-sink: instead of emitting AG-UI SSE events, this module ACCUMULATES the assistant
-text and returns it for the adapter to chunk and send proactively (Teams is
-request/response, UDR-0070 D6).
+Reuses the EXACT agent core the AG-UI endpoint (CTR-0009) uses -- the registry
+chokepoint agent and the resilient streaming run (``_resilient_run``). The only
+difference from the AG-UI path is the sink: instead of emitting AG-UI SSE events,
+this module ACCUMULATES the assistant text and returns it for the adapter to chunk
+and send proactively (Teams is request/response, UDR-0070 D6).
 
-Tool approval (UDR-0070 D8): when MAF pauses on a ``function_approval_request``,
-the loop honors a prior "Allow Session" grant via the CTR-0099 session cache, or
-calls ``approval_renderer`` (an Adaptive Card; parks until the user decides). The
-resolved decision is turned into the proper MAF ``function_approval_response`` and
-the next iteration is built with the originating ``function_call`` paired alongside
-it -- WITHOUT this pairing MAF re-emits the same approval request and the bot would
-re-prompt in a loop. Teams NEVER auto-approves.
+A turn is ONE agent run (PRP-0179, UDR-0161 D2). No tool is approval-gated, so the
+former Adaptive Card approval loop (UDR-0070 D8, CTR-0141) is gone. Which tools a
+Teams turn can reach is decided by configuration (CODING_ENABLED, the active
+agent's tool allow-list) and who can start one by ``ALLOWED_USERS`` (UDR-0161 D4).
+A residual approval request is a named defect that ends the turn (D3).
 
 This module imports the Teams SDK nowhere; it depends only on the core.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -34,12 +28,6 @@ if TYPE_CHECKING:
     from app.teams.message import TeamsMessage
 
 logger = logging.getLogger(__name__)
-
-# An approval renderer: given (record_id, thread_id, tool_name, arguments_preview,
-# iteration, max_iterations), render the Adaptive Card, park until the user
-# decides, and return True/False. The trailing (iteration, max_iterations) are the
-# PRP-0103 / UDR-0082 D3 round counter shown on the card.
-ApprovalRenderer = Callable[[str, str, str, dict[str, Any], int, int], Awaitable[bool]]
 
 
 def _record_turn(
@@ -126,31 +114,21 @@ async def run_turn(
     *,
     agent_registry: Any,
     model: str | None = None,
-    approval_renderer: ApprovalRenderer | None = None,
 ) -> str:
     """Run the agent for one Teams message and return the accumulated reply text.
 
-    Mirrors the AG-UI outer approval loop but accumulates text instead of streaming
-    SSE. Honors the per-run instruction remainder and the image-gen contextvar, and
-    resolves tool approval through the CTR-0099 store + ``approval_renderer``
-    (UDR-0070 D8). The loop is bounded by the shared two-counter budget
-    (``TOOL_APPROVAL_MAX_ITERATIONS`` interactive rounds +
-    ``TOOL_APPROVAL_ABSOLUTE_MAX_ITERATIONS`` absolute backstop; PRP-0103 /
-    UDR-0082 D2/D5), at parity with the AG-UI endpoint.
+    One run per turn (UDR-0161 D2), accumulating text instead of streaming SSE.
+    Honors the per-run instruction remainder and the image-gen contextvar.
     """
     import uuid
 
     from agent_framework import AgentSession
 
-    from app.agent.approval import approval_store, truncate_arguments_preview
-    from app.agent.approval_iteration import IterationContentAccumulator
     from app.agui.endpoint import (  # type: ignore[attr-defined]
-        _arguments_to_dict,
         _image_gen_thread_id,
         _resilient_run,
         _RetryNotice,
     )
-    from app.core.config import settings
     from app.teams.session import persist_turn
 
     thread_id = msg.thread_id
@@ -168,208 +146,81 @@ async def run_turn(
     # conversation history (UDR-0070 D5); persistence below accumulates it.
     session = AgentSession()
     session.metadata = {"ag_ui_thread_id": thread_id, "ag_ui_run_id": uuid.uuid4().hex}
-    iteration_messages = _build_input_messages(msg)
+    input_messages = _build_input_messages(msg)
     assistant_text_parts: list[str] = []
     # Generated images live in the image tool's RESULT (not the assistant text); we
-    # collect their /api/uploads URLs across iterations so they render on the Web SPA
-    # (appended as Markdown below) AND can be sent to Teams as real data (UDR-0070 D9).
+    # collect their /api/uploads URLs so they render on the Web SPA (appended as
+    # Markdown below) AND can be sent to Teams as real data (UDR-0070 D9).
     generated_image_uris: list[str] = []
 
-    def _finish() -> str:
-        # Model-private citation markup never reaches a reply (CTR-0218, UDR-0160 D1).
-        # This channel has no surface for the report, so the removal is logged only.
-        cleaned, stripped = sanitize_text("".join(assistant_text_parts))
-        if stripped:
-            logger.warning(
-                "Removed model-private citation markup from a Teams reply: count=%d markers=%s",
-                len(stripped),
-                stripped[:10],
-            )
-        final_text = cleaned.strip()
-        # Append each generated image as Markdown so the persisted message renders the
-        # image on the Web SPA, and the Teams adapter can extract + attach the bytes.
-        for uri in generated_image_uris:
-            if uri and uri not in final_text:
-                final_text = f"{final_text}\n\n![generated image]({uri})".strip()
-        persist_turn(
-            thread_id,
-            user_text=msg.text,
-            assistant_text=final_text,
-            conversation_type=msg.conversation_type,
-        )
-        # CTR-0200 append (PRP-0158). `_finish` is the single exit of this turn --
-        # normal completion and both budget stops route through it -- so the record
-        # is written exactly once per turn. Best-effort by contract (UDR-0136 D6).
-        _record_turn(turn_usage, model_calls, effective_model, thread_id)
-        return final_text
-
-    # Token Usage Ledger accumulation (CTR-0200, PRP-0158, UDR-0136 D5). This lane
-    # had NO `usage` branch at all: a Teams turn was billed and was invisible even
-    # to the operator's own per-message display. Declared here, outside the round
-    # loop, so the total spans every approval round exactly as CTR-0009 does.
+    # Token Usage Ledger accumulation (CTR-0200, PRP-0158, UDR-0136 D5), summed over
+    # every model call of the run exactly as CTR-0009 does.
     turn_usage: dict[str, Any] | None = None
     model_calls = 0
+    unexpected_approval_tool: str | None = None
 
-    # PRP-0103 / UDR-0082 D2/D5: two-counter approval budget, parity with AG-UI.
-    max_iterations = settings.tool_approval_max_iterations
-    absolute_max_iterations = settings.tool_approval_absolute_max_iterations
-    interactive_rounds = 0
-    total_rounds = 0
-    while True:
-        # Per-iteration accumulator pairs this iteration's function_call(s) with the
-        # approval response(s) for the next agent.run (prevents the re-prompt loop).
-        accumulator = IterationContentAccumulator()
-        pending: list[tuple[Any, Any]] = []  # (ApprovalRecord, request_content)
+    async for update in _resilient_run(agent, input_messages, session, run_options):
+        if isinstance(update, _RetryNotice):
+            continue
+        for content in getattr(update, "contents", None) or []:
+            content_type = getattr(content, "type", None)
+            if content_type == "text":
+                text = getattr(content, "text", None)
+                if text:
+                    assistant_text_parts.append(text)
+            elif content_type == "usage":
+                # One MAF usage content per MODEL CALL. Summed with the framework's
+                # own public helper, exactly as the AG-UI seam does, so both lanes
+                # report the same quantity (PRP-0158).
+                details = getattr(content, "usage_details", None) or {}
+                turn_usage = dict(add_usage_details(turn_usage, dict(details)))
+                model_calls += 1
+            elif content_type == "function_result":
+                _collect_generated_images(content, generated_image_uris)
+            elif content_type == "function_approval_request":
+                # UDR-0161 D3: no tool is approval-gated, so this is a construction
+                # defect. Not parked, approved, denied or dropped -- the turn ends and
+                # the reply names the tool.
+                fn_call = getattr(content, "function_call", None)
+                unexpected_approval_tool = getattr(fn_call, "name", "") or "<unknown>"
+                logger.error(
+                    "Tool %r asked for approval (call_id=%s, thread=%s), but no tool is "
+                    "approval-gated since PRP-0179; ending the Teams turn (UDR-0161 D3).",
+                    unexpected_approval_tool,
+                    getattr(fn_call, "call_id", None),
+                    thread_id,
+                )
+                break
+        if unexpected_approval_tool is not None:
+            break
 
-        async for update in _resilient_run(agent, iteration_messages, session, run_options):
-            if isinstance(update, _RetryNotice):
-                continue
-            for content in getattr(update, "contents", None) or []:
-                content_type = getattr(content, "type", None)
-                if content_type == "text_reasoning":
-                    accumulator.observe_text_reasoning(content)
-                elif content_type == "text":
-                    accumulator.observe_text(content)
-                    text = getattr(content, "text", None)
-                    if text:
-                        assistant_text_parts.append(text)
-                elif content_type == "function_call":
-                    accumulator.observe_function_call(content)
-                elif content_type == "usage":
-                    # One MAF usage content per MODEL CALL. Summed with the framework's
-                    # own public helper, exactly as the AG-UI seam does, so both lanes
-                    # report the same quantity (PRP-0158).
-                    details = getattr(content, "usage_details", None) or {}
-                    turn_usage = dict(add_usage_details(turn_usage, dict(details)))
-                    model_calls += 1
-                elif content_type == "function_result":
-                    accumulator.observe_function_result(content)
-                    _collect_generated_images(content, generated_image_uris)
-                elif content_type == "function_approval_request":
-                    fn_call = getattr(content, "function_call", None)
-                    if fn_call is None:
-                        continue
-                    accumulator.observe_function_call_from_approval(fn_call)
-                    tool_name = getattr(fn_call, "name", "") or "<unknown>"
-                    call_id = getattr(fn_call, "call_id", "") or ""
-                    preview = truncate_arguments_preview(_arguments_to_dict(getattr(fn_call, "arguments", None)))
-                    record = await approval_store.register(
-                        thread_id=thread_id, tool_name=tool_name, call_id=call_id, arguments_preview=preview
-                    )
-                    pending.append((record, content))
-
-        if not pending:
-            return _finish()
-
-        # Resolve every paused approval (session-cache grant or rendered card), then
-        # build the iter-N+1 input with the proper MAF approval responses.
-        approval_response_contents, round_sources = await _resolve_pending(
-            pending,
-            thread_id,
-            approval_renderer,
-            approval_store,
-            iteration=interactive_rounds + 1,
-            max_iterations=max_iterations,
+    if unexpected_approval_tool is not None:
+        assistant_text_parts.append(
+            f"\n\nTool '{unexpected_approval_tool}' asked for approval, which this version no "
+            "longer supports. This is a defect -- please report it."
         )
-        iter_messages = _build_iteration_messages(
-            accumulator, approval_response_contents, effective_model, session=session
+
+    # Model-private citation markup never reaches a reply (CTR-0218, UDR-0160 D1).
+    # This channel has no surface for the report, so the removal is logged only.
+    cleaned, stripped = sanitize_text("".join(assistant_text_parts))
+    if stripped:
+        logger.warning(
+            "Removed model-private citation markup from a Teams reply: count=%d markers=%s",
+            len(stripped),
+            stripped[:10],
         )
-        iteration_messages = [*iteration_messages, *iter_messages]
-        # The approval handshake interrupted the iter-N response stream; clear the
-        # uncommitted server-side response id so the re-run relies on explicit
-        # context (mirrors the AG-UI post-approval reset).
-        session.service_session_id = None
-
-        # PRP-0103 / UDR-0082 D2: cached rounds (every approval resolved from the
-        # session grant) are free against the interactive budget; every round
-        # counts toward the absolute backstop.
-        total_rounds += 1
-        round_cached = bool(round_sources) and all(s == "session-cache" for s in round_sources)
-        if not round_cached:
-            interactive_rounds += 1
-        if interactive_rounds > max_iterations or total_rounds > absolute_max_iterations:
-            logger.warning(
-                "Teams approval loop exceeded for thread %s (interactive=%d/%d, total=%d/%d)",
-                thread_id,
-                interactive_rounds,
-                max_iterations,
-                total_rounds,
-                absolute_max_iterations,
-            )
-            return _finish()
-
-
-async def _resolve_pending(
-    pending: list[tuple[Any, Any]],
-    thread_id: str,
-    approval_renderer: ApprovalRenderer | None,
-    approval_store: Any,
-    *,
-    iteration: int,
-    max_iterations: int,
-) -> tuple[list[Any], list[str]]:
-    """Resolve each paused approval to a MAF function_approval_response (UDR-0070 D8).
-
-    Returns ``(responses, sources)`` where ``sources`` is the resolution source
-    per record ("session-cache" for a session-grant hit, "user" otherwise) so
-    the caller can classify the round as cached or interactive (PRP-0103 /
-    UDR-0082 D2). A rendered "Allow Session" decision caches the grant and
-    cascades onto any sibling records still pending for the same
-    (thread_id, tool_name), so they resolve as "session-cache" here.
-    """
-    responses: list[Any] = []
-    sources: list[str] = []
-    for record, request_content in pending:
-        cached = await approval_store.lookup_session_cache(thread_id=thread_id, tool_name=record.tool_name)
-        if cached is not None:
-            approved = cached
-            source = "session-cache"
-        elif approval_renderer is not None:
-            approved = await approval_renderer(
-                record.id, thread_id, record.tool_name, record.arguments_preview, iteration, max_iterations
-            )
-            source = "user"
-        else:
-            # No renderer wired -> Teams must NOT auto-approve (UDR-0070 D8): deny.
-            approved = False
-            source = "user"
-        # resolve() is idempotent: if a cascade (UDR-0082 D4) already released
-        # this record as "session-cache", that resolution stands.
-        await approval_store.resolve(record.id, approved=approved, source=source)
-        actual = record.resolution.source if record.resolution else source
-        sources.append(actual)
-        # The original request content builds the MAF response MAF matches by id.
-        responses.append(request_content.to_function_approval_response(approved=approved))
-        await approval_store.drop(record.id)
-    return responses, sources
-
-
-def _build_iteration_messages(
-    accumulator: Any, approval_response_contents: list[Any], effective_model: str, *, session: Any
-) -> list[Any]:
-    """Build the iter-N+1 [assistant, user] pair, provider-aware (matches AG-UI)."""
-    from app import providers
-    from app.agent import approval_debug
-    from app.agent.approval_iteration import maf_resumable_call_ids
-    from app.demo import is_demo_mode
-
-    # Anthropic needs the signed reasoning + original tool_use Content replayed;
-    # OpenAI reasoning models need the function_call rebuilt without server ids.
-    is_anthropic = (not is_demo_mode()) and providers.provider_for(effective_model).name == "anthropic"
-    resumable_ids = maf_resumable_call_ids(session)  # PRP-0141: read BEFORE the re-run pops the group
-    replay = accumulator.build_iteration_messages(
-        approval_response_contents,
-        include_reasoning=is_anthropic,
-        strip_function_call_ids=not is_anthropic,
-        resumable_call_ids=resumable_ids,
+    final_text = cleaned.strip()
+    # Append each generated image as Markdown so the persisted message renders the
+    # image on the Web SPA, and the Teams adapter can extract + attach the bytes.
+    for uri in generated_image_uris:
+        if uri and uri not in final_text:
+            final_text = f"{final_text}\n\n![generated image]({uri})".strip()
+    persist_turn(
+        thread_id,
+        user_text=msg.text,
+        assistant_text=final_text,
+        conversation_type=msg.conversation_type,
     )
-    approval_debug.logger.info(
-        "[teams replay] provider=%s resumable_call_ids=%s %s\n  %s\n  responses: %s\n  replay: %s",
-        "anthropic" if is_anthropic else "openai-family",
-        sorted(resumable_ids),
-        approval_debug.describe_session_state(session),
-        accumulator.observation_summary(),
-        ", ".join(approval_debug.describe_content(c) for c in approval_response_contents),
-        " | ".join(approval_debug.describe_messages(replay)),
-    )
-    return replay
+    # CTR-0200 append (PRP-0158), exactly once per turn. Best-effort (UDR-0136 D6).
+    _record_turn(turn_usage, model_calls, effective_model, thread_id)
+    return final_text

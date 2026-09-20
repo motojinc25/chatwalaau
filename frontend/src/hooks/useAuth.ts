@@ -22,17 +22,12 @@ import { subscribeAuthRequired } from '@/lib/auth-fetch'
 
 export type AuthMode = 'open' | 'api-key-only' | 'login-required'
 
-/** PRP-0067 / CTR-0094 v4 -- runtime tool-approval policy. */
-export type ToolApprovalMode = 'skip' | 'auto' | 'always'
-
 export interface AuthState {
   mode: AuthMode | null
   authenticated: boolean
   username: string | null
   /** PRP-0066 / CTR-0094 v3: backend DEMO_MODE flag. SPA renders a "DEMO" badge when true. */
   demoMode: boolean
-  /** PRP-0067 / CTR-0094 v4: backend TOOL_APPROVAL_MODE. "skip" renders PermissionsDisabledBanner. */
-  toolApprovalMode: ToolApprovalMode
   /** PRP-0068 / CTR-0094 v5: running backend app version. null when the backend omits it. */
   version: string | null
   loading: boolean
@@ -69,8 +64,6 @@ interface StatusPayload {
   username: string | null
   /** Optional in older backend builds; defaults to false (PRP-0066, CTR-0094 v3). */
   demo_mode?: boolean
-  /** Optional in older backend builds; defaults to "auto" (PRP-0067, CTR-0094 v4). */
-  tool_approval_mode?: ToolApprovalMode
   /** Optional in older backend builds; null when absent (PRP-0068, CTR-0094 v5). */
   version?: string
 }
@@ -95,7 +88,6 @@ export function useAuth(): AuthState & AuthActions {
     authenticated: false,
     username: null,
     demoMode: false,
-    toolApprovalMode: 'auto',
     version: null,
     loading: true,
     hasEverAuthenticated: false,
@@ -136,10 +128,6 @@ export function useAuth(): AuthState & AuthActions {
       // last known one so ReauthDialog can prefill it (PRP-0110).
       username: payload.authenticated ? payload.username : (payload.username ?? prev.username),
       demoMode: payload.demo_mode === true,
-      toolApprovalMode:
-        payload.tool_approval_mode === 'skip' || payload.tool_approval_mode === 'always'
-          ? payload.tool_approval_mode
-          : 'auto',
       version: payload.version && payload.version.length > 0 ? payload.version : null,
       loading: false,
       // Latch (UDR-0088 D2) and clear the dialog once the session is live again.
@@ -182,7 +170,6 @@ export function useAuth(): AuthState & AuthActions {
       authenticated: false,
       username: null,
       demoMode: prev.demoMode,
-      toolApprovalMode: prev.toolApprovalMode,
       version: prev.version,
       loading: false,
       // An explicit sign-out returns the SPA to a boot-like state, so AuthGuard

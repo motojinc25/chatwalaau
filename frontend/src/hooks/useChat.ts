@@ -128,7 +128,7 @@ interface UseChatOptions {
    * Harness Agent run-target (CTR-0197, PRP-0135, UDR-0119 D3). When set, the run is
    * sent with AG-UI state.harness_id so the endpoint streams the cached
    * per-conversation harness agent (its todo / mode / file / shell activity rides the
-   * existing TOOL_CALL / approval grammar) instead of the active Prompt agent.
+   * existing TOOL_CALL grammar) instead of the active Prompt agent.
    * Mutually exclusive with selectedWorkflowId (one effective run-target axis).
    */
   selectedHarnessId?: string
@@ -139,9 +139,8 @@ interface UseChatOptions {
    */
   runTargetLabel?: string
   /**
-   * PRP-0067 / CTR-0100. Receives AG-UI CUSTOM events that useChat does
-   * not itself act on (e.g., tool_approval_request /
-   * tool_approval_response). useToolApproval supplies this callback.
+   * Receives AG-UI CUSTOM events that useChat does not itself act on (today the
+   * workflow_* progress events, PRP-0118). ChatPanel supplies this callback.
    */
   onCustomEvent?: (name: string | undefined, value: Record<string, unknown> | undefined) => void
   /**
@@ -814,11 +813,9 @@ export function useChat(options?: UseChatOptions) {
                   break
                 }
                 case 'CUSTOM': {
-                  // PRP-0067 / CTR-0100: forward every CUSTOM event to
-                  // the optional handler before useChat acts on the ones
-                  // it owns. This lets useToolApproval react to the
-                  // tool_approval_request / tool_approval_response pair
-                  // without duplicating SSE parsing.
+                  // Forward every CUSTOM event to the optional handler before
+                  // useChat acts on the ones it owns, so a consumer (the workflow
+                  // run state) reacts without duplicating SSE parsing.
                   onCustomEventRef.current?.(event.name, event.value)
                   if (event.name === 'run_retry' && event.value) {
                     // v0.77.1 (CTR-0009): the backend hit a transient upstream
