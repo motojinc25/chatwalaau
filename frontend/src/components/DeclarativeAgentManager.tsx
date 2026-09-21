@@ -555,6 +555,9 @@ export function DeclarativeAgentManager() {
                           <p>
                             Todo {current.policy.todo ? 'on' : 'off'} · Mode{' '}
                             {current.policy.mode ? (current.policy.mode_initial ?? 'on') : 'off'}
+                            {current.policy.mode && current.policy.plan_approval
+                              ? ` · Plan approval ${current.policy.plan_approval}`
+                              : ''}
                           </p>
                           {/*
                             PRP-0144 / UDR-0125 D4: report the RESOLVED budget, not

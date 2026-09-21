@@ -21,6 +21,12 @@ HARNESS_KIND = "Harness"
 # Valid initial modes for the Agent Mode Provider (UDR-0119 D4).
 ALLOWED_INITIAL_MODES = ("plan", "execute")
 
+# Plan approval (PRP-0181, UDR-0163 D2). "skip": the agent presents its plan and
+# switches itself to execute mode; "ask": MAF's own plan mode, which asks the user
+# before executing. Absent in the YAML => the default.
+ALLOWED_PLAN_APPROVALS = ("skip", "ask")
+DEFAULT_PLAN_APPROVAL = "skip"
+
 
 class HarnessAgentError(Exception):
     """Raised when a harness YAML cannot be parsed or mapped (UDR-0119 D8).
@@ -37,7 +43,7 @@ class HarnessAgentSpec:
     Field defaults mirror the phase-1 policy set (UDR-0119 D4): everything the
     YAML omits inherits the harness default; the factory (CTR-0193) supplies the
     FIXED policies (InMemory history, default Todo / Mode providers,
-    ``todos_remaining()`` loop, file / shell approvals off) that are never spec
+    ``todos_remaining()`` loop in execute mode, file / shell approvals off) that are never spec
     fields at all.
     """
 
@@ -73,6 +79,8 @@ class HarnessAgentSpec:
     todo_disabled: bool = False
     mode_disabled: bool = False
     mode_initial: str | None = None  # "plan" | "execute" | None (MAF default)
+    # "skip" | "ask" (UDR-0163 D2). Meaningful only while mode is enabled.
+    mode_plan_approval: str = DEFAULT_PLAN_APPROVAL
     file_memory_disabled: bool = False
     file_access_disable_write_tools: bool = False
     web_search_disabled: bool = False
@@ -86,6 +94,8 @@ class HarnessAgentSpec:
 
 __all__ = [
     "ALLOWED_INITIAL_MODES",
+    "ALLOWED_PLAN_APPROVALS",
+    "DEFAULT_PLAN_APPROVAL",
     "HARNESS_KIND",
     "IDENTITY_SENTINEL",
     "HarnessAgentError",

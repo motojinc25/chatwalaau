@@ -21,7 +21,7 @@ from app.agent.declarative.authoring import _atomic_write, _jail_ok, authoring_s
 from app.agent.harness.factory import preflight
 from app.agent.harness.loader import discover_files, resolve_spec
 from app.agent.harness.mapping import map_document
-from app.agent.harness.spec import HARNESS_KIND, HarnessAgentError
+from app.agent.harness.spec import DEFAULT_PLAN_APPROVAL, HARNESS_KIND, HarnessAgentError
 
 
 class _Literal(str):
@@ -98,7 +98,9 @@ def build_harness_yaml(document: dict[str, Any]) -> str:
 
     _switch_block("compaction", {"disabled": False, "maxContextWindowTokens": None, "maxOutputTokens": None})
     _switch_block("todo", {"disabled": False})
-    _switch_block("mode", {"disabled": False, "initial": None})
+    # planApproval: the default ("skip") is never written, so a new or re-saved agent
+    # stays loadable by a build that predates the field (PRP-0181, UDR-0163 D2).
+    _switch_block("mode", {"disabled": False, "initial": None, "planApproval": DEFAULT_PLAN_APPROVAL})
     _switch_block("fileMemory", {"disabled": False})
     _switch_block("fileAccess", {"disableWriteTools": False})
     _switch_block("webSearch", {"disabled": False})
@@ -157,7 +159,13 @@ def document_from_yaml(text: str) -> dict[str, Any]:
             "maxOutputTokens": compaction.get("maxOutputTokens"),
         },
         "todo": {"disabled": bool(_block("todo").get("disabled"))},
-        "mode": {"disabled": bool(mode.get("disabled")), "initial": mode.get("initial") or None},
+        "mode": {
+            "disabled": bool(mode.get("disabled")),
+            "initial": mode.get("initial") or None,
+            "planApproval": "ask"
+            if str(mode.get("planApproval") or "").strip().lower() == "ask"
+            else DEFAULT_PLAN_APPROVAL,
+        },
         "fileMemory": {"disabled": bool(_block("fileMemory").get("disabled"))},
         "fileAccess": {
             "disableWriteTools": bool(file_access.get("disableWriteTools")),

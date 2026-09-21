@@ -688,6 +688,12 @@ class UsageItem(BaseModel):
     context_base_tokens: int | None = None
     turn: dict[str, Any] | None = None
     workflow_nodes: list[dict[str, Any]] | None = None
+    # End-of-turn harness progress RECORD (PRP-0181, CTR-0219, UDR-0163 D5): the last
+    # harness_progress value of the turn -- mode, iteration n of N, end state and the
+    # bounded Todo list -- so a reloaded chat still shows the indicator and the dialog.
+    # Declared for the same reason as workflow_run: UsageItem is strict and would drop
+    # it. It is a record of that turn only; nothing feeds it back into the agent.
+    harness_run: dict[str, Any] | None = None
 
 
 class SaveMessageItem(BaseModel):

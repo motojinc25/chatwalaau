@@ -82,7 +82,7 @@ function emptyDocument(): HarnessDocument {
     tools: [],
     compaction: { disabled: false, maxContextWindowTokens: null, maxOutputTokens: null },
     todo: { disabled: false },
-    mode: { disabled: false, initial: null },
+    mode: { disabled: false, initial: null, planApproval: 'skip' },
     fileMemory: { disabled: false },
     fileAccess: { disableWriteTools: false },
     webSearch: { disabled: false },
@@ -178,14 +178,14 @@ function blockParts(doc: HarnessDocument): Array<{ id: string; label: string; su
     parts.push({
       id: 'b-todo',
       label: 'Todo list',
-      sub: 'todos_remaining loop',
+      sub: 'todos_remaining loop (execute mode)',
       icon: <ListTodo className="h-4 w-4" />,
     })
   if (!doc.mode.disabled)
     parts.push({
       id: 'b-mode',
       label: 'Plan / Execute',
-      sub: doc.mode.initial ? `initial: ${doc.mode.initial}` : 'mode tracking',
+      sub: `${doc.mode.initial ? `initial: ${doc.mode.initial}, ` : ''}approval: ${doc.mode.planApproval ?? 'skip'}`,
       icon: <Route className="h-4 w-4" />,
     })
   if (!doc.fileMemory.disabled)
@@ -499,7 +499,7 @@ export function HarnessAgentEditor({ open, onOpenChange, editId, onSaved }: Prop
                   label="Todo list"
                   checked={!doc.todo.disabled}
                   onChange={(on) => patch({ todo: { disabled: !on } })}
-                  note="Fixed: todos_remaining() drives the loop."
+                  note="Fixed: todos_remaining() drives the loop in execute mode."
                 />
                 <SwitchField
                   label="Plan / Execute mode"
@@ -515,6 +515,22 @@ export function HarnessAgentEditor({ open, onOpenChange, editId, onSaved }: Prop
                       <option value="">Default</option>
                       <option value="plan">plan</option>
                       <option value="execute">execute</option>
+                    </select>
+                  </Field>
+                )}
+                {!doc.mode.disabled && (
+                  <Field label="Plan approval">
+                    {/* PRP-0181 / UDR-0163 D2: skip (default) lets the agent switch itself to
+                        execute after planning; ask waits for the user's approval. Clarifying
+                        questions are asked either way. */}
+                    <select
+                      className={CONTROL}
+                      value={doc.mode.planApproval ?? 'skip'}
+                      onChange={(e) =>
+                        patch({ mode: { ...doc.mode, planApproval: e.target.value === 'ask' ? 'ask' : 'skip' } })
+                      }>
+                      <option value="skip">Skip -- start executing after planning (default)</option>
+                      <option value="ask">Ask -- wait for my approval before executing</option>
                     </select>
                   </Field>
                 )}

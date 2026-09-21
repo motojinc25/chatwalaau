@@ -18,6 +18,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from app.coding.ansi import plain_text_env, strip_ansi
 from app.coding.security import resolve_safe_path
 from app.core.config import settings
 
@@ -166,9 +167,13 @@ def _bash_execute_sync(command: str, cwd: str) -> str:
             errors="replace",
             timeout=timeout,
             cwd=work_dir,
+            # Plain text for the model and the tool card (UDR-0163 D7): NO_COLOR asks the
+            # child not to colour; strip_ansi below removes whatever it colours anyway.
+            env=plain_text_env(),
         )
         # Defensive: never concatenate None even if a stream came back empty/None.
-        output = (result.stdout or "") + (result.stderr or "")
+        # ANSI is removed BEFORE truncation so the limit counts real text.
+        output = strip_ansi(result.stdout or "") + strip_ansi(result.stderr or "")
         if len(output) > max_output:
             output = output[:max_output] + f"\n... (output truncated at {max_output} characters)"
         return f"Exit code: {result.returncode}\n{output}"

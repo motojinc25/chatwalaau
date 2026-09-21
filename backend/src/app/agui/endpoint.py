@@ -55,6 +55,7 @@ from app import providers
 from app.agent import wire_trace
 from app.agent.agent_memory import session_agent_memory_snapshot
 from app.agent.declarative import active_spec
+from app.agent.harness.progress import HARNESS_PROGRESS_EVENT, HarnessRunTracker, is_progress_tool
 from app.agent.identity import load_identity
 from app.agent.prompt_dump import dump_prompt
 from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_path
@@ -668,6 +669,32 @@ class _RunStats:
         return time.monotonic() - self.started
 
 
+def _build_harness_tracker(agent: Any, session: Any, harness_id: Any, run_id: str) -> Any:
+    """The CTR-0219 tracker for a harness turn, or None when it has no Todo list.
+
+    Never raises: progress reporting must not fail a run.
+    """
+    try:
+        from app.agent.harness.loader import resolve_spec
+        from app.agent.harness.mapping import HARNESS_MAX_ITERATIONS, effective_loop_max_iterations
+
+        try:
+            max_iterations = effective_loop_max_iterations(resolve_spec(str(harness_id)))
+        except Exception:
+            max_iterations = HARNESS_MAX_ITERATIONS
+        tracker = HarnessRunTracker(
+            agent=agent,
+            session=session,
+            harness_id=str(harness_id),
+            run_id=run_id,
+            max_iterations=max_iterations,
+        )
+        return tracker if tracker.enabled else None
+    except Exception:
+        logger.warning("Harness progress tracker unavailable for %s", harness_id, exc_info=True)
+        return None
+
+
 def _harness_run_target(harness_id: Any) -> str | None:
     """The harness agent's NAME for the ledger's ``run_target`` (PRP-0159 C3).
 
@@ -1199,6 +1226,14 @@ async def _stream_with_reasoning(
     last_usage: dict[str, Any] | None = None
     model_calls = 0
 
+    # Harness Run Progress (CTR-0219, PRP-0181, UDR-0163 D3/D4). Declared BEFORE the
+    # try so the end-of-turn value is sent on the error path too. None off the harness
+    # lane: only a harness run has an agent loop.
+    harness_tracker: Any = None
+    # call_id -> tool name, so a function_result can tell whether it changed the
+    # task list or the mode (parallel calls make `tc_name_current` unreliable).
+    harness_tool_names: dict[str, str] = {}
+
     try:
         # Pre-process: strip PDF image_url entries from messages before normalization.
         # normalize_agui_input_messages converts image_url content to MAF Content,
@@ -1511,6 +1546,13 @@ async def _stream_with_reasoning(
                 session=session,
                 cached=True,
             )
+            harness_tracker = _build_harness_tracker(agent, session, _harness_id, run_id)
+            if harness_tracker is not None:
+                progress_value = await harness_tracker.snapshot(at_start=True)
+                if progress_value is not None:
+                    yield encoder.encode(
+                        CustomEvent(type=EventType.CUSTOM, name=HARNESS_PROGRESS_EVENT, value=progress_value)
+                    )
         # Structured output marker (PRP-0082, CTR-0009 v14, UDR-0058 D5). Tell the
         # SPA early that this turn is structured so it renders the answer as a JSON
         # code block. DEMO_MODE resolves no structured shape (DemoChatClient is
@@ -1547,6 +1589,21 @@ async def _stream_with_reasoning(
                         },
                     )
                 )
+                continue
+
+            # UDR-0163 D3: a message MAF's loop injected between iterations ("Progress
+            # so far: ...", "Continue working on the task ...") is NOT answer text. It
+            # ends the open text message -- the next iteration starts a new paragraph --
+            # and becomes a harness_progress event. The model's history keeps it.
+            if harness_tracker is not None and harness_tracker.observe(update):
+                if msg_id is not None:
+                    yield encoder.encode(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
+                    msg_id = None
+                progress_value = await harness_tracker.snapshot()
+                if progress_value is not None:
+                    yield encoder.encode(
+                        CustomEvent(type=EventType.CUSTOM, name=HARNESS_PROGRESS_EVENT, value=progress_value)
+                    )
                 continue
 
             contents = getattr(update, "contents", None) or []
@@ -1631,6 +1688,8 @@ async def _stream_with_reasoning(
 
                     tc_id = getattr(content, "call_id", None) or _generate_id()
                     tc_name = getattr(content, "name", None)
+                    if harness_tracker is not None and tc_name:
+                        harness_tool_names[tc_id] = tc_name
                     if tc_name and tc_id != tool_call_id:
                         tool_call_id = tc_id
                         tc_name_current = tc_name
@@ -1727,6 +1786,17 @@ async def _stream_with_reasoning(
                                         )
                             except Exception:
                                 logger.warning("Failed to fetch MCP App UI for %s", tc_name_current, exc_info=True)
+
+                        # A todo / mode tool changed the picture: send a fresh snapshot
+                        # (CTR-0219, UDR-0163 D4).
+                        if harness_tracker is not None and is_progress_tool(harness_tool_names.get(tc_id)):
+                            progress_value = await harness_tracker.snapshot()
+                            if progress_value is not None:
+                                yield encoder.encode(
+                                    CustomEvent(
+                                        type=EventType.CUSTOM, name=HARNESS_PROGRESS_EVENT, value=progress_value
+                                    )
+                                )
 
                         tool_call_id = None
                         # Reset text message after tool result (allows new text block)
@@ -1971,6 +2041,18 @@ async def _stream_with_reasoning(
                 },
             )
         )
+
+    # End-of-turn harness progress (CTR-0219, UDR-0163 D4/D5): the value the SPA
+    # persists with the message as usage.harness_run. Sent before RUN_ERROR so an
+    # errored turn still records where it stopped.
+    if harness_tracker is not None:
+        try:
+            progress_value = await harness_tracker.final(error=run_error)
+        except Exception:
+            logger.warning("Harness progress: end-of-turn snapshot failed", exc_info=True)
+            progress_value = None
+        if progress_value is not None:
+            yield encoder.encode(CustomEvent(type=EventType.CUSTOM, name=HARNESS_PROGRESS_EVENT, value=progress_value))
 
     if run_error:
         logger.warning("AG-UI run finished with error: thread=%s message=%s", thread_id, error_message)

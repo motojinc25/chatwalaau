@@ -12,6 +12,7 @@ ChatWalaʻau owns every INPUT --
 * Fixed phase-1 policies (UDR-0119 D4): history omitted (MAF-internal
   InMemoryHistoryProvider), default TodoProvider, default AgentModeProvider
   (initial mode from YAML), ``todos_remaining()`` loop clamped to the MAF cap,
+  continuing in EXECUTE mode only (PRP-0181, UDR-0163 D1),
   ``file_access_disable_readonly_tool_approval=True`` set EXPLICITLY.
 * Workspace wiring (UDR-0119 D7): CODING_WORKSPACE_DIR-scoped file stores and a
   LocalShellTool; Skills through the SHARED provider (below).
@@ -43,6 +44,10 @@ ChatWalaʻau owns every INPUT --
   No ``scope=`` is ever passed to the file-memory provider: its folder is the
   session id, which MAF 1.18.0 maps through ``_storage_key_segment`` verbatim only
   while it stays literal-safe (see ``runtime.agent_for_thread``).
+* Plan approval is a declared choice (PRP-0181, UDR-0163 D2): ``mode.planApproval``
+  ``ask`` keeps MAF's mode instructions byte for byte; ``skip`` (the default)
+  replaces ONLY the ``plan`` entry, so the agent presents its plan and switches
+  itself to execute mode. Clarifying questions stay.
 """
 
 from __future__ import annotations
@@ -52,7 +57,7 @@ from pathlib import Path
 from typing import Any
 
 from app import providers
-from app.agent.harness.mapping import HARNESS_MAX_ITERATIONS
+from app.agent.harness.mapping import effective_loop_max_iterations
 from app.agent.harness.spec import IDENTITY_SENTINEL, HarnessAgentError, HarnessAgentSpec
 from app.core.config import settings
 from app.skills.provider import create_skills_provider
@@ -71,6 +76,64 @@ DEFAULT_AGENT_INSTRUCTIONS = (
     "Run the relevant build, tests, and static checks after changes.\n"
     "Do not claim success unless verification passes."
 )
+
+# The ``plan`` mode instructions for ``mode.planApproval: skip`` (PRP-0181, UDR-0163 D2).
+# MAF's default plan mode asks the user for approval before switching to execute
+# (its steps 6-7). This text keeps MAF's planning steps -- including clarifying
+# questions, which are NOT approval -- and replaces the approval step with the agent
+# switching itself. The ``execute`` entry is never touched: it stays MAF's own text.
+PLAN_MODE_SKIP_APPROVAL_INSTRUCTIONS = (
+    "Use this mode when analyzing requirements, breaking down tasks, and creating plans. "
+    "Ask clarifying questions only when the request cannot be planned without the answer; "
+    "do NOT ask for approval of the plan.\n\n"
+    "Process to follow when in plan mode:\n"
+    "1. Analyze the request with the purpose of building a research plan.\n"
+    "2. Create a list of todo items.\n"
+    "3. If needed, use the provided tools to do some exploratory checks to help build a plan and determine "
+    "what clarifying questions you may need from the user.\n"
+    "4. Ask for clarifications from the user only where the plan cannot be made without them.\n"
+    "   1. Ask each clarification one by one.\n"
+    "   2. When asking for clarification and you have specific options in mind, present them to the user, "
+    "so they can choose the option instead of having to retype the entire response.\n"
+    "   3. Do not proceed until you have received all the needed clarifications.\n"
+    "5. Write the plan to a memory file, so that it is retained even if compaction happens.\n"
+    "6. Present the plan to the user briefly. Do NOT ask for approval to proceed.\n"
+    "7. Immediately switch to execute mode (using the `mode_set` tool) and follow the steps for "
+    "*Execute mode*."
+)
+
+
+def build_mode_provider(spec: HarnessAgentSpec) -> Any:
+    """The AgentModeProvider for *spec*, or None for MAF's default provider (UDR-0163 D2).
+
+    - mode disabled -> None (MAF builds none).
+    - ``ask`` -> today's behaviour byte for byte: a provider only when the YAML chose
+      an initial mode (UDR-0119 D4), otherwise MAF's default.
+    - ``skip`` -> always a provider whose instructions are MAF's own map with ONLY
+      ``plan`` replaced. The map is read from the PUBLIC attribute of a default
+      provider, never from a private constant, so ``execute`` follows each MAF wave.
+    """
+    from agent_framework import AgentModeProvider
+
+    if spec.mode_disabled:
+        return None
+    if spec.mode_plan_approval == "ask":
+        return AgentModeProvider(default_mode=spec.mode_initial) if spec.mode_initial else None
+    base = dict(AgentModeProvider().mode_instructions)
+    base["plan"] = PLAN_MODE_SKIP_APPROVAL_INSTRUCTIONS
+    return AgentModeProvider(default_mode=spec.mode_initial, mode_instructions=base)
+
+
+def loop_looping_modes(spec: HarnessAgentSpec) -> list[str] | None:
+    """``looping_modes`` for ``todos_remaining()`` (PRP-0181, UDR-0163 D1).
+
+    With mode enabled the loop continues only in ``execute``: a run that ended in
+    ``plan`` asked the user something, and continuing it would answer in the user's
+    place. With mode DISABLED it must be None -- there is no mode provider, the mode
+    would resolve to MAF's first default (``plan``) and the loop would never run.
+    """
+    return None if spec.mode_disabled else ["execute"]
+
 
 # Subdirectories under CODING_WORKSPACE_DIR for the harness stores (UDR-0119 D7).
 FILE_MEMORY_SUBDIR = "agent-file-memory"
@@ -319,7 +382,6 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         raise HarnessAgentError("model.id is required to build a harness agent.")
 
     from agent_framework import (
-        AgentModeProvider,
         FileSystemAgentFileStore,
         create_harness_agent,
         todos_remaining,
@@ -392,11 +454,8 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
             f"(window={max_window}, max_output={max_output}); MAF would build no strategy."
         )
 
-    # Initial mode (UDR-0119 D4): only a custom provider when the YAML chose one;
-    # otherwise MAF's default provider (identical modes, MAF default initial).
-    mode_provider = None
-    if spec.mode_initial and not spec.mode_disabled:
-        mode_provider = AgentModeProvider(default_mode=spec.mode_initial)
+    # Initial mode (UDR-0119 D4) and plan approval (UDR-0163 D2).
+    mode_provider = build_mode_provider(spec)
 
     agent = create_harness_agent(
         client,
@@ -440,8 +499,9 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         #        weren't passed as input: call_..."
         # (UDR-0119 D6). It stays unwired; a turn is ONE run (UDR-0161 D8).
         disable_tool_auto_approval=True,
-        loop_should_continue=todos_remaining(),
-        loop_max_iterations=min(spec.loop_max_iterations or HARNESS_MAX_ITERATIONS, HARNESS_MAX_ITERATIONS),
+        # UDR-0163 D1: the loop continues in execute mode only (None when mode is off).
+        loop_should_continue=todos_remaining(looping_modes=loop_looping_modes(spec)),
+        loop_max_iterations=effective_loop_max_iterations(spec),
         # CLIENT-MANAGED CONVERSATION (UDR-0119 D4). The harness is built for it:
         # it sets require_per_service_call_history_persistence=True and ships an
         # InMemoryHistoryProvider with load_messages=True. But

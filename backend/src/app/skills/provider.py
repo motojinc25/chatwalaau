@@ -47,6 +47,17 @@ Approval model (PRP-0179, UDR-0161 D1):
   script can run at all is decided by ``CODING_ENABLED`` (the runner below), not by a
   prompt. This replaces the PRP-0108 middleware mapping (UDR-0086 D2, superseded).
 
+The runner is offered only when a script exists (PRP-0181, UDR-0163 D6):
+  MAF (still in 1.18.0) registers ``run_skill_script`` and injects its instructions
+  whenever ANY skill is visible, even when no skill has a script -- contradicting its
+  own ``before_run`` docstring. A model handed a tool that can only fail invents
+  arguments for it (``script_name: "noop"``, ``skill_name: "none"``), and the harness
+  loop multiplied the retries. ``ScriptAwareSkillsProvider`` withdraws the tool and
+  its instructions for a run in which no visible skill has a script, and leaves MAF's
+  output untouched otherwise. This closes the defect UDR-0130 D6 recorded as open.
+  ``CODING_ENABLED`` is NOT part of the rule: a skill WITH scripts keeps the tool and
+  the runner answers with the disabled message (operator decision, PRP-0181 Q1).
+
 Discovery (PRP-0108, UDR-0086 D3 -- MAF 1.10):
   ``FileSkillsSource`` no longer whitelists ``references/`` / ``assets/`` /
   ``scripts/`` directories; it depth-scans (default depth 2) with extension
@@ -70,6 +81,10 @@ from agent_framework import (
     SkillsProvider,
     SkillsSourceContext,
 )
+
+# Private module: the runner instructions constant is not exported. Pinned by the
+# PRP-0181 canary (tests/invariants/test_prp0181_harness_loop_progress.py).
+from agent_framework._skills import SCRIPT_RUNNER_INSTRUCTIONS
 
 from app.core.config import settings
 from app.skills.loaded import set_loaded_skills
@@ -255,6 +270,44 @@ def agentless_skills_context() -> SkillsSourceContext:
     return SkillsSourceContext(agent=cast("Any", None))
 
 
+def _skill_has_scripts(skill: Any) -> bool:
+    """True when *skill* ships at least one script.
+
+    MAF's ``Skill`` base class has no public "list scripts" accessor: ``ClassSkill``
+    exposes a ``scripts`` property, while ``FileSkill`` and ``InlineSkill`` keep them in
+    ``_scripts`` (a private attribute, pinned by the PRP-0181 canary). A skill of any
+    other shape, or one whose scripts cannot be listed, is treated as HAVING scripts:
+    withdrawing a tool that might work is worse than offering one that might not.
+    """
+    for attr in ("scripts", "_scripts"):
+        if hasattr(skill, attr):
+            try:
+                return bool(getattr(skill, attr))
+            except Exception:
+                return True
+    return True
+
+
+class ScriptAwareSkillsProvider(SkillsProvider):
+    """A SkillsProvider that offers ``run_skill_script`` only when a script exists.
+
+    UDR-0163 D6. Overrides MAF's per-run context build (``_create_context``, a PRIVATE
+    seam -- pinned by an invariant canary together with ``RUN_SKILL_SCRIPT_TOOL_NAME``
+    so a MAF wave that renames either fails a test instead of silently re-advertising
+    the runner). The visible skills are already filtered (disabled set, allow-list),
+    so the rule is decided on exactly what the model sees. When MAF fixes its own gate
+    this override becomes a no-op and can be removed.
+    """
+
+    async def _create_context(self, source_context: SkillsSourceContext) -> Any:
+        skills, instructions, tools = await super()._create_context(source_context)
+        if skills and not any(_skill_has_scripts(s) for s in skills):
+            tools = [t for t in tools if getattr(t, "name", None) != self.RUN_SKILL_SCRIPT_TOOL_NAME]
+            if instructions:
+                instructions = instructions.replace(SCRIPT_RUNNER_INSTRUCTIONS, "")
+        return skills, instructions, tools
+
+
 def create_skills_provider(allowlist_names: set[str] | None = None) -> SkillsProvider | None:
     """Create SkillsProvider if SKILLS_DIR exists and is a directory.
 
@@ -326,7 +379,7 @@ def create_skills_provider(allowlist_names: set[str] | None = None) -> SkillsPro
     # PRP-0179 / UDR-0161 D1: the three tools are built approval-free. MAF's default is
     # always_require for all three; leaving any flag off would bring the approval
     # request back on every lane (and the R3 canary would fail).
-    provider = SkillsProvider(
+    provider = ScriptAwareSkillsProvider(
         source,
         disable_load_skill_approval=True,
         disable_read_skill_resource_approval=True,

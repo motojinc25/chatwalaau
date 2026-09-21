@@ -187,6 +187,10 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
       // Restore the full workflow run (v0.117.1) so a reloaded chat shows the same step
       // list it showed live, and the diagram can be re-opened for it.
       ...(usage?.workflow_run ? { workflowRun: usage.workflow_run } : {}),
+      // Restore the end-of-turn harness progress record (PRP-0181, UDR-0163 D5) so the
+      // task indicator and dialog survive a reload. The dialog labels it as the state at
+      // the end of that turn; it is never sent back to the agent.
+      ...(usage?.harness_run ? { harnessRun: usage.harness_run } : {}),
       // Restore the structured-output flag so a reloaded JSON answer still renders
       // as a code block (CTR-0118 / CTR-0012 v11, PRP-0082, UDR-0058 D9).
       ...(usage?.structured ? { structured: true } : {}),

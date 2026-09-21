@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { type KeyboardEvent, memo, useCallback, useEffect, useRef, useState } from 'react'
 import { AuthedImage } from '@/components/AuthedImage'
+import { HarnessProgressPanel } from '@/components/HarnessProgressPanel'
 import { ImageGenerationResults } from '@/components/ImageGenerationResult'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
 import { McpAppView } from '@/components/mcp-apps/McpAppView'
@@ -645,6 +646,16 @@ function ChatMessageItemImpl({
                 rendered inside the message (the standalone panel was removed, v0.115.1). */}
             {workflowState && (
               <WorkflowProgressPanel state={workflowState} className="mb-1" onOpenCanvas={onOpenWorkflowCanvas} />
+            )}
+            {/* Harness run: tasks + automatic continuation (PRP-0181, CTR-0197 v2). Live from
+                harness_progress, restored from usage.harness_run on reload. */}
+            {!isUser && message.harnessRun && (
+              <HarnessProgressPanel
+                progress={message.harnessRun}
+                live={Boolean(isLoading) && message.harnessRun.state === 'running'}
+                agentName={message.runTarget}
+                className="mb-1"
+              />
             )}
             {message.content ? (
               // Structured output (CTR-0012 v11, PRP-0082, UDR-0058 D5): render the

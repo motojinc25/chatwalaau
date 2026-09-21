@@ -22,7 +22,8 @@ export interface HarnessDocument {
   tools: string[]
   compaction: { disabled?: boolean; maxContextWindowTokens?: number | null; maxOutputTokens?: number | null }
   todo: { disabled?: boolean }
-  mode: { disabled?: boolean; initial?: string | null }
+  /** planApproval (PRP-0181, UDR-0163 D2): 'skip' (default, never written) | 'ask'. */
+  mode: { disabled?: boolean; initial?: string | null; planApproval?: 'skip' | 'ask' }
   fileMemory: { disabled?: boolean }
   fileAccess: { disableWriteTools?: boolean }
   webSearch: { disabled?: boolean }
@@ -39,6 +40,8 @@ export interface HarnessPolicy {
   todo: boolean
   mode: boolean
   mode_initial: string | null
+  /** 'skip' | 'ask'; null when mode is disabled (PRP-0181). Absent on older backends. */
+  plan_approval?: string | null
   /**
    * PRP-0144 / UDR-0125 D4 -- EFFECTIVE compaction, not declared intent. Was a
    * bare boolean, which reported `true` for an agent the framework had built no

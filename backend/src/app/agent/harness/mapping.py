@@ -15,6 +15,8 @@ import yaml
 
 from app.agent.harness.spec import (
     ALLOWED_INITIAL_MODES,
+    ALLOWED_PLAN_APPROVALS,
+    DEFAULT_PLAN_APPROVAL,
     HARNESS_KIND,
     HarnessAgentError,
     HarnessAgentSpec,
@@ -56,6 +58,15 @@ try:
     from agent_framework._harness._loop import DEFAULT_MAX_ITERATIONS as HARNESS_MAX_ITERATIONS
 except Exception:  # pragma: no cover - pinned dependency; defensive fallback
     HARNESS_MAX_ITERATIONS = 10
+
+
+def effective_loop_max_iterations(spec: HarnessAgentSpec) -> int:
+    """The loop cap a harness actually runs with: the YAML value clamped to MAF's (D4).
+
+    One definition for the factory (CTR-0193), the inventory (CTR-0192) and the progress
+    report (CTR-0219), so the "n of N" a user sees is the N the loop enforces.
+    """
+    return min(spec.loop_max_iterations or HARNESS_MAX_ITERATIONS, HARNESS_MAX_ITERATIONS)
 
 
 def parse_yaml(text: str) -> dict[str, Any]:
@@ -249,6 +260,16 @@ def map_document(
         if mode_initial not in ALLOWED_INITIAL_MODES:
             warnings.append(f"mode.initial must be one of: {', '.join(ALLOWED_INITIAL_MODES)}.")
             mode_initial = None
+    # Plan approval (PRP-0181, UDR-0163 D2): absent => skip; an invalid value is a
+    # visible warning (UDR-0119 D8, like mode.initial) and falls back to the default.
+    plan_approval = DEFAULT_PLAN_APPROVAL
+    plan_approval_raw = mode.get("planApproval")
+    if plan_approval_raw is not None:
+        candidate = str(plan_approval_raw).strip().lower()
+        if candidate in ALLOWED_PLAN_APPROVALS:
+            plan_approval = candidate
+        else:
+            warnings.append(f"mode.planApproval must be one of: {', '.join(ALLOWED_PLAN_APPROVALS)}.")
 
     file_memory = _block(data, "fileMemory", warnings)
     file_access = _block(data, "fileAccess", warnings)
@@ -289,6 +310,7 @@ def map_document(
         todo_disabled=_bool(todo, "disabled", "todo", warnings),
         mode_disabled=_bool(mode, "disabled", "mode", warnings),
         mode_initial=mode_initial,
+        mode_plan_approval=plan_approval,
         file_memory_disabled=_bool(file_memory, "disabled", "fileMemory", warnings),
         file_access_disable_write_tools=_bool(file_access, "disableWriteTools", "fileAccess", warnings),
         web_search_disabled=_bool(web_search, "disabled", "webSearch", warnings),
@@ -297,4 +319,10 @@ def map_document(
     )
 
 
-__all__ = ["CODING_TOOL_IDS", "HARNESS_MAX_ITERATIONS", "map_document", "parse_yaml"]
+__all__ = [
+    "CODING_TOOL_IDS",
+    "HARNESS_MAX_ITERATIONS",
+    "effective_loop_max_iterations",
+    "map_document",
+    "parse_yaml",
+]

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ChatMessage, ImageRef, McpAppEvent, PersistedWorkflowRun, UsageInfo } from '@/types/chat'
+import { finalizeHarnessProgress, parseHarnessProgress } from '@/lib/harnessProgress'
+import type { ChatMessage, HarnessProgress, ImageRef, McpAppEvent, PersistedWorkflowRun, UsageInfo } from '@/types/chat'
 
 /**
  * AG-UI protocol event types (CTR-0009).
@@ -580,6 +581,10 @@ export function useChat(options?: UseChatOptions) {
         // A workflow run that paused on a human-in-the-loop request (UDR-0106 D5). The
         // turn is a normal, successful end -- the run is not finished, but nothing failed.
         let workflowInterrupted = false
+        // Harness run progress (PRP-0181, CTR-0197 v2): the latest full snapshot of the
+        // turn's Todo list / mode / loop iteration. Kept on the message live, and the last
+        // one is persisted as usage.harness_run (UDR-0163 D5).
+        let harnessProgress: HarnessProgress | null = null
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
@@ -861,6 +866,16 @@ export function useChat(options?: UseChatOptions) {
                       ),
                     )
                   }
+                  if (event.name === 'harness_progress' && event.value) {
+                    // CTR-0219 / UDR-0163 D4: a full snapshot -- replace, never merge.
+                    const progress = parseHarnessProgress(event.value)
+                    if (progress) {
+                      harnessProgress = progress
+                      setMessages((prev) =>
+                        prev.map((msg) => (msg.id === assistantId ? { ...msg, harnessRun: progress } : msg)),
+                      )
+                    }
+                  }
                   if (event.name === 'citation_markers_stripped' && event.value) {
                     // CTR-0218 / UDR-0160 D3: the backend removed the model's private
                     // citation markup from this answer. Kept on the message for the note
@@ -950,12 +965,16 @@ export function useChat(options?: UseChatOptions) {
               prev.map((msg) => (msg.id === assistantId ? { ...msg, workflowRun: workflowSnapshot } : msg)),
             )
           }
-          if (completedUsage || runTargetLabelRef.current || workflowCompleted || workflowSnapshot) {
+          // The end-of-turn harness record (UDR-0163 D5). A stream that ended without its
+          // final snapshot is recorded as stopped, never as still running.
+          const harnessRecord = harnessProgress ? finalizeHarnessProgress(harnessProgress) : null
+          if (completedUsage || runTargetLabelRef.current || workflowCompleted || workflowSnapshot || harnessRecord) {
             assistantMsg.usage = {
               ...(completedUsage ?? {}),
               ...(runTargetLabelRef.current ? { run_target: runTargetLabelRef.current } : {}),
               ...(workflowCompleted ? { workflow_completed: { steps: workflowSteps } } : {}),
               ...(workflowSnapshot ? { workflow_run: workflowSnapshot } : {}),
+              ...(harnessRecord ? { harness_run: harnessRecord } : {}),
             }
           }
           const userMsg: Record<string, unknown> = { role: 'user', content: userContent, id: userMessage.id }
@@ -1023,6 +1042,15 @@ export function useChat(options?: UseChatOptions) {
                     rb.status === 'thinking' ? { ...rb, status: 'done' as const } : rb,
                   ),
                 }
+              : msg,
+          ),
+        )
+        // A harness turn stopped by the user (or a dropped stream) never receives its
+        // final snapshot: its indicator must not keep saying "Working" (PRP-0181).
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantId && msg.harnessRun?.state === 'running'
+              ? { ...msg, harnessRun: finalizeHarnessProgress(msg.harnessRun) }
               : msg,
           ),
         )

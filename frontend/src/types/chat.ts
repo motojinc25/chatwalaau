@@ -99,6 +99,12 @@ export interface UsageInfo {
    */
   workflow_run?: PersistedWorkflowRun
   /**
+   * End-of-turn harness progress record (PRP-0181, CTR-0219, UDR-0163 D5): the last
+   * `harness_progress` value of the turn, so a reloaded chat still shows the task
+   * indicator and dialog. A record of that turn only -- never fed back to the agent.
+   */
+  harness_run?: HarnessProgress
+  /**
    * Per-node breakdown of a Declarative Workflow run (PRP-0170). Present only on a
    * workflow message; there `turn` is the RUN total across all nodes, and the top-level
    * last-call / context fields describe the node with the highest context occupancy.
@@ -126,6 +132,32 @@ export interface PersistedWorkflowLogEntry {
   payload?: unknown
   truncated?: boolean
   iteration?: number | null
+}
+
+/** End state of a harness turn (CTR-0219). `running` is the only non-final state. */
+export type HarnessRunState = 'running' | 'completed' | 'waiting' | 'cap_reached' | 'stopped'
+
+/** One task of a harness Todo list, as reported by `harness_progress` (CTR-0219). */
+export interface HarnessTodo {
+  id: number
+  title: string
+  done: boolean
+}
+
+/**
+ * The `harness_progress` CUSTOM event value (CTR-0009 / CTR-0219, PRP-0181). Always a
+ * FULL snapshot: the reducer replaces, never merges. The same shape is persisted as
+ * `usage.harness_run`.
+ */
+export interface HarnessProgress {
+  run_id: string
+  harness_id: string
+  mode: string | null
+  iteration: number
+  max_iterations: number
+  state: HarnessRunState
+  todos: HarnessTodo[]
+  todos_truncated: boolean
 }
 
 /** A workflow run as saved with its assistant message (v0.117.1). */
@@ -200,6 +232,11 @@ export interface ChatMessage {
   workflowCompleted?: { steps: number }
   /** Restored workflow run (v0.117.1): rebuilds the indicator and the run canvas. */
   workflowRun?: PersistedWorkflowRun
+  /**
+   * Harness run progress (PRP-0181, CTR-0197 v2): live from `harness_progress` while
+   * the turn streams, restored from `usage.harness_run` on reload.
+   */
+  harnessRun?: HarnessProgress
   /** Reasoning effort used for this assistant message (CTR-0030, PRP-0071) */
   reasoning?: string
   /** Text verbosity used for this assistant message (gpt-5.x only; CTR-0030, PRP-0081) */

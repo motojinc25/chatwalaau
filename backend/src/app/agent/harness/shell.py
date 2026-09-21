@@ -63,6 +63,8 @@ from agent_framework_tools.shell import (
     ShellResult,
 )
 
+from app.coding.ansi import plain_text_env, strip_ansi
+
 logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -187,12 +189,14 @@ class WorkspaceShellTool(LocalShellTool):
                 errors="replace",
                 timeout=timeout,
                 cwd=workdir,
-                env=self._cw_env,
+                # Plain text (UDR-0163 D7): NO_COLOR asks the child not to colour. A
+                # caller-supplied env is kept as the base, exactly as before.
+                env={**self._cw_env, "NO_COLOR": "1"} if self._cw_env is not None else plain_text_env(),
             )
         except subprocess.TimeoutExpired as exc:
             elapsed = int((time.monotonic() - started) * 1000)
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            stdout = strip_ansi(exc.stdout) if isinstance(exc.stdout, str) else ""
+            stderr = strip_ansi(exc.stderr) if isinstance(exc.stderr, str) else ""
             return ShellResult(
                 stdout=stdout,
                 stderr=(stderr + f"\nCommand timed out after {timeout}s.").strip(),
@@ -210,8 +214,9 @@ class WorkspaceShellTool(LocalShellTool):
             )
 
         elapsed = int((time.monotonic() - started) * 1000)
-        stdout, out_cut = _truncate(completed.stdout or "", self._cw_max_output_bytes)
-        stderr, err_cut = _truncate(completed.stderr or "", self._cw_max_output_bytes)
+        # ANSI removed BEFORE truncation, so the byte limit counts real text (UDR-0163 D7).
+        stdout, out_cut = _truncate(strip_ansi(completed.stdout or ""), self._cw_max_output_bytes)
+        stderr, err_cut = _truncate(strip_ansi(completed.stderr or ""), self._cw_max_output_bytes)
         return ShellResult(
             stdout=stdout,
             stderr=stderr,

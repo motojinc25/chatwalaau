@@ -15,7 +15,7 @@ from pathlib import Path
 
 from app import providers
 from app.agent.declarative.loader import _agents_dir, _jail_ok, read_top_kind
-from app.agent.harness.mapping import HARNESS_MAX_ITERATIONS, map_document
+from app.agent.harness.mapping import effective_loop_max_iterations, map_document
 from app.agent.harness.spec import HARNESS_KIND, HarnessAgentError, HarnessAgentSpec
 from app.core.config import settings
 
@@ -178,8 +178,10 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
         "todo": not spec.todo_disabled,
         "mode": not spec.mode_disabled,
         "mode_initial": spec.mode_initial,
+        # PRP-0181 / UDR-0163 D2: "skip" | "ask"; None when mode is disabled.
+        "plan_approval": None if spec.mode_disabled else spec.mode_plan_approval,
         "compaction": compaction,
-        "loop_max_iterations": min(spec.loop_max_iterations or HARNESS_MAX_ITERATIONS, HARNESS_MAX_ITERATIONS),
+        "loop_max_iterations": effective_loop_max_iterations(spec),
     }
 
 
