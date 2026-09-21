@@ -67,6 +67,8 @@ const toolDisplayNames: Record<string, { label: string; doneLabel: string; icon:
   // CODING_WORKSPACE_DIR/agent-file-memory.
   file_access_ls: { label: 'Listing workspace files...', doneLabel: 'Listed workspace files', icon: FolderSearch },
   file_access_read: { label: 'Reading workspace file...', doneLabel: 'Read workspace file', icon: File },
+  // MAF 1.18.0 (#7669, PRP-0180): ranged read, read-only like file_access_read.
+  file_access_read_lines: { label: 'Reading workspace file...', doneLabel: 'Read workspace file', icon: File },
   file_access_write: { label: 'Writing workspace file...', doneLabel: 'Wrote workspace file', icon: FilePen },
   file_access_replace: { label: 'Editing workspace file...', doneLabel: 'Edited workspace file', icon: FilePen },
   file_access_replace_lines: { label: 'Editing workspace file...', doneLabel: 'Edited workspace file', icon: FilePen },

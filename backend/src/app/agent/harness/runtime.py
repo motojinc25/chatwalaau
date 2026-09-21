@@ -57,6 +57,11 @@ async def agent_for_thread(harness_id: str, thread_id: str) -> tuple[Any, Any, s
 
         from agent_framework import AgentSession
 
+        # MAF's DEFAULT session id (a lowercase UUID) on purpose: MAF 1.18.0 (#8123)
+        # derives the harness file-memory folder from it through
+        # `_storage_key_segment`, which keeps a literal-safe id verbatim and ENCODES
+        # anything else -- a custom id would silently relocate every memory written
+        # so far (UDR-0162 D3).
         session = AgentSession()
         # PRP-0148 Section 4.1: make MAF's own history provider report what it loads.
         # Attached here rather than passed into the factory so UDR-0119 D4's "parameter

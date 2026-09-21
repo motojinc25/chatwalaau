@@ -35,6 +35,14 @@ ChatWalaʻau owns every INPUT --
   loop cap times MAF's function-invocation cap (UDR-0161 D8).
 * The per-offering web-search capability gate (UDR-0119 D5) forces
   ``disable_web_search=True`` when the offering is withheld.
+* File tools as of MAF 1.18.0 (PRP-0180, UDR-0162 D3): read-only
+  ``file_access_read`` / ``file_access_read_lines`` / ``file_access_ls`` /
+  ``file_access_grep`` (``read_lines`` is new in #7669 and stays available under
+  ``fileAccess.disableWriteTools``), write ``file_access_write`` / ``_delete`` /
+  ``_replace`` / ``_replace_lines``. Grep matches keep each line's own terminator.
+  No ``scope=`` is ever passed to the file-memory provider: its folder is the
+  session id, which MAF 1.18.0 maps through ``_storage_key_segment`` verbatim only
+  while it stays literal-safe (see ``runtime.agent_for_thread``).
 """
 
 from __future__ import annotations

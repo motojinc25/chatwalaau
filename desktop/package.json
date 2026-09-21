@@ -1,7 +1,7 @@
 {
   "name": "chatwalaau-desktop",
   "productName": "ChatWalaau",
-  "version": "0.160.0",
+  "version": "0.161.0",
   "description": "ChatWalaʻau Desktop -- a Windows shell around the unchanged ChatWalaʻau web app",
   "private": true,
   "author": "WeDX Digital Twins Solutions",

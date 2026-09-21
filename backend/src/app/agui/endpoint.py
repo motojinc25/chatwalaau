@@ -191,8 +191,11 @@ def _is_transient_upstream_error(exc: BaseException) -> bool:
 # --- Run-error classification (CTR-0009) -------------------------------------
 # Map an exception raised mid-stream to a clear, actionable RUN_ERROR message.
 # Applied to BOTH the typed and the generic except blocks so a RAW provider error
-# (e.g. anthropic.BadRequestError, which is NOT wrapped in ChatClientException)
-# gets the same actionable treatment as an OpenAI-wrapped one.
+# gets the same actionable treatment as a wrapped one. Since MAF 1.18.0 (#7855) the
+# Anthropic connector wraps its SDK failures in ChatClientException too, with the
+# provider's status / code / message on the CAUSE -- which is why every _is_*
+# detector below MUST walk the __cause__ / __context__ chain rather than inspect
+# the head exception (UDR-0162 D4, PRP-0180 M9).
 
 _MSG_PREV_RESPONSE = (
     "The conversation's server-side response reference expired or "
@@ -1860,10 +1863,12 @@ async def _stream_with_reasoning(
         )
 
     except Exception as exc:
-        # A RAW provider error not wrapped in the typed exceptions above (e.g.
-        # anthropic.BadRequestError for an out-of-credits 400) reaches here; run
-        # it through the same classifier so billing / rate-limit / transient
-        # causes still surface an actionable message instead of the generic one.
+        # A RAW provider error not wrapped in the typed exceptions above reaches
+        # here; run it through the same classifier so billing / rate-limit /
+        # transient causes still surface an actionable message instead of the
+        # generic one. Anthropic errors take the typed branch since MAF 1.18.0
+        # (#7855); this branch is retained for every provider or failure that is
+        # not wrapped (UDR-0162 D4).
         run_error = True
         error_message, known = _classify_run_error(exc, harness_run=harness_run)
         if known:
