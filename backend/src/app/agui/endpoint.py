@@ -1712,6 +1712,70 @@ async def _stream_with_reasoning(
                             )
                         )
 
+                elif content_type == "shell_tool_call":
+                    # UDR-0164 D5 (PRP-0182): since MAF 1.19.0 (#8294) the OpenAI
+                    # connector keeps a Responses `shell_call` LOCAL only when the item
+                    # says environment.type == "local"; anything else arrives here as a
+                    # HOSTED shell call. ChatWalaʻau never executes a hosted call, but it
+                    # must never be invisible either: render it as the harness shell's
+                    # tool call ("Ran command") and say that it was not run locally.
+                    if reasoning_msg_id is not None:
+                        yield encoder.encode(
+                            ReasoningMessageEndEvent(
+                                type=EventType.REASONING_MESSAGE_END,
+                                message_id=reasoning_msg_id,
+                            )
+                        )
+                        reasoning_msg_id = None
+                    tc_id = getattr(content, "call_id", None) or _generate_id()
+                    commands = [c for c in (getattr(content, "commands", None) or []) if isinstance(c, str)]
+                    logger.warning(
+                        "Hosted shell call reached the AG-UI stream (call_id=%s, thread=%s); it is "
+                        "NOT executed by ChatWalaʻau. A local harness shell call should arrive as "
+                        "a function_call (UDR-0164 D5).",
+                        tc_id,
+                        thread_id,
+                    )
+                    if tc_id != tool_call_id:
+                        tool_call_id = tc_id
+                        tc_name_current = "run_shell"
+                        yield encoder.encode(
+                            ToolCallStartEvent(
+                                type=EventType.TOOL_CALL_START,
+                                tool_call_id=tc_id,
+                                tool_call_name="run_shell",
+                                parent_message_id=msg_id,
+                            )
+                        )
+                        yield encoder.encode(
+                            ToolCallArgsEvent(
+                                type=EventType.TOOL_CALL_ARGS,
+                                tool_call_id=tc_id,
+                                delta=json.dumps({"command": "\n".join(commands)}),
+                            )
+                        )
+
+                elif content_type == "shell_tool_result":
+                    tc_id = getattr(content, "call_id", None)
+                    if tc_id:
+                        yield encoder.encode(ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=tc_id))
+                        outputs = getattr(content, "outputs", None) or []
+                        result_str = "\n".join(
+                            part
+                            for out in outputs
+                            for part in (getattr(out, "stdout", None), getattr(out, "stderr", None))
+                            if isinstance(part, str) and part
+                        )
+                        yield encoder.encode(
+                            ToolCallResultEvent(
+                                type=EventType.TOOL_CALL_RESULT,
+                                message_id=_generate_id(),
+                                tool_call_id=tc_id,
+                                content=result_str,
+                                role="tool",
+                            )
+                        )
+
                 elif content_type == "function_approval_request":
                     # UDR-0161 D3: no tool is built approval-gated (D1), so a request
                     # reaching here is a construction defect -- an upstream default

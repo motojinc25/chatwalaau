@@ -166,7 +166,10 @@ def wire_pairing_report(items: Any) -> str:
         if not isinstance(item, dict):
             continue
         t = item.get("type")
-        if t == "function_call" and item.get("call_id"):
+        # `shell_call` is a call too (PRP-0182, UDR-0164 D5): MAF 1.19.0 replays a local
+        # harness shell call as the provider's `shell_call` item. Counting only
+        # function_call reported "OK" while its output had been dropped.
+        if t in ("function_call", "shell_call") and item.get("call_id"):
             calls.append(item["call_id"])
         elif t in _CALL_KEYED_OUTPUT_TYPES and item.get("call_id"):
             outputs.append(item["call_id"])

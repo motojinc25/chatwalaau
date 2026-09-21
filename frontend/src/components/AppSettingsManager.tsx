@@ -232,7 +232,9 @@ const WEB_SEARCH_CAPABILITY_HELP =
 // literal `${VAR}`, which threw "VAR is not defined" at runtime. Quoted-string
 // concatenation folds to an inert double-quoted string instead.
 const ENDPOINT_HELP =
-  'endpoint = Azure / Foundry resource URL. base_url = OpenAI-compatible gateway URL. Either may contain $' +
+  'endpoint = Azure OpenAI / Foundry resource URL. base_url = OpenAI-compatible gateway URL -- EXCEPT for ' +
+  'Anthropic with hosting "foundry", which uses base_url only: the full Anthropic-on-Foundry URL, ' +
+  'https://<resource>.services.ai.azure.com/anthropic (leave endpoint empty). Either may contain $' +
   '{VAR} placeholders resolved from the server environment.'
 const PROVIDER_HELP = 'The API surface this model is served through.'
 

@@ -63,7 +63,11 @@ def _discover_skill_dirs(root: Path) -> list[Path]:
     try:
         from agent_framework import FileSkillsSource
 
-        return [Path(p) for p in FileSkillsSource._discover_skill_directories([str(root)])]
+        # MAF 1.19.0 (#8151) returns `_SkillPathScope(trusted_root, skill_dir)` objects
+        # instead of path strings; the skill directory is `skill_dir`. Both shapes are
+        # accepted so the enumerated residue (UDR-0110 D2) keeps working across the
+        # boundary instead of silently falling back (PRP-0182 I3).
+        return [Path(getattr(p, "skill_dir", p)) for p in FileSkillsSource._discover_skill_directories([str(root)])]
     except (ImportError, AttributeError, TypeError):
         logger.warning(
             "MAF FileSkillsSource._discover_skill_directories unavailable; "

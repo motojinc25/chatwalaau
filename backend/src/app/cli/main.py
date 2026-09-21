@@ -203,6 +203,11 @@ def main() -> None:
     from dotenv import load_dotenv
 
     load_dotenv()
+    # CLI lanes build chat clients too (v0.163.0; see app.core.retired_env).
+    from app.core.retired_env import scrub_retired_provider_env, warn_scrubbed_env
+
+    scrub_retired_provider_env()
+    warn_scrubbed_env()
 
     version = _get_version()
     parser = argparse.ArgumentParser(

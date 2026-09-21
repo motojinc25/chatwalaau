@@ -98,7 +98,12 @@ def _add_offering_options(parser: argparse.ArgumentParser, argparse_mod: Any, *,
         "--operation", choices=_OPERATIONS, action="append", default=None, help="Operation (repeatable; default chat)"
     )
     parser.add_argument("--endpoint", default=None, help="Azure/Foundry endpoint (may use ${VAR})")
-    parser.add_argument("--base-url", default=None, help="OpenAI-compatible gateway base URL (may use ${VAR})")
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI-compatible gateway base URL; for --provider anthropic --hosting foundry the REQUIRED "
+        "Anthropic-on-Foundry URL https://<resource>.services.ai.azure.com/anthropic (may use ${VAR})",
+    )
     parser.add_argument("--api-version", default=None, help="API version (optional)")
     parser.add_argument("--hosting", choices=_HOSTINGS, default=None, help="Hosting (anthropic provider only)")
     parser.add_argument("--family", choices=_FAMILIES, default=None, help="Option-catalog family override")
@@ -259,7 +264,10 @@ def _build_offering(args: argparse.Namespace, existing: dict[str, Any] | None) -
     base_url = pick(
         args.base_url,
         "base_url",
-        prompt_label="Base URL (OpenAI-compatible gateway; blank to skip)"
+        prompt_label=(
+            "Base URL (OpenAI-compatible gateway; for Anthropic on Foundry REQUIRED: "
+            "https://<resource>.services.ai.azure.com/anthropic; blank to skip)"
+        )
         if provider in ("anthropic", "openai")
         else None,
         default=base.get("base_url"),

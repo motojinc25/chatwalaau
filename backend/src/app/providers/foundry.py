@@ -164,8 +164,11 @@ class _EncryptedReasoningMixin:
     OpenAI reasoning family, absent otherwise, whatever any lower layer did.
     """
 
-    async def _prepare_options(self, messages: Any, options: Any, **kwargs: Any) -> dict[str, Any]:
-        run_options = await super()._prepare_options(messages, options, **kwargs)  # type: ignore[misc]
+    async def _prepare_options(self, messages: Any, options: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        # UDR-0164 D4 (PRP-0182): forward positional extras. MAF 1.19.0's Anthropic
+        # connector began passing a per-request `request_state` POSITIONALLY; a signature
+        # without *args failed every request with TypeError before it was sent.
+        run_options = await super()._prepare_options(messages, options, *args, **kwargs)  # type: ignore[misc]
         include = run_options.get("include")
         include_list = list(include) if isinstance(include, list) else []
         present = _ENCRYPTED_REASONING in include_list

@@ -203,8 +203,11 @@ class _PromptCacheMixin:
     per call from settings so a test toggling it sees the effect.
     """
 
-    def _prepare_options(self, messages: Any, options: Any, **kwargs: Any) -> dict[str, Any]:
-        run_options = super()._prepare_options(messages, options, **kwargs)  # type: ignore[misc]
+    def _prepare_options(self, messages: Any, options: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        # UDR-0164 D4 (PRP-0182): forward positional extras. MAF 1.19.0's Anthropic
+        # connector passes a per-request `request_state` POSITIONALLY; a signature
+        # without *args failed every request with TypeError before it was sent.
+        run_options = super()._prepare_options(messages, options, *args, **kwargs)  # type: ignore[misc]
         # PRP-0151 C4 / UDR-0129 D8: see app/providers/azure_openai.py. The Anthropic
         # connector filters framework-level options by its own denylist, which does not
         # list MAF 1.15.0's harness-loop marker either, so this lane leaks it too
@@ -284,6 +287,14 @@ class AnthropicProvider:
 
         if hosting == "foundry":
             from agent_framework.anthropic import AnthropicFoundryClient
+
+            from app.core.retired_env import scrub_retired_provider_env
+
+            # Re-scrub right before construction (v0.163.0): agent_framework_declarative's
+            # AgentFactory() calls load_dotenv() on every construction, which puts a
+            # retired ANTHROPIC_FOUNDRY_* value from .env back into os.environ after the
+            # startup scrub -- and the connector / SDK read it whenever an argument is None.
+            scrub_retired_provider_env()
 
             kwargs: dict[str, Any] = {"model": model_ref}
             # Endpoint: the offering's base_url is the full Anthropic-on-Foundry URL

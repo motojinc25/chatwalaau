@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.162.0"
+version = "0.163.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "pydantic-settings>=2.9.0",
     "python-dotenv>=1.1.0",
-    # Microsoft Agent Framework family: EXACT pins (PRP-0180, UDR-0162 D1;
+    # Microsoft Agent Framework family: EXACT pins (PRP-0182, UDR-0164 D1;
     # policy from PRP-0108, UDR-0086 D1; method from PRP-0126, UDR-0109 D1/D2).
     # MAF ships breaking changes inside minor releases (1.8.0 async Skill lookup,
     # 1.9.0 MCP sampling guardrails, 1.10.0 SkillsProvider approval-by-default,
@@ -29,44 +29,46 @@ dependencies = [
     # 1.15.0 history de-duplication at the save seam + OTel semconv consolidation,
     # 1.17.0 sequence-only agent middleware + `agent-hooks` core extra removal,
     # 1.18.0 storage-key derivation + ranged file reads + masked SecretString +
-    # Lab removed from core[all]); a version bump is a deliberate, PRP-reviewed
-    # act, never a routine refresh.
+    # Lab removed from core[all], 1.19.0 per-request Anthropic parsing state passed
+    # POSITIONALLY to `_prepare_options` + hosted/local shell-call separation);
+    # a version bump is a deliberate, PRP-reviewed act, never a routine refresh.
     #
-    # 1.18.0 publishes SIX "Breaking" entries, the most of any adopted wave. Every
-    # one is measured to zero observable change on the paths this project runs
-    # (PRP-0180 Section 3), but three of them only because of PREMISES that the
-    # PRP-0180 invariants now enforce (UDR-0162 D3-D5):
-    #
-    #   * #8123 derives every harness storage folder through `_storage_key_segment`.
-    #     Harness sessions are bare `AgentSession()`s (lowercase UUIDs, literal-safe),
-    #     so file-memory folders written at 1.17.0 are the folders read at 1.18.0.
-    #   * #8127 makes SecretString a masked wrapper. Nothing in app/ reads a
-    #     credential back; seven construction shapes deliver the same str (M6).
-    #   * #7855 (filed under "Fixed") wraps Anthropic SDK failures in
-    #     ChatClientException. The run-error classifier keeps every classification
-    #     because every detector walks the exception chain (M9).
+    # 1.19.0's breaking change for THIS codebase is filed under "Fixed" (#8237):
+    # the Anthropic connector calls `_prepare_options(messages, options,
+    # request_state, **kwargs)`. An override that does not accept positional extras
+    # fails EVERY Anthropic request with TypeError (PRP-0182 M6), so every
+    # `_prepare_options` override forwards `*args, **kwargs` (UDR-0164 D4), and a
+    # send-path test drives each built client through `get_response`.
     #
     # The family does NOT share a version line (UDR-0109 D1, carried by UDR-0129 D1
-    # and reaffirmed unamended by UDR-0131 D1, UDR-0139 D1 and UDR-0162 D1): each
-    # package is pinned at the version published in the SAME release wave as
-    # `agent-framework==1.18.0` (2026-09-10), so the declared set and the resolved
+    # and reaffirmed unamended by UDR-0131 D1, UDR-0139 D1, UDR-0162 D1 and UDR-0164
+    # D1): each package is pinned at the version published in the SAME release wave
+    # as `agent-framework==1.19.0` (2026-09-18), so the declared set and the resolved
     # set are identical for uv.lock AND for a bare `pip install chatwalaau`.
     #
     # A package that published NO artifact in the target wave is HELD at its current
     # pin, and REJOINS at the first wave that does publish it -- at that wave's
-    # build, in ONE step, however many waves it missed. The 1.18.0 wave is the first
-    # FULL wave: every declared package published, so nothing is held, and anthropic
-    # (one held wave) and declarative (two held waves) both REJOIN.
+    # build, in ONE step, however many waves it missed. The 1.19.0 wave is the second
+    # FULL wave in a row: nothing is held.
     #
     # Transitive GA family packages are NOT declared (UDR-0109 D2) but are moved in
-    # uv.lock to their wave-consistent GA build (UDR-0162 D2):
-    # agent-framework-orchestrations 1.1.1, agent-framework-github-copilot 2.0.0.
-    # A fresh resolve of the whole lock is its own proposal (UDR-0162 D2.4).
-    "agent-framework==1.18.0",
-    "agent-framework-ag-ui==1.3.0",
-    # ADVANCES with the 1.18.0 wave (UDR-0162 D1); the Python surface is unchanged,
-    # only frontend assets moved (PRP-0180 M2).
-    "agent-framework-devui==1.0.0b260910",
+    # uv.lock to their wave-consistent GA build (UDR-0162 D2, UDR-0164 D2):
+    # agent-framework-orchestrations 1.2.0 (1.19.0 wave), agent-framework-github-copilot
+    # 2.0.0 (no 1.19.0-wave build). A fresh resolve of the whole lock is its own
+    # proposal (UDR-0162 D2.4).
+    "agent-framework==1.19.0",
+    "agent-framework-ag-ui==1.4.0",
+    # ADVANCES with the 1.19.0 wave (UDR-0164 D1): Aspire traces in the UI (#7874).
+    "agent-framework-devui==1.0.0b260918",
+    # Harness shell tooling (PRP-0182, UDR-0164 D3). DECLARED because ChatWalaʻau
+    # SUBCLASSES it: app/agent/harness/shell.py `WorkspaceShellTool(LocalShellTool)`,
+    # which also reads the private `_stateless_argv` (UDR-0110 D2 residue). It was
+    # resolved only transitively from PRP-0135 until PRP-0182 -- a UDR-0109 D2
+    # violation; beta packages are not exempt (anthropic and devui are beta and
+    # declared for the same reason). 1.0.0b260918 (#8206) resets PowerShell's
+    # $LASTEXITCODE in PERSISTENT sessions, which the stateless workspace shell
+    # does not use.
+    "agent-framework-tools==1.0.0b260918",
     # Declared because ChatWalaʻau SUBCLASSES it and overrides the private
     # `_prepare_options` chokepoint (app/providers/azure_openai.py, PRP-0082 /
     # UDR-0058). An undeclared package is an unpinned package (UDR-0109 D2).
@@ -83,7 +85,11 @@ dependencies = [
     # upstream; see assets/docs/guides/model-providers.md).
     # 1.14.3 accepts a SecretString api_key (#8127) and loads its exports lazily
     # (#8219). `_prepare_options` is byte-identical to 1.14.2 (PRP-0180 M5).
-    "agent-framework-openai==1.14.3",
+    # 1.14.4 (#8294) keeps a Responses `shell_call` LOCAL only when the item says
+    # environment.type == "local"; anything else becomes a hosted shell_tool_call
+    # nothing here executes. The harness shell must stay local (UDR-0164 D5).
+    # `_prepare_options` is unchanged at 1.14.4 (PRP-0182 M5).
+    "agent-framework-openai==1.14.4",
     # Anthropic (Claude) base-model provider, Direct + Foundry hostings
     # (PRP-0069, UDR-0045 D8). Already resolved transitively via
     # agent-framework-core[all]; declared explicitly to guarantee the capability.
@@ -95,8 +101,14 @@ dependencies = [
     # REJOINS at the 1.18.0-wave build after ONE held wave (UDR-0162 D1). It now
     # wraps every SDK failure in ChatClientException (#7855); the run-error
     # classifier walks the exception chain, so classification is unchanged
-    # (PRP-0180 M9, UDR-0162 D4). `_prepare_options` is byte-identical (M5).
-    "agent-framework-anthropic==1.0.0b260910",
+    # (PRP-0180 M9, UDR-0162 D4).
+    #
+    # 1.0.0b260918 moves per-request parsing state into an `_AnthropicRequestState`
+    # passed POSITIONALLY to `_prepare_options` (#8237, filed under Fixed), which
+    # broke `_PromptCacheMixin` until it forwarded `*args` (PRP-0182 F1, UDR-0164
+    # D4). A stream that fails after a local call started now raises
+    # ResponseInvalidatedException (a ChatClientException) and the call is not run.
+    "agent-framework-anthropic==1.0.0b260918",
     # Microsoft Foundry base-model provider (PRP-0106, UDR-0085 D1): the stable
     # FoundryChatClient connector (OpenAI Responses API via a Foundry project
     # endpoint, Entra ID credential only). Already resolved transitively via the
@@ -109,7 +121,8 @@ dependencies = [
     # `openai<3` below, the lock keeps azure-ai-projects 2.3.0. Exports load lazily
     # (#8219). `_prepare_options` is UNTOUCHED (PRP-0180 M5), so UDR-0085 D9 /
     # UDR-0128 D3's re-assertion at app/providers/foundry.py stands unchanged.
-    "agent-framework-foundry==1.13.0",
+    # 1.13.1 leaves `_prepare_options` unchanged again (PRP-0182 M5).
+    "agent-framework-foundry==1.13.1",
     # Declarative agents (PRP-0094, FEAT-0051, UDR-0072): the MAF AgentFactory front
     # end (create_agent_from_yaml / create_agent_from_yaml_path) used to PARSE and
     # VALIDATE declarative agent YAML. The runtime agent is built by ChatWalaʻau
@@ -120,7 +133,10 @@ dependencies = [
     # step. 1.0.4 preserves HttpRequestAction query bytes (#7765; the CTR-0186 jail
     # gates on the host, unaffected) and starts a fresh run for a bare Message
     # trigger (#7839; app/workflow passes a str, unaffected -- PRP-0180 M13).
-    "agent-framework-declarative==1.0.4",
+    # 1.1.0 (#8371) stops persisting response cookies in the owned HTTP client the
+    # CTR-0186 jail delegates to (accepted, UDR-0164 D6); #8425 scopes MCP sessions
+    # per invocation only when a client_provider is given -- the jail passes none.
+    "agent-framework-declarative==1.1.0",
     # OpenAI SDK: pinned BELOW 3.x on purpose (PRP-0161 F3, UDR-0139 D3).
     # `agent-framework-openai==1.14.2` (#7967) widened its ceiling to SDK 3.x, and a
     # fresh resolve of this declared set takes openai 2.54.0 -> 3.9.0 -- a MAJOR move

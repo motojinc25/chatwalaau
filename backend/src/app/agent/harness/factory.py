@@ -525,7 +525,14 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         # the conversation is carried in the request, the harness's history
         # provider loads as designed, and compaction finally sees the history it
         # is meant to compact.
-        default_options={"store": False},
+        #
+        # ONLY for a client that stores server-side by default (the OpenAI family),
+        # exactly as the Prompt lane decides it (PRP-0142, agent_registry). The
+        # Anthropic Messages API is inherently client-managed and has no `store`
+        # parameter: sending it made EVERY Anthropic harness turn fail with
+        # an "unexpected keyword argument 'store'" TypeError from AsyncMessages.create
+        # since PRP-0135 (operator-reported at v0.163.0; not a MAF 1.19 change).
+        default_options=({"store": False} if providers.stores_responses_server_side(spec.model_id) else None),
     )
     # The resolved compaction budget is logged so "is compaction actually
     # configured for this agent" is answerable from the log alone (UDR-0125 D3);

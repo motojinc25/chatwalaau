@@ -538,6 +538,25 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
     base_url = entry.get("base_url")
     if base_url is not None:
         base_url = _interpolate(str(base_url), offering_id, "base_url")
+    # UDR-0094 D7, now ENFORCED (v0.163.0): Anthropic on Microsoft Foundry is reached
+    # through its full Anthropic URL in `base_url` -- the catalog home of the retired
+    # ANTHROPIC_FOUNDRY_BASE_URL / ANTHROPIC_FOUNDRY_RESOURCE. `endpoint` is never read
+    # on this hosting. Without this check an offering carrying only the Foundry project
+    # `endpoint` saved cleanly and then failed the whole agent rebuild with the
+    # connector's own "requires either resource or base_url" ValueError.
+    if provider == "anthropic" and hosting == "foundry":
+        example = "https://<resource>.services.ai.azure.com/anthropic"
+        if endpoint:
+            raise CatalogError(
+                f"offering '{offering_id}': an anthropic offering with hosting 'foundry' does not use "
+                f"'endpoint' -- remove it and put the Anthropic-on-Foundry URL in 'base_url' "
+                f"(e.g. {example})"
+            )
+        if not base_url:
+            raise CatalogError(
+                f"offering '{offering_id}': an anthropic offering with hosting 'foundry' requires "
+                f"'base_url' -- the full Anthropic-on-Foundry URL (e.g. {example})"
+            )
     api_version = entry.get("api_version")
 
     image_defaults = _parse_image_defaults(entry.get("image_defaults"), offering_id, operations)

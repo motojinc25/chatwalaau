@@ -1,0 +1,107 @@
+{
+  "offerings": [
+    {
+      "id": "gpt-5.6-sol",
+      "provider": "azure-openai",
+      "model_ref": "gpt-5.6-sol",
+      "operations": [
+        "chat"
+      ],
+      "endpoint": "${AZURE_OPENAI_ENDPOINT}",
+      "context_window": 1050000,
+      "default": true
+    },
+    {
+      "id": "gpt-5.5",
+      "provider": "azure-openai",
+      "model_ref": "gpt-5.5",
+      "operations": [
+        "chat"
+      ],
+      "endpoint": "${AZURE_OPENAI_ENDPOINT}",
+      "context_window": 1050000
+    },
+    {
+      "id": "gpt-5.4",
+      "provider": "azure-openai",
+      "model_ref": "gpt-5.4",
+      "operations": [
+        "chat"
+      ],
+      "endpoint": "${AZURE_OPENAI_ENDPOINT}",
+      "context_window": 1050000
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "provider": "foundry",
+      "model_ref": "deepseek-v4-pro",
+      "operations": [
+        "chat"
+      ],
+      "endpoint": "${FOUNDRY_PROJECT_ENDPOINT}",
+      "context_window": 1050000
+    },
+    {
+      "id": "claude-opus-4-8",
+      "provider": "anthropic",
+      "model_ref": "claude-opus-4-8",
+      "operations": [
+        "chat"
+      ],
+      "hosting": "direct",
+      "context_window": 1050000,
+      "api_key_env": "ANTHROPIC_API_KEY"
+    },
+    {
+      "id": "claude-fable-5",
+      "provider": "anthropic",
+      "model_ref": "claude-fable-5",
+      "operations": [
+        "chat"
+      ],
+      "hosting": "direct",
+      "context_window": 1050000,
+      "api_key_env": "ANTHROPIC_API_KEY"
+    },
+    {
+      "id": "text-embedding-3-small",
+      "provider": "azure-openai",
+      "model_ref": "text-embedding-3-small",
+      "operations": [
+        "embeddings"
+      ],
+      "endpoint": "${AZURE_OPENAI_ENDPOINT}"
+    },
+    {
+      "id": "gpt-image-2",
+      "provider": "azure-openai",
+      "model_ref": "gpt-image-2",
+      "operations": [
+        "image"
+      ],
+      "endpoint": "${AZURE_OPENAI_ENDPOINT}"
+    },
+    {
+      "id": "gpt-5.1",
+      "provider": "openai",
+      "model_ref": "gpt-5.1",
+      "operations": [
+        "chat"
+      ],
+      "context_window": 1050000,
+      "api_key_env": "OPENAI_API_KEY"
+    },
+    {
+      "id": "claude-opus-5",
+      "provider": "anthropic",
+      "model_ref": "claude-opus-5",
+      "operations": [
+        "chat"
+      ],
+      "hosting": "foundry",
+      "family": "anthropic-adaptive",
+      "endpoint": "https://aif-wedxcc-dev1-02.services.ai.azure.com/api/projects/proj-wedxcc-dev1-02drchas",
+      "context_window": 1050000
+    }
+  ]
+}

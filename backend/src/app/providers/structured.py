@@ -207,6 +207,9 @@ def strip_loop_iteration_marker(run_options: dict[str, Any]) -> bool:
 # twice) and removing it would delete a real message (UDR-0126 D4).
 _IDENTITY_FIELD: dict[str, str] = {
     "function_call": "call_id",
+    # PRP-0182 (UDR-0164 D5): MAF 1.19.0 replays a local harness shell call as the
+    # provider's own `shell_call` item, so it is de-duplicated like a function call.
+    "shell_call": "call_id",
     "function_call_output": "call_id",
     "shell_call_output": "call_id",
     "local_shell_call_output": "id",
@@ -354,6 +357,14 @@ def _merge_into_first(first: dict[str, Any], other: dict[str, Any], key: tuple[s
 # In the reported incident (RES-0003) the seam had already computed that exact id and
 # printed it in the pairing verdict, and sent the request anyway.
 
+# Items that ARE a call, keyed by `call_id`. `shell_call` joined in PRP-0182 (UDR-0164
+# D5): from MAF 1.19.0 (#8294) a local harness shell call is replayed as the provider's
+# own `shell_call` item instead of a `function_call`. Before this, the orphan-output
+# repair below saw its `shell_call_output` as answering NOTHING and deleted it, and
+# Azure then rejected the request with
+#   400 'No tool output found for shell call call_...'
+# (measured live, PRP-0182 ML-1).
+_CALL_TYPES = ("function_call", "shell_call")
 # Items that ANSWER a call, keyed by the field carrying the call's id.
 _ANSWER_BY_CALL_ID = ("function_call_output", "shell_call_output")
 # An approval-gated call is answered by an approval item, NOT by an output. These two
@@ -397,8 +408,8 @@ def unanswered_calls(items: Any) -> list[tuple[str, str]]:
             if not isinstance(item, dict):
                 continue
             itype = item.get("type")
-            if itype == "function_call" and isinstance(item.get("call_id"), str):
-                calls.append((item["call_id"], str(item.get("name") or "?")))
+            if itype in _CALL_TYPES and isinstance(item.get("call_id"), str):
+                calls.append((item["call_id"], str(item.get("name") or itype)))
             elif itype in _ANSWER_BY_CALL_ID and isinstance(item.get("call_id"), str):
                 answered.add(item["call_id"])
             elif itype in _ANSWER_APPROVAL_BY_ID and isinstance(item.get("id"), str):
@@ -427,8 +438,8 @@ def orphan_outputs(items: Any) -> list[tuple[str, str]]:
         400 'No tool output found for function call call_...'      <- unanswered call
         400 'No tool call found for shell call output ... call_...' <- orphan output
 
-    An output is orphaned when no ``function_call`` in the SAME request carries its
-    ``call_id``. Approval items are irrelevant here: an approval answers a CALL and is
+    An output is orphaned when no call (``function_call`` or ``shell_call``,
+    ``_CALL_TYPES``) in the SAME request carries its ``call_id``. Approval items are irrelevant here: an approval answers a CALL and is
     never expressed as a bare output, which is why this direction carries none of the
     FEAT-0028 risk that keeps ``unanswered_calls`` removal gated.
 
@@ -444,7 +455,7 @@ def orphan_outputs(items: Any) -> list[tuple[str, str]]:
             if not isinstance(item, dict):
                 continue
             itype = item.get("type")
-            if itype == "function_call" and isinstance(item.get("call_id"), str):
+            if itype in _CALL_TYPES and isinstance(item.get("call_id"), str):
                 declared.add(item["call_id"])
             elif itype in _ANSWER_BY_CALL_ID and isinstance(item.get("call_id"), str):
                 outputs.append((item["call_id"], str(itype)))

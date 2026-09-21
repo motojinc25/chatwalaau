@@ -44,6 +44,14 @@ from dotenv import load_dotenv
 # import-time SHOW_EXPERIMENTAL_WARNINGS toggle honors a value set in .env.
 load_dotenv()
 
+# Retired provider variables must not reach the libraries that still read them from
+# the environment (v0.163.0; see app.core.retired_env). Named at startup below.
+# Loaded through importlib so the first `from app.` import stays after the
+# experimental-warning filter (UDR-0040 D3); the module imports only os / logging.
+import importlib
+
+importlib.import_module("app.core.retired_env").scrub_retired_provider_env()
+
 
 def _suppress_experimental_warnings_unless_opted_in() -> None:
     """Hide MAF staged-feature (ExperimentalWarning) startup noise by default.
@@ -319,6 +327,9 @@ async def lifespan(_app: FastAPI):
     _warn_removed_role_model_env()
     # Advisory for the retired tool-approval env vars (PRP-0179, UDR-0161 D7).
     _warn_retired_tool_approval_env()
+    from app.core.retired_env import warn_scrubbed_env
+
+    warn_scrubbed_env()
     # Session token store rehydrate (PRP-0110, CTR-0095 v2, UDR-0089 D4). Building
     # the singleton loads the digest projection from disk when the web auth lane is
     # enabled and AUTH_SESSION_PERSIST is true, so a restart no longer signs users
