@@ -55,7 +55,7 @@ def render_capability_guidance(blocks: list[ToolGuidance]) -> str:
 
     Blocks are emitted in the order given (UDR-0103 D4: fixed order). A block whose
     normalized text is empty is skipped, so a category that contributes an empty string
-    adds nothing. An empty list renders the empty string, keeping the no-tool / DevUI /
+    adds nothing. An empty list renders the empty string, keeping the no-tool /
     headless path byte-for-byte identical to "no capability guidance".
     """
     parts: list[str] = []

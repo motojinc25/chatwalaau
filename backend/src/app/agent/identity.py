@@ -129,6 +129,12 @@ def build_system_prompt(
 ) -> str:
     """Assemble the full system prompt with Identity as slot #1 (CTR-0104 v3).
 
+    This is the documented Prompt Assembly seam (CTR-0104) and is exported from
+    ``app.agent``. Since PRP-0183 removed DevUI its only in-tree caller is the test
+    suite -- the AgentRegistry composes the same order from ``load_identity()`` and
+    ``build_capability_block()``. It is kept deliberately: the seam is the contract,
+    not its current call count.
+
     Prompt Assembly order (UDR-0049 D4, UDR-0051 D4, UDR-0079 D6)::
 
         [slot #1]   Identity (this block, from .agent/IDENTITY.md or default)
@@ -141,7 +147,7 @@ def build_system_prompt(
 
     With both memory blocks None the output is byte-for-byte identical to the
     CTR-0104 v1 behavior (Identity + blank line + capability guidance), so the
-    construction-time / DevUI / headless path is unchanged (UDR-0051 D4 /
+    construction-time / headless path is unchanged (UDR-0051 D4 /
     UDR-0079 D6).
     """
     identity = load_identity()

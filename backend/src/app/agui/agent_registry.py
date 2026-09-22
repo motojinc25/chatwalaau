@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # Web search instruction fragment, appended per-model only when the model's
 # provider supplies a web search tool (PRP-0069, UDR-0045 D5). Defined here --
 # not in app.agui.agent_factory, which imports this module -- to avoid a
-# circular import while letting both the registry and build_devui_agent reuse
+# circular import while letting both the registry and the workflow node build reuse
 # it. The leading space lets it append cleanly to the base instructions.
 WEB_SEARCH_INSTRUCTION = (
     " You can search the web for up-to-date information. "

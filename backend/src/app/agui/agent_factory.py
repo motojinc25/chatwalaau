@@ -9,10 +9,11 @@ Coding tools (CTR-0031, CTR-0032, PRP-0019) are conditionally registered.
 Agent Skills (CTR-0043, PRP-0024) are conditionally loaded via SkillsProvider.
 MCP tools (CTR-0060, PRP-0031) are dynamically loaded from config file.
 
-PRP-0046 adds ``include_mcp`` / ``include_rag`` parameters so that DevUI,
-which runs in a separate asyncio event loop on a daemon thread, can
+PRP-0046 adds ``include_mcp`` / ``include_rag`` parameters so a caller can
 construct an agent that does not share MCP tool async contexts or the
-ChromaDB client with the main FastAPI loop.
+ChromaDB client. Since PRP-0183 (UDR-0165 D3) the consumer is the Declarative
+Workflow prompt node (``app/workflow/handlers.py``, both flags ``False``); the
+flags MUST NOT be removed as DevUI residue.
 """
 
 import logging
@@ -20,15 +21,12 @@ from pathlib import Path
 import platform
 from typing import Any
 
-from agent_framework import Agent
-
-from app import models_catalog, providers
+from app import models_catalog
 from app.agent.capability_guidance import ToolGuidance, render_capability_guidance
 from app.agent.compaction import resolve_compaction_strategy
-from app.agent.identity import build_system_prompt
-from app.agui.agent_registry import WEB_SEARCH_INSTRUCTION, AgentRegistry, _build_chat_client
+from app.agui.agent_registry import AgentRegistry
 from app.core.config import settings
-from app.demo import is_demo_mode, resolve_demo_models
+from app.demo import is_demo_mode
 from app.mcp.lifecycle import get_mcp_tools, get_server_tool_names
 from app.mcp.overrides import get_override_store
 from app.session.provider import FileHistoryProvider
@@ -131,9 +129,10 @@ def _build_tools_and_instructions(
 ) -> tuple[list[Any], list[Any], str, list[Any]]:
     """Assemble (tools, context_providers, instructions, middleware) from current settings.
 
-    PRP-0046 introduces the ``include_mcp`` / ``include_rag`` flags so
-    DevUI can build an agent without the loop-bound MCP tools and
-    ChromaDB-backed rag_search tool.
+    PRP-0046 introduces the ``include_mcp`` / ``include_rag`` flags so a
+    caller can build an agent without the loop-bound MCP tools and the
+    ChromaDB-backed rag_search tool. The workflow prompt node is the consumer
+    (UDR-0165 D3).
 
     The fourth return element ``middleware`` is the agent-level middleware list
     shared by every per-model Agent. It is EMPTY since PRP-0179 (UDR-0161 D1/D2):
@@ -147,7 +146,7 @@ def _build_tools_and_instructions(
     # Per-agent tool surface (PRP-0117, UDR-0100 D2). The active declarative agent's
     # tool_allowlist (None => inherit the full shared surface) SUBSETS the tools
     # assembled below. Resolved here so EVERY consumer of this chokepoint -- the
-    # AgentRegistry rebuild AND build_devui_agent -- honors it identically. Local
+    # AgentRegistry rebuild AND the workflow node build -- honors it identically. Local
     # imports avoid the agent_factory <-> declarative import cycle (the router
     # precedent, declarative/router.py). ``_fn_ok`` gates a built-in function tool.
     from app.agent.declarative.store import active_spec as _active_spec
@@ -156,15 +155,15 @@ def _build_tools_and_instructions(
     # ``spec`` lets a caller pin a SPECIFIC declarative spec instead of the globally
     # active one -- used to build a workflow node agent from its referenced Prompt
     # agent (PRP-0118, CTR-0180). Defaulting to active_spec() keeps every existing
-    # caller (AgentRegistry rebuild, build_devui_agent) byte-for-byte.
+    # caller (AgentRegistry rebuild, workflow node build) byte-for-byte.
     _effective_spec = spec if spec is not None else _active_spec()
     _allow = _parse_allowlist(_effective_spec.tool_allowlist)
 
     def _fn_ok(name: str) -> bool:
         return _allow is None or _allow.allows_function(name)
 
-    # Web search is provider-supplied and added per-model in the AgentRegistry /
-    # build_devui_agent (PRP-0069, UDR-0045 D5), so it is NOT part of this shared
+    # Web search is provider-supplied and added per-model in the AgentRegistry
+    # (PRP-0069, UDR-0045 D5), so it is NOT part of this shared
     # base tool list and the web search guidance lives in WEB_SEARCH_INSTRUCTION
     # (appended only for models whose provider supplies a web search tool).
     _weather_tools = [
@@ -426,7 +425,7 @@ def _build_tools_and_instructions(
     # Render the collected slot-#3 blocks into the capability guidance string
     # (PRP-0120, CTR-0104 v4, UDR-0103 D1). Each block becomes a <tool-guide
     # name="..."> tag in append order; an empty list renders "" so the no-tool /
-    # DevUI / headless path is byte-for-byte "no capability guidance".
+    # headless path is byte-for-byte "no capability guidance".
     instructions = render_capability_guidance(guidance)
 
     # No approval wrapping (PRP-0179, UDR-0161 D1): every tool is registered as the
@@ -452,7 +451,7 @@ def _build_tools_and_instructions(
     # by the consumer: AgentRegistry bakes Identity-only and supplies the
     # capability/memory remainder per run when USER_PROFILE_ENABLED, otherwise it
     # bakes the full Identity+capability prompt (CTR-0104 v2, CTR-0105, UDR-0051
-    # D4). build_devui_agent assembles the full prompt directly.
+    # D4).
     return tools, context_providers, instructions, middleware
 
 
@@ -499,81 +498,3 @@ async def rebuild_agent_registry(registry: AgentRegistry) -> None:
         compaction_strategy=resolve_compaction_strategy(),
         middleware=middleware,
     )
-
-
-def build_devui_agent() -> Agent | None:
-    """Build a single Agent for DevUI (PRP-0046, PRP-0066).
-
-    DevUI runs in a daemon thread with its own asyncio event loop. To
-    avoid cross-loop invocation of MCP tools (whose async context is
-    entered by the main FastAPI lifespan) and the ChromaDB client
-    (SQLite is thread-bound), this function constructs a fresh Agent
-    that excludes MCP tools and ``rag_search`` when the respective
-    ``DEVUI_DISABLE_*`` flags are set (default ``true``).
-
-    Returns ``None`` when there are no configured models; the caller
-    should fall back to the default-model registry agent in that case.
-
-    DEMO_MODE (PRP-0066): DevUI is recommended-disabled on the demo
-    deploy target (UDR-0041 D5), but the factory still works -- it
-    builds against the demo model list and DemoChatClient.
-    """
-    if is_demo_mode():
-        models = resolve_demo_models()
-        model = models[0]
-    else:
-        # Catalog-only (PRP-0113, UDR-0094): the default model is the catalog's
-        # default offering. No catalog (non-demo) -> no DevUI agent (the caller
-        # falls back to the registry, which fail-fasts at build time).
-        model = providers.resolve_default_model()
-        if not model:
-            return None
-
-    include_mcp = not settings.devui_disable_mcp
-    include_rag = not settings.devui_disable_rag
-
-    # The factory applies compaction (UDR-0042 D1) -- compaction has no UI
-    # dependency. No tool is approval-gated on any lane (UDR-0161 D1).
-    tools, context_providers, instructions, middleware = _build_tools_and_instructions(
-        include_mcp=include_mcp,
-        include_rag=include_rag,
-    )
-
-    # DEMO_MODE: DemoChatClient; LIVE: provider dispatch (CTR-0102).
-    client = _build_chat_client(model)
-
-    # Web search + per-model options are provider-supplied (PRP-0069, UDR-0045).
-    # Demo preserves pre-PRP-0069 behavior: OpenAI web search tool + instruction.
-    if is_demo_mode():
-        web_search = providers.openai_web_search_tool()
-        devui_tools = [web_search, *tools]
-        # DevUI bakes the full Identity + capability prompt (no per-run Memory
-        # Block; the User Profile snapshot is the AG-UI session path, UDR-0051 D10).
-        devui_instructions = build_system_prompt(instructions + WEB_SEARCH_INSTRUCTION)
-        model_options: dict[str, Any] = {}
-    else:
-        web_search = providers.web_search_tool(model)
-        devui_tools = [web_search, *tools] if web_search is not None else list(tools)
-        devui_instructions = build_system_prompt(
-            instructions + (WEB_SEARCH_INSTRUCTION if web_search is not None else "")
-        )
-        model_options = providers.build_model_options(model)
-
-    agent = Agent(
-        name=f"ChatWalaau-DevUI-{model}",
-        instructions=devui_instructions,
-        client=client,
-        tools=devui_tools,
-        context_providers=context_providers,
-        default_options=model_options or None,
-        compaction_strategy=resolve_compaction_strategy(),
-        middleware=middleware or None,
-    )
-    logger.info(
-        "DevUI agent built (model=%s, include_mcp=%s, include_rag=%s, demo=%s)",
-        model,
-        include_mcp,
-        include_rag,
-        is_demo_mode(),
-    )
-    return agent

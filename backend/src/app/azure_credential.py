@@ -1,7 +1,7 @@
 """Shared Azure OpenAI credential resolution (PRP-0058, PRP-0059, UDR-0034).
 
 Centralizes the credential decision for every Azure OpenAI client in the
-runtime so that all consumers (MAF AgentRegistry, MAF DevUI agent, Whisper
+runtime so that all consumers (MAF AgentRegistry, Whisper
 STT, image generation, RAG ingest embedder, RAG query embedder) agree on
 which lane is active.
 

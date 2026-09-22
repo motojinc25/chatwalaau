@@ -699,21 +699,6 @@ class Settings(BaseSettings):
     auth_session_persist: bool = True
     auth_session_store_path: str = ".auth/session_tokens.json"
 
-    # DevUI (CTR-0024, PRP-0016, PRP-0046)
-    devui_enabled: bool = False
-    devui_port: int = 8080
-    devui_auth_enabled: bool = True
-    devui_auth_token: str = ""
-    devui_tracing: bool = False
-    devui_mode: str = "developer"
-    # PRP-0046: DevUI runs in a daemon thread with its own asyncio event
-    # loop. Sharing MCP tools (whose async context is entered by the
-    # main FastAPI lifespan) or the RAG ChromaDB client (SQLite is
-    # thread-bound) across loops is a latent crash risk, so DevUI
-    # excludes those tools by default. Opt-in via false.
-    devui_disable_mcp: bool = True
-    devui_disable_rag: bool = True
-
     # Demo Mode for Cloud Deployment (CTR-0006 v22, PRP-0066, UDR-0041)
     # When truthy every metered external provider (chat / STT / TTS /
     # image generation / RAG embedder) routes to an in-process

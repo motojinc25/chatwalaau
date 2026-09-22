@@ -22,8 +22,6 @@ handlers:
 loggers:
   app.agui:
     level: DEBUG
-  app.devui:
-    level: INFO
   app.session:
     level: INFO
   app.stt:

@@ -1183,14 +1183,13 @@ wheels = [
 
 [[package]]
 name = "chatwalaau"
-version = "0.163.0"
+version = "0.164.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework" },
     { name = "agent-framework-ag-ui" },
     { name = "agent-framework-anthropic" },
     { name = "agent-framework-declarative" },
-    { name = "agent-framework-devui" },
     { name = "agent-framework-foundry" },
     { name = "agent-framework-openai" },
     { name = "agent-framework-tools" },
@@ -1233,7 +1232,6 @@ requires-dist = [
     { name = "agent-framework-ag-ui", specifier = "==1.4.0" },
     { name = "agent-framework-anthropic", specifier = "==1.0.0b260918" },
     { name = "agent-framework-declarative", specifier = "==1.1.0" },
-    { name = "agent-framework-devui", specifier = "==1.0.0b260918" },
     { name = "agent-framework-foundry", specifier = "==1.13.1" },
     { name = "agent-framework-openai", specifier = "==1.14.4" },
     { name = "agent-framework-tools", specifier = "==1.0.0b260918" },

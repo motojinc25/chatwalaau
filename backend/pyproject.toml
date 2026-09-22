@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.163.0"
+version = "0.164.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -58,14 +58,18 @@ dependencies = [
     # proposal (UDR-0162 D2.4).
     "agent-framework==1.19.0",
     "agent-framework-ag-ui==1.4.0",
-    # ADVANCES with the 1.19.0 wave (UDR-0164 D1): Aspire traces in the UI (#7874).
-    "agent-framework-devui==1.0.0b260918",
+    # NOTE (PRP-0183, UDR-0165 D4): `agent-framework-devui` is deliberately NOT
+    # declared. The DevUI integration is removed from the product, so nothing in
+    # `app/` imports or subclasses it and UDR-0109 D2 no longer requires a
+    # declaration. The wheel STAYS in the lock as an undeclared transitive of
+    # `agent-framework-core[all]`, like the rest of the family the product never
+    # imports; no wave proposal verifies it again (D6).
     # Harness shell tooling (PRP-0182, UDR-0164 D3). DECLARED because ChatWalaʻau
     # SUBCLASSES it: app/agent/harness/shell.py `WorkspaceShellTool(LocalShellTool)`,
     # which also reads the private `_stateless_argv` (UDR-0110 D2 residue). It was
     # resolved only transitively from PRP-0135 until PRP-0182 -- a UDR-0109 D2
-    # violation; beta packages are not exempt (anthropic and devui are beta and
-    # declared for the same reason). 1.0.0b260918 (#8206) resets PowerShell's
+    # violation; beta packages are not exempt (anthropic is beta and declared for
+    # the same reason). 1.0.0b260918 (#8206) resets PowerShell's
     # $LASTEXITCODE in PERSISTENT sessions, which the stateless workspace shell
     # does not use.
     "agent-framework-tools==1.0.0b260918",

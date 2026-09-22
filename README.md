@@ -116,7 +116,6 @@ Some features require explicit enablement or additional provider configuration. 
 <p align="center">
   <img src="assets/images/screenshot2.png" alt="Mermaid diagrams in chat">
   <img src="assets/images/screenshot3.png" alt="Image analysis">
-  <img src="assets/images/screenshot4.png" alt="Agent development UI">
   <img src="assets/images/screenshot5.png" alt="Conversation search">
   <img src="assets/images/screenshot6.png" alt="Image generation">
 </p>
