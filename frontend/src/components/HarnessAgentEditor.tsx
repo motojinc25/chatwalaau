@@ -77,7 +77,7 @@ function emptyDocument(): HarnessDocument {
     name: '',
     displayName: '',
     description: '',
-    model: { id: '' },
+    model: { id: '', options: { effort: '' } },
     instructions: { harness: '', agent: '' },
     tools: [],
     compaction: { disabled: false, maxContextWindowTokens: null, maxOutputTokens: null },
@@ -269,6 +269,10 @@ export function HarnessAgentEditor({ open, onOpenChange, editId, onSaved }: Prop
   const [rawYaml, setRawYaml] = useState('')
   const [inventory, setInventory] = useState<ToolInventory | null>(null)
   const [models, setModels] = useState<string[]>([])
+  // Effort levels the SELECTED model advertises (CTR-0069 model_options). A
+  // `family: bare` offering advertises none, so the control disappears for it
+  // rather than offering a value the provider would ignore (UDR-0166 D3).
+  const [effortByModel, setEffortByModel] = useState<Record<string, string[]>>({})
   const [validation, setValidation] = useState<HarnessValidationResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -297,6 +301,14 @@ export function HarnessAgentEditor({ open, onOpenChange, editId, onSaved }: Prop
         if (cancelled) return
         setInventory(inv)
         setModels(mi.models ?? [])
+        setEffortByModel(
+          Object.fromEntries(
+            Object.entries(mi.model_options ?? {}).map(([id, entry]) => [
+              id,
+              entry.options.find((o) => o.key === 'effort')?.allowed ?? [],
+            ]),
+          ),
+        )
         if (editId) {
           const src = await api.loadSource(editId)
           if (cancelled) return
@@ -632,6 +644,26 @@ export function HarnessAgentEditor({ open, onOpenChange, editId, onSaved }: Prop
                       </option>
                     ))}
                   </select>
+                  {/* Reasoning effort (PRP-0184, CTR-0192/CTR-0196, UDR-0166 D11). NEW:
+                      before PRP-0184 a harness applied no generation options at all, so
+                      the longest-running run-target thought at the provider's bare
+                      default. Empty means the model family's default. */}
+                  {(effortByModel[doc.model.id ?? ''] ?? []).length > 0 && (
+                    <select
+                      className={cn(CONTROL, 'w-32')}
+                      value={doc.model.options?.effort ?? ''}
+                      title="Reasoning effort. Verbosity and the output budget follow it."
+                      onChange={(e) =>
+                        patch({ model: { ...doc.model, options: { ...doc.model.options, effort: e.target.value } } })
+                      }>
+                      <option value="">effort (default)</option>
+                      {(effortByModel[doc.model.id ?? ''] ?? []).map((v) => (
+                        <option key={v} value={v}>
+                          {v}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                   <div className="relative">
                     <Button variant="outline" size="sm" onClick={() => setShowAddTool((s) => !s)}>
                       <Wrench className="mr-1 h-3.5 w-3.5" /> Add tool

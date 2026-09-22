@@ -16,7 +16,8 @@ export interface HarnessDocument {
   name: string
   displayName?: string
   description?: string
-  model: { id?: string }
+  /** Effort is the only generation option a harness declares (UDR-0166 D11). */
+  model: { id?: string; options?: { effort?: string } }
   instructions: { harness?: string; agent?: string }
   /** Flat CTR-0178 identifiers: function:<name> / mcp:<server> (whole servers only). */
   tools: string[]

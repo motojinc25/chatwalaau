@@ -59,6 +59,16 @@ class HarnessAgentSpec:
     # Exactly ONE catalog offering id; the CTR-0102 client source (UDR-0119 D2).
     model_id: str = ""
 
+    # Reasoning effort from ``model.options.effort`` (PRP-0184, UDR-0166 D11).
+    # "" => the model family's default. It is the ONLY generation option a harness
+    # declares: verbosity, the reasoning summary, the thinking mode and the output
+    # budget are derived from it or fixed (UDR-0166 D6). Before PRP-0184 the harness
+    # factory applied NO generation options at all.
+    #
+    # Do not confuse this with ``max_output_tokens`` below, which sizes the
+    # COMPACTION budget, not the request.
+    effort: str = ""
+
     # ---- instructions ----
     # None => MAF DEFAULT_HARNESS_INSTRUCTIONS.
     harness_instructions: str | None = None

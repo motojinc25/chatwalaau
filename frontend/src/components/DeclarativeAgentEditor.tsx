@@ -63,7 +63,7 @@ function emptyDocument(): AgentDocument {
     displayName: '',
     description: '',
     instructions: '',
-    model: { id: '', options: { effort: '', verbosity: '' } },
+    model: { id: '', options: { effort: '' } },
     tools: [],
     outputSchema: null,
   }
@@ -258,7 +258,8 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
         setInventory(inv)
         const options: Record<string, Array<{ key: string; allowed?: string[] }>> = {}
         for (const [id, entry] of Object.entries(mi.model_options ?? {})) {
-          options[id] = entry.options.filter((o) => o.key === 'effort' || o.key === 'verbosity')
+          // Effort is the only selectable generation option (PRP-0184, UDR-0166 D6).
+          options[id] = entry.options.filter((o) => o.key === 'effort')
         }
         setModels({ ids: mi.models ?? [], options })
         if (editId) {
@@ -312,7 +313,6 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
 
   const modelOptions = doc.model.id ? (models.options[doc.model.id] ?? []) : []
   const effortAllowed = modelOptions.find((o) => o.key === 'effort')?.allowed ?? []
-  const verbosityAllowed = modelOptions.find((o) => o.key === 'verbosity')?.allowed ?? []
 
   // ---- add / remove tools ----
   const toolSelected = useCallback(
@@ -519,21 +519,6 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
                       }>
                       <option value="">effort</option>
                       {effortAllowed.map((v) => (
-                        <option key={v} value={v}>
-                          {v}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  {verbosityAllowed.length > 0 && (
-                    <select
-                      className={cn(CONTROL, 'w-28')}
-                      value={doc.model.options?.verbosity ?? ''}
-                      onChange={(e) =>
-                        patch({ model: { ...doc.model, options: { ...doc.model.options, verbosity: e.target.value } } })
-                      }>
-                      <option value="">verbosity</option>
-                      {verbosityAllowed.map((v) => (
                         <option key={v} value={v}>
                           {v}
                         </option>

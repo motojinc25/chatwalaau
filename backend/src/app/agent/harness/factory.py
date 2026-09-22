@@ -310,6 +310,39 @@ def _resolve_agent_instructions(spec: HarnessAgentSpec) -> str:
     return raw
 
 
+def _harness_default_options(spec: HarnessAgentSpec) -> dict[str, Any] | None:
+    """Build the harness Agent's ``default_options`` (PRP-0184, UDR-0166 D1/D11).
+
+    Two things are merged here:
+
+    - **The generation options** from the owning provider, resolved from the YAML's
+      ``model.options.effort``. This is NEW: until PRP-0184 this factory passed only
+      ``store`` and never called ``providers.build_model_options()``, so a harness run
+      sent no ``reasoning.effort`` on the OpenAI lane and no ``thinking`` /
+      ``output_config.effort`` / ``max_tokens`` on the Anthropic lane. An empty effort
+      resolves to the family default inside the provider, and a ``family: bare``
+      offering yields ``{}`` -- so a non-reasoning gateway model still gets a bare
+      request.
+    - **``store: False``**, ONLY for a client that stores server-side by default (the
+      OpenAI family), exactly as the Prompt lane decides it (PRP-0142,
+      agent_registry). The Anthropic Messages API is inherently client-managed and has
+      no ``store`` parameter: sending it made EVERY Anthropic harness turn fail with an
+      "unexpected keyword argument 'store'" TypeError from AsyncMessages.create since
+      PRP-0135 (operator-reported at v0.163.0; not a MAF 1.19 change).
+
+    ``None`` is returned when nothing applies, preserving the pre-PRP-0184 shape for a
+    bare Anthropic-family offering.
+    """
+    from app.demo import is_demo_mode
+
+    options: dict[str, Any] = {}
+    if not is_demo_mode():
+        options.update(providers.build_model_options(spec.model_id, {"effort": spec.effort} if spec.effort else None))
+    if providers.stores_responses_server_side(spec.model_id):
+        options["store"] = False
+    return options or None
+
+
 def web_search_withheld(model_id: str) -> bool:
     """True when the offering's hosted web search is withheld (UDR-0119 D5).
 
@@ -532,7 +565,7 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         # parameter: sending it made EVERY Anthropic harness turn fail with
         # an "unexpected keyword argument 'store'" TypeError from AsyncMessages.create
         # since PRP-0135 (operator-reported at v0.163.0; not a MAF 1.19 change).
-        default_options=({"store": False} if providers.stores_responses_server_side(spec.model_id) else None),
+        default_options=_harness_default_options(spec),
     )
     # The resolved compaction budget is logged so "is compaction actually
     # configured for this agent" is answerable from the log alone (UDR-0125 D3);

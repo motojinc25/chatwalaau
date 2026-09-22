@@ -10,16 +10,14 @@ import { MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { McpToolManager } from '@/components/McpToolManager'
 import { MessageNavigator } from '@/components/MessageNavigator'
 import { MessageStepButton } from '@/components/MessageStepButton'
-import { ModelOptionsSelector } from '@/components/ModelOptionsSelector'
-import { ModelSelector, type ModelSelectorHandle } from '@/components/ModelSelector'
 import { OPEN_RUN_TARGET_PICKER_EVENT } from '@/components/RunTargetSheet'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
 import { SkillsManager } from '@/components/SkillsManager'
-import { StructuredOutputControl, type StructuredSelection } from '@/components/StructuredOutputControl'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { EMPTY_WORKFLOW_RUN, reduceWorkflowEvent, type WorkflowRunState } from '@/components/WorkflowProgressPanel'
 import { WorkflowRunCanvas } from '@/components/WorkflowRunCanvas'
+import { useActiveModel } from '@/hooks/useActiveModel'
 import { useChat } from '@/hooks/useChat'
 import { useChatScroll } from '@/hooks/useChatScroll'
 import { type ImageAttachment, useImageAttachment } from '@/hooks/useImageAttachment'
@@ -106,7 +104,10 @@ export function ChatPanel({
   temporary = false,
 }: ChatPanelProps) {
   const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null)
-  const [selectedModel, setSelectedModel] = useState('')
+  // Which model answers is the RUN-TARGET's business since PRP-0184 (UDR-0166 D1):
+  // the panel reads it, it does not choose it. `maxContextTokens` still feeds the
+  // context-window indicator (CTR-0092).
+  const { model: selectedModel, maxContextTokens: modelMaxTokens } = useActiveModel()
   // Run-target (CTR-0185, PRP-0118, UDR-0101 D5 amended). Decided from the unified
   // Declarative Agents modal, not a composer picker: a selected Workflow (from the
   // run-target store) streams the compiled workflow (state.workflow_id) and hides the
@@ -125,13 +126,6 @@ export function ChatPanel({
   // agent's name -- including the Built-in agent (v0.112.2), so a reloaded chat can
   // always say which Built-in / Prompt / Workflow / Harness agent answered.
   const runTargetLabel = wfTarget ? `⧉ ${wfTarget.name}` : hTarget ? `⚙ ${hTarget.name}` : activeAgent.name || undefined
-  // A declarative agent pins its own model + options, so the per-message controls would
-  // be misleading -- hide them for a custom Prompt agent exactly as for a workflow
-  // (v0.112.2) or a harness agent (PRP-0135: the harness YAML fixes model + policies).
-  // The Built-in (CORE) agent keeps the controls, as before.
-  const hideModelControls =
-    Boolean(selectedWorkflowId) || Boolean(selectedHarnessId) || (activeAgent.id !== '' && activeAgent.id !== 'core')
-
   const runTargetName = selectedWorkflowId ? wfTarget?.name : selectedHarnessId ? hTarget?.name : activeAgent.name
   // On a phone the button exists before /api/model has answered (D9), so it never renders
   // an empty label.
@@ -140,13 +134,13 @@ export function ChatPanel({
   // one; the compact /popup and /sidebar panels read the wide default.
   const surface = useChatSurfaceTier()
   const narrowSurfaceTier = surface.narrow
-  // UDR-0158 D9: WHERE the indicator leads is the tier's choice (above); WHEN it is
-  // rendered is too. On a wide viewport it still stands in place of the per-message model
-  // controls, so the Built-in agent shows none (UDR-0101 D7) -- the sidebar-footer entry
-  // to the manager serves that case. On a phone `sidebar.agents` is gated, so this button
-  // is the ONLY way to change who answers: it is rendered in EVERY run-target state,
-  // beside the model controls when the Built-in agent runs.
-  const showRunTarget = hideModelControls || narrowSurfaceTier
+  // UDR-0158 D9 decided WHERE the indicator leads per tier; PRP-0184 (UDR-0166 D12)
+  // settles WHEN it is rendered: always. The condition it replaced existed only because
+  // the per-message model controls stood in the indicator's place on a wide viewport, so
+  // the Built-in agent showed no indicator there. With those controls gone (UDR-0166 D1)
+  // there is nothing to stand in its place, and the indicator is the single statement of
+  // who answers -- and the way in to change the model, the effort and the structured
+  // output -- on every tier and in every run-target state.
 
   // UDR-0111 D5/D6 + UDR-0158 D1: the run-target name is the entry point to a
   // switching surface on EVERY tier. A real button (keyboard-reachable) that dispatches
@@ -156,6 +150,13 @@ export function ChatPanel({
   const openRunTargetSurface = useCallback(() => {
     window.dispatchEvent(new Event(narrowSurfaceTier ? OPEN_RUN_TARGET_PICKER_EVENT : OPEN_DECLARATIVE_MANAGER_EVENT))
   }, [narrowSurfaceTier])
+  // PRP-0184 (UDR-0166 D1): `/model` opens the run-target surface. The argument is
+  // accepted and ignored, and `true` means "the command was handled" -- so `/model` is
+  // never sent to the model as text.
+  const handleSlashModel = useCallback(() => {
+    openRunTargetSurface()
+    return true
+  }, [openRunTargetSurface])
   const show = (id: EntryId) => isEntryVisible(surface, id)
   const runTargetIcon = selectedWorkflowId ? (
     <WorkflowIcon className="h-3.5 w-3.5" />
@@ -204,29 +205,13 @@ export function ChatPanel({
       window.removeEventListener(ACTIVE_AGENT_CHANGED_EVENT, onAgent)
     }
   }, [])
-  // Per-message generation options (effort + verbosity), catalog-driven
-  // (CTR-0071, PRP-0081). Sent as AG-UI state.model_options.
-  const [selectedModelOptions, setSelectedModelOptions] = useState<Record<string, string>>({})
-  // Structured output selection (CTR-0118, PRP-0082). Sent as AG-UI
-  // state.output_schema / state.output_format.
-  const [structured, setStructured] = useState<StructuredSelection>({ format: 'none', schema: null })
-  // Image output options (CTR-0120, PRP-0085). Sent as AG-UI state.image_options.
+  // PRP-0184 (UDR-0166 D1/D10): the per-message generation-option state is GONE.
+  // Model, reasoning effort and structured output are configured on the run-target
+  // -- the Built-in agent card, an agent / harness detail screen, or the narrow
+  // run-target picker -- and travel to the provider as the Agent's default_options.
+  // Image output options stay: they are a tool-argument default, not a chat-model
+  // generation option (CTR-0120, PRP-0085).
   const [selectedImageOptions, setSelectedImageOptions] = useState<Record<string, string>>({})
-  const [modelMaxTokens, setModelMaxTokens] = useState(128000)
-  const [availableModels, setAvailableModels] = useState<string[]>([])
-
-  const handleModelChange = useCallback((model: string, maxTokens: number) => {
-    setSelectedModel(model)
-    setModelMaxTokens(maxTokens)
-  }, [])
-
-  const handleModelOptionsChange = useCallback((opts: Record<string, string>) => {
-    setSelectedModelOptions(opts)
-  }, [])
-
-  const handleStructuredChange = useCallback((selection: StructuredSelection) => {
-    setStructured(selection)
-  }, [])
 
   const handleImageOptionsChange = useCallback((opts: Record<string, string>) => {
     setSelectedImageOptions(opts)
@@ -249,7 +234,6 @@ export function ChatPanel({
     stopGeneration,
     editUserMessage,
     regenerateAssistantMessage,
-    regenerateWithModel,
     editAssistantMessage,
     deleteMessage,
   } = useChat({
@@ -257,10 +241,6 @@ export function ChatPanel({
     initialMessages,
     onStreamComplete,
     onSessionCreated,
-    selectedModel,
-    selectedModelOptions,
-    selectedOutputFormat: structured.format,
-    selectedOutputSchema: structured.schema,
     selectedImageOptions,
     temporary,
     selectedWorkflowId,
@@ -352,11 +332,11 @@ export function ChatPanel({
 
   const tts = useTTS()
 
-  // Slash commands (CTR-0128, PRP-0088): /model drives the selector via an
-  // imperative handle; /help opens the Help Portal.
-  const modelSelectorRef = useRef<ModelSelectorHandle>(null)
+  // Slash commands (CTR-0128, PRP-0088): /help opens the Help Portal. Since
+  // PRP-0184 (UDR-0166 D1) /model has no per-message selector to drive, so it OPENS
+  // the run-target surface -- where the model is chosen and persisted -- instead of
+  // being removed outright.
   const [helpOpen, setHelpOpen] = useState(false)
-  const handleSlashModel = useCallback((model: string) => modelSelectorRef.current?.selectModel(model) ?? false, [])
   const handleSlashHelp = useCallback(() => setHelpOpen(true), [])
 
   // Prompt Templates state (CTR-0048, PRP-0026)
@@ -450,17 +430,6 @@ export function ChatPanel({
 
   const [isDragging, setIsDragging] = useState(false)
   const dragCountRef = useRef(0)
-  // Fetch model info for single-model fallback and available models list
-  useEffect(() => {
-    fetch('/api/model')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.max_context_tokens) setModelMaxTokens((prev) => (prev === 128000 ? data.max_context_tokens : prev))
-        if (data?.models) setAvailableModels(data.models)
-      })
-      .catch(() => {})
-  }, [])
-
   // CTR-0092 Chat Scroll Behavior (PRP-0055): autoscroll suspend on user
   // intent, ScrollToBottom affordance, and bottom spacer sized by the
   // observed ChatInput height.
@@ -689,8 +658,6 @@ export function ChatPanel({
                 onSaveAsTemplate={show('message.saveAsTemplate') ? handleSaveAsTemplate : undefined}
                 onMaskEdit={show('message.maskEdit') ? handleMaskEdit : undefined}
                 onPaintEdit={show('message.paintEdit') ? handlePaintEditFromHistory : undefined}
-                availableModels={availableModels}
-                onRegenerateWithModel={regenerateWithModel}
                 onToggleMemoryLike={turn ? handleToggleMemoryLike : undefined}
                 memoryLikeStatus={turn ? memory.states[turn.turnKey] : undefined}
                 workflowRun={
@@ -759,26 +726,11 @@ export function ChatPanel({
       {compact ? (
         <div ref={inputRef}>
           <div className="flex flex-wrap items-center justify-end gap-1 px-4">
-            {/* UDR-0101 D7 (extended v0.112.2): a workflow's nodes -- and a custom Prompt
-                agent -- fix their own model + options, so the per-message model / options /
-                structured controls are hidden and the active run-target is named instead.
-                The Built-in agent keeps the controls. */}
-            {showRunTarget && runTargetIndicator}
-            {!hideModelControls && (
-              <>
-                <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
-                <ModelOptionsSelector
-                  threadId={threadId ?? ''}
-                  selectedModel={selectedModel}
-                  onOptionsChange={handleModelOptionsChange}
-                />
-                <StructuredOutputControl
-                  threadId={threadId ?? ''}
-                  selectedModel={selectedModel}
-                  onChange={handleStructuredChange}
-                />
-              </>
-            )}
+            {/* PRP-0184 (UDR-0166 D1/D12): EVERY run-target -- the Built-in agent
+                included -- fixes its own model and options, so the composer carries no
+                model / options / structured controls at all and names the run-target
+                instead. The name is the way in to change any of them. */}
+            {runTargetIndicator}
             <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
             <McpToolManager />
             <SkillsManager />
@@ -801,7 +753,6 @@ export function ChatPanel({
             onSlashHelp={handleSlashHelp}
             onSlashCron={onSlashCron}
             onSlashFiles={onSlashFiles}
-            availableModels={availableModels}
             temporary={temporary}
           />
         </div>
@@ -837,26 +788,11 @@ export function ChatPanel({
                 'mx-auto flex max-w-3xl items-center justify-end gap-1 px-4',
                 surface.narrow && 'flex-wrap',
               )}>
-              {/* UDR-0101 D7 (extended v0.112.2): hidden under a workflow OR a custom
-                  Prompt agent; the Built-in agent keeps the controls. */}
-              {showRunTarget && runTargetIndicator}
-              {!hideModelControls && (
-                <>
-                  <ModelSelector ref={modelSelectorRef} threadId={threadId ?? ''} onModelChange={handleModelChange} />
-                  <ModelOptionsSelector
-                    threadId={threadId ?? ''}
-                    selectedModel={selectedModel}
-                    onOptionsChange={handleModelOptionsChange}
-                  />
-                  {show('toolbar.structuredOutput') && (
-                    <StructuredOutputControl
-                      threadId={threadId ?? ''}
-                      selectedModel={selectedModel}
-                      onChange={handleStructuredChange}
-                    />
-                  )}
-                </>
-              )}
+              {/* PRP-0184 (UDR-0166 D12): rendered in every run-target state on every
+                  tier. On a wide viewport the Built-in agent used to show nothing here,
+                  because the per-message controls stood in its place; with those gone the
+                  desktop gets what the phone already had. */}
+              {runTargetIndicator}
               {/* Narrow viewport (PRP-0171, UDR-0153 D4): administration entries are not
                   rendered; whatever they already selected keeps taking effect. */}
               {show('toolbar.imageOutput') && (
@@ -883,7 +819,6 @@ export function ChatPanel({
               onSlashHelp={show('slash.help') ? handleSlashHelp : undefined}
               onSlashCron={onSlashCron}
               onSlashFiles={onSlashFiles}
-              availableModels={availableModels}
               temporary={temporary}
             />
           </div>

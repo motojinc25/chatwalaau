@@ -105,13 +105,27 @@ class Settings(BaseSettings):
     # AZURE_TENANT_ID) is RETAINED, shared with image / RAG / STT / TTS and used
     # as the azure-openai offering fallback (UDR-0094 D6).
 
-    # Anthropic generation. Anthropic requires max_tokens on every request as a
-    # cap on thinking + text output COMBINED (CTR-0006, UDR-0047 D5). Because
-    # adaptive-thinking effort and the answer share this budget, the per-effort
-    # tier (app.providers.anthropic.ANTHROPIC_EFFORT_MAX_TOKENS) is the effective
-    # value; this setting is a FLOOR an operator can raise (never lowers the
-    # tier). Default 8192 = the low-effort tier.
-    anthropic_max_tokens: int = 8192
+    # ANTHROPIC_MAX_TOKENS was REMOVED by PRP-0184 (UDR-0166 D7). The per-effort
+    # tier (app.providers.base.EFFORT_MAX_OUTPUT_TOKENS) is now the value, not a
+    # floor over it: a raised floor silently flattened the ladder, giving `low` the
+    # same output budget as `max`. A stale key in an existing .env or App Service
+    # configuration is IGNORED, never rejected.
+
+    # Built-in (CORE) Prompt agent selection (PRP-0184, UDR-0166 D8). The bundled
+    # Core agent has no YAML -- core_spec() synthesizes it -- and the active-agent
+    # store is deliberately not persisted (UDR-0072 D7), so its model and effort
+    # live here, as App Settings descriptors with rebuild scope (CTR-0198). Empty
+    # means "inherit": no model preference (the catalog default applies) and no
+    # effort override (the model family's default applies), which is byte-for-byte
+    # the pre-PRP-0184 Core build.
+    core_agent_model: str = ""
+    core_agent_effort: str = ""
+    # Structured output for the Built-in agent (UDR-0166 D10). "" => off. The schema
+    # is stored as JSON TEXT because the settings store holds scalars; an unparsable
+    # value degrades to "no explicit schema" (the provider's default schema applies)
+    # rather than breaking the build.
+    core_agent_output_format: str = ""
+    core_agent_output_schema: str = ""
 
     # OpenAI API key (OPENAI_API_KEY). RETAINED (UDR-0094 D6): consumed by image
     # generation (app.image_gen) and the RAG embedder plain-OpenAI path; also a

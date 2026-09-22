@@ -170,6 +170,10 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
             logger.debug("Web search gate probe failed for %s", spec.model_id, exc_info=True)
     return {
         "model": spec.model_id,
+        # PRP-0184 / UDR-0166 D11: the declared reasoning effort, or "" when the model
+        # family's default applies. Part of the CTR-0192 policy summary so "how hard
+        # does this harness think" is answerable without opening the YAML.
+        "effort": spec.effort,
         "web_search": web_search,
         "file_memory": bool(workspace) and not spec.file_memory_disabled,
         "file_access": bool(workspace),

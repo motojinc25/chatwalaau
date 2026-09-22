@@ -17,7 +17,13 @@ from app import models_catalog
 from app.agent.wire_trace import describe_wire_input_full, log_wire_request, wire_pairing_report
 from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
-from app.providers.base import hosted_tool_withheld
+from app.providers.base import (
+    EFFORT_DEFAULT,
+    EFFORT_LEVELS,
+    hosted_tool_withheld,
+    max_output_tokens_for,
+    resolve_effort_level,
+)
 from app.providers.structured import (
     GENERIC_OBJECT_SCHEMA,
     STRUCTURED_OUTPUT_NAME,
@@ -36,21 +42,33 @@ logger = logging.getLogger(__name__)
 
 NAME = "azure-openai"
 
-# Reasoning effort catalog (PRP-0071, UDR-0047 D2/D3). The OpenAI Responses API
-# accepts none / minimal / low / medium / high / xhigh, but the reasoning-only
-# policy hides none / minimal -- only low and above are offered (UDR-0047 D3).
-OPENAI_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
-OPENAI_EFFORT_DEFAULT = "medium"
+# Reasoning effort catalog (PRP-0071, UDR-0047 D2/D3; ladder unified by PRP-0184,
+# UDR-0166 D5). The reasoning-only policy still hides none / minimal -- only low
+# and above are offered (UDR-0047 D3) -- and the ladder now runs to `max`, the
+# same five levels the Anthropic lane offers, with the same `xhigh` default.
+#
+# `max` is shipped WITHOUT a recorded live measurement, by decision (PRP-0184 Q5):
+# the deployment operates only current-generation base models (GPT-6 Astra /
+# GPT-5.6 Sol). Effort is sent on EVERY turn, so an offering whose endpoint does
+# not accept `max` fails its first turn at that level rather than degrading --
+# that 400 is the signal, and the answer is the offering's `family` (or a narrower
+# ladder), not a silent fallback here.
+OPENAI_EFFORT_LEVELS: tuple[str, ...] = EFFORT_LEVELS
+OPENAI_EFFORT_DEFAULT = EFFORT_DEFAULT
 
-# Text verbosity catalog (PRP-0081, UDR-0057 D4). gpt-5.x exposes a text-
-# generation verbosity control (OpenAI Responses API `text: {verbosity}`)
-# orthogonal to reasoning effort: it shapes how terse / expansive the visible
-# answer is. The default mirrors the API's own default (medium) so the
-# un-changed path is byte-for-byte (UDR-0057 D6). Unlike temperature / top_p,
-# verbosity IS accepted by gpt-5.x reasoning models, so it is the one generation
-# knob the v1 catalog advertises beyond effort.
+# Text verbosity is DERIVED from the effort and is no longer selectable
+# (PRP-0184, UDR-0166 D6). One axis, not two: "how hard it thinks" also decides
+# "how much it says". The mapping saturates at `high`, so the three levels above
+# `medium` all answer expansively -- the combination this gives up deliberately is
+# "think hard, answer briefly" (PRP-0184 Q3).
 OPENAI_VERBOSITY_LEVELS: tuple[str, ...] = ("low", "medium", "high")
-OPENAI_VERBOSITY_DEFAULT = "medium"
+OPENAI_VERBOSITY_FOR_EFFORT: dict[str, str] = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "max": "high",
+}
 
 
 # Structured output vs. hosted web search (PRP-0082, UDR-0058 D2). The OpenAI
@@ -303,11 +321,17 @@ class AzureOpenAIProvider:
         )
 
     def model_options_catalog(self, model: str) -> dict[str, Any]:
-        # Generalized per-model option catalog (PRP-0081, UDR-0057 D2/D4). gpt-5.x
-        # advertises reasoning effort + text verbosity. It does NOT advertise
-        # temperature / top_p / top_k: they are not part of a reasoning model's
-        # request (reasoning-only policy, UDR-0047 D3 / UDR-0057 D3). Fixed,
-        # backend-owned allowed lists + defaults; the operator picks per message.
+        # Generalized per-model option catalog (PRP-0081, UDR-0057 D2/D4), reduced
+        # to ONE axis by PRP-0184 (UDR-0166 D6): effort is the only selectable
+        # generation option, and verbosity / summary / output budget are derived
+        # from it in build_model_options. It does NOT advertise temperature /
+        # top_p / top_k: they are not part of a reasoning model's request
+        # (reasoning-only policy, UDR-0047 D3 / UDR-0057 D3).
+        #
+        # The catalog is consumed by the RUN-TARGET authoring surfaces (the agent
+        # card, the agent / harness detail screens, the narrow run-target picker);
+        # since PRP-0184 it is no longer a per-message chat control (UDR-0166 D1).
+        #
         # A catalog `family: bare` override advertises no options (PRP-0109,
         # UDR-0087 D6) so a non-reasoning gateway model renders no control.
         if models_catalog.offering_family(model) == "bare":
@@ -319,12 +343,6 @@ class AzureOpenAIProvider:
                     "kind": "enum",
                     "allowed": list(OPENAI_EFFORT_LEVELS),
                     "default": OPENAI_EFFORT_DEFAULT,
-                },
-                {
-                    "key": "verbosity",
-                    "kind": "enum",
-                    "allowed": list(OPENAI_VERBOSITY_LEVELS),
-                    "default": OPENAI_VERBOSITY_DEFAULT,
                 },
             ]
         }
@@ -343,22 +361,31 @@ class AzureOpenAIProvider:
         if models_catalog.offering_family(model) == "bare":
             return {}
         # Reasoning-only policy: always send reasoning.effort (UDR-0047 D3).
-        # Requested effort wins when allowed; otherwise the catalog default.
-        selected = selected or {}
-        effort = selected.get("effort")
-        if effort not in OPENAI_EFFORT_LEVELS:
-            effort = OPENAI_EFFORT_DEFAULT
-        options: dict[str, Any] = {"reasoning": {"effort": effort, "summary": "detailed"}}
-
-        # Text verbosity (UDR-0057 D4). OpenAI Responses API `text: {verbosity}`;
-        # MAF OpenAIChatClient forwards default_options keys to the request the
-        # same way it forwards `reasoning` (verified at implementation against the
-        # deployed connector). Output-neutral default (UDR-0057 D6): send the key
-        # ONLY when a valid, non-default verbosity is chosen, so the default path
-        # is byte-for-byte identical to pre-PRP-0081.
-        verbosity = selected.get("verbosity")
-        if verbosity in OPENAI_VERBOSITY_LEVELS and verbosity != OPENAI_VERBOSITY_DEFAULT:
-            options["text"] = {"verbosity": verbosity}
+        # The selection comes from the RUN-TARGET definition, not from the request
+        # (PRP-0184, UDR-0166 D1); an unknown value resolves to the shared default.
+        effort = resolve_effort_level(selected)
+        options: dict[str, Any] = {
+            # `summary: detailed` stays fixed and unselectable (UDR-0166 D6). It is
+            # entangled with the Foundry lane's `include: reasoning.encrypted_content`
+            # assertion (UDR-0128 D3), a seam that has already produced two wrong
+            # fixes; PRP-0184 deliberately leaves it alone.
+            "reasoning": {"effort": effort, "summary": "detailed"},
+            # Text verbosity, DERIVED from the effort and ALWAYS sent (UDR-0166 D6).
+            # Before PRP-0184 this was a second selectable axis sent only when it
+            # differed from the API default; with one axis there is no "unchanged
+            # default" left to preserve, so the key is always stated.
+            "text": {"verbosity": OPENAI_VERBOSITY_FOR_EFFORT[effort]},
+            # Output budget, DERIVED from the effort (UDR-0166 D6). MAF maps
+            # ChatOptions `max_tokens` onto the Responses API `max_output_tokens`,
+            # which counts reasoning AND visible text, so the budget scales with the
+            # effort for the same reason the Anthropic lane's always has.
+            #
+            # NOTE: this lane sent NO cap before PRP-0184 -- the model's own ceiling
+            # applied. A long generation at `low` now stops at 16000 where it used to
+            # run further; that is the accepted cost of one shared table (PRP-0184 Q4),
+            # and `stop_reason: max_output_tokens` at low effort is its signature.
+            "max_tokens": max_output_tokens_for(effort),
+        }
         return options
 
     def web_search_tool(self, model: str) -> Any | None:

@@ -7,6 +7,11 @@ Three endpoints let an operator READ and WRITE the application settings store
                                       group registry, preserved unknown keys,
                                       load warnings, residual .env key NAMES, and
                                       the resolved path.
+    PATCH /api/app-settings        -- MERGE a subset of keys into the stored
+                                      document (PRP-0184, UDR-0166 D8/D9), for a
+                                      surface that owns two settings rather than
+                                      the whole screen: the Built-in agent card
+                                      and the narrow run-target picker.
     PUT  /api/app-settings         -- full-document write: coerce -> write ->
                                       apply by scope -> rebuild if needed, then
                                       report whether a restart is still required.
@@ -60,6 +65,21 @@ class SettingsPayload(BaseModel):
 
     settings: dict[str, Any] = Field(default_factory=dict)
     unknown: dict[str, Any] | None = None
+
+
+class SettingsPatch(BaseModel):
+    """A SUBSET of settings keys to merge into the stored document (UDR-0166 D8).
+
+    The full-document PUT is the App Settings screen's contract: it owns every key
+    on screen, so sending all of them is honest. A surface that owns TWO keys --
+    the Built-in agent card's model + reasoning effort -- cannot use it without
+    first reading and re-sending every unrelated value, which turns an unrelated
+    concurrent edit into silent data loss. Hence a merge.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    settings: dict[str, Any] = Field(default_factory=dict)
 
 
 def _resolve_secret(key: str, value: Any) -> Any:
@@ -123,14 +143,13 @@ def register_app_settings(app: FastAPI, *, agent_registry) -> None:
 
         return coerced, errors
 
-    @router.get("", dependencies=[Depends(verify_api_key)])
-    async def get_app_settings() -> dict:
-        """Return live values, descriptors, groups, unknown keys, and warnings."""
-        return store_mod.store_status()
+    async def _write_and_apply(coerced: dict[str, Any], unknown: dict[str, Any] | None) -> dict:
+        """Write a validated document, apply it, rebuild when a scope demands it.
 
-    @router.put("", dependencies=[Depends(verify_api_key)])
-    async def put_app_settings(body: SettingsPayload) -> dict:
-        """Validate, write, and apply the document; report if a restart remains."""
+        Shared by PUT (the whole document) and PATCH (a merged subset) so the two
+        cannot drift on the part that matters: the all-or-nothing rollback when the
+        rebuild fails (UDR-0120 D2).
+        """
         path = store_mod.store_path()
         if path is None:
             raise HTTPException(
@@ -143,22 +162,7 @@ def register_app_settings(app: FastAPI, *, agent_registry) -> None:
                 },
             )
 
-        coerced, errors = _coerce_payload(body.settings)
-        # Cross-field rules run AFTER per-key coercion and BEFORE the write, so a
-        # rule spanning two keys is enforced on the path an operator actually uses
-        # (UDR-0141 D4). A `Settings` validator would not run here at all: apply
-        # is an attribute assignment and the model does not set
-        # `validate_assignment`, which is how an out-of-range bound used to save
-        # successfully and then prevent the next start.
-        errors.extend(store_mod.validate_document(coerced))
-        if errors:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "invalid_settings", "message": "; ".join(errors)},
-            )
-
-        # Omitted `unknown` preserves the on-disk bag (see the class docstring).
-        unknown = body.unknown
+        # Omitted `unknown` preserves the on-disk bag (see SettingsPayload).
         if unknown is None:
             try:
                 unknown = store_mod.load_store(path).unknown
@@ -166,11 +170,6 @@ def register_app_settings(app: FastAPI, *, agent_registry) -> None:
                 unknown = {}
 
         prior_bytes = path.read_bytes() if path.is_file() else None
-
-        try:
-            store_mod.write_store(coerced, unknown, path)
-        except (store_mod.SettingsStoreError, OSError) as exc:
-            raise HTTPException(status_code=400, detail={"error": "write_failed", "message": str(exc)}) from None
 
         # Which restart-scope keys actually CHANGED. Captured before the apply,
         # because afterwards the singleton already holds the new value and the
@@ -186,6 +185,11 @@ def register_app_settings(app: FastAPI, *, agent_registry) -> None:
             and d.scope == descriptors_mod.SCOPE_RESTART
             and getattr(_live, key, None) != value
         )
+
+        try:
+            store_mod.write_store(coerced, unknown, path)
+        except (store_mod.SettingsStoreError, OSError) as exc:
+            raise HTTPException(status_code=400, detail={"error": "write_failed", "message": str(exc)}) from None
 
         scopes = store_mod.apply_values(coerced)
         scopes |= store_mod.apply_defaults_for_absent(coerced)
@@ -215,6 +219,68 @@ def register_app_settings(app: FastAPI, *, agent_registry) -> None:
 
         logger.info("Application settings updated (%s)", path.name)
         return status
+
+    @router.get("", dependencies=[Depends(verify_api_key)])
+    async def get_app_settings() -> dict:
+        """Return live values, descriptors, groups, unknown keys, and warnings."""
+        return store_mod.store_status()
+
+    @router.put("", dependencies=[Depends(verify_api_key)])
+    async def put_app_settings(body: SettingsPayload) -> dict:
+        """Validate, write, and apply the document; report if a restart remains."""
+        coerced, errors = _coerce_payload(body.settings)
+        # Cross-field rules run AFTER per-key coercion and BEFORE the write, so a
+        # rule spanning two keys is enforced on the path an operator actually uses
+        # (UDR-0141 D4). A `Settings` validator would not run here at all: apply
+        # is an attribute assignment and the model does not set
+        # `validate_assignment`, which is how an out-of-range bound used to save
+        # successfully and then prevent the next start.
+        # Cross-field rules run AFTER per-key coercion and BEFORE the write, so a
+        # rule spanning two keys is enforced on the path an operator actually uses
+        # (UDR-0141 D4).
+        errors.extend(store_mod.validate_document(coerced))
+        if errors:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "invalid_settings", "message": "; ".join(errors)},
+            )
+        return await _write_and_apply(coerced, body.unknown)
+
+    @router.patch("", dependencies=[Depends(verify_api_key)])
+    async def patch_app_settings(body: SettingsPatch) -> dict:
+        """Merge a SUBSET of keys into the stored document (PRP-0184, UDR-0166 D8).
+
+        The submitted keys replace their stored counterparts; every other stored
+        value and the preserved `unknown` bag are carried over untouched. Validation,
+        the write, the apply and the rebuild are the PUT's, so a merged save is as
+        atomic as a full one -- including the rollback when the rebuild fails.
+
+        A merged save is still SERVER-WIDE (UDR-0166 D9): `core_agent_model` /
+        `core_agent_effort` are rebuild-scope, so the answer changes for chat, the
+        Teams channel, the CLI channel, the OpenAI-compatible API and every
+        background lane at once. Saying so is the CALLING SURFACE's job -- this
+        endpoint cannot know whether the operator was told.
+        """
+        coerced, errors = _coerce_payload(body.settings)
+        if errors:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "invalid_settings", "message": "; ".join(errors)},
+            )
+
+        try:
+            stored = store_mod.load_store().values
+        except store_mod.SettingsStoreError:
+            stored = {}
+        merged = {**stored, **coerced}
+
+        errors = store_mod.validate_document(merged)
+        if errors:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "invalid_settings", "message": "; ".join(errors)},
+            )
+        return await _write_and_apply(merged, None)
 
     @router.post("/reload", dependencies=[Depends(verify_api_key)])
     async def reload_app_settings() -> dict:

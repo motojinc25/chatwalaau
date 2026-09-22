@@ -60,12 +60,21 @@ def build_harness_yaml(document: dict[str, Any]) -> str:
 
     model_in = document.get("model") or {}
     model_id = ""
+    model_effort = ""
     if isinstance(model_in, dict):
         model_id = str(model_in.get("id") or "").strip()
+        options_in = model_in.get("options")
+        if isinstance(options_in, dict):
+            model_effort = str(options_in.get("effort") or "").strip()
     elif isinstance(model_in, str):
         model_id = model_in.strip()
     if model_id:
         doc["model"] = {"id": model_id}
+        # Reasoning effort (PRP-0184, UDR-0166 D11). Emitted only when chosen, so a
+        # harness that inherits the family default keeps a YAML without an options
+        # block. Effort is the ONLY generation option a harness declares.
+        if model_effort:
+            doc["model"]["options"] = {"effort": model_effort}
 
     instr_in = document.get("instructions") or {}
     instr_out: dict[str, Any] = {}
@@ -129,8 +138,12 @@ def document_from_yaml(text: str) -> dict[str, Any]:
 
     model_raw = data.get("model")
     model_id = ""
+    model_effort = ""
     if isinstance(model_raw, dict):
         model_id = str(model_raw.get("id") or "")
+        model_options = model_raw.get("options")
+        if isinstance(model_options, dict):
+            model_effort = str(model_options.get("effort") or "")
     elif model_raw is not None:
         model_id = str(model_raw)
 
@@ -147,7 +160,7 @@ def document_from_yaml(text: str) -> dict[str, Any]:
         "name": str(data.get("name") or ""),
         "displayName": str(data.get("displayName") or ""),
         "description": str(data.get("description") or ""),
-        "model": {"id": model_id},
+        "model": {"id": model_id, "options": {"effort": model_effort}},
         "instructions": {
             "harness": instr.get("harness") if isinstance(instr.get("harness"), str) else "",
             "agent": instr.get("agent") if isinstance(instr.get("agent"), str) else "",

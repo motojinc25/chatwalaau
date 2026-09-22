@@ -88,7 +88,7 @@ See the [Configuration guide](https://www.chatwalaau.com/docs/getting-started/co
 | --- | --- |
 | **Chat & media** | Render Markdown, code, math, and Mermaid diagrams. Use voice, image analysis, PDF attachments, web search with citations, and a built-in paint canvas. |
 | **Conversation controls** | Use slash commands, search and bookmark chats, navigate messages, start temporary chats, and mask your content with Privacy Screen for screen sharing. Continue chatting from a phone: the chat and chat list adapt to small screens, with a drawer chat list and touch-friendly controls. |
-| **Models** | Switch providers mid-conversation -- Azure OpenAI, OpenAI, Microsoft Foundry, and Claude (direct or on Foundry), all configured in one model catalog. Configure reasoning, verbosity, structured output, prompt caching, and deployment-specific capabilities. Availability depends on the model and deployment. |
+| **Models** | Azure OpenAI, OpenAI, Microsoft Foundry, and Claude (direct or on Foundry), all configured in one model catalog. Availability depends on the model and deployment. |
 | **Tools & Skills** | Use image, weather, and coding tools, prompt templates, and catalog-installed Agent Skills with license/update tracking. Choose which tools each agent has; enabled tools run without an approval step. |
 | **Knowledge & RAG** | Ingest PDFs into a ChromaDB-backed knowledge base. Submit, monitor, and cancel ingestion through Pipeline Jobs. |
 | **Ontology** | Build RDF concept models on a visual graph canvas. Import/export RDF, query with SPARQL or natural language, and let agents use your ontologies. |

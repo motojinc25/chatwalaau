@@ -294,12 +294,12 @@ def validate_document(body: dict[str, Any]) -> dict[str, Any]:
     try:
         text = _yaml_from_body(body)
     except DeclarativeAgentError as exc:
-        return {"valid": False, "error": str(exc), "warnings": [], "yaml": None}
+        return {"valid": False, "error": str(exc), "warnings": [], "notes": [], "yaml": None}
 
     try:
         spec = map_document(text, agent_id="_preview", source="custom")
     except DeclarativeAgentError as exc:
-        return {"valid": False, "error": str(exc), "warnings": [], "yaml": text}
+        return {"valid": False, "error": str(exc), "warnings": [], "notes": [], "yaml": text}
 
     # Live-state warnings (unconfigured model / unrecognized tool) mirror the loader.
     from app.agent.declarative.loader import _annotate_model_warnings, _annotate_tool_warnings
@@ -311,6 +311,8 @@ def validate_document(body: dict[str, Any]) -> dict[str, Any]:
         "valid": True,
         "error": None,
         "warnings": spec.warnings,
+        # Informational, never blocking (PRP-0184, UDR-0166 D6).
+        "notes": spec.notes,
         "yaml": text,
         "summary": {
             "name": spec.name,

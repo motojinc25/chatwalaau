@@ -199,16 +199,67 @@ GROUPS: tuple[SettingGroup, ...] = (
 
 DESCRIPTORS: tuple[SettingDescriptor, ...] = (
     # ---- Generation / inference (runtime) --------------------------------
+    # Built-in (CORE) Prompt agent selection (PRP-0184, UDR-0166 D8/D9). These two
+    # are the persisted home of what used to be a per-message chat control. They are
+    # REBUILD scope: a change re-derives the construction inputs and swaps every
+    # per-model Agent atomically (CTR-0070), so it applies without a restart -- and
+    # SERVER-WIDE, reaching chat, the Teams channel, the CLI channel, the
+    # OpenAI-compatible API and every background lane at once (UDR-0166 D9).
+    #
+    # They are deliberately NOT hidden from this screen even though the agent card
+    # and the narrow run-target picker are where an operator normally sets them: a
+    # persisted setting that no settings screen shows is exactly the invisible state
+    # that produced the UDR-0140 D2 defect.
     SettingDescriptor(
-        "anthropic_max_tokens",
-        "Anthropic max tokens",
+        "core_agent_model",
+        "Built-in agent model",
         "generation",
-        "int",
-        SCOPE_RUNTIME,
+        "str",
+        SCOPE_REBUILD,
         help=(
-            "Floor on the Anthropic max_tokens budget, which caps thinking and answer "
-            "text COMBINED. The per-effort tier is the effective value; this only ever "
-            "raises it, never lowers it."
+            "Chat model the Built-in ChatWalaʻau Core agent answers with, as a Model "
+            "Offering Catalog id. Empty uses the catalog's default offering. Applies "
+            "server-wide: chat, Teams, CLI, the OpenAI-compatible API and the "
+            "background lanes all follow it."
+        ),
+    ),
+    SettingDescriptor(
+        "core_agent_effort",
+        "Built-in agent reasoning effort",
+        "generation",
+        "enum",
+        SCOPE_REBUILD,
+        enum=("", "low", "medium", "high", "xhigh", "max"),
+        help=(
+            "Reasoning effort for the Built-in ChatWalaʻau Core agent. Empty uses the "
+            "model family's default (xhigh). Verbosity and the output budget follow the "
+            "effort; a 'bare' family model ignores it. Applies server-wide."
+        ),
+    ),
+    SettingDescriptor(
+        "core_agent_output_format",
+        "Built-in agent structured output",
+        "generation",
+        "enum",
+        SCOPE_REBUILD,
+        enum=("", "json_object", "json_schema"),
+        help=(
+            "Structured output for the Built-in ChatWalaʻau Core agent. Empty is off. "
+            "json_object asks for any JSON object; json_schema constrains the answer to "
+            "the schema below. Applies server-wide."
+        ),
+    ),
+    SettingDescriptor(
+        "core_agent_output_schema",
+        "Built-in agent output schema",
+        "generation",
+        "str",
+        SCOPE_REBUILD,
+        parent="core_agent_output_format",
+        enabled_when="json_schema",
+        help=(
+            "JSON Schema the Built-in agent's answer must conform to, as JSON text. "
+            "Unparsable text falls back to the provider's default schema."
         ),
     ),
     SettingDescriptor(
@@ -911,6 +962,12 @@ RETIRED_KEYS: frozenset[str] = frozenset(
         # the successor is a boolean with a different meaning, so the value is
         # absorbed by `app.app_settings.store` rather than carried across.
         "compaction_strategy",
+        # PRP-0184 / UDR-0166 D7: the Anthropic max_tokens FLOOR is gone. The
+        # per-effort tier (app.providers.base.EFFORT_MAX_OUTPUT_TOKENS) is the value
+        # now, for both reasoning families. Not a rename: there is no successor key,
+        # because the budget is no longer operator-tunable at all -- a raised floor
+        # silently flattened the ladder, giving `low` the same budget as `max`.
+        "anthropic_max_tokens",
     }
 )
 

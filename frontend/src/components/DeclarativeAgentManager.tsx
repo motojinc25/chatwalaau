@@ -11,6 +11,7 @@ import {
   Workflow as WorkflowIcon,
 } from 'lucide-react'
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { CoreAgentOptions } from '@/components/CoreAgentOptions'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { type HarnessEntry, type HarnessPolicy, useHarnessAuthoring } from '@/hooks/useHarnessAuthoring'
@@ -583,6 +584,19 @@ export function DeclarativeAgentManager() {
                         <p className="mb-3 text-[11px] text-amber-700 dark:text-amber-400">
                           Read-only here: harness agents are not runnable in demo mode.
                         </p>
+                      )}
+
+                      {/* Built-in agent configuration (PRP-0184, CTR-0144, UDR-0166
+                          D8/D10). The bundled agent has no YAML to edit, so its model,
+                          reasoning effort and structured output are set here -- the
+                          controls that left the chat input. */}
+                      {current.kind === 'Prompt' && current.source === 'core' && (
+                        <div className="mb-3 rounded-md border bg-muted/30 p-2">
+                          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            Model and reasoning
+                          </p>
+                          <CoreAgentOptions withStructuredOutput onSaved={() => void fetchInventory()} />
+                        </div>
                       )}
 
                       <div className="flex flex-wrap items-center gap-2">

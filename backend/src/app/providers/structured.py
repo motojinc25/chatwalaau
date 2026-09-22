@@ -53,23 +53,12 @@ MODE_JSON_OBJECT = "json_object"
 VALID_MODES = frozenset({MODE_JSON_SCHEMA, MODE_JSON_OBJECT})
 
 
-def resolve_request(state: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
-    """Resolve an AG-UI ``state`` into ``(schema, mode)`` (UDR-0058 D3).
-
-    - A non-empty ``state.output_schema`` object -> (schema, "json_schema").
-    - Else ``state.output_format == "json_object"`` -> (None, "json_object").
-    - Else -> (None, "none") = structured output off (default).
-
-    Never raises; an unexpected shape resolves to off.
-    """
-    if not isinstance(state, dict):
-        return None, MODE_NONE
-    raw_schema = state.get("output_schema")
-    if isinstance(raw_schema, dict) and raw_schema:
-        return raw_schema, MODE_JSON_SCHEMA
-    if state.get("output_format") == MODE_JSON_OBJECT:
-        return None, MODE_JSON_OBJECT
-    return None, MODE_NONE
+# ``resolve_request(state)`` -- which turned an AG-UI ``state.output_schema`` /
+# ``state.output_format`` pair into (schema, mode) -- was REMOVED by PRP-0184
+# (UDR-0166 D10). Structured output is configured on the run-target now, so those
+# request keys are accepted and ignored and nothing parses them. The function is
+# gone rather than left unused: an unused parser is an invitation to wire the
+# second lane back up.
 
 
 def effective_schema(

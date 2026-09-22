@@ -1,5 +1,6 @@
 import { Bot, Check, Hammer, Loader2, Search, TriangleAlert, Workflow as WorkflowIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { CoreAgentOptions } from '@/components/CoreAgentOptions'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent } from '@/components/ui/sheet'
 import {
@@ -253,6 +254,20 @@ export function RunTargetSheet() {
             )}
             {!loading && groups.length === 0 && (
               <p className="px-4 py-6 text-sm text-muted-foreground">No agent matches.</p>
+            )}
+            {/* PRP-0184 (UDR-0166 D12): on a phone this sheet is the ONLY way in, so the
+                Built-in agent's model and reasoning effort are combined with the agent
+                list here rather than only on the wide manager. Structured output is
+                deliberately NOT offered on this tier (D10). */}
+            {!loading && (
+              <section>
+                <h3 className="sticky top-0 bg-background/95 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Built-in agent options
+                </h3>
+                <div className="px-4 pb-3 pt-1">
+                  <CoreAgentOptions onSaved={() => setOpen(false)} />
+                </div>
+              </section>
             )}
             {!loading &&
               groups.map((group) => (

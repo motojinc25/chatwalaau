@@ -62,6 +62,21 @@ logger = logging.getLogger(__name__)
 VALID_PROVIDERS = frozenset({"azure-openai", "anthropic", "openai", "foundry"})
 VALID_OPERATIONS = frozenset({"chat", "embeddings", "image"})
 VALID_FAMILIES = frozenset({"openai-reasoning", "anthropic-adaptive", "bare"})
+
+# Which option-catalog families each provider can actually serve (PRP-0184,
+# UDR-0166 D4). `bare` is universal -- every provider can build a request with no
+# generation parameters. A provider MUST NOT be given the other provider's
+# reasoning family: the request shapes are not interchangeable (OpenAI
+# `reasoning.effort` + `text.verbosity` vs Anthropic `output_config.effort` +
+# `thinking`). An ABSENT family keeps each provider's own inference
+# (azure-openai / openai -> openai-reasoning, anthropic -> anthropic-adaptive,
+# foundry -> the UDR-0085 A1 deployment-name heuristic).
+FAMILIES_BY_PROVIDER: dict[str, frozenset[str]] = {
+    "azure-openai": frozenset({"openai-reasoning", "bare"}),
+    "openai": frozenset({"openai-reasoning", "bare"}),
+    "foundry": frozenset({"openai-reasoning", "bare"}),
+    "anthropic": frozenset({"anthropic-adaptive", "bare"}),
+}
 VALID_HOSTINGS = frozenset({"direct", "foundry"})
 
 # Hosted-tool capabilities an offering may DECLARE (PRP-0129, UDR-0112 D1/D2).
@@ -507,8 +522,25 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
             raise CatalogError(f"offering '{offering_id}': 'hosting' applies only to the anthropic provider")
 
     family = entry.get("family")
-    if family is not None and family not in VALID_FAMILIES:
-        raise CatalogError(f"offering '{offering_id}': family must be one of {sorted(VALID_FAMILIES)}, got {family!r}")
+    if family is not None:
+        if family not in VALID_FAMILIES:
+            raise CatalogError(
+                f"offering '{offering_id}': family must be one of {sorted(VALID_FAMILIES)}, got {family!r}"
+            )
+        # provider x family compatibility (PRP-0184, UDR-0166 D4). While `family`
+        # was decorative a wrong value was harmless; since UDR-0166 D3 it decides
+        # the ENTIRE request shape, so an incompatible pair is a silent mis-serve:
+        # `anthropic` + `openai-reasoning` would advertise a knob the Messages API
+        # does not take, and `foundry` + `anthropic-adaptive` resolves to neither
+        # branch of _effective_family() and quietly degrades to `bare`, removing
+        # every generation control. Fail fast, as every other malformed field does.
+        permitted = FAMILIES_BY_PROVIDER.get(provider, frozenset())
+        if family not in permitted:
+            raise CatalogError(
+                f"offering '{offering_id}': family {family!r} is not valid for provider "
+                f"{provider!r} (permitted: {sorted(permitted)}). Omit 'family' to use the "
+                f"provider's own inference."
+            )
 
     context_window = entry.get("context_window")
     if context_window is not None and (

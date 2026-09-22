@@ -90,21 +90,14 @@ interface UseChatOptions {
    * temporary chats.
    */
   onSessionCreated?: (info: { threadId: string; title: string }) => void
-  selectedModel?: string
-  /**
-   * Selected per-message generation options (effort + verbosity) sent as AG-UI
-   * state.model_options (CTR-0009 v13, PRP-0081). Supersedes the single
-   * selectedReasoning string; the backend still accepts the legacy field.
+  /*
+   * PRP-0184 (UDR-0166 D1/D10): `selectedModel`, `selectedModelOptions`,
+   * `selectedOutputFormat` and `selectedOutputSchema` are GONE. Generation options
+   * belong to the run-target definition and reach the provider as the Agent's
+   * default_options, so the request carries none of them; the backend accepts and
+   * ignores the corresponding `state.*` keys (D2), which is why nothing here has to
+   * keep sending them for compatibility.
    */
-  selectedModelOptions?: Record<string, string>
-  /**
-   * Structured output (CTR-0118 / CTR-0009 v14, PRP-0082). `selectedOutputFormat`
-   * is 'none' (off, default), 'json_object' (generic), or 'json_schema' (explicit
-   * schema). For 'json_schema' the schema is sent as AG-UI state.output_schema; a
-   * null/empty schema degrades to state.output_format='json_object'.
-   */
-  selectedOutputFormat?: string
-  selectedOutputSchema?: Record<string, unknown> | null
   /**
    * Per-session image output options (CTR-0120 / CTR-0049, PRP-0085). Sent as AG-UI
    * state.image_options {size, quality, format, compression, background}; only
@@ -206,10 +199,7 @@ export function useChat(options?: UseChatOptions) {
   const threadIdRef = useRef(options?.threadId ?? crypto.randomUUID())
   const onStreamCompleteRef = useRef(options?.onStreamComplete)
   const onSessionCreatedRef = useRef(options?.onSessionCreated)
-  const selectedModelRef = useRef(options?.selectedModel ?? '')
-  const selectedModelOptionsRef = useRef<Record<string, string>>(options?.selectedModelOptions ?? {})
-  const selectedOutputFormatRef = useRef(options?.selectedOutputFormat ?? 'none')
-  const selectedOutputSchemaRef = useRef<Record<string, unknown> | null>(options?.selectedOutputSchema ?? null)
+
   const selectedImageOptionsRef = useRef<Record<string, string>>(options?.selectedImageOptions ?? {})
   const temporaryRef = useRef(options?.temporary ?? false)
   const selectedWorkflowIdRef = useRef(options?.selectedWorkflowId ?? '')
@@ -247,22 +237,6 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     onSessionCreatedRef.current = options?.onSessionCreated
   }, [options?.onSessionCreated])
-
-  useEffect(() => {
-    selectedModelRef.current = options?.selectedModel ?? ''
-  }, [options?.selectedModel])
-
-  useEffect(() => {
-    selectedModelOptionsRef.current = options?.selectedModelOptions ?? {}
-  }, [options?.selectedModelOptions])
-
-  useEffect(() => {
-    selectedOutputFormatRef.current = options?.selectedOutputFormat ?? 'none'
-  }, [options?.selectedOutputFormat])
-
-  useEffect(() => {
-    selectedOutputSchemaRef.current = options?.selectedOutputSchema ?? null
-  }, [options?.selectedOutputSchema])
 
   useEffect(() => {
     selectedImageOptionsRef.current = options?.selectedImageOptions ?? {}
@@ -377,7 +351,6 @@ export function useChat(options?: UseChatOptions) {
       options?: {
         skipUserMessage?: boolean
         images?: ImageRef[]
-        modelOverride?: string
         // PRP-0073: async preparation that runs AFTER the optimistic user
         // bubble + assistant placeholder render (so the user sees their
         // message instantly) but BEFORE the agent dispatch. Used by mask-edit
@@ -484,38 +457,26 @@ export function useChat(options?: UseChatOptions) {
           }
         }
 
-        // Build AG-UI request state (CTR-0070 model)
+        // Build AG-UI request state (CTR-0009).
+        //
+        // PRP-0184 (UDR-0166 D1): no `model`, no `model_options`, no `output_schema` /
+        // `output_format`. Which model answers and how hard it thinks is the
+        // run-target's configuration, applied at agent construction; sending a
+        // per-message copy was the second lane this release removed.
         const aguiState: Record<string, unknown> = {}
-        const effectiveModel = options?.modelOverride || selectedModelRef.current
-        if (effectiveModel) aguiState.model = effectiveModel
-        if (Object.keys(selectedModelOptionsRef.current).length > 0)
-          aguiState.model_options = selectedModelOptionsRef.current
-        // Structured output (PRP-0082, UDR-0058 D3). An explicit schema rides in
-        // state.output_schema; the generic mode (or a json_schema selection whose
-        // schema is empty/invalid) rides in state.output_format. 'none' sends
-        // nothing so the default path is byte-for-byte (UDR-0058 D7).
-        {
-          const of = selectedOutputFormatRef.current
-          if (of === 'json_schema' && selectedOutputSchemaRef.current) {
-            aguiState.output_schema = selectedOutputSchemaRef.current
-          } else if (of === 'json_schema' || of === 'json_object') {
-            aguiState.output_format = 'json_object'
-          }
-        }
         // Per-session image output options (PRP-0085, CTR-0120/CTR-0049). Only
         // non-default fields are present; absent = backend settings/API default.
         if (Object.keys(selectedImageOptionsRef.current).length > 0)
           aguiState.image_options = selectedImageOptionsRef.current
         if (temporaryRef.current) aguiState.temporary = true
         // Declarative Workflow run-target (PRP-0118, CTR-0009, UDR-0101 D5). When set,
-        // the backend streams the compiled workflow instead of the active agent; the
-        // model / options / structured-output state above is ignored server-side (each
-        // node's model + options come from its referenced Prompt agent, UDR-0101 D7).
+        // the backend streams the compiled workflow instead of the active agent; each
+        // node's model + options come from its referenced Prompt agent (UDR-0101 D7).
         if (selectedWorkflowIdRef.current) aguiState.workflow_id = selectedWorkflowIdRef.current
         // Harness Agent run-target (PRP-0135, CTR-0009 v-next, UDR-0119 D3). When set,
-        // the backend runs the cached per-conversation harness agent; the model /
-        // options / structured-output state above is ignored server-side (the harness
-        // YAML fixes them, CTR-0193). Mutually exclusive with workflow_id.
+        // the backend runs the cached per-conversation harness agent; its model and
+        // effort come from the harness YAML (CTR-0192 / CTR-0193, UDR-0166 D11).
+        // Mutually exclusive with workflow_id.
         if (selectedHarnessIdRef.current) aguiState.harness_id = selectedHarnessIdRef.current
         // HITL resume (PRP-0123, UDR-0106 D5): the answers to the requests the previous
         // turn interrupted on. The backend routes them into workflow.run(responses=...).
@@ -1202,36 +1163,14 @@ export function useChat(options?: UseChatOptions) {
     [streamResponse, truncateSaved],
   )
 
-  /** Regenerate with a specific model (CTR-0071, PRP-0035). */
-  const regenerateWithModel = useCallback(
-    async (messageId: string, model: string) => {
-      if (savingRef.current) return
-      const current = messagesRef.current
-      const idx = current.findIndex((m) => m.id === messageId)
-      if (idx === -1) return
-
-      let userContent = ''
-      for (let i = idx - 1; i >= 0; i--) {
-        if (current[i].role === 'user') {
-          userContent = current[i].content
-          break
-        }
-      }
-      if (!userContent) return
-
-      const truncated = current.slice(0, idx)
-
-      // Await the truncate so the backend session file is persisted BEFORE
-      // streamResponse triggers POST /ag-ui/ -> before_run reads the file.
-      // Otherwise the two requests race and before_run can load stale,
-      // un-truncated history (duplicate / out-of-order turns), which the
-      // Azure OpenAI Responses API can reject mid-stream.
-      if (!(await truncateSaved(idx))) return
-
-      await streamResponse(userContent, truncated, { skipUserMessage: true, modelOverride: model })
-    },
-    [streamResponse, truncateSaved],
-  )
+  /*
+   * `regenerateWithModel` (CTR-0071, PRP-0035) was REMOVED by PRP-0184
+   * (UDR-0166 D1/D2). It re-ran a turn under a DIFFERENT model by sending
+   * `state.model`, a key the backend now accepts and ignores -- so the control would
+   * have kept offering a choice that no longer changed anything, which is worse than
+   * not offering it. To answer under another model, change the run-target's model.
+   * Plain regenerate (`retryTurn` / `regenerateAssistantMessage`) is unaffected.
+   */
 
   const deleteMessage = useCallback((messageId: string) => {
     if (savingRef.current) return
@@ -1335,7 +1274,6 @@ export function useChat(options?: UseChatOptions) {
     clearMessages,
     editUserMessage,
     regenerateAssistantMessage,
-    regenerateWithModel,
     editAssistantMessage,
     deleteMessage,
   }

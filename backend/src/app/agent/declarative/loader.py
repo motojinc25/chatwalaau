@@ -9,6 +9,7 @@ UDR-0072 D11). Only ``*.yaml`` / ``*.yml`` are loaded.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -26,8 +27,10 @@ logger = logging.getLogger(__name__)
 
 # Bundled CORE declarative agent (UDR-0072 D2/D13). ``instructions: "=Identity"``
 # is the sentinel that maps to the runtime Global Agent Identity, so an
-# operator-edited .agent/IDENTITY.md still applies; no model / options means the
-# spec is all-``None`` and the registry build is byte-for-byte the imperative path.
+# operator-edited .agent/IDENTITY.md still applies; no model / options in the
+# DOCUMENT means the mapped spec starts all-``None``. Since PRP-0184 ``core_spec()``
+# then layers the operator's persisted model / effort over it (UDR-0166 D8), so the
+# document is the floor rather than the whole story.
 CORE_AGENT_YAML = """kind: Prompt
 name: ChatWalaʻau Core
 description: >-
@@ -39,13 +42,58 @@ instructions: "=Identity"
 
 
 def core_spec() -> DeclarativeAgentSpec:
-    """Return the CORE spec (always mappable; reproduces current behavior)."""
-    return map_document(
+    """Return the CORE spec, carrying the operator's persisted model / effort.
+
+    The bundled Core agent has no YAML file on disk: the document above is a
+    constant, and the active-agent store is process-local and deliberately not
+    persisted (UDR-0072 D7). Since PRP-0184 removed the per-message chat controls,
+    the Core agent needs a PERSISTED model and reasoning effort, and they live in
+    the Application Settings store (CTR-0198) rather than in a generated file --
+    a file would make the bundled agent editable and deletable, which it is not
+    (UDR-0166 D8).
+
+    Applying them HERE, on the mapped spec, is what keeps the rest of the
+    construction path untouched: ``agui/agent_registry`` already feeds
+    ``spec.model_filter`` and ``spec.model_options_override`` into the registry
+    default and ``providers.build_model_options()``, so Core now travels the same
+    road every custom Prompt agent does.
+
+    An unset setting leaves the field ``None`` -- "inherit the deployment default"
+    -- so a fresh deployment behaves exactly as it did before PRP-0184. This
+    AMENDS UDR-0072 D13: the CORE spec is all-``None`` only until the operator
+    makes a selection.
+    """
+    spec = map_document(
         CORE_AGENT_YAML,
         agent_id=CORE_AGENT_ID,
         source="core",
         default_name="ChatWalaʻau Core",
     )
+    model = (settings.core_agent_model or "").strip()
+    if model:
+        spec.model_filter = [model]
+    effort = (settings.core_agent_effort or "").strip()
+    if effort:
+        spec.model_options_override = {"effort": effort}
+    # Structured output (UDR-0166 D10). The chat input's per-message control is gone,
+    # so this is the Built-in agent's only way to ask for JSON. An unparsable schema
+    # is NOT fatal: the mode still applies and the provider's own default schema is
+    # used, which is what `structured_output={"schema": None}` already means
+    # everywhere else (UDR-0058 D9).
+    output_format = (settings.core_agent_output_format or "").strip()
+    if output_format:
+        schema: dict | None = None
+        raw_schema = (settings.core_agent_output_schema or "").strip()
+        if raw_schema:
+            try:
+                parsed = json.loads(raw_schema)
+                schema = parsed if isinstance(parsed, dict) and parsed else None
+            except ValueError:
+                logger.warning(
+                    "CORE_AGENT_OUTPUT_SCHEMA is not valid JSON; the provider's default output schema applies instead."
+                )
+        spec.structured_output = {"schema": schema, "mode": output_format}
+    return spec
 
 
 def _agents_dir() -> Path | None:
@@ -221,10 +269,16 @@ def load_inventory(active_id: str) -> dict:
             "loaded": True,
             "error": None,
             "warnings": core.warnings,
+            "notes": core.notes,
             # CTR-0143 v2 (PRP-0117): the bundled CORE agent is not a file on disk, so
             # it can be neither edited nor deleted; it never restricts its tool surface.
             "editable": False,
             "tool_allowlist": None,
+            # CTR-0143 v4 (PRP-0184, UDR-0166 D8): the Built-in agent's PERSISTED model
+            # and reasoning effort, so the management UI can render the two controls that
+            # left the chat input. Both are None/absent until the operator chooses.
+            "model_filter": core.model_filter,
+            "model_options": core.model_options_override,
         }
     )
 
@@ -240,6 +294,7 @@ def load_inventory(active_id: str) -> dict:
             "loaded": False,
             "error": None,
             "warnings": [],
+            "notes": [],
             # CTR-0143 v2 (PRP-0117): a custom agent is a YAML file, so the management
             # modal offers Edit / Delete even when it currently fails to map.
             "editable": True,
@@ -255,6 +310,7 @@ def load_inventory(active_id: str) -> dict:
             entry["description"] = spec.description
             entry["loaded"] = True
             entry["warnings"] = spec.warnings
+            entry["notes"] = spec.notes
             entry["tool_allowlist"] = spec.tool_allowlist
         except DeclarativeAgentError as exc:
             entry["error"] = str(exc)

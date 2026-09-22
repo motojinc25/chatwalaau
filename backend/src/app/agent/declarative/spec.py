@@ -72,7 +72,16 @@ class DeclarativeAgentSpec:
     tool_allowlist: list[str] | None = None
 
     # Non-fatal mapping notes (ignored fields) surfaced in the inventory (D3/D5).
+    # ANY entry here BLOCKS activation (UDR-0072 D9), so a field that merely became
+    # redundant does not belong in this list -- see `notes`.
     warnings: list[str] = field(default_factory=list)
+
+    # Purely informational mapping notes (PRP-0184, UDR-0166 D6). Surfaced beside
+    # `warnings` and NEVER blocking. Introduced because PRP-0184 stopped mapping
+    # `model.options.verbosity` (it is derived from the effort now): reporting that
+    # as a warning would have made every existing agent YAML carrying the line
+    # un-activatable at upgrade, turning a redundant field into an outage.
+    notes: list[str] = field(default_factory=list)
 
 
 __all__ = [

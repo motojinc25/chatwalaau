@@ -40,7 +40,13 @@ from typing import Any
 
 from app import models_catalog
 from app.core.config import settings
-from app.providers.base import hosted_tool_withheld
+from app.providers.base import (
+    EFFORT_DEFAULT,
+    EFFORT_LEVELS,
+    hosted_tool_withheld,
+    max_output_tokens_for,
+    resolve_effort_level,
+)
 from app.providers.structured import (
     CLOSED_ANSWER_SCHEMA,
     effective_schema,
@@ -53,27 +59,12 @@ logger = logging.getLogger(__name__)
 NAME = "anthropic"
 
 # Reasoning effort catalog (PRP-0071, UDR-0047 D2). Anthropic adaptive-thinking
-# effort levels for Claude Opus 4.7 / 4.8: low / medium / high / xhigh / max
-# (xhigh sits between high and max; available on Opus 4.7+). The effort is sent
-# in a separate output_config object (NOT inside thinking) per the Anthropic API.
-ANTHROPIC_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
-ANTHROPIC_EFFORT_DEFAULT = "xhigh"
-
-# Total output budget (thinking + visible text) per effort level. Anthropic
-# counts BOTH adaptive-thinking tokens AND the answer against max_tokens, so a
-# small cap lets high-effort thinking starve the answer: observed ~70s of xhigh
-# thinking on Opus 4.8, then a single-character reply that stopped at
-# stop_reason=max_tokens. Each effort therefore needs a far larger cap than the
-# 8192 baseline. These tiers are within Claude Opus 4.7/4.8 output limits;
-# ANTHROPIC_MAX_TOKENS acts as a floor an operator can raise further (e.g. for a
-# model with a larger output window), never a value that can lower the tier.
-ANTHROPIC_EFFORT_MAX_TOKENS: dict[str, int] = {
-    "low": 8192,
-    "medium": 16000,
-    "high": 32000,
-    "xhigh": 48000,
-    "max": 64000,
-}
+# effort levels: low / medium / high / xhigh / max (xhigh sits between high and
+# max). The effort is sent in a separate output_config object (NOT inside
+# thinking) per the Anthropic API. Since PRP-0184 this is the SHARED ladder --
+# the OpenAI lane offers the same five levels and the same default (UDR-0166 D5).
+ANTHROPIC_EFFORT_LEVELS: tuple[str, ...] = EFFORT_LEVELS
+ANTHROPIC_EFFORT_DEFAULT = EFFORT_DEFAULT
 
 # One INFO log line per active hosting lane per process (mirrors UDR-0034).
 _logged_lanes: set[str] = set()
@@ -338,11 +329,20 @@ class AnthropicProvider:
         return _caching_client_class(AnthropicClient)(**kwargs)
 
     def model_options_catalog(self, model: str) -> dict[str, Any]:
-        # Generalized per-model option catalog (PRP-0081, UDR-0057 D2/D3). Opus
-        # 4.7/4.8 advertise reasoning effort ONLY. temperature / top_p / top_k are
+        # Generalized per-model option catalog (PRP-0081, UDR-0057 D2/D3). Adaptive
+        # thinking advertises reasoning effort ONLY. temperature / top_p / top_k are
         # removed on adaptive-thinking models and the Messages API returns HTTP 400
         # if sent, so they are NEVER advertised (UDR-0057 D3); verbosity is an
-        # OpenAI-only control. Fixed, backend-owned; the operator picks per message.
+        # OpenAI-only control, and since PRP-0184 it is derived there rather than
+        # chosen (UDR-0166 D6).
+        #
+        # PRP-0184 / UDR-0166 D3: this lane now CONSULTS the offering's `family`,
+        # which it never did. UDR-0087 D6 promised the override for every provider
+        # and only the OpenAI and Foundry lanes implemented it, so a `family: bare`
+        # Anthropic offering used to be advertised -- and served -- as if it were a
+        # reasoning model.
+        if models_catalog.offering_family(model) == "bare":
+            return {"options": []}
         return {
             "options": [
                 {
@@ -356,30 +356,36 @@ class AnthropicProvider:
 
     def reasoning_catalog(self, model: str) -> dict[str, Any]:
         # Derived effort-axis view of model_options_catalog (back-compat for the
-        # GET /api/model reasoning_options map, CTR-0069 v4).
+        # GET /api/model reasoning_options map, CTR-0069 v4). `family: bare`
+        # advertises no effort axis (UDR-0166 D3), matching the other lanes.
+        if models_catalog.offering_family(model) == "bare":
+            return {"allowed": [], "default": None}
         return {"allowed": list(ANTHROPIC_EFFORT_LEVELS), "default": ANTHROPIC_EFFORT_DEFAULT}
 
     def build_model_options(self, model: str, selected: dict[str, Any] | None = None) -> dict[str, Any]:
-        # Adaptive thinking is the only supported mode on Opus 4.7 / 4.8 (manual
-        # thinking.type=enabled + budget_tokens returns HTTP 400). The effort
-        # level goes in a separate output_config object; display=summarized keeps
-        # the thinking blocks populated for the reasoning UI (CTR-0017, UDR-0047
-        # D5/F3).
+        # A `family: bare` offering builds a BARE request on this lane too
+        # (PRP-0184, UDR-0166 D3) -- the branch the OpenAI and Foundry lanes have
+        # had since PRP-0109 and this one never did.
+        if models_catalog.offering_family(model) == "bare":
+            return {}
+        # Adaptive thinking is the only supported mode (manual thinking.type=enabled
+        # + budget_tokens returns HTTP 400). The effort level goes in a separate
+        # output_config object; display=summarized keeps the thinking blocks
+        # populated for the reasoning UI (CTR-0017, UDR-0047 D5/F3). Both are FIXED
+        # and unselectable (UDR-0166 D6).
         #
         # max_tokens caps thinking + text TOGETHER, so it must scale with the
         # effort or high-effort thinking starves the visible answer to ~1 token
-        # (the xhigh "one character then stops" defect). Use the per-effort tier,
-        # floored by the operator's ANTHROPIC_MAX_TOKENS so a larger configured
-        # value still wins.
-        selected = selected or {}
-        effort = selected.get("effort")
-        chosen = effort if effort in ANTHROPIC_EFFORT_LEVELS else ANTHROPIC_EFFORT_DEFAULT
-        effort_budget = ANTHROPIC_EFFORT_MAX_TOKENS.get(chosen, ANTHROPIC_EFFORT_MAX_TOKENS["high"])
-        max_tokens = max(settings.anthropic_max_tokens, effort_budget)
+        # (the xhigh "one character then stops" defect). Since PRP-0184 the tier
+        # comes from the SHARED table and is used as-is: the ANTHROPIC_MAX_TOKENS
+        # floor is gone with the setting (UDR-0166 D7), because a floor an operator
+        # had raised silently flattened the whole ladder -- a 64000 floor gave
+        # `low` the same budget as `max`.
+        effort = resolve_effort_level(selected)
         return {
-            "max_tokens": max_tokens,
+            "max_tokens": max_output_tokens_for(effort),
             "thinking": {"type": "adaptive", "display": "summarized"},
-            "output_config": {"effort": chosen},
+            "output_config": {"effort": effort},
         }
 
     def web_search_tool(self, model: str) -> Any:

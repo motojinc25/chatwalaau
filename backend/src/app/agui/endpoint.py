@@ -69,7 +69,6 @@ from app.core.config import settings
 from app.demo import is_demo_mode
 from app.image_gen.tools import current_image_options as _image_gen_options
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
-from app.providers.structured import resolve_request as resolve_structured_request
 from app.providers.structured import soft_validate
 
 logger = logging.getLogger(__name__)
@@ -1244,12 +1243,19 @@ async def _stream_with_reasoning(
         # Convert AG-UI messages to MAF Message objects
         messages, _ = normalize_agui_input_messages(sanitized_messages)
 
+        # The EFFECTIVE model is the run-target's own: the YAML-bound offering for a
+        # harness run, otherwise the registry default that the active Prompt agent's
+        # `model_filter` selected (PRP-0184, UDR-0166 D1). Resolved HERE, before the
+        # first per-model decision below, and reused for the usage event.
+        effective_model = _harness_ctx[2] if harness_run else agent_registry.default_model
+
         # Inject image + PDF content from the request into MAF messages (CTR-0022).
         # A PDF is attached natively (like an image) for providers that support it,
         # else its text is extracted (PRP-0116, UDR-0099); resolve the mode from the
-        # requested model's provider.
-        _pdf_model = request_body.state.get("model") if request_body.state else None
-        _inject_image_content(messages, request_body.messages, pdf_native=_pdf_wants_native(_pdf_model))
+        # provider of the model that will ANSWER. Before PRP-0184 this read
+        # `state.model`, which is now accepted and ignored (UDR-0166 D2) -- so the
+        # decision would have been made from a value the rest of the turn discards.
+        _inject_image_content(messages, request_body.messages, pdf_native=_pdf_wants_native(effective_model))
 
         # Create session with metadata (same as _agent_run.py:685-691). A harness
         # run reuses the per-conversation CACHED session instead, so its in-memory
@@ -1260,16 +1266,22 @@ async def _stream_with_reasoning(
             "ag_ui_run_id": run_id,
         }
 
-        # Read model and reasoning options from AG-UI state (CTR-0070, CTR-0009
-        # reasoning PRP-0071). Legacy `state.background` / `state.continuation_token`
-        # keys are not read: Background Responses was retired and a stale client's
-        # keys are ignored, never rejected (PRP-0172, UDR-0154 D2).
-        selected_model = None
-        requested_options: dict[str, Any] = {}
+        # Read the per-run AG-UI state (CTR-0009).
+        #
+        # PRP-0184 / UDR-0166 D1/D2: the GENERATION keys are no longer read on ANY
+        # run-target. `state.model`, `state.model_options`, `state.reasoning`,
+        # `state.output_schema` and `state.output_format` are ACCEPTED AND IGNORED --
+        # never rejected -- so a stale SPA or a third-party AG-UI client keeps working
+        # and simply gets the run-target's own configuration. This is the same posture
+        # PRP-0172 / UDR-0154 D2 took for the retired Background Responses keys
+        # (`state.background` / `state.continuation_token`), and it generalizes what
+        # UDR-0119 D3 already did for the Harness run-target to all four.
+        #
+        # What the state still carries is per-run context that is NOT a generation
+        # option: the image-tool defaults and the Temporary Chat flag.
         temporary = False
         image_options: dict[str, Any] = {}
         if request_body.state:
-            selected_model = request_body.state.get("model")
             # Per-session image output options (PRP-0085, CTR-0120/CTR-0049,
             # UDR-0063 D6). The SPA sends state.image_options
             # {size, quality, format, compression, background}; it becomes the tool
@@ -1277,114 +1289,66 @@ async def _stream_with_reasoning(
             raw_image_options = request_body.state.get("image_options")
             if isinstance(raw_image_options, dict):
                 image_options = {k: v for k, v in raw_image_options.items() if v not in (None, "")}
-            # Per-message generation options (PRP-0081, CTR-0009 v13). The SPA
-            # sends a `state.model_options` object (e.g. {effort, verbosity}).
-            # Back-compat (UDR-0057): a legacy `state.reasoning` string is folded
-            # in as {effort: <value>} when model_options omits effort.
-            raw_options = request_body.state.get("model_options")
-            if isinstance(raw_options, dict):
-                requested_options = dict(raw_options)
-            legacy_reasoning = request_body.state.get("reasoning")
-            if legacy_reasoning and "effort" not in requested_options:
-                requested_options["effort"] = legacy_reasoning
             # Temporary Chat (PRP-0076, CTR-0106, UDR-0052). When the SPA marks
             # the run temporary the thread_id is temp_-prefixed and routes to the
             # .temporary/ quarantine (CTR-0014); below we skip the Memory snapshot
             # and no-op the memory tool for a de-personalized, Identity-only run.
             temporary = bool(request_body.state.get("temporary", False))
 
-        # Structured output (PRP-0082, CTR-0009 v14, UDR-0058). Resolve the additive
-        # `state.output_schema` (object) / `state.output_format` (mode) into an
-        # (explicit schema, mode) pair. mode == "none" means structured output is off
-        # (default) and the request stays byte-for-byte (UDR-0058 D7).
-        output_schema, output_format = resolve_structured_request(request_body.state)
-        structured_active = output_format != "none"
-
-        # Harness run-target (PRP-0135, UDR-0119 D3): the per-message Model /
-        # options / Structured Output controls do NOT apply -- the
-        # harness YAML fixes the model and the factory fixes the policies
-        # (CTR-0193). CTR-0197 hides the controls; ignoring the state here is
-        # defense-in-depth so a stale client value can never leak into the run.
-        if harness_run:
-            selected_model = None
-            requested_options = {}
-            output_schema, output_format = None, "none"
-            structured_active = False
-
         # Select agent: the harness run-target's cached agent (CTR-0193, UDR-0119
-        # D3) or the registry agent for state.model (CTR-0070, PRP-0035).
-        agent = _harness_ctx[0] if harness_run else agent_registry.get(selected_model)
+        # D3) or the registry's DEFAULT agent (CTR-0070). Since PRP-0184 there is no
+        # per-message model: the registry default is the run-target's own model --
+        # the Built-in agent's persisted `core_agent_model` or the active custom
+        # agent's `model.id`, both arriving through `spec.model_filter` (UDR-0166 D1).
+        agent = _harness_ctx[0] if harness_run else agent_registry.get(None)
 
-        # Resolve the per-message generation options against the owning provider's
-        # catalog (PRP-0081, UDR-0057 D7). Every advertised option is resolved
-        # (effort plus, for gpt-5.x, verbosity); a missing / invalid value falls
-        # back to the model default and never errors. The resolved values are
-        # emitted in the usage event regardless of provider; the per-request
-        # options are merged only for live (non-demo) agents -- DemoChatClient
-        # ignores them. `resolved_reasoning` is kept as the effort alias used by
-        # the usage event's back-compat `reasoning` field.
-        # A harness run reports the YAML-bound offering as the effective model
-        # (usage events); the per-message
-        # option resolution below stays inert for it ({} everywhere).
-        effective_model = _harness_ctx[2] if harness_run else (selected_model or agent_registry.default_model)
-        resolved_options = {} if harness_run else providers.resolve_options(effective_model, requested_options)
-
-        # Active declarative agent option DEFAULTS (PRP-0094, CTR-0142, UDR-0072 D5).
-        # The agent's mapped options (effort / verbosity) are applied for any option the
-        # operator has NOT explicitly changed in the chat panel -- i.e. the panel still
-        # reports the model's catalog default -- and are overridden by an explicit
-        # per-message selection. This makes the active agent's options actually take
-        # effect (the panel always reports a full selection, so they cannot ride on the
-        # agent's startup default_options alone) while preserving per-message override.
+        # Resolve the run-target's option selection against the owning provider's
+        # catalog, for the USAGE ECHO only (UDR-0166 D13). The request itself no
+        # longer carries generation options: they were built once, at agent
+        # construction, from this same selection (agent_registry / harness factory /
+        # workflow builder), so rebuilding them here would be a second lane -- the
+        # one PRP-0184 removed.
+        #
+        # A harness run echoes nothing: its effort lives in the harness YAML and is
+        # reported by the CTR-0192 policy summary instead.
         spec = active_spec()
-        spec_opts = {} if harness_run else (spec.model_options_override or {})
-        if spec_opts:
-            catalog_defaults = {
-                d["key"]: d.get("default") for d in providers.model_options_catalog(effective_model)["options"]
-            }
-            for key, value in spec_opts.items():
-                if resolved_options.get(key) == catalog_defaults.get(key):
-                    resolved_options[key] = value
-        # The agent's default structured output applies when the chat has not explicitly
-        # enabled structured output (UDR-0072 D5; per-message control still wins).
-        # Never for a harness run (the active Prompt agent's defaults are not its own).
-        if not harness_run and not structured_active and spec.structured_output is not None:
+        resolved_options = (
+            {} if harness_run else providers.resolve_options(effective_model, spec.model_options_override)
+        )
+
+        # Structured output (PRP-0082, CTR-0009 v14, UDR-0058) now comes from the
+        # run-target definition ALONE (UDR-0166 D10): the active Prompt agent's
+        # `outputSchema`. The per-message `state.output_schema` / `state.output_format`
+        # keys are ignored (D2), and a harness run never takes the active Prompt
+        # agent's defaults -- they are not its own.
+        output_schema: dict | None = None
+        output_format = "none"
+        if not harness_run and spec.structured_output is not None:
             output_schema = spec.structured_output.get("schema")
             output_format = spec.structured_output.get("mode", "json_schema")
-            structured_active = output_format != "none"
+        structured_active = output_format != "none"
 
         # PRP-0131 / UDR-0058 D9 removed the PRP-0131 pre-run guard: a request with no
         # schema is no longer unsatisfiable, because each provider now supplies its own
         # DEFAULT output schema (open where it can express one, a valid closed object
         # where it cannot). There is nothing left to refuse.
 
-        resolved_reasoning = resolved_options.get("effort", providers.resolve_effort(effective_model, None))
+        resolved_reasoning = (
+            resolved_options.get("effort")
+            if harness_run
+            else resolved_options.get("effort", providers.resolve_effort(effective_model, None))
+        )
 
+        # Run options carry NO generation options (UDR-0166 D1). Everything the model
+        # is told about how to think -- effort, the derived verbosity and output
+        # budget, the thinking block, the structured-output format -- is already in the
+        # Agent's `default_options`, built from the run-target's definition. What still
+        # goes per-run is the prompt remainder (`instructions`, below).
+        #
         # Never a background run, and never a per-request `store` override: the Prompt
         # lane stays CLIENT-MANAGED (default_options store=False, PRP-0142) on every
         # turn (PRP-0172, UDR-0154 D1).
         run_options: dict[str, Any] = {}
-        # Per-request generation options override the Agent's startup
-        # default_options via MAF _merge_options (per key). Only when the client
-        # explicitly chose at least one option; otherwise the Agent's
-        # catalog-default options already apply. build_model_options keeps the
-        # output-neutral default rule (a default value is omitted), so a default
-        # selection is byte-for-byte with the construction-time options.
-        #
-        # Structured output (PRP-0082, UDR-0058 D2) folds into the same merge: when a
-        # schema is requested we ALWAYS build the model options (so the provider's
-        # native option container -- OpenAI `text`, Anthropic `output_config` -- is
-        # present with its effort/verbosity defaults) and then deep-merge the
-        # structured fragment into it via merge_generation_options, so the format and
-        # the effort/verbosity coexist instead of clobbering each other.
-        if (requested_options or structured_active or spec_opts) and not is_demo_mode():
-            gen_options = providers.build_model_options(effective_model, resolved_options)
-            if structured_active:
-                providers.merge_generation_options(
-                    gen_options,
-                    providers.build_structured_output(effective_model, output_schema, output_format),
-                )
-            providers.merge_generation_options(run_options, gen_options)
 
         # Temporary Chat (PRP-0076, CTR-0106, UDR-0052) vs normal run.
         # Temporary: de-personalized. No User Profile snapshot is captured or
@@ -1527,7 +1491,7 @@ async def _stream_with_reasoning(
         logger.info(
             "AG-UI run start: thread=%s model=%s harness=%s input_msgs=%d",
             thread_id,
-            effective_model if harness_run else (selected_model or "<default>"),
+            effective_model or "<default>",
             _harness_id or "-",
             len(messages),
         )
@@ -1889,27 +1853,26 @@ async def _stream_with_reasoning(
                     last_usage = dict(usage_details)
                     model_calls += 1
                     # PRP-0144 / UDR-0125 D5: attribute usage to the offering
-                    # that actually SERVED the turn. `effective_model` already
-                    # resolves to the harness run-target's bound offering for a
-                    # harness run and to the selected/default model otherwise;
-                    # reading `selected_model` back here reported another
-                    # model's context window, because a harness run
-                    # deliberately clears it (the per-message controls must not
-                    # leak into a run-target run).
+                    # that actually SERVED the turn. `effective_model` resolves to
+                    # the harness run-target's bound offering for a harness run and
+                    # to the active Prompt agent's model otherwise -- since PRP-0184
+                    # there is no other candidate, because the model is the
+                    # run-target's (UDR-0166 D1).
                     model_name = effective_model
                     # Catalog context window (CTR-0069, PRP-0113): an offering's
                     # declared context_window wins, else DEFAULT_CONTEXT_WINDOW.
                     usage_value["max_context_tokens"] = providers.get_max_context_tokens(model_name)
                     usage_value["model"] = model_name
-                    # Per-message generation options (PRP-0071 / PRP-0081,
-                    # CTR-0030). The effort keeps its back-compat field name
-                    # `reasoning`; every other advertised option (e.g.
-                    # `verbosity`) is echoed under its own key. Emitted for
-                    # every provider (incl. demo) so the SPA can label and
-                    # persist the selections next to the model name. Anthropic
-                    # advertises effort only, so no extra key appears there.
-                    # None = the model advertises no effort axis (e.g. a
-                    # non-OpenAI-family Foundry deployment, UDR-0085 A1);
+                    # The turn's generation options (PRP-0071 / PRP-0081,
+                    # CTR-0030), sourced since PRP-0184 from the RUN-TARGET's
+                    # resolved selection rather than from the request
+                    # (UDR-0166 D13). The effort keeps its back-compat field
+                    # name `reasoning`; effort is the only advertised option
+                    # now, so no extra key appears. Emitted for every provider
+                    # (incl. demo) so the SPA can label and persist it next to
+                    # the model name. None = the model advertises no effort
+                    # axis (a `family: bare` offering, UDR-0166 D3, or a harness
+                    # run, whose effort the CTR-0192 policy summary reports);
                     # omit the key rather than echo null.
                     if resolved_reasoning is not None:
                         usage_value["reasoning"] = resolved_reasoning

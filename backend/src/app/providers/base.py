@@ -25,6 +25,53 @@ logger = logging.getLogger(__name__)
 _logged_withheld: set[str] = set()
 
 
+# ---- The one reasoning-effort ladder (PRP-0184, UDR-0166 D5) ---------------
+# Both reasoning families -- OpenAI (`reasoning.effort`) and Anthropic adaptive
+# thinking (`output_config.effort`) -- offer the SAME five levels with the SAME
+# default. Before PRP-0184 the two ladders had drifted (OpenAI stopped at xhigh
+# and defaulted to medium), which made "the same effort" mean two things
+# depending on which model answered. `family: bare` advertises no effort axis at
+# all and is unaffected.
+EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+EFFORT_DEFAULT = "xhigh"
+
+# ---- Derived output budget (UDR-0166 D6/D7) -------------------------------
+# One table for both reasoning families. A reasoning model counts its thinking
+# tokens against the output budget, so the budget MUST scale with the effort or
+# high-effort thinking starves the visible answer (the xhigh "one character then
+# stops" defect that produced the original Anthropic tiers).
+#
+# This is a PROVIDER CONSTANT by decision (UDR-0166 D7): no per-offering ceiling
+# and no operator floor. It is safe only while every operated offering's own
+# output ceiling contains 96000, which is true of the current model generation
+# (PRP-0184 Q4). A future offering with a smaller ceiling would be REJECTED by
+# its provider at `max` -- loudly, on its first turn -- and is the signal that
+# this table has to become a per-offering declaration.
+EFFORT_MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "low": 16000,
+    "medium": 32000,
+    "high": 48000,
+    "xhigh": 64000,
+    "max": 96000,
+}
+
+
+def resolve_effort_level(selected: dict[str, Any] | None) -> str:
+    """Return the effort from ``selected``, or the shared default (UDR-0166 D5).
+
+    Never raises and never passes an unknown value through: an effort outside the
+    ladder resolves to the default, so a hand-edited YAML or a stale stored
+    setting can never produce a provider validation error.
+    """
+    effort = (selected or {}).get("effort")
+    return effort if effort in EFFORT_LEVELS else EFFORT_DEFAULT
+
+
+def max_output_tokens_for(effort: str) -> int:
+    """Output budget for ``effort`` (UDR-0166 D6). Unknown -> the default tier."""
+    return EFFORT_MAX_OUTPUT_TOKENS.get(effort, EFFORT_MAX_OUTPUT_TOKENS[EFFORT_DEFAULT])
+
+
 @runtime_checkable
 class Provider(Protocol):
     """Provider seam consumed by ``app.providers`` dispatch and CTR-0070."""
@@ -87,12 +134,17 @@ class Provider(Protocol):
     def build_model_options(self, model: str, selected: dict[str, Any] | None = None) -> dict[str, Any]:
         """Per-model Agent ``default_options`` (provider-specific shape).
 
-        ``selected`` maps advertised option keys to chosen values
-        (e.g. ``{"effort": "high", "verbosity": "low"}``). ``None``, missing, or
-        invalid / out-of-range values resolve to the catalog default (UDR-0057
-        D7). A resolved value equal to its default is OMITTED from the request so
-        the un-changed path stays byte-for-byte (output-neutral default, UDR-0057
-        D6).
+        ``selected`` carries the run-target's option selection -- since PRP-0184
+        that is ``{"effort": <level>}`` and nothing else (UDR-0166 D6). ``None``,
+        missing, or invalid values resolve to the shared default
+        (:func:`resolve_effort_level`).
+
+        Every other generation parameter is DERIVED from the effort or FIXED, and
+        the derived value is ALWAYS sent. This retires UDR-0057 D6's
+        output-neutral omission rule: with verbosity derived there is no
+        "unchanged default" left to preserve, and a request whose shape depends on
+        whether a value happened to equal its default is harder to reason about
+        than one that always states it.
         """
         ...
 

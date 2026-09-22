@@ -33,12 +33,9 @@ export type EntryId =
   | 'sidebar.memory'
   | 'sidebar.appSettings'
   // composer toolbar
-  | 'toolbar.model'
-  | 'toolbar.modelOptions'
   | 'toolbar.contextWindow'
   | 'toolbar.runTargetLabel'
   | 'toolbar.runTargetAction'
-  | 'toolbar.structuredOutput'
   | 'toolbar.imageOutput'
   | 'toolbar.mcpTools'
   | 'toolbar.skills'
@@ -89,14 +86,15 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   'sidebar.cron': 'wide-only',
   'sidebar.memory': 'wide-only',
   'sidebar.appSettings': 'wide-only',
-  'toolbar.model': 'all',
-  'toolbar.modelOptions': 'all',
+  // PRP-0184 / UDR-0166 D1: `toolbar.model`, `toolbar.modelOptions` and
+  // `toolbar.structuredOutput` are GONE from this table with the controls they gated.
+  // Model, reasoning effort and structured output are configured on the run-target, so
+  // there is no composer entry left to admit or withhold per tier.
   'toolbar.contextWindow': 'all',
   'toolbar.runTargetLabel': 'all',
   // PRP-0176 / UDR-0158 D1: the action exists on both tiers; only its DESTINATION
   // differs (the wide manager modal, or the narrow run-target picker, CTR-0216).
   'toolbar.runTargetAction': 'all',
-  'toolbar.structuredOutput': 'wide-only',
   'toolbar.imageOutput': 'wide-only',
   'toolbar.mcpTools': 'wide-only',
   'toolbar.skills': 'wide-only',

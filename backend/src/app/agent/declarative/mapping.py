@@ -9,7 +9,7 @@ module:
    UDR-0072 D2).
 2. Maps the fields ChatWalaʻau understands onto a ``DeclarativeAgentSpec``:
    ``instructions`` -> Identity slot #1 (D6); ``model.id`` -> model selection (D4);
-   ``model.options`` -> reasoning effort / verbosity only (D5); ``outputSchema`` ->
+   ``model.options`` -> reasoning effort only (D5, UDR-0166 D6); ``outputSchema`` ->
    structured output (D5).
 3. REJECTS incompatible model options (temperature / top_p / top_k / seed / ...)
    with a visible ``DeclarativeAgentError`` (D5), and IGNORES credentials /
@@ -34,6 +34,7 @@ from app.agent.declarative.tool_ids import (
     mcp_tool_id,
     skill_id,
 )
+from app.providers.base import EFFORT_LEVELS
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +56,18 @@ _REJECTED_OPTION_KEYS = {
 }
 
 # model.options keys ChatWalaʻau MAPS (everything else is ignored with a warning).
+# Since PRP-0184 (UDR-0166 D6) effort is the ONLY mapped generation option: verbosity
+# is derived from it, so a `verbosity` line is redundant rather than wrong and is
+# reported as an informational NOTE, never a warning (a warning would block
+# activation under UDR-0072 D9 and take existing agents offline at upgrade).
 _EFFORT_KEYS = {"effort", "reasoningeffort"}
 _VERBOSITY_KEYS = {"verbosity", "textverbosity"}
 
-# Valid generation-option values (union across providers; see the EFFORT / VERBOSITY
-# level constants in app.providers.{azure_openai,anthropic}). Validated here so a typo
-# (e.g. effort: ultra) is reported as a warning -- which, per UDR-0072 D9, blocks
-# activation -- instead of silently falling back to the model default at run time.
-_ALLOWED_EFFORT = {"low", "medium", "high", "xhigh", "max"}
-_ALLOWED_VERBOSITY = {"low", "medium", "high"}
+# Valid effort values (the shared ladder, app.providers.base.EFFORT_LEVELS).
+# Validated here so a typo (e.g. effort: ultra) is reported as a warning -- which,
+# per UDR-0072 D9, blocks activation -- instead of silently falling back to the
+# model default at run time.
+_ALLOWED_EFFORT = set(EFFORT_LEVELS)
 
 
 def _norm_key(key: str) -> str:
@@ -107,12 +111,15 @@ def _validate_with_maf(text: str) -> None:
         raise DeclarativeAgentError(f"MAF declarative validation failed: {exc}") from exc
 
 
-def _map_model(data: dict[str, Any], warnings: list[str]) -> tuple[list[str] | None, dict | None]:
+def _map_model(data: dict[str, Any], warnings: list[str], notes: list[str]) -> tuple[list[str] | None, dict | None]:
     """Map the YAML ``model`` block to (model_filter, model_options_override).
 
     Honors ``model.id`` for selection (D4) and ``model.options`` for the compatible
     subset only (D5). Rejects sampling params; ignores connection / credentials and
     unknown options with a warning (D3). ``model.id`` may be a scalar or a list.
+
+    A field that became REDUNDANT rather than wrong goes on ``notes``, which never
+    blocks activation (PRP-0184, UDR-0166 D6).
     """
     model = data.get("model")
     if model is None:
@@ -159,14 +166,14 @@ def _map_model(data: dict[str, Any], warnings: list[str]) -> tuple[list[str] | N
                 else:
                     selected["effort"] = sval
             elif nk in _VERBOSITY_KEYS:
-                sval = str(val)
-                if sval not in _ALLOWED_VERBOSITY:
-                    warnings.append(
-                        f"model.options.{key}={sval!r} is not a valid verbosity "
-                        f"(allowed: {', '.join(sorted(_ALLOWED_VERBOSITY))})."
-                    )
-                else:
-                    selected["verbosity"] = sval
+                # PRP-0184 / UDR-0166 D6: verbosity is derived from the effort and is
+                # no longer a selectable option. A NOTE, not a warning -- the line is
+                # redundant, and blocking activation over it would break every agent
+                # that was configured while it was selectable.
+                notes.append(
+                    f"model.options.{key} is no longer used: verbosity follows the reasoning "
+                    "effort (low -> low, medium -> medium, high / xhigh / max -> high)."
+                )
             else:
                 warnings.append(f"model.options.{key} ignored (not a ChatWalaʻau-mapped option).")
     elif options is not None:
@@ -287,12 +294,14 @@ def map_document(
 
     Raises ``DeclarativeAgentError`` on malformed YAML or a rejected option (D5/D9);
     records non-fatal notes (ignored connection / unknown options / unmappable
-    outputSchema) on ``spec.warnings`` (D3).
+    outputSchema) on ``spec.warnings`` (D3), and purely informational ones on
+    ``spec.notes``, which never block activation (UDR-0166 D6).
     """
     _validate_with_maf(text)
     data = parse_yaml(text)
 
     warnings: list[str] = []
+    notes: list[str] = []
 
     name = str(data.get("name") or data.get("displayName") or default_name or agent_id)
     # ``displayName`` is ALSO kept separately (v0.112.1) so the management UI can show a
@@ -309,7 +318,7 @@ def map_document(
         if stripped and stripped != IDENTITY_SENTINEL:
             instructions_override = instr
 
-    model_filter, model_options_override = _map_model(data, warnings)
+    model_filter, model_options_override = _map_model(data, warnings, notes)
     structured_output = _map_output_schema(data, warnings)
     tool_allowlist = _map_tools(data, warnings)
 
@@ -326,6 +335,7 @@ def map_document(
         structured_output=structured_output,
         tool_allowlist=tool_allowlist,
         warnings=warnings,
+        notes=notes,
     )
 
 

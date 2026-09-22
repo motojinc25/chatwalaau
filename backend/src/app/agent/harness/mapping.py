@@ -21,6 +21,7 @@ from app.agent.harness.spec import (
     HarnessAgentError,
     HarnessAgentSpec,
 )
+from app.providers.base import EFFORT_LEVELS
 
 logger = logging.getLogger(__name__)
 
@@ -113,31 +114,74 @@ def _positive_int(block: dict[str, Any], key: str, prefix: str, warnings: list[s
     return raw
 
 
-def _map_model(data: dict[str, Any], warnings: list[str]) -> str:
-    """Map ``model`` to exactly ONE catalog offering id (UDR-0119 D2/D10)."""
+def _map_model(data: dict[str, Any], warnings: list[str]) -> tuple[str, str]:
+    """Map ``model`` to (offering id, reasoning effort) (UDR-0119 D2/D10, UDR-0166 D11).
+
+    ``model.options.effort`` is NEW in PRP-0184. Until then the harness factory never
+    called ``providers.build_model_options()`` at all, so a harness run sent no
+    reasoning effort, no thinking block and no output budget -- the run-target with the
+    longest, most reasoning-bound work was the one using the provider's bare defaults.
+    An empty effort means "the model family's default".
+    """
     model = data.get("model")
     if model is None:
         warnings.append("model.id is required: name exactly one catalog offering.")
-        return ""
+        return "", ""
     if isinstance(model, str):
-        return model.strip()
+        return model.strip(), ""
     if not isinstance(model, dict):
         warnings.append("model must be a mapping with an 'id' key.")
-        return ""
+        return "", ""
     # Credentials / connection are NEVER honored (UDR-0119 D10).
     if "connection" in model:
         warnings.append("model.connection ignored; ChatWalaʻau resolves credentials and endpoints itself.")
     warnings.extend(
-        f"model.{key} ignored (not a harness-mapped field)." for key in model if key not in ("id", "connection")
+        f"model.{key} ignored (not a harness-mapped field)."
+        for key in model
+        if key not in ("id", "connection", "options")
     )
     raw_id = model.get("id")
     if isinstance(raw_id, list):
         warnings.append("model.id must name exactly ONE offering (a harness agent binds one client).")
-        return ""
+        return "", ""
     model_id = str(raw_id or "").strip()
     if not model_id:
         warnings.append("model.id is required: name exactly one catalog offering.")
-    return model_id
+    return model_id, _map_model_effort(model, warnings)
+
+
+def _map_model_effort(model: dict[str, Any], warnings: list[str]) -> str:
+    """Map ``model.options.effort``; "" means the family default (UDR-0166 D11).
+
+    Effort is the ONLY generation option a harness YAML may set: verbosity, the
+    reasoning summary, the thinking mode and the output budget are all derived from it
+    or fixed (UDR-0166 D6). An invalid value is a blocking warning, as ``model.id``
+    already is (UDR-0119 D8) -- a typo must not silently become the default.
+    """
+    options = model.get("options")
+    if options is None:
+        return ""
+    if not isinstance(options, dict):
+        warnings.append("model.options ignored (expected a mapping).")
+        return ""
+    effort = ""
+    for key, val in options.items():
+        nk = str(key).lower().replace("_", "").replace("-", "")
+        if nk in ("effort", "reasoningeffort"):
+            sval = str(val).strip()
+            if sval not in EFFORT_LEVELS:
+                warnings.append(
+                    f"model.options.{key}={sval!r} is not a valid reasoning effort "
+                    f"(allowed: {', '.join(EFFORT_LEVELS)})."
+                )
+            else:
+                effort = sval
+        else:
+            warnings.append(
+                f"model.options.{key} ignored; effort is the only generation option a "
+                "harness declares (verbosity and the output budget follow it)."
+            )
+    return effort
 
 
 def _map_instructions(data: dict[str, Any], warnings: list[str]) -> tuple[str | None, str | None]:
@@ -238,7 +282,7 @@ def map_document(
     display_name = str(data.get("displayName") or "").strip()
     description = str(data.get("description") or "")
 
-    model_id = _map_model(data, warnings)
+    model_id, model_effort = _map_model(data, warnings)
     harness_instructions, agent_instructions = _map_instructions(data, warnings)
     tool_allowlist = _map_tools(data, warnings)
 
@@ -301,6 +345,7 @@ def map_document(
         description=description,
         group_path=group_path,
         model_id=model_id,
+        effort=model_effort,
         harness_instructions=harness_instructions,
         agent_instructions=agent_instructions,
         tool_allowlist=tool_allowlist,
