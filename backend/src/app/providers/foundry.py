@@ -71,7 +71,7 @@ from app import models_catalog
 from app.azure_credential import get_credential
 from app.core.config import settings
 from app.providers.azure_openai import AzureOpenAIProvider, _StructuredOutputMixin
-from app.providers.base import hosted_tool_withheld
+from app.providers.base import capability_withheld
 
 NAME = "foundry"
 
@@ -286,7 +286,7 @@ class FoundryProvider(AzureOpenAIProvider):
         #
         # PRP-0129 / UDR-0112 D1: an offering may declare that its project /
         # deployment cannot serve the hosted tool. Undeclared is unchanged.
-        if hosted_tool_withheld(model, "web_search"):
+        if capability_withheld(model, "web_search"):
             return None
         return _to_plain_json(
             FoundryChatClient.get_web_search_tool(

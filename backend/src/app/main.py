@@ -771,6 +771,17 @@ async def get_model_info():
         # provider's own rejections (never guessed), so the SPA disables a value only
         # after this deployment has actually refused it.
         "image_output": _image_output_capabilities(),
+        # Per-model tool capability states (CTR-0069, PRP-0185, UDR-0167):
+        # model -> {web_search, function_calling, mcp, skills, image_generation,
+        # native_structured_output} as resolved booleans (true = enabled). Published
+        # so a configuration surface can SAY that a model withholds MCP instead of
+        # leaving an operator to infer it from an agent that stopped using a tool.
+        # Every key of the closed set is reported, including the fixed-enabled
+        # `function_calling` (D3), so the UI renders the whole vocabulary without
+        # knowing which rows are actionable. It is NOT a gating input for the tool
+        # PICKER, which stays model-agnostic (CTR-0178): a Custom agent may run on
+        # several models, so there is no single model to ask.
+        "model_capabilities": _model_capabilities_map(),
         # Active declarative agent (CTR-0142 / CTR-0144, PRP-0094, UDR-0072): its
         # mapped option defaults + structured-output default, so the SPA reflects the
         # active agent's effort / verbosity / structured output and refreshes them when
@@ -778,6 +789,24 @@ async def get_model_info():
         # endpoint applies these as defaults); this is for the UI to display.
         "active_agent": _active_agent_info(),
     }
+
+
+def _model_capabilities_map() -> dict:
+    """Resolved capability states per configured model (CTR-0069, PRP-0185).
+
+    Never raises: a capability lookup must not be able to break the model endpoint,
+    and an empty map degrades the DISPLAY rather than the behaviour -- the gates
+    themselves live at the runtime chokepoints (UDR-0167 D5).
+    """
+    try:
+        from app.agent.model_capabilities import capability_states
+
+        return {model: capability_states(model) for model in agent_registry.available_models}
+    except Exception:  # pragma: no cover - defensive
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning("Could not resolve model capabilities", exc_info=True)
+        return {}
 
 
 def _image_output_capabilities() -> dict | None:

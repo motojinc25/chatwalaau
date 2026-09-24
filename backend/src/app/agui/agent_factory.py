@@ -22,7 +22,7 @@ import platform
 from typing import Any
 
 from app import models_catalog
-from app.agent.capability_guidance import ToolGuidance, render_capability_guidance
+from app.agent.capability_guidance import ToolGuidance
 from app.agent.compaction import resolve_compaction_strategy
 from app.agui.agent_registry import AgentRegistry
 from app.core.config import settings
@@ -126,13 +126,23 @@ def _build_tools_and_instructions(
     include_mcp: bool,
     include_rag: bool,
     spec: Any = None,
-) -> tuple[list[Any], list[Any], str, list[Any]]:
-    """Assemble (tools, context_providers, instructions, middleware) from current settings.
+) -> tuple[list[Any], list[Any], list[ToolGuidance], list[Any]]:
+    """Assemble (tools, context_providers, guidance, middleware) from current settings.
 
     PRP-0046 introduces the ``include_mcp`` / ``include_rag`` flags so a
     caller can build an agent without the loop-bound MCP tools and the
     ChromaDB-backed rag_search tool. The workflow prompt node is the consumer
     (UDR-0165 D3).
+
+    PRP-0185 / UDR-0167 D7: the THIRD element is the slot-#3 guidance as a LIST of
+    ``ToolGuidance`` blocks, not the rendered string it used to be. A capability
+    withheld for one model must drop that tool AND its ``<tool-guide>`` block in the
+    same breath (D6), and a rendered string cannot be subset without parsing it back.
+    The consumer that knows the MODEL renders it -- ``AgentRegistry`` through
+    ``subset_for_model()``, the workflow node through
+    ``render_capability_guidance()``. This assembly stays model-agnostic and runs
+    ONCE, because building it again would repeat the SkillsProvider side effect
+    UDR-0130 D1 requires to happen once.
 
     The fourth return element ``middleware`` is the agent-level middleware list
     shared by every per-model Agent. It is EMPTY since PRP-0179 (UDR-0161 D1/D2):
@@ -422,11 +432,12 @@ def _build_tools_and_instructions(
         tools.append(query_ontology)
         guidance.append(ToolGuidance("ontology", ONTOLOGY_TOOL_INSTRUCTION))
 
-    # Render the collected slot-#3 blocks into the capability guidance string
-    # (PRP-0120, CTR-0104 v4, UDR-0103 D1). Each block becomes a <tool-guide
-    # name="..."> tag in append order; an empty list renders "" so the no-tool /
-    # headless path is byte-for-byte "no capability guidance".
-    instructions = render_capability_guidance(guidance)
+    # The collected slot-#3 blocks are returned UNRENDERED (PRP-0185, UDR-0167 D7).
+    # Rendering happens at the consumer, which knows the model and can therefore drop
+    # a withheld capability's block alongside its tools (D6). The renderer and its
+    # <tool-guide name="..."> format are unchanged (PRP-0120, CTR-0104 v4,
+    # UDR-0103 D1): an empty list still renders "" so the no-tool / headless path is
+    # byte-for-byte "no capability guidance".
 
     # No approval wrapping (PRP-0179, UDR-0161 D1): every tool is registered as the
     # plain callable, which MAF builds as never_require. Whether an agent HAS a
@@ -446,18 +457,17 @@ def _build_tools_and_instructions(
         # middleware is attached on any lane (D2).
         context_providers.append(skills_provider)
 
-    # Return the RAW capability instructions (slot #3..). The Identity (slot #1)
-    # and -- when enabled -- the per-session Memory Block (slot #2) are assembled
-    # by the consumer: AgentRegistry bakes Identity-only and supplies the
-    # capability/memory remainder per run when USER_PROFILE_ENABLED, otherwise it
-    # bakes the full Identity+capability prompt (CTR-0104 v2, CTR-0105, UDR-0051
-    # D4).
-    return tools, context_providers, instructions, middleware
+    # Return the slot-#3 guidance BLOCKS. The Identity (slot #1) and -- when enabled
+    # -- the per-session Memory Block (slot #2) are assembled by the consumer:
+    # AgentRegistry bakes Identity-only and supplies the capability/memory remainder
+    # per run when USER_PROFILE_ENABLED, otherwise it bakes the full
+    # Identity+capability prompt (CTR-0104 v2, CTR-0105, UDR-0051 D4).
+    return tools, context_providers, guidance, middleware
 
 
 def create_agent_registry() -> AgentRegistry:
     """Create the AgentRegistry with one Agent per configured model (CTR-0070)."""
-    tools, context_providers, instructions, middleware = _build_tools_and_instructions(
+    tools, context_providers, guidance, middleware = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
     )
@@ -465,7 +475,7 @@ def create_agent_registry() -> AgentRegistry:
     return AgentRegistry(
         tools=tools,
         context_providers=context_providers,
-        instructions=instructions,
+        guidance=guidance,
         compaction_strategy=compaction_strategy,
         middleware=middleware,
     )
@@ -487,14 +497,14 @@ async def rebuild_agent_registry(registry: AgentRegistry) -> None:
     rebuilt agents. The resolver's own INFO line doubles as the operator's record
     of which window the next turn will use.
     """
-    tools, context_providers, instructions, middleware = _build_tools_and_instructions(
+    tools, context_providers, guidance, middleware = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
     )
     await registry.rebuild(
         tools=tools,
         context_providers=context_providers,
-        instructions=instructions,
+        guidance=guidance,
         compaction_strategy=resolve_compaction_strategy(),
         middleware=middleware,
     )

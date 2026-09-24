@@ -5,14 +5,11 @@ import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
 import { ACTIVE_AGENT_CHANGED_EVENT, OPEN_DECLARATIVE_MANAGER_EVENT } from '@/components/DeclarativeAgentManager'
 import { HelpPortal } from '@/components/HelpPortal'
-import { ImageOutputOptions } from '@/components/ImageOutputOptions'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
-import { McpToolManager } from '@/components/McpToolManager'
 import { MessageNavigator } from '@/components/MessageNavigator'
 import { MessageStepButton } from '@/components/MessageStepButton'
 import { OPEN_RUN_TARGET_PICKER_EVENT } from '@/components/RunTargetSheet'
 import { ScrollToBottomButton } from '@/components/ScrollToBottomButton'
-import { SkillsManager } from '@/components/SkillsManager'
 import { PromptTemplatesModal } from '@/components/templates/PromptTemplatesModal'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { EMPTY_WORKFLOW_RUN, reduceWorkflowEvent, type WorkflowRunState } from '@/components/WorkflowProgressPanel'
@@ -209,13 +206,11 @@ export function ChatPanel({
   // Model, reasoning effort and structured output are configured on the run-target
   // -- the Built-in agent card, an agent / harness detail screen, or the narrow
   // run-target picker -- and travel to the provider as the Agent's default_options.
-  // Image output options stay: they are a tool-argument default, not a chat-model
-  // generation option (CTR-0120, PRP-0085).
-  const [selectedImageOptions, setSelectedImageOptions] = useState<Record<string, string>>({})
-
-  const handleImageOptionsChange = useCallback((opts: Record<string, string>) => {
-    setSelectedImageOptions(opts)
-  }, [])
+  // PRP-0185 (UDR-0167 D11): image output options have followed them. They are a
+  // tool-argument default rather than a generation option, which is why PRP-0184 left
+  // them behind -- but they are still the BUILT-IN AGENT's configuration, not a
+  // property of one chat session, so they now live on the Core agent card and are read
+  // server-side. The composer holds no state for them.
 
   // Auto-dismiss notification
   useEffect(() => {
@@ -241,7 +236,6 @@ export function ChatPanel({
     initialMessages,
     onStreamComplete,
     onSessionCreated,
-    selectedImageOptions,
     temporary,
     selectedWorkflowId,
     selectedHarnessId,
@@ -730,10 +724,13 @@ export function ChatPanel({
                 included -- fixes its own model and options, so the composer carries no
                 model / options / structured controls at all and names the run-target
                 instead. The name is the way in to change any of them. */}
+            {/* PRP-0185 (UDR-0167 D11/D13): the image output options, MCP management
+                and Skills management have left the composer. The options are the
+                Built-in agent's configuration (Core agent card) and the two managers
+                are sidebar-footer entries, so the composer carries no administration
+                at all -- the same move PRP-0184 made for model / effort / structured
+                output. */}
             {runTargetIndicator}
-            <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
-            <McpToolManager />
-            <SkillsManager />
             <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
           </div>
           <ChatInput
@@ -793,13 +790,12 @@ export function ChatPanel({
                   because the per-message controls stood in its place; with those gone the
                   desktop gets what the phone already had. */}
               {runTargetIndicator}
-              {/* Narrow viewport (PRP-0171, UDR-0153 D4): administration entries are not
-                  rendered; whatever they already selected keeps taking effect. */}
-              {show('toolbar.imageOutput') && (
-                <ImageOutputOptions threadId={threadId ?? ''} onChange={handleImageOptionsChange} />
-              )}
-              {show('toolbar.mcpTools') && <McpToolManager />}
-              {show('toolbar.skills') && <SkillsManager />}
+              {/* PRP-0185 (UDR-0167 D11/D13): the three administration entries that
+                  stood here are gone from every tier -- not hidden, MOVED. Image
+                  output options are the Built-in agent's configuration on the Core
+                  agent card; MCP and Skills management are sidebar-footer entries
+                  (CTR-0220). Nothing is lost on the wide tier and the narrow tier
+                  never rendered them (UDR-0153 D4). */}
               <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
             </div>
             <ChatInput

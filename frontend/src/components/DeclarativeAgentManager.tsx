@@ -823,8 +823,8 @@ export function DeclarativeAgentManagerTrigger() {
       size="icon"
       className="h-6 w-6 text-muted-foreground"
       onClick={requestDeclarativeManager}
-      aria-label="Declarative agents and workflows"
-      title="Declarative agents & workflows">
+      aria-label="Declarative Agents"
+      title="Declarative Agents">
       <Bot className="h-4 w-4" />
     </Button>
   )

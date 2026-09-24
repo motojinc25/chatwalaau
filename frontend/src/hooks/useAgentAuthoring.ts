@@ -63,6 +63,14 @@ export interface ModelInfo {
   models: string[]
   default_model: string
   model_options?: Record<string, { options: Array<{ key: string; kind: string; allowed?: string[]; default: string }> }>
+  /**
+   * Per-model structured-output capability (CTR-0069 v5, UDR-0058 D6).
+   * PRP-0185 step 2: read by the editor so a Custom agent's output schema can say
+   * that the model it pins withholds structured output (UDR-0167 D17).
+   */
+  structured_output?: Record<string, { supported: boolean; native: boolean }>
+  /** Per-model tool capability states (CTR-0069, PRP-0185, UDR-0167). */
+  model_capabilities?: Record<string, Record<string, boolean>>
 }
 
 function detailMessage(detail: unknown, fallback: string): string {

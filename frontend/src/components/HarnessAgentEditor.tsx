@@ -18,6 +18,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import {
+  BookOpen,
   FileText,
   FolderCog,
   Globe,
@@ -49,7 +50,7 @@ import { cn } from '@/lib/utils'
  * own the scalar + text fields and the harness building-block switches; CENTER a
  * React Flow hub-and-spoke canvas whose toolbar owns MODEL (single-select -- a
  * harness agent binds ONE offering, UDR-0119 D2) and TOOL attachment (CTR-0178
- * function tools + whole MCP servers; coding tools and skills are not offered,
+ * function tools + whole MCP servers + Skills; coding tools are not offered,
  * UDR-0119 D7); block nodes visualize the enabled building blocks. RIGHT a monaco
  * pane shows the backend-canonical YAML (live preview) with a raw-edit escape
  * hatch. Validation + serialization are the backend's (CTR-0195, the UDR-0100
@@ -59,8 +60,16 @@ import { cn } from '@/lib/utils'
 const CONTROL =
   'w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-ring'
 
-// ChatWalaʻau coding tools are harness-internal territory (UDR-0119 D7); skills ride
-// SKILLS_DIR. Neither is offered by this editor's tool picker.
+// ChatWalaʻau coding tools are harness-internal territory (UDR-0119 D7): the harness
+// brings its own file-access and shell tools, so mounting these would collide. Not
+// offered by this editor's tool picker.
+//
+// Skills ARE offered since PRP-0185 (UDR-0167 D9). They used to be excluded here on the
+// grounds that they "ride SKILLS_DIR" -- true, but it meant a harness agent could not be
+// narrowed to specific skills at all, and a `skill:` id typed into the YAML by hand made
+// the agent refuse to start. Selecting NO skill still inherits every enabled one, so an
+// empty Skills section is not "no skills"; the hint below the picker says so, because an
+// empty multi-select normally reads the other way.
 const HIDDEN_FUNCTION_CATEGORY = 'coding'
 
 interface Props {
@@ -239,8 +248,8 @@ function buildNodes(
       type: 'part',
       position: { x: 640, y: 60 + i * 70 },
       data: {
-        label: ident.replace(/^(function|mcp):/, ''),
-        sub: ident.startsWith('mcp:') ? 'mcp server' : 'function',
+        label: ident.replace(/^(function|mcp|skill):/, ''),
+        sub: ident.startsWith('mcp:') ? 'mcp server' : ident.startsWith('skill:') ? 'skill' : 'function',
         variant: 'tool',
         onRemove: rawMode ? undefined : () => removeTool(ident),
       },
@@ -678,7 +687,7 @@ export function HarnessAgentEditor({ open, onOpenChange, editId, onSaved }: Prop
                     )}
                   </div>
                   <span className="text-[10px] text-muted-foreground">
-                    File / shell tools are harness-built-in; Skills load from SKILLS_DIR.
+                    File / shell tools are harness-built-in. Selecting no Skill inherits every enabled skill.
                   </span>
                 </div>
                 <div className="min-h-0 flex-1">
@@ -835,8 +844,10 @@ function HarnessToolPicker({
   onAdd: (identifier: string) => void
   onClose: () => void
 }) {
-  // Coding tools are harness-internal (UDR-0119 D7); skills ride SKILLS_DIR; MCP is
-  // whole-server only (per-tool narrowing is the MCP Tool Manager's job, CTR-0121).
+  // Coding tools are harness-internal (UDR-0119 D7). MCP is whole-server only --
+  // per-tool narrowing would write allowed_tools on the MCPTool the Prompt agents also
+  // hold (UDR-0167 D10), so it stays the MCP Tool Manager's job (CTR-0121). Skills are
+  // offered since PRP-0185 (UDR-0167 D9).
   const functions = inventory.function_tools.filter((t) => t.category !== HIDDEN_FUNCTION_CATEGORY)
   return (
     <>
@@ -866,6 +877,29 @@ function HarnessToolPicker({
                 key={s.identifier}
                 label={s.name}
                 sub={s.available ? 'whole server' : 'not loaded'}
+                selected={isSelected(s.identifier)}
+                onAdd={() => onAdd(s.identifier)}
+              />
+            ))}
+          </div>
+        )}
+        {inventory.skills.length > 0 && (
+          <div>
+            <div className="flex items-center gap-1.5 px-1 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <BookOpen className="h-3.5 w-3.5" /> Skills
+            </div>
+            {/* PRP-0185 / UDR-0167 D9. Adding NONE is not the same as adding none of
+                them: an empty selection inherits every enabled skill, which is what
+                every harness agent written before this release does. The note says so
+                because the picker cannot show the difference. */}
+            <div className="px-2 pb-1 text-[10px] leading-snug text-muted-foreground">
+              Add none to inherit every enabled skill.
+            </div>
+            {inventory.skills.map((s) => (
+              <PickRow
+                key={s.identifier}
+                label={s.name}
+                sub={s.available ? s.description || s.group : `${s.description || s.group} (disabled)`}
                 selected={isSelected(s.identifier)}
                 onAdd={() => onAdd(s.identifier)}
               />

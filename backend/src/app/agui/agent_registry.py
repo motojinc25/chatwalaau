@@ -9,8 +9,13 @@ per model (CTR-0102).
 
 When DEMO_MODE=true (PRP-0066, UDR-0041), the underlying client is replaced by
 DemoChatClient and the model list is taken from DEMO_MODELS. Demo behavior is
-preserved byte-for-byte (UDR-0045 D7): provider dispatch is bypassed and demo
-agents keep the OpenAI hosted web search tool + instruction.
+preserved byte-for-byte (UDR-0045 D7, reaffirmed by UDR-0167 D15): provider dispatch
+is bypassed and demo agents keep the OpenAI hosted web search tool + instruction.
+
+PRP-0185 / UDR-0167: the shared tool surface is assembled ONCE by the factory and
+SUBSET per model here, because a catalog capability is a property of one deployment
+and this is the only loop that knows which model is being built. The slot-#3 guidance
+therefore arrives as a LIST and is rendered per model.
 """
 
 from __future__ import annotations
@@ -22,8 +27,10 @@ from typing import TYPE_CHECKING, Any
 from agent_framework import Agent
 
 from app import providers
+from app.agent.capability_guidance import ToolGuidance, render_capability_guidance
 from app.agent.declarative import active_spec
 from app.agent.identity import build_capability_block, load_identity
+from app.agent.model_capabilities import subset_for_model
 from app.demo import is_demo_mode, resolve_demo_models
 
 if TYPE_CHECKING:
@@ -78,7 +85,7 @@ class AgentRegistry:
         *,
         tools: list[Any],
         context_providers: list[Any],
-        instructions: str,
+        guidance: list[ToolGuidance],
         compaction_strategy: Any | None = None,
         middleware: list[Any] | None = None,
     ) -> None:
@@ -92,7 +99,7 @@ class AgentRegistry:
         # constructed without a running event loop on Python 3.12 (it binds lazily),
         # which matters because the registry is created at import time.
         self._rebuild_lock = asyncio.Lock()
-        self._install(self._build(tools, context_providers, instructions))
+        self._install(self._build(tools, context_providers, guidance))
 
         logger.info(
             "AgentRegistry initialized: %d model(s), default=%s, demo=%s",
@@ -107,17 +114,21 @@ class AgentRegistry:
         self,
         tools: list[Any],
         context_providers: list[Any],
-        instructions: str,
+        guidance: list[ToolGuidance],
     ) -> tuple[dict[str, Agent], dict[str, str], list[str], str]:
         """Build a FRESH per-model agent map + capability map (pure; no self mutation).
 
         Returns ``(agents, capability_instructions, configured_models,
         default_model)`` so ``__init__`` and ``rebuild()`` can adopt the result
         with a single atomic swap (UDR-0064 D5).
+
+        ``guidance`` arrives UNRENDERED (PRP-0185, UDR-0167 D7): the live build
+        renders it per model, after ``subset_for_model()`` has removed whatever that
+        model's offering withholds.
         """
         if is_demo_mode():
-            return self._build_demo_agents(tools, context_providers, instructions)
-        return self._build_live_agents(tools, context_providers, instructions)
+            return self._build_demo_agents(tools, context_providers, guidance)
+        return self._build_live_agents(tools, context_providers, guidance)
 
     def _install(
         self,
@@ -142,7 +153,7 @@ class AgentRegistry:
         *,
         tools: list[Any],
         context_providers: list[Any],
-        instructions: str,
+        guidance: list[ToolGuidance],
         compaction_strategy: Any | None,
         middleware: list[Any] | None = None,
     ) -> None:
@@ -173,7 +184,7 @@ class AgentRegistry:
             self._middleware = list(middleware or [])
             self._compaction_strategy = compaction_strategy
             try:
-                built = self._build(tools, context_providers, instructions)
+                built = self._build(tools, context_providers, guidance)
                 self._install(built)
             except BaseException:
                 self._middleware = previous_middleware
@@ -190,7 +201,7 @@ class AgentRegistry:
         self,
         tools: list[Any],
         context_providers: list[Any],
-        instructions: str,
+        guidance: list[ToolGuidance],
     ) -> tuple[dict[str, Agent], dict[str, str], list[str], str]:
         """Build demo agents (DemoChatClient), preserving pre-PRP-0069 behavior.
 
@@ -209,9 +220,14 @@ class AgentRegistry:
         agents: dict[str, Agent] = {}
         caps: dict[str, str] = {}
 
+        # DEMO_MODE keeps its own lane (PRP-0185, UDR-0167 D15). Demo models carry no
+        # catalog offering, so every capability already resolves to ENABLED and routing
+        # this through subset_for_model() would change which client factory resolves the
+        # tool for no behavioural gain. The guidance is rendered here instead, which is
+        # the only thing the new return type requires.
         web_search = providers.openai_web_search_tool()
         demo_tools = [web_search, *tools]
-        demo_caps = instructions + WEB_SEARCH_INSTRUCTION
+        demo_caps = render_capability_guidance(guidance) + WEB_SEARCH_INSTRUCTION
 
         for model in models:
             caps[model] = demo_caps
@@ -234,7 +250,7 @@ class AgentRegistry:
         self,
         tools: list[Any],
         context_providers: list[Any],
-        instructions: str,
+        guidance: list[ToolGuidance],
     ) -> tuple[dict[str, Agent], dict[str, str], list[str], str]:
         """Build live agents via provider dispatch (PRP-0069, UDR-0045).
 
@@ -288,9 +304,16 @@ class AgentRegistry:
         for model, provider_name in resolved:
             client = _build_chat_client(model)
             model_middleware = list(self._middleware)
-            web_search = providers.web_search_tool(model)
-            model_tools = [web_search, *tools] if web_search is not None else list(tools)
-            model_caps = instructions + (WEB_SEARCH_INSTRUCTION if web_search is not None else "")
+            # The ONE place a per-model capability decision is made on the Prompt lane
+            # (PRP-0185, UDR-0167 D5/D7). It attaches the hosted web search (whose single
+            # gate is still providers.web_search_tool() returning None, UDR-0112 D3) and
+            # removes whatever this model's offering withholds -- image tools, MCP tools,
+            # the SkillsProvider -- together with each one's guidance block (D6). The
+            # shared inputs are never mutated (D8).
+            surface = subset_for_model(model, tools, context_providers, guidance)
+            model_tools = surface.tools
+            model_context_providers = surface.context_providers
+            model_caps = surface.instructions()
             caps[model] = model_caps
             model_options = providers.build_model_options(model, spec.model_options_override)
             if spec.structured_output is not None:
@@ -320,7 +343,7 @@ class AgentRegistry:
                 instructions=self._bake_instructions(model_caps, spec),
                 client=client,
                 tools=model_tools,
-                context_providers=context_providers,
+                context_providers=model_context_providers,
                 default_options=default_options or None,
                 compaction_strategy=self._compaction_strategy,
                 middleware=model_middleware or None,

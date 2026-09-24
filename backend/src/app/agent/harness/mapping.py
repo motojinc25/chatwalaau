@@ -202,20 +202,33 @@ def _map_instructions(data: dict[str, Any], warnings: list[str]) -> tuple[str | 
     return harness_out, agent_out
 
 
-def _map_tools(data: dict[str, Any], warnings: list[str]) -> list[str]:
+def _map_tools(data: dict[str, Any], warnings: list[str]) -> tuple[list[str], list[str] | None]:
     """Map ``tools`` -- a flat list of CTR-0178 identifiers (UDR-0119 D2).
 
-    Skills ride the shared ``SkillsProvider`` (CTR-0043, UDR-0130 D1), never this
-    list; ChatWalaʻau coding tools are never mountable (UDR-0119 D7). The
-    identifiers' existence against live state is validated in the loader.
+    Returns ``(tool_allowlist, skill_allowlist)``.
+
+    ChatWalaʻau coding tools are never mountable (UDR-0119 D7). The identifiers'
+    existence against live state is validated in the loader.
+
+    PRP-0185 / UDR-0167 D9: ``skill:<name>`` is now a LEGAL harness identifier and
+    selects that skill, where it used to be a blocking warning -- which meant the
+    obvious YAML produced an agent that would not start rather than a narrowed one.
+    Skills still ride the shared ``SkillsProvider`` (CTR-0043, UDR-0130 D1); what is
+    new is that the provider is handed an allow-list, exactly as the Prompt lane
+    already hands it one.
+
+    The second element is ``None`` when NO ``skill:`` identifier appears, meaning
+    "inherit every enabled skill" -- the behaviour of every harness YAML written
+    before this version. It is a list only when at least one appears.
     """
     raw = data.get("tools")
     if raw is None:
-        return []
+        return [], None
     if not isinstance(raw, list):
         warnings.append("tools ignored (expected a list of tool identifiers).")
-        return []
+        return [], None
     ids: list[str] = []
+    skills: list[str] = []
     for index, entry in enumerate(raw):
         if not isinstance(entry, str) or not entry.strip():
             warnings.append(f"tools[{index}] ignored (expected an identifier string).")
@@ -228,10 +241,11 @@ def _map_tools(data: dict[str, Any], warnings: list[str]) -> list[str]:
             )
             continue
         if ident.startswith("skill:"):
-            warnings.append(
-                f"tools[{index}] {ident!r} is not a harness tool: Agent Skills load via "
-                "SKILLS_DIR (the harness skills provider), not the tools list."
-            )
+            skill_name = ident[len("skill:") :].strip()
+            if not skill_name:
+                warnings.append(f"tools[{index}] {ident!r} ignored (skill: needs a skill name).")
+            elif skill_name not in skills:
+                skills.append(skill_name)
             continue
         if not (ident.startswith("function:") or ident.startswith("mcp:")):
             warnings.append(
@@ -250,7 +264,9 @@ def _map_tools(data: dict[str, Any], warnings: list[str]) -> list[str]:
             continue
         if ident not in ids:
             ids.append(ident)
-    return ids
+    # An empty `skills` list is ABSENCE, not a deliberate "no skills" (UDR-0167 D9):
+    # it means the YAML named no skill, so the agent inherits every enabled one.
+    return ids, (skills or None)
 
 
 def map_document(
@@ -284,7 +300,7 @@ def map_document(
 
     model_id, model_effort = _map_model(data, warnings)
     harness_instructions, agent_instructions = _map_instructions(data, warnings)
-    tool_allowlist = _map_tools(data, warnings)
+    tool_allowlist, skill_allowlist = _map_tools(data, warnings)
 
     compaction = _block(data, "compaction", warnings)
     max_window = _positive_int(compaction, "maxContextWindowTokens", "compaction", warnings)
@@ -349,6 +365,7 @@ def map_document(
         harness_instructions=harness_instructions,
         agent_instructions=agent_instructions,
         tool_allowlist=tool_allowlist,
+        skill_allowlist=skill_allowlist,
         compaction_disabled=_bool(compaction, "disabled", "compaction", warnings),
         max_context_window_tokens=max_window,
         max_output_tokens=max_output,

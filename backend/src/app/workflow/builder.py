@@ -21,7 +21,8 @@ from app.agent.compaction import resolve_compaction_strategy
 from app.agent.declarative.loader import resolve_spec
 from app.agent.declarative.spec import DeclarativeAgentError, DeclarativeAgentSpec
 from app.agent.identity import load_identity
-from app.agui.agent_registry import WEB_SEARCH_INSTRUCTION, _build_chat_client
+from app.agent.model_capabilities import subset_for_model
+from app.agui.agent_registry import _build_chat_client
 from app.demo import is_demo_mode, resolve_demo_models
 
 if TYPE_CHECKING:
@@ -78,7 +79,7 @@ def build_prompt_agent(
     from app.agui.agent_factory import _build_tools_and_instructions
 
     model = _pick_model(spec)
-    tools, context_providers, instructions, middleware = _build_tools_and_instructions(
+    tools, context_providers, guidance, middleware = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
         spec=spec,
@@ -89,10 +90,23 @@ def build_prompt_agent(
     client = _build_chat_client(model)
     model_options = None
     if not is_demo_mode():
-        web_search = providers.web_search_tool(model)
-        if web_search is not None:
-            tools = [web_search, *tools]
-            instructions = instructions + WEB_SEARCH_INSTRUCTION
+        # A workflow prompt node IS model-bound, so it goes through the same per-model
+        # capability seam the AgentRegistry uses (PRP-0185, UDR-0167 D5/D7). This is
+        # what keeps a withheld capability from reappearing through a workflow run --
+        # the hosted web-search attach that used to live here is now inside it.
+        #
+        # ``surface.instructions()`` is deliberately NOT read. A node agent is built
+        # with ``instructions=baked`` (the Identity alone) and the assembled slot-#3
+        # guidance has never reached it: the pre-PRP-0185 code computed the same
+        # string, appended WEB_SEARCH_INSTRUCTION to it, and dropped it on the floor
+        # -- invisible because the value arrived by tuple unpacking, which no linter
+        # flags. PRP-0185 does not change that behaviour; it only makes the dead
+        # value visible. Whether a workflow node SHOULD carry the tool guidance is a
+        # separate question with a separate answer (see the PRP-0185 completion
+        # report), and fixing it here would silently alter every workflow prompt.
+        surface = subset_for_model(model, tools, context_providers, guidance)
+        tools = surface.tools
+        context_providers = surface.context_providers
         model_options = providers.build_model_options(model, spec.model_options_override)
         if spec.structured_output is not None:
             so = providers.build_structured_output(

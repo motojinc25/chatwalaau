@@ -141,6 +141,11 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
     gate is INFORMATIONAL here -- a withheld offering forces
     ``disable_web_search`` at build time (forced-safe, never a blocking warning).
 
+    PRP-0185 / UDR-0167: ``capabilities`` carries the offering's resolved capability
+    states and the ``skills`` flag follows them -- a model that withholds Skills gets
+    no SkillsProvider, so reporting SKILLS_DIR alone would describe a wiring the build
+    does not perform.
+
     ``compaction`` reports EFFECT, not declared intent (PRP-0144, UDR-0125 D4).
     It was a bare ``not spec.compaction_disabled``, which returned true for an
     agent whose compaction MAF had built no strategy for; a summary described as
@@ -161,6 +166,14 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
         )
     workspace = (settings.coding_workspace_dir or "").strip()
     skills_dir = (settings.skills_dir or "").strip()
+    capabilities: dict[str, bool] = {}
+    if spec.model_id:
+        try:
+            from app.agent.model_capabilities import capability_states
+
+            capabilities = capability_states(spec.model_id)
+        except Exception:
+            logger.debug("Capability probe failed for %s", spec.model_id, exc_info=True)
     web_search: str = "disabled" if spec.web_search_disabled else "enabled"
     if not spec.web_search_disabled and spec.model_id:
         try:
@@ -178,7 +191,13 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
         "file_memory": bool(workspace) and not spec.file_memory_disabled,
         "file_access": bool(workspace),
         "shell": bool(workspace),
-        "skills": bool(skills_dir and Path(skills_dir).is_dir()),
+        "skills": bool(skills_dir and Path(skills_dir).is_dir()) and capabilities.get("skills", True),
+        # PRP-0185 / UDR-0167: the offering's resolved capability states, so "why does
+        # this agent have no MCP tools" is answerable from the summary rather than only
+        # from a run's prompt dump. Every key of the closed set is reported, including
+        # the fixed-enabled `function_calling` (D3), so a reader renders the whole
+        # vocabulary without knowing which entries are actionable.
+        "capabilities": capabilities,
         "todo": not spec.todo_disabled,
         "mode": not spec.mode_disabled,
         "mode_initial": spec.mode_initial,

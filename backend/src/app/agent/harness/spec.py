@@ -79,6 +79,21 @@ class HarnessAgentSpec:
     # ---- tool allow-list (CTR-0178 identifier space; [] => no extra tools) ----
     tool_allowlist: list[str] = field(default_factory=list)
 
+    # ---- Skills selection (PRP-0185, UDR-0167 D9) ----
+    # Skill names selected by ``skill:<name>`` entries in the YAML ``tools:`` list.
+    #
+    # ``None`` means INHERIT EVERY ENABLED SKILL -- today's behaviour and the value
+    # every existing harness YAML resolves to, because none of them carries a
+    # ``skill:`` identifier (the mapping used to reject one outright). It MUST NOT be
+    # conflated with ``[]``, which is a deliberate "no skills": reading absence as
+    # "none" would silently strip skills from every agent already in the field, and
+    # the symptom -- an agent that stopped using a skill it used yesterday -- points
+    # at nothing. A list is formed only when at least one ``skill:`` id is present.
+    #
+    # The Skills override store (CTR-0123) still applies on top: this NARROWS, it
+    # never re-enables a skill the Skills manager disabled.
+    skill_allowlist: list[str] | None = None
+
     # ---- compaction (UDR-0119 D9) ----
     compaction_disabled: bool = False
     # None => catalog_context_window(model_id) at build time.

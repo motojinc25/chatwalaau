@@ -1,7 +1,11 @@
 """Weather tools for the Weather Agent (CTR-0027, PRP-0017).
 
 Provides geocoding and weather data via Open-Meteo APIs (free, no API key required).
-Tools are registered as MAF function tools using the @tool decorator.
+Tools are registered as MAF function tools: plain callables whose parameters carry
+Annotated[..., Field(...)] metadata. MAF converts them to FunctionTool at build time,
+and that plain-callable form is what makes them ``never_require`` (UDR-0161 D1) --
+this module has never used a ``@tool`` decorator, and the sentence that said it did
+contradicted a shipped decision (PRP-0185).
 """
 
 from dataclasses import asdict

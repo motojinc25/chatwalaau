@@ -221,9 +221,14 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
   const [models, setModels] = useState<{
     ids: string[]
     options: Record<string, Array<{ key: string; allowed?: string[] }>>
+    /** Per-model structured-output support and capability states (PRP-0185 step 2). */
+    structured: Record<string, { supported: boolean }>
+    capabilities: Record<string, Record<string, boolean>>
   }>({
     ids: [],
     options: {},
+    structured: {},
+    capabilities: {},
   })
   const [validation, setValidation] = useState<ValidationResult | null>(null)
   const [loading, setLoading] = useState(false)
@@ -261,7 +266,12 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
           // Effort is the only selectable generation option (PRP-0184, UDR-0166 D6).
           options[id] = entry.options.filter((o) => o.key === 'effort')
         }
-        setModels({ ids: mi.models ?? [], options })
+        setModels({
+          ids: mi.models ?? [],
+          options,
+          structured: mi.structured_output ?? {},
+          capabilities: mi.model_capabilities ?? {},
+        })
         if (editId) {
           const src = await api.loadSource(editId)
           if (cancelled) return
@@ -313,6 +323,21 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
 
   const modelOptions = doc.model.id ? (models.options[doc.model.id] ?? []) : []
   const effortAllowed = modelOptions.find((o) => o.key === 'effort')?.allowed ?? []
+
+  // Structured output for a Custom Prompt agent (PRP-0185 step 2, UDR-0167 D20).
+  //
+  // It is ON whenever the document declares an `outputSchema` at all: a mapping with
+  // no usable properties still selects the generic JSON-object mode (UDR-0058 D3), so
+  // "has fields" is the wrong test. The SSOT is the YAML document -- this surface
+  // REPORTS it next to the model setting and the schema itself is edited in the
+  // inspector, so there is exactly one writer and an exported agent carries its own
+  // configuration (the failure a second store would cause).
+  const structuredOn = doc.outputSchema != null
+  // An unpinned agent runs on whatever model is active, so there is no single offering
+  // to ask; the warnings below apply only to a pinned one.
+  const pinnedModel = doc.model.id ?? ''
+  const structuredWithheld = structuredOn && pinnedModel !== '' && models.structured[pinnedModel]?.supported === false
+  const webSearchDropped = structuredOn && !structuredWithheld && models.capabilities[pinnedModel]?.web_search !== false
 
   // ---- add / remove tools ----
   const toolSelected = useCallback(
@@ -538,7 +563,38 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
                       />
                     )}
                   </div>
+                  {/* Structured output, NEXT TO the model setting (PRP-0185 step 2,
+                      UDR-0167 D20). Read-only on purpose: the schema is authored in
+                      the inspector and the YAML document stays the single writer.
+                      What belongs here is the STATE -- whether this agent answers in
+                      JSON at all -- because that is a property of how the model is
+                      run, and it was previously discoverable only by scrolling the
+                      inspector to find out whether any field had been added. */}
+                  <span
+                    className={cn(
+                      'ml-auto shrink-0 rounded-md border px-2 py-0.5 text-[11px]',
+                      structuredOn ? 'border-primary/40 text-foreground' : 'text-muted-foreground',
+                    )}>
+                    Structured output: {structuredOn ? 'on' : 'off'}
+                  </span>
                 </div>
+                {(structuredWithheld || webSearchDropped) && (
+                  <div className="space-y-0.5 border-b px-2 py-1 text-[11px] text-amber-700 dark:text-amber-400">
+                    {structuredWithheld && (
+                      <p>
+                        <span className="font-mono">{pinnedModel}</span> withholds structured output, so this agent
+                        answers in plain text on it. Change it in the Model Offering Catalog (App settings), or pin a
+                        different model.
+                      </p>
+                    )}
+                    {webSearchDropped && (
+                      <p>
+                        Web search is dropped while structured output is on -- the provider rejects the two together.
+                        Remove the output schema to search again.
+                      </p>
+                    )}
+                  </div>
+                )}
                 <div className="min-h-0 flex-1">
                   <ReactFlowProvider>
                     <ReactFlow

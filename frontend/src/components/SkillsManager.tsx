@@ -432,16 +432,28 @@ export function SkillsManager() {
 
   return (
     <>
+      {/* Sidebar-footer launcher (CTR-0124 / CTR-0220, PRP-0185): ICON ONLY, sized and
+          styled like every other entry in that row. It used to sit in the chat composer
+          as an icon plus a VISIBLE "Skills" label; that is dropped -- the row is a strip
+          of bare icons, and one entry carrying text would read as a different kind of
+          control.
+
+          The NAME is carried three ways, all the same string (v0.166.0, CTR-0220):
+          `title` is the hover tooltip every other entry in the row has, `aria-label` is
+          the button's only accessible name, and the caller repeats it as the label the
+          "..." overflow menu shows. An earlier revision dropped the tooltip here while
+          the neighbouring entries kept theirs, which made this one entry the only icon
+          in the row that could not be identified by hovering. */}
       <button
         type="button"
         onClick={openModal}
-        title="Manage skills (browse the catalog, install, enable/disable)"
+        aria-label="Agent Skills"
+        title="Agent Skills"
         className={cn(
-          'flex items-center gap-0.5 rounded-md border px-1.5 h-6 text-xs transition-colors',
-          'border-transparent text-muted-foreground hover:bg-muted hover:text-foreground',
+          'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-colors',
+          'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
         )}>
-        <BookOpen className="h-3 w-3 shrink-0" />
-        <span className="hidden sm:inline">Skills</span>
+        <BookOpen className="h-4 w-4 shrink-0" />
       </button>
 
       <Dialog open={open} onOpenChange={handleOpenChange}>

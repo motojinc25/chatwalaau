@@ -43,13 +43,14 @@ from app.core.config import settings
 from app.providers.base import (
     EFFORT_DEFAULT,
     EFFORT_LEVELS,
-    hosted_tool_withheld,
+    capability_withheld,
     max_output_tokens_for,
     resolve_effort_level,
 )
 from app.providers.structured import (
     CLOSED_ANSWER_SCHEMA,
     effective_schema,
+    has_structured_format,
     strip_loop_iteration_marker,
     strip_web_search,
 )
@@ -207,8 +208,10 @@ class _PromptCacheMixin:
         # Structured output vs hosted web search (PRP-0082, UDR-0058 D2): web search
         # is incompatible with a JSON output_config.format; drop it for that turn so
         # the request never fails. Inert when no structured format is set.
-        oc = run_options.get("output_config")
-        if isinstance(oc, dict) and oc.get("format") is not None:
+        # PRP-0185 step 2 (UDR-0167 D18): one shared shape predicate for both lanes,
+        # so the tool surface report explains the drop on the SAME condition that
+        # performs it.
+        if has_structured_format(run_options):
             strip_web_search(run_options)
         # Prompt caching (PRP-0080, UDR-0056). Gated here so the wrapper is applied
         # unconditionally (for the structured strip above) while caching stays an
@@ -412,7 +415,7 @@ class AnthropicProvider:
         the answer cannot be a class constant, so the OFFERING declares it. Absent
         declaration keeps the pre-PRP-0129 behavior exactly.
         """
-        if hosted_tool_withheld(model, "web_search"):
+        if capability_withheld(model, "web_search"):
             return None
         return anthropic_web_search_tool()
 
@@ -450,7 +453,7 @@ class AnthropicProvider:
         # default is PUBLISHED so the surface can say what "no schema" means here --
         # an object with one `answer` string, which is a real difference from the
         # OpenAI family and must not be silent.
-        native = not hosted_tool_withheld(model, "native_structured_output")
+        native = not capability_withheld(model, "native_structured_output")
         return {
             "supported": native,
             "native": native,

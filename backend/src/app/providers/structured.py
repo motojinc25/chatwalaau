@@ -116,6 +116,28 @@ def is_web_search_tool(tool: Any) -> bool:
     return isinstance(t, str) and t.startswith("web_search")
 
 
+def has_structured_format(options: Any) -> bool:
+    """True when ``options`` already carries a native structured-output format.
+
+    Matched by SHAPE on both lanes -- OpenAI's ``text.format`` and Anthropic's
+    ``output_config.format`` -- because that is precisely what the two
+    ``_prepare_options`` hooks test before they call :func:`strip_web_search`.
+
+    PRP-0185 step 2 (UDR-0167 D18): the predicate is DERIVED here rather than
+    restated at each caller, so the tool surface report cannot drift from the
+    runtime it claims to describe. A report that says "web search is dropped" on a
+    different condition than the one the request actually applies is worse than no
+    report at all -- it explains an absence that is not happening, and hides one
+    that is. Accepts any object; a non-mapping is False.
+    """
+    if not isinstance(options, dict):
+        return False
+    return any(
+        isinstance(section := options.get(outer), dict) and section.get("format") is not None
+        for outer in ("text", "output_config")
+    )
+
+
 def strip_web_search(run_options: dict[str, Any]) -> dict[str, Any]:
     """Remove the hosted web-search tool from a request's ``tools`` list in place.
 

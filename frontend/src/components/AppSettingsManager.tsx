@@ -90,11 +90,32 @@ interface ImageDefaults {
 interface OfferingCapabilities {
   web_search?: boolean
   /**
-   * `false` does NOT turn Structured Output off (PRP-0130, UDR-0112 D10): it selects
-   * the forced-tool-use fallback, which still returns schema-conforming JSON. Named
-   * for the NATIVE path so the declaration does not overstate its own effect.
+   * `false` turns Structured Output OFF for this model.
+   *
+   * The name is historical and is KEPT deliberately (PRP-0185 step 2, UDR-0167 D19).
+   * When PRP-0130 added the key, `false` only DEGRADED -- it selected a forced
+   * tool-use fallback that still returned schema-conforming JSON -- and the `native_`
+   * prefix existed so the declaration did not overstate its own effect (UDR-0112 D10).
+   * PRP-0131 removed that fallback (UDR-0058 D10), so `supported` follows `native` and
+   * the `false` is now final. Only the LABEL was corrected: renaming the key would
+   * invalidate every catalog that declares it.
    */
   native_structured_output?: boolean
+  /**
+   * PRP-0185 / UDR-0167 D3: recognized but FIXED-ENABLED. It is serialized when the
+   * operator records an explicit `true`; `false` is rejected by the backend loader,
+   * so the control renders as an always-on row rather than a three-state select.
+   */
+  function_calling?: boolean
+  /**
+   * PRP-0185 / UDR-0167: agent tool classes a deployment may withhold. `false` removes
+   * the class for THIS model only -- both MCP transports together, every skill, or both
+   * image tools -- along with that class's guidance in the system prompt (D6). Absent
+   * means ENABLED (D1), so an offering that declares nothing is unchanged.
+   */
+  mcp?: boolean
+  skills?: boolean
+  image_generation?: boolean
 }
 
 interface Offering {
@@ -206,16 +227,26 @@ const FAMILY_HELP =
 const HOSTING_HELP = "Anthropic only. 'direct' = Anthropic API; 'foundry' = served through Azure AI Foundry."
 
 /** Keep in step with the backend's CAPABILITY_KEYS (an invariant test asserts it). */
-const CAPABILITY_KEYS = ['web_search', 'native_structured_output'] as const
+const CAPABILITY_KEYS = [
+  'web_search',
+  'native_structured_output',
+  'function_calling',
+  'mcp',
+  'skills',
+  'image_generation',
+] as const
 
-const NATIVE_STRUCTURED_OUTPUT_HELP =
-  "Whether THIS deployment supports the provider's native structured-output request " +
-  '(Anthropic output_config.format / OpenAI text.format). Leave on Default unless a ' +
-  'request fails because of it -- e.g. a Claude deployment created in Microsoft Foundry ' +
-  'with the "Hosted on Azure" hosting option, which supports no structured outputs. ' +
-  'Setting "Not available" REMOVES Structured Output for this model -- the composer ' +
-  'control disappears. There is no fallback: the one this project shipped was never ' +
-  'compatible with the agent framework and was removed (PRP-0131).'
+const STRUCTURED_OUTPUT_CAPABILITY_HELP =
+  'Whether THIS deployment can serve structured output -- an answer constrained to a ' +
+  'JSON schema (Anthropic output_config.format / OpenAI text.format). Leave on Default ' +
+  'unless a request fails because of it -- e.g. a Claude deployment created in Microsoft ' +
+  'Foundry with the "Hosted on Azure" hosting option, which supports no structured ' +
+  'outputs. "Not available" turns the feature OFF for this model: a run-target that has ' +
+  'an output schema configured falls back to a plain answer on it, and says so. There is ' +
+  'no degraded path -- the fallback this project once shipped was never compatible with ' +
+  'the agent framework and was removed (PRP-0131). Note that structured output and web ' +
+  'search cannot run on the same turn; the provider rejects the combination, so web ' +
+  'search is dropped while an output schema is set.'
 
 const WEB_SEARCH_CAPABILITY_HELP =
   'Whether THIS deployment can serve the provider-supplied web search tool. Leave on Default ' +
@@ -231,6 +262,32 @@ const WEB_SEARCH_CAPABILITY_HELP =
 // template-literal trick got constant-folded by the bundler into a real template
 // literal `${VAR}`, which threw "VAR is not defined" at runtime. Quoted-string
 // concatenation folds to an inert double-quoted string instead.
+const FUNCTION_CALLING_CAPABILITY_HELP =
+  'Always enabled, and shown here so the whole tool-capability vocabulary is visible in one ' +
+  'place. MCP tools, the three Skills tools and the two image tools ' +
+  'all reach the provider AS function tools, so every other capability below depends on this ' +
+  'one -- a deployment that could withhold it would make the others incoherent. Register only ' +
+  'models that support function calling as chat offerings.'
+
+const MCP_CAPABILITY_HELP =
+  'Whether THIS deployment may carry MCP tools. Set it to "Not available" for a model that ' +
+  'must not reach your MCP servers -- both stdio and streamable-HTTP servers are withheld ' +
+  'together, and the MCP guidance is removed from the system prompt so the agent will not ' +
+  'claim it has them. MCP connections themselves are untouched: this changes what this model ' +
+  'is offered, not what the server is doing. Other models keep their MCP tools.'
+
+const SKILLS_CAPABILITY_HELP =
+  'Whether THIS deployment may carry Agent Skills. Set it to "Not available" for a model that ' +
+  'should answer without the skill library -- the Skills provider is not attached at all, so ' +
+  'no skill is advertised and load_skill / read_skill_resource / run_skill_script are absent. ' +
+  'Skills Management and the skills on disk are unaffected; other models keep them.'
+
+const IMAGE_GENERATION_CAPABILITY_HELP =
+  'Whether THIS chat deployment may call the image tools (generate_image / edit_image). Set it ' +
+  'to "Not available" for a chat model that must not produce images. This is a SECOND gate: an ' +
+  'image offering must also exist, or the tools are not registered for any model. The image ' +
+  'offering itself, and other chat models, are unaffected.'
+
 const ENDPOINT_HELP =
   'endpoint = Azure OpenAI / Foundry resource URL. base_url = OpenAI-compatible gateway URL -- EXCEPT for ' +
   'Anthropic with hosting "foundry", which uses base_url only: the full Anthropic-on-Foundry URL, ' +
@@ -646,32 +703,99 @@ function OfferingCard({
             </div>
           </Field>
 
-          {/* Deployment capabilities (PRP-0129 / PRP-0130, UDR-0112 D6). Chat
-              offerings only. Three states each, and "Default" writes NOTHING -- an
-              untouched offering keeps its exact previous serialization. */}
+          {/* Deployment capabilities (PRP-0129 / PRP-0130, UDR-0112 D6; extended by
+              PRP-0185 / UDR-0167). Chat offerings only. Three states each, and
+              "Default" writes NOTHING -- an untouched offering keeps its exact
+              previous serialization. Every state is an OPT-OUT: absent means ENABLED,
+              so only "Not available" changes anything (UDR-0167 D1). */}
           {isChat && (
             <>
-              <Field label="Hosted web search" hint={WEB_SEARCH_CAPABILITY_HELP}>
+              {/* Fixed-enabled, rendered as a disabled row rather than omitted
+                  (UDR-0167 D3): a capability the operator cannot change is still a
+                  capability they should be able to SEE, and an unexplained gap in the
+                  list reads as a missing feature. */}
+              <Field label="Function calling" hint={FUNCTION_CALLING_CAPABILITY_HELP}>
+                <select className={CONTROL_CLASS} value="true" disabled aria-readonly="true">
+                  <option value="true">Always available</option>
+                </select>
+              </Field>
+
+              {/* PRP-0185: renamed from "Hosted web search" and its empty state from
+                  "Default (provider decides)" to "Default (available)". Under UDR-0167 D1
+                  every capability here is an OPT-OUT, so the empty state is not a
+                  deferral -- it is the ENABLED state, and saying "the provider decides"
+                  invited the opposite reading. The five rows now share one vocabulary. */}
+              <Field label="Web search" hint={WEB_SEARCH_CAPABILITY_HELP}>
                 <select
                   className={CONTROL_CLASS}
                   value={capabilityValue('web_search')}
                   disabled={readOnly}
                   onChange={(e) => setCapability('web_search', e.target.value)}>
-                  <option value="">Default (provider decides)</option>
+                  <option value="">Default (available)</option>
                   <option value="true">Available</option>
                   <option value="false">Not available on this deployment</option>
                 </select>
               </Field>
 
-              <Field label="Native structured output" hint={NATIVE_STRUCTURED_OUTPUT_HELP}>
+              {/* PRP-0185 step 2 (UDR-0167 D19): relabelled "Native structured output"
+                  -> "Structured output", and its empty state "Default (provider
+                  decides)" -> "Default (available)", so all six rows share ONE
+                  vocabulary. The STORED KEY stays `native_structured_output`: renaming
+                  it would invalidate every model_offerings.jsonc that declares it, and
+                  the label is what an operator reads, not the key.
+
+                  The old label described the REQUEST SHAPE because `false` used to
+                  DEGRADE to a forced-tool-use fallback rather than disable the feature
+                  -- the `native_` prefix existed precisely so its `false` did not read
+                  as "structured output off" (UDR-0112 D10). PRP-0131 removed that
+                  fallback (UDR-0058 D10), so `supported` now follows `native` and
+                  `false` does mean off. The label had been describing a distinction
+                  the product no longer makes. */}
+              <Field label="Structured output" hint={STRUCTURED_OUTPUT_CAPABILITY_HELP}>
                 <select
                   className={CONTROL_CLASS}
                   value={capabilityValue('native_structured_output')}
                   disabled={readOnly}
                   onChange={(e) => setCapability('native_structured_output', e.target.value)}>
-                  <option value="">Default (provider decides)</option>
+                  <option value="">Default (available)</option>
                   <option value="true">Available</option>
-                  <option value="false">Not available (turns Structured Output off)</option>
+                  <option value="false">Not available on this deployment</option>
+                </select>
+              </Field>
+
+              <Field label="MCP" hint={MCP_CAPABILITY_HELP}>
+                <select
+                  className={CONTROL_CLASS}
+                  value={capabilityValue('mcp')}
+                  disabled={readOnly}
+                  onChange={(e) => setCapability('mcp', e.target.value)}>
+                  <option value="">Default (available)</option>
+                  <option value="true">Available</option>
+                  <option value="false">Not available on this deployment</option>
+                </select>
+              </Field>
+
+              <Field label="Skills" hint={SKILLS_CAPABILITY_HELP}>
+                <select
+                  className={CONTROL_CLASS}
+                  value={capabilityValue('skills')}
+                  disabled={readOnly}
+                  onChange={(e) => setCapability('skills', e.target.value)}>
+                  <option value="">Default (available)</option>
+                  <option value="true">Available</option>
+                  <option value="false">Not available on this deployment</option>
+                </select>
+              </Field>
+
+              <Field label="Image generation" hint={IMAGE_GENERATION_CAPABILITY_HELP}>
+                <select
+                  className={CONTROL_CLASS}
+                  value={capabilityValue('image_generation')}
+                  disabled={readOnly}
+                  onChange={(e) => setCapability('image_generation', e.target.value)}>
+                  <option value="">Default (available)</option>
+                  <option value="true">Available</option>
+                  <option value="false">Not available on this deployment</option>
                 </select>
               </Field>
             </>
@@ -1135,8 +1259,8 @@ export function AppSettingsManager() {
         size="icon"
         className="h-6 w-6 text-muted-foreground"
         onClick={openModal}
-        aria-label="App settings"
-        title="App settings (models and application configuration)">
+        aria-label="App Settings"
+        title="App Settings">
         <SlidersHorizontal className="h-4 w-4" />
       </Button>
 

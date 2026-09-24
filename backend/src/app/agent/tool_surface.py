@@ -64,6 +64,16 @@ REASON_NOT_CONNECTED = "not connected"
 # the model catalog rather than to the app settings.
 REASON_PROVIDER_CAPABILITY = "provider capability"
 
+# PRP-0185 step 2 / UDR-0167 D18 (further amends UDR-0102 D3's taxonomy): a hosted
+# tool the run-target itself displaces. Hosted web search is incompatible with a JSON
+# output format ("Web Search cannot be used with JSON mode."), so the provider
+# chokepoints drop it for any turn that carries one (UDR-0058 D2). It is a FOURTH
+# kind of reason, distinct from all three above: nothing is withheld, nothing is
+# misconfigured and no gate is flipped -- the operator's own structured-output
+# choice displaced it, and the way to get web search back is to turn structured
+# output off. Naming it sends them to the run-target's card, not to the catalog.
+REASON_STRUCTURED_OUTPUT = "structured output"
+
 # Per-tool detail for the ``settings`` reason, so the row names the gate the
 # operator has to flip rather than just asserting "unavailable".
 _SETTINGS_DETAIL: dict[str, str] = {
@@ -240,33 +250,116 @@ def _agent_has_web_search(agent: Any) -> bool:
     return any(is_web_search_tool(entry) for entry in entries)
 
 
-def _withheld_provider_rows(agent: Any, model: str) -> list[ToolRow]:
-    """PREDICTED rows for hosted tools the model's offering withholds (UDR-0112 D4).
+def _model_withholds(model: str, capability: str) -> bool:
+    """True when ``model``'s offering withholds ``capability`` (PRP-0185, UDR-0167).
 
-    Provider-supplied rows are otherwise derived from the BUILT agent alone, so a
-    withheld tool would leave no row and no reason -- an unexplained absence, which is
-    exactly what this report exists to prevent (UDR-0102). Withheld AND still present
-    is a genuine build-vs-configuration divergence and is reported as MISMATCH rather
-    than resolved in favour of either side (UDR-0102 D4).
+    Best-effort like the rest of this module: a lookup that cannot be made reports
+    "not withheld", so a failure here degrades the EXPLANATION rather than inventing
+    an exclusion the build did not make.
     """
-    from app.providers.base import hosted_tool_withheld
+    if not model:
+        return False
+    try:
+        from app.providers.base import capability_withheld
 
-    if not model or not hosted_tool_withheld(model, "web_search"):
+        return capability_withheld(model, capability)
+    except Exception:
+        logger.debug("Capability probe failed for %s/%s", model, capability, exc_info=True)
+        return False
+
+
+def _agent_has_structured_format(agent: Any) -> bool:
+    """True when the built agent's default options carry a structured-output format.
+
+    Read from the SAME predicate the provider chokepoints apply before they drop
+    hosted web search (`providers.structured.has_structured_format`), so this report
+    cannot explain the drop on a condition the request does not use.
+
+    The format reaches `default_options` at BUILD time: the agent registry merges
+    `build_structured_output(...)` into the per-model options (agent_registry.py), so
+    a run-target with structured output configured carries it on every agent it
+    built. That is why the displacement is PREDICTABLE here rather than only
+    observable per request.
+    """
+    from app.providers.structured import has_structured_format
+
+    return has_structured_format(getattr(agent, "default_options", None))
+
+
+def _provider_supplied_rows(agent: Any, model: str) -> list[ToolRow]:
+    """Rows for the hosted, provider-supplied tools (UDR-0112 D4, UDR-0167 D18).
+
+    Provider-supplied rows are otherwise derived from the BUILT agent's FUNCTION
+    tools alone, and a hosted web search is not one -- so before PRP-0185 step 2 this
+    tool produced a row only when it was WITHHELD. Present-and-working produced
+    nothing, and present-but-displaced-by-structured-output produced nothing either:
+    the one case an operator is most likely to file as a bug ("it stopped searching")
+    was the one case the report was silent about.
+
+    The order below is normative, because the two absences send the operator to two
+    different screens:
+
+    1. WITHHELD by the offering -> the model catalog. Withheld AND still present is a
+       genuine build-vs-configuration divergence and is reported as MISMATCH rather
+       than resolved in favour of either side (UDR-0102 D4).
+    2. DISPLACED by structured output -> the run-target's own card. Nothing is
+       misconfigured; the operator's structured-output choice takes this turn
+       (UDR-0058 D2) and turning it off brings web search back.
+
+    A model whose provider supplies no web search at all still yields no row: there
+    is no absence to explain, only a provider that never offered it.
+    """
+    from app.providers.base import capability_withheld
+
+    withheld = bool(model) and capability_withheld(model, "web_search")
+    present = _agent_has_web_search(agent)
+
+    if withheld:
+        if present:
+            return [
+                ToolRow(
+                    "web_search",
+                    STATUS_MISMATCH,
+                    reason="withheld by the offering but present on the built agent",
+                )
+            ]
+        return [ToolRow("web_search", STATUS_EXCLUDED, reason=f"{REASON_PROVIDER_CAPABILITY} ({model})")]
+
+    if not present:
         return []
-    if _agent_has_web_search(agent):
+
+    if _agent_has_structured_format(agent):
+        # EXCLUDED, not WARNING: the tool is attached to the built agent but will not
+        # reach the wire on any turn this agent serves, and "attached but never sent"
+        # is an exclusion from the operator's point of view. The reason names the
+        # cause so it does not read as a defect.
         return [
             ToolRow(
                 "web_search",
-                STATUS_MISMATCH,
-                reason="withheld by the offering but present on the built agent",
+                STATUS_EXCLUDED,
+                reason=REASON_STRUCTURED_OUTPUT,
+                note="dropped per request; JSON output formats cannot carry web search",
             )
         ]
-    return [ToolRow("web_search", STATUS_EXCLUDED, reason=f"{REASON_PROVIDER_CAPABILITY} ({model})")]
+
+    return [ToolRow("web_search", STATUS_ACTIVE, note="per-model, not selectable per agent")]
 
 
-def _function_rows(agent: Any, allow: ResolvedAllowlist | None) -> tuple[list[ToolRow], list[ToolRow]]:
-    """Build the built-in function rows and the provider-supplied rows."""
+def _function_rows(
+    agent: Any,
+    allow: ResolvedAllowlist | None,
+    model: str = "",
+) -> tuple[list[ToolRow], list[ToolRow]]:
+    """Build the built-in function rows and the provider-supplied rows.
+
+    PRP-0185 / UDR-0167: the ``image`` category has TWO gates and only one of them is
+    per-model. The order below is normative (PRP-0185 Section 2.3) because the two
+    reasons send the operator to two different screens: an absent image OFFERING is
+    ``settings``, a chat model that withholds ``image_generation`` is
+    ``provider capability``.
+    """
     actual = _actual_function_tools(agent)
+    image_withheld = _model_withholds(model, "image_generation")
     rows: list[ToolRow] = []
     known: set[str] = set()
 
@@ -278,8 +371,9 @@ def _function_rows(agent: Any, allow: ResolvedAllowlist | None) -> tuple[list[To
         except Exception:
             logger.debug("Availability probe failed for %s", name, exc_info=True)
             gate_open = False
+        capability_open = not (image_withheld and builtin.category == "image")
         selected = allow is None or allow.allows_function(name)
-        predicted = gate_open and selected
+        predicted = gate_open and capability_open and selected
         present = name in actual
 
         note = ""
@@ -295,11 +389,18 @@ def _function_rows(agent: Any, allow: ResolvedAllowlist | None) -> tuple[list[To
             if not gate_open:
                 detail = _SETTINGS_DETAIL.get(name, "")
                 reason = f"{REASON_SETTINGS} ({detail})" if detail else REASON_SETTINGS
+            elif not capability_open:
+                reason = f"{REASON_PROVIDER_CAPABILITY} ({model})"
             else:
                 reason = REASON_ALLOWLIST
             rows.append(ToolRow(name, STATUS_EXCLUDED, reason=reason))
         elif present and not predicted:
-            why = REASON_SETTINGS if not gate_open else REASON_ALLOWLIST
+            if not gate_open:
+                why = REASON_SETTINGS
+            elif not capability_open:
+                why = REASON_PROVIDER_CAPABILITY
+            else:
+                why = REASON_ALLOWLIST
             rows.append(ToolRow(name, STATUS_MISMATCH, reason=f"built but {why} predicted exclusion", note=note))
         else:
             rows.append(ToolRow(name, STATUS_MISMATCH, reason="predicted active but absent from the built agent"))
@@ -312,13 +413,21 @@ def _function_rows(agent: Any, allow: ResolvedAllowlist | None) -> tuple[list[To
     return rows, provider_rows
 
 
-def _mcp_rows(agent: Any, allow: ResolvedAllowlist | None) -> list[ToolRow]:
-    """Build the MCP server rows, mirroring the agent factory's gate order."""
+def _mcp_rows(agent: Any, allow: ResolvedAllowlist | None, model: str = "") -> list[ToolRow]:
+    """Build the MCP server rows, mirroring the agent factory's gate order.
+
+    PRP-0185 / UDR-0167: the model's own ``mcp`` capability is evaluated FIRST and
+    short-circuits every server. It is the outermost gate -- an offering that
+    withholds MCP removes the whole class before the override store or the allow-list
+    get a say -- and reporting it per server is what keeps a whole absent section
+    from reading as "not connected".
+    """
     from app.mcp.lifecycle import get_mcp_tool_inventory
     from app.mcp.overrides import get_override_store
 
     actual = _actual_mcp_servers(agent)
     store = get_override_store()
+    mcp_withheld = _model_withholds(model, "mcp")
     rows: list[ToolRow] = []
 
     for server in get_mcp_tool_inventory():
@@ -327,6 +436,20 @@ def _mcp_rows(agent: Any, allow: ResolvedAllowlist | None) -> list[ToolRow]:
             continue
         exposed = [str(t.get("name") or "") for t in server.get("tools", []) if t.get("name")]
         present = name in actual
+
+        if mcp_withheld:
+            rows.append(
+                ToolRow(
+                    name,
+                    STATUS_MISMATCH if present else STATUS_EXCLUDED,
+                    reason=(
+                        "withheld by the offering but present on the built agent"
+                        if present
+                        else f"{REASON_PROVIDER_CAPABILITY} ({model})"
+                    ),
+                )
+            )
+            continue
 
         # PREDICTED, in the agent factory's own precedence (agent_factory.py:262-302).
         if store.server_disabled(name):
@@ -409,8 +532,19 @@ def _mcp_rows(agent: Any, allow: ResolvedAllowlist | None) -> list[ToolRow]:
     return rows
 
 
-async def _skill_rows(agent: Any, allow: ResolvedAllowlist | None, notes: list[str]) -> list[ToolRow]:
-    """Build the Skills rows from the SkillsProvider lane (UDR-0102 D5)."""
+async def _skill_rows(
+    agent: Any,
+    allow: ResolvedAllowlist | None,
+    notes: list[str],
+    model: str = "",
+) -> list[ToolRow]:
+    """Build the Skills rows from the SkillsProvider lane (UDR-0102 D5).
+
+    PRP-0185 / UDR-0167: a model that withholds ``skills`` has no SkillsProvider at
+    all, which would otherwise be reported as "no SkillsProvider attached
+    (SKILLS_DIR missing or unreadable)" -- a true statement about the agent and a
+    misleading one about the cause.
+    """
     from app.skills.inventory import get_skills_inventory
 
     try:
@@ -427,6 +561,12 @@ async def _skill_rows(agent: Any, allow: ResolvedAllowlist | None, notes: list[s
                 entries.append((name, bool(skill.get("enabled")), bool(skill.get("loaded"))))
     if not entries:
         return []
+
+    if _model_withholds(model, "skills"):
+        return [
+            ToolRow(name, STATUS_EXCLUDED, reason=f"{REASON_PROVIDER_CAPABILITY} ({model})")
+            for name, _enabled, _loaded in entries
+        ]
 
     provider = _skills_provider(agent)
     if provider is None:
@@ -490,10 +630,10 @@ async def describe_tool_surface(
 
         notes: list[str] = []
         report = ToolSurfaceReport(model=model)
-        report.functions, report.provider_supplied = _function_rows(agent, allow)
-        report.provider_supplied.extend(_withheld_provider_rows(agent, model))
-        report.mcp = _mcp_rows(agent, allow)
-        report.skills = await _skill_rows(agent, allow, notes)
+        report.functions, report.provider_supplied = _function_rows(agent, allow, model)
+        report.provider_supplied.extend(_provider_supplied_rows(agent, model))
+        report.mcp = _mcp_rows(agent, allow, model)
+        report.skills = await _skill_rows(agent, allow, notes, model)
         report.notes = notes
 
         spec_id = str(getattr(spec, "id", "") or "")
@@ -517,6 +657,7 @@ __all__ = [
     "REASON_PROVIDER_CAPABILITY",
     "REASON_SETTINGS",
     "REASON_SKILLS_OVERRIDE",
+    "REASON_STRUCTURED_OUTPUT",
     "STATUS_ACTIVE",
     "STATUS_EXCLUDED",
     "STATUS_MISMATCH",

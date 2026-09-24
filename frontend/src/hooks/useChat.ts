@@ -99,13 +99,6 @@ interface UseChatOptions {
    * keep sending them for compatibility.
    */
   /**
-   * Per-session image output options (CTR-0120 / CTR-0049, PRP-0085). Sent as AG-UI
-   * state.image_options {size, quality, format, compression, background}; only
-   * non-default fields are present. Becomes the generate_image / edit_image default
-   * (an explicit LLM tool argument still wins).
-   */
-  selectedImageOptions?: Record<string, string>
-  /**
    * Temporary Chat (CTR-0107 / CTR-0106, PRP-0076). When true the run is sent
    * with AG-UI state.temporary=true (de-personalized, quarantine-routed) and the
    * sidebar-creating session init call is skipped so it never appears in history.
@@ -200,7 +193,6 @@ export function useChat(options?: UseChatOptions) {
   const onStreamCompleteRef = useRef(options?.onStreamComplete)
   const onSessionCreatedRef = useRef(options?.onSessionCreated)
 
-  const selectedImageOptionsRef = useRef<Record<string, string>>(options?.selectedImageOptions ?? {})
   const temporaryRef = useRef(options?.temporary ?? false)
   const selectedWorkflowIdRef = useRef(options?.selectedWorkflowId ?? '')
   const selectedHarnessIdRef = useRef(options?.selectedHarnessId ?? '')
@@ -237,10 +229,6 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     onSessionCreatedRef.current = options?.onSessionCreated
   }, [options?.onSessionCreated])
-
-  useEffect(() => {
-    selectedImageOptionsRef.current = options?.selectedImageOptions ?? {}
-  }, [options?.selectedImageOptions])
 
   useEffect(() => {
     temporaryRef.current = options?.temporary ?? false
@@ -463,11 +451,12 @@ export function useChat(options?: UseChatOptions) {
         // `output_format`. Which model answers and how hard it thinks is the
         // run-target's configuration, applied at agent construction; sending a
         // per-message copy was the second lane this release removed.
+        //
+        // PRP-0185 (UDR-0167 D11): no `image_options` either. Image output options are
+        // the Built-in agent's configuration now, read server-side from the Application
+        // Settings store; the backend accepts and ignores the key, so nothing here has
+        // to keep sending it for compatibility.
         const aguiState: Record<string, unknown> = {}
-        // Per-session image output options (PRP-0085, CTR-0120/CTR-0049). Only
-        // non-default fields are present; absent = backend settings/API default.
-        if (Object.keys(selectedImageOptionsRef.current).length > 0)
-          aguiState.image_options = selectedImageOptionsRef.current
         if (temporaryRef.current) aguiState.temporary = true
         // Declarative Workflow run-target (PRP-0118, CTR-0009, UDR-0101 D5). When set,
         // the backend streams the compiled workflow instead of the active agent; each

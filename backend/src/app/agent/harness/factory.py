@@ -16,8 +16,9 @@ ChatWalaʻau owns every INPUT --
   ``file_access_disable_readonly_tool_approval=True`` set EXPLICITLY.
 * Workspace wiring (UDR-0119 D7): CODING_WORKSPACE_DIR-scoped file stores and a
   LocalShellTool; Skills through the SHARED provider (below).
-* Skills ride ``skills_provider=create_skills_provider()`` -- the ONE construction
-  path for a mounted SkillsProvider (CTR-0043, UDR-0130 D1). Handing MAF a bare
+* Skills ride ``skills_provider=create_skills_provider(allowlist_names=...)`` -- the
+  ONE construction path for a mounted SkillsProvider (CTR-0043, UDR-0130 D1). The
+  allow-list is new in PRP-0185 (UDR-0167 D9); ``None`` inherits every enabled skill. Handing MAF a bare
   directory string instead would make it build its own
   ``SkillsProvider.from_paths(...)``, which carries none of the four properties
   this project already fixed: the CODING_ENABLED-gated script runner (CTR-0043
@@ -60,6 +61,7 @@ from app import providers
 from app.agent.harness.mapping import effective_loop_max_iterations
 from app.agent.harness.spec import IDENTITY_SENTINEL, HarnessAgentError, HarnessAgentSpec
 from app.core.config import settings
+from app.providers.base import capability_withheld
 from app.skills.provider import create_skills_provider
 
 logger = logging.getLogger(__name__)
@@ -285,15 +287,42 @@ def _resolve_mcp_tools(servers: list[str]) -> list[Any]:
 
 
 def resolve_tools(spec: HarnessAgentSpec) -> list[Any]:
-    """Resolve the YAML allow-list to tool instances (CTR-0178 identifier space)."""
+    """Resolve the YAML allow-list to tool instances (CTR-0178 identifier space).
+
+    PRP-0185 / UDR-0167 D5: the offering's capability gates are applied HERE, at the
+    runtime chokepoint, not in the authoring picker -- a harness YAML is hand-written,
+    so a picker filter would not be a gate. ``image_generation`` withholds the image
+    category; ``mcp`` withholds every MCP server. ``function_calling`` has no branch
+    because it is fixed-enabled (D3).
+    """
+    from app.agent.declarative.tool_inventory import BUILTIN_FUNCTION_TOOLS
+    from app.providers.base import capability_withheld
+
+    image_withheld = capability_withheld(spec.model_id, "image_generation")
+    image_names = {t.name for t in BUILTIN_FUNCTION_TOOLS if t.category == "image"}
+
     fn_names: list[str] = []
     mcp_servers: list[str] = []
     for ident in spec.tool_allowlist:
         kind, _, rest = ident.partition(":")
         if kind == "function" and rest:
+            if image_withheld and rest in image_names:
+                logger.info(
+                    "Harness tool function:%s is withheld for offering %s (image_generation); skipped.",
+                    rest,
+                    spec.model_id,
+                )
+                continue
             fn_names.append(rest)
         elif kind == "mcp" and rest:
             mcp_servers.append(rest)
+    if mcp_servers and capability_withheld(spec.model_id, "mcp"):
+        logger.info(
+            "Harness MCP servers are withheld for offering %s (mcp capability); %d skipped.",
+            spec.model_id,
+            len(mcp_servers),
+        )
+        mcp_servers = []
     return [*_resolve_function_tools(fn_names), *_resolve_mcp_tools(mcp_servers)]
 
 
@@ -475,7 +504,22 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
     # Built ONCE (UDR-0130 D1): the factory snapshots the Skills override store and
     # refreshes the live-build set (set_loaded_skills, CTR-0123 / UDR-0068 D4), so a
     # second call would repeat a side effect for a value the build already holds.
-    skills_provider = create_skills_provider()
+    #
+    # PRP-0185 / UDR-0167 D9: the provider now takes the spec's allow-list, which it
+    # never did -- a harness agent got EVERY enabled skill no matter what its YAML
+    # said, and a `skill:` id in that YAML made the agent unbuildable. `None` still
+    # means "inherit every enabled skill", so a YAML that names no skill behaves
+    # exactly as it did. UDR-0167 D5: `skills: false` on the offering withholds the
+    # provider outright, at this chokepoint.
+    if capability_withheld(spec.model_id, "skills"):
+        logger.info(
+            "Harness %s: skills withheld for offering %s (capability gate); no SkillsProvider.",
+            spec.id,
+            spec.model_id,
+        )
+        skills_provider = None
+    else:
+        skills_provider = create_skills_provider(allowlist_names=spec.skill_allowlist)
 
     max_window, max_output, _budget_source = resolve_compaction_budget(spec)
     # Canary, unreachable by construction above. A declared-enabled compaction
@@ -609,6 +653,10 @@ def preflight(spec: HarnessAgentSpec) -> dict:
             kind, _, rest = ident.partition(":")
             if (kind == "function" and rest in available_fns) or (kind == "mcp" and rest):
                 resolved.append(ident)
+        # Skills are not in tool_allowlist (they reach the provider, not the tool
+        # list), but the CTR-0194 caller asks "what would contribute at build time"
+        # and a selected skill does (PRP-0185, UDR-0167 D9).
+        resolved.extend(f"skill:{skill_name}" for skill_name in spec.skill_allowlist or [])
     except Exception:
         logger.debug("Harness preflight tool resolution failed", exc_info=True)
     return {"policy": policy_summary(spec), "resolved_tools": resolved}

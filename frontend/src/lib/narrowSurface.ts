@@ -32,13 +32,12 @@ export type EntryId =
   | 'sidebar.cron'
   | 'sidebar.memory'
   | 'sidebar.appSettings'
+  | 'sidebar.mcpTools'
+  | 'sidebar.skills'
   // composer toolbar
   | 'toolbar.contextWindow'
   | 'toolbar.runTargetLabel'
   | 'toolbar.runTargetAction'
-  | 'toolbar.imageOutput'
-  | 'toolbar.mcpTools'
-  | 'toolbar.skills'
   // composer
   | 'attach.file'
   | 'attach.paint'
@@ -86,6 +85,13 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   'sidebar.cron': 'wide-only',
   'sidebar.memory': 'wide-only',
   'sidebar.appSettings': 'wide-only',
+  // PRP-0185 / UDR-0167 D13: MOVED here from the composer toolbar, and wide-only like
+  // every other management launcher in this footer -- a ~90% modal is an out-of-scope
+  // screen on a phone (UDR-0153 D3). The move also takes them off /popup and /sidebar,
+  // which mount ChatPanel but not SessionSidebar; the capabilities themselves and their
+  // APIs (CTR-0121 / CTR-0123) are untouched on every surface.
+  'sidebar.mcpTools': 'wide-only',
+  'sidebar.skills': 'wide-only',
   // PRP-0184 / UDR-0166 D1: `toolbar.model`, `toolbar.modelOptions` and
   // `toolbar.structuredOutput` are GONE from this table with the controls they gated.
   // Model, reasoning effort and structured output are configured on the run-target, so
@@ -95,9 +101,12 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   // PRP-0176 / UDR-0158 D1: the action exists on both tiers; only its DESTINATION
   // differs (the wide manager modal, or the narrow run-target picker, CTR-0216).
   'toolbar.runTargetAction': 'all',
-  'toolbar.imageOutput': 'wide-only',
-  'toolbar.mcpTools': 'wide-only',
-  'toolbar.skills': 'wide-only',
+  // PRP-0185 / UDR-0167 D11/D13: `toolbar.imageOutput`, `toolbar.mcpTools` and
+  // `toolbar.skills` are GONE from this table with the controls they gated, exactly as
+  // PRP-0184 removed the model / options / structured-output entries. Image output
+  // options are the Built-in agent's configuration (Core agent card) and the two
+  // managers are sidebar-footer entries, so there is no composer entry left to admit
+  // or withhold per tier.
   'attach.file': 'all',
   'attach.paint': 'wide-only',
   'attach.templates': 'wide-only',

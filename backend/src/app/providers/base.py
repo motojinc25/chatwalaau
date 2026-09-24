@@ -158,7 +158,7 @@ class Provider(Protocol):
         sources while holding no search tool.
 
         An implementation that supplies a hosted tool MUST first consult
-        :func:`hosted_tool_withheld`: availability can depend on the DEPLOYMENT (its
+        :func:`capability_withheld`: availability can depend on the DEPLOYMENT (its
         endpoint / workspace), not only on the provider, and one provider class may
         serve several (UDR-0112 D1).
         """
@@ -207,21 +207,26 @@ class Provider(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Hosted-tool capability gate (PRP-0129, UDR-0112)
+# Tool capability gate (PRP-0129 / PRP-0185, UDR-0112 / UDR-0167)
 # ---------------------------------------------------------------------------
-def hosted_tool_withheld(model: str, capability: str) -> bool:
-    """True when ``model``'s offering EXPLICITLY withholds hosted tool ``capability``.
+def capability_withheld(model: str, capability: str) -> bool:
+    """True when ``model``'s offering EXPLICITLY withholds tool ``capability``.
 
-    Hosted-tool availability is a property of the deployment an offering names, not
-    of its provider (UDR-0112 D1): one provider class can serve two API surfaces
-    whose hosted-tool sets differ -- ``anthropic`` direct vs. ``anthropic`` on
-    Foundry, where the workspace must enable Anthropic's server tools.
+    Tool availability is a property of the deployment an offering names, not of its
+    provider (UDR-0112 D1): one provider class can serve two API surfaces whose
+    hosted-tool sets differ -- ``anthropic`` direct vs. ``anthropic`` on Foundry,
+    where the workspace must enable Anthropic's server tools. PRP-0185 / UDR-0167
+    generalizes the same statement from hosted tools to every AGENT TOOL CLASS
+    (``mcp``, ``skills``, ``image_generation``), which is why this function is named
+    for the capability rather than for the hosted lane it started in.
 
     Only an explicit ``false`` withholds. An absent catalog, an unknown model, an
     offering without a ``capabilities`` block, and an undeclared key ALL return
     False, so a deployment that declares nothing behaves exactly as it did before
-    this gate existed (UDR-0112 D2). Never raises: a capability lookup must not be
-    able to break agent construction.
+    this gate existed (UDR-0112 D2, restated normatively as UDR-0167 D1: absent
+    means ENABLED). Never raises: a capability lookup must not be able to break agent
+    construction -- which is also why the opt-out posture is not negotiable, since a
+    swallowed failure under an opt-IN reading would silently remove every tool.
     """
     try:
         from app import models_catalog
@@ -236,7 +241,7 @@ def hosted_tool_withheld(model: str, capability: str) -> bool:
 
 
 def _log_withheld(offering_id: str, capability: str) -> None:
-    """Announce a withheld hosted tool ONCE per offering+capability (UDR-0112 D5).
+    """Announce a withheld capability ONCE per offering+capability (UDR-0112 D5).
 
     The logging lives here rather than at each call site so a provider cannot gate a
     tool without announcing it. A capability that silently reduces function is
@@ -248,7 +253,7 @@ def _log_withheld(offering_id: str, capability: str) -> None:
         return
     _logged_withheld.add(key)
     logger.info(
-        "Hosted tool '%s' is withheld for offering '%s' by its catalog capabilities declaration",
+        "Capability '%s' is withheld for offering '%s' by its catalog capabilities declaration",
         capability,
         offering_id,
     )

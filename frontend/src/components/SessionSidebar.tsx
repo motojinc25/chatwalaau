@@ -17,6 +17,8 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import {
   Archive,
+  BookOpen,
+  Bot,
   Brain,
   ChartColumn,
   Check,
@@ -41,9 +43,11 @@ import {
   Pencil,
   Pin,
   PinOff,
+  Plug,
   Plus,
   RefreshCw,
   Search,
+  SlidersHorizontal,
   Trash2,
   Upload,
   Webhook,
@@ -64,7 +68,10 @@ import {
 import { AboutDialog } from '@/components/AboutDialog'
 import { AppSettingsManager } from '@/components/AppSettingsManager'
 import { DeclarativeAgentManagerTrigger } from '@/components/DeclarativeAgentManager'
+import { McpToolManager } from '@/components/McpToolManager'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
+import { SidebarFooterActions } from '@/components/SidebarFooterActions'
+import { SkillsManager } from '@/components/SkillsManager'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -146,20 +153,27 @@ interface SessionSidebarProps {
   onLoadMoreSessions: () => void
   /** Fetch a folder's sessions COMPLETE when it is expanded (never paginated). */
   onLoadFolderSessions: (folderId: string) => void
-  /** Cron scheduler launcher (CTR-0135, PRP-0089): footer icon next to App Info. */
+  /*
+   * Footer-row launchers (CTR-0220). Each pair is a PROBE result plus the handler the
+   * row's entry calls. The row's ORDER and NAMES are declared in one place -- the
+   * `items` list at the bottom of this file -- so these no longer state a position
+   * relative to a neighbour, which is the coupling CTR-0220 exists to remove.
+   *
+   * Cron scheduler (CTR-0135, PRP-0089): CRON_ENABLED probe.
+   */
   cronAvailable?: boolean
   onOpenCron?: () => void
-  /** File Explorer launcher (CTR-0137, PRP-0091): footer icon next to Cron. */
+  /** File Explorer launcher (CTR-0137, PRP-0091): FILE_EXPLORER_ENABLED probe. */
   fileExplorerAvailable?: boolean
   onOpenFiles?: () => void
-  /** Pipeline jobs launcher (CTR-0148, PRP-0096): footer icon next to Declarative Agents. */
+  /** Pipeline Jobs launcher (CTR-0148, PRP-0096): PIPELINE_ENABLED probe. */
   pipelineAvailable?: boolean
   onOpenPipeline?: () => void
   webhookAvailable?: boolean
   onOpenWebhook?: () => void
-  /** Memory Management launcher (CTR-0167, PRP-0101): footer icon; always shown. */
+  /** Agent Memory launcher (CTR-0167, PRP-0101): no probe -- identity always exists. */
   onOpenMemory?: () => void
-  /** Ontology manager launcher (CTR-0173, PRP-0105): footer icon next to Declarative Agents. */
+  /** Ontology launcher (CTR-0173, PRP-0105): ONTOLOGY_ENABLED probe. */
   ontologyAvailable?: boolean
   onOpenOntology?: () => void
   /** Token Usage Dashboard launcher (CTR-0215, PRP-0173): footer icon right of Ontology; no probe, wide-only. */
@@ -1456,120 +1470,242 @@ export function SessionSidebar({
       </div>
 
       {/* App info footer (CTR-0101, FEAT-0029): tool launchers + About. The version
-          label was removed here (CTR-0176); it stays visible via the About dialog. */}
+          label was removed here (CTR-0176); it stays visible via the About dialog.
+
+          PRP-0185 (CTR-0220, UDR-0167 D13/D14): the launchers are declared as a LIST
+          and rendered by SidebarFooterActions, which collapses whatever does not fit
+          into one trailing "..." menu. Two new members arrive here from the chat
+          composer -- MCP and Skills management -- which is what pushed the row past
+          the width it used to fit in. Membership is still decided HERE (probe +
+          ENTRY_POLICY, UDR-0153 D3); the row only decides what fits.
+
+          ORDER AND TITLES ARE OPERATOR-DEFINED (v0.166.0, CTR-0220). The row used to
+          be ordered by the accident of when each launcher was added, and each entry
+          named itself in three places that had drifted apart -- the inline `title`,
+          the `aria-label`, and the label the "..." menu shows. They are ONE string per
+          entry now, stated once below and used for all three, so what an operator
+          hovers, what a screen reader announces and what the overflow menu lists can
+          no longer disagree.
+
+          The sequence groups by what an operator is doing rather than by subsystem
+          age: who answers (Agents, Skills, MCP, Ontology), what it works on (Files,
+          Pipeline, Webhooks, Cron), what it remembers and spent (Memory, Usage), then
+          configuration (App Settings) and About. Earlier entries survive inline
+          longest, so the ones that are never gated and least often needed sit at the
+          end -- About is last because it is the one entry that is never gated, which
+          makes it the one position an operator can always predict. */}
       <div className="flex h-9 shrink-0 items-center justify-end border-t px-3">
-        <div className="flex items-center gap-1">
-          {/* Ontology manager launcher (CTR-0173, PRP-0105): next to Declarative Agents;
-              shown only when ONTOLOGY_ENABLED (probed via GET /api/ontology/catalog). */}
-          {/* Narrow viewport (PRP-0171, UDR-0153 D3/D4): every launcher below except About
-              is wide-only and is not rendered; the features keep working. */}
-          {ontologyAvailable && show('sidebar.ontology') && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6 text-muted-foreground"
-              onClick={() => onOpenOntology?.()}
-              aria-label="Ontology"
-              title="Ontology (concept models)">
-              <Network className="h-4 w-4" />
-            </Button>
-          )}
-          {/* Token Usage Dashboard launcher (CTR-0215, PRP-0173): immediately right of
-              Ontology; needs no probe, because the usage API is always mounted. Wide-only
-              like the other management launchers (UDR-0153 D3). */}
-          {onOpenUsage && show('sidebar.usage') && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6 text-muted-foreground"
-              onClick={() => onOpenUsage()}
-              aria-label="Token usage"
-              title="Token usage (statistics)">
-              <ChartColumn className="h-4 w-4" />
-            </Button>
-          )}
-          {/* Declarative Agents & Workflows management (CTR-0144 v3, PRP-0094 / PRP-0118):
-              ONE self-probing icon opens the manager, which manages both Prompt agents
-              and Workflows. Only the ICON lives here (PRP-0134 / UDR-0115 D1): the modal
-              and its open-request listener are mounted in ChatPage, because this sidebar
-              is collapsible and unmounting it used to delete the listener -- which made
-              the chat composer's run-target button silently do nothing. */}
-          {show('sidebar.agents') && <DeclarativeAgentManagerTrigger />}
-          {/* Webhook gateway launcher (CTR-0157, PRP-0097): next to Declarative Agents;
-              shown only when WEBHOOK_ENABLED. */}
-          {webhookAvailable && show('sidebar.webhook') && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6 text-muted-foreground"
-              onClick={() => onOpenWebhook?.()}
-              aria-label="Webhooks"
-              title="Webhooks">
-              <Webhook className="h-4 w-4" />
-            </Button>
-          )}
-          {/* Pipeline jobs launcher (CTR-0148, PRP-0096): shown only when PIPELINE_ENABLED. */}
-          {pipelineAvailable && show('sidebar.pipeline') && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6 text-muted-foreground"
-              onClick={() => onOpenPipeline?.()}
-              aria-label="Pipeline jobs"
-              title="Pipeline jobs">
-              <Workflow className="h-4 w-4" />
-            </Button>
-          )}
-          {/* File Explorer launcher (CTR-0137, PRP-0091): shown only when FILE_EXPLORER_ENABLED. */}
-          {fileExplorerAvailable && show('sidebar.files') && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6 text-muted-foreground"
-              onClick={() => onOpenFiles?.()}
-              aria-label="File Explorer"
-              title="File Explorer">
-              <FolderTree className="h-4 w-4" />
-            </Button>
-          )}
-          {/* Cron scheduler launcher (CTR-0135, PRP-0089): shown only when CRON_ENABLED. */}
-          {cronAvailable && show('sidebar.cron') && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6 text-muted-foreground"
-              onClick={() => onOpenCron?.()}
-              aria-label="Cron scheduler"
-              title="Cron scheduler">
-              <Clock className="h-4 w-4" />
-            </Button>
-          )}
-          {/* Memory Management launcher (CTR-0167, PRP-0101): edit the built-in
-              IDENTITY / USER / MEMORY files. Always shown (identity always exists). */}
-          {onOpenMemory && show('sidebar.memory') && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6 text-muted-foreground"
-              onClick={() => onOpenMemory()}
-              aria-label="Agent memory"
-              title="Agent memory">
-              <Brain className="h-4 w-4" />
-            </Button>
-          )}
-          {/* Model Settings (CTR-0176, PRP-0111): self-probing icon next to About;
-              shown when GET /api/model-offerings is reachable. */}
-          {show('sidebar.appSettings') && <AppSettingsManager />}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6 text-muted-foreground"
-            onClick={() => setAboutOpen(true)}
-            aria-label="About ChatWalaʻau"
-            title="About ChatWalaʻau">
-            <Info className="h-4 w-4" />
-          </Button>
-        </div>
+        <SidebarFooterActions
+          className="min-w-0 flex-1"
+          items={[
+            // 1. Declarative Agents & Workflows (CTR-0144 v3): ONE self-probing icon.
+            // Only the ICON lives here (PRP-0134 / UDR-0115 D1) -- the modal and its
+            // open-request listener are mounted in ChatPage, because this sidebar is
+            // collapsible and unmounting it used to delete the listener.
+            ...(show('sidebar.agents')
+              ? [
+                  {
+                    id: 'agents',
+                    label: 'Declarative Agents',
+                    icon: <Bot className="h-4 w-4" />,
+                    node: <DeclarativeAgentManagerTrigger />,
+                  },
+                ]
+              : []),
+            // 2. Skills management (CTR-0124, PRP-0185): MOVED from the chat composer.
+            ...(show('sidebar.skills')
+              ? [
+                  {
+                    id: 'skills',
+                    label: 'Agent Skills',
+                    icon: <BookOpen className="h-4 w-4" />,
+                    node: <SkillsManager />,
+                  },
+                ]
+              : []),
+            // 3. MCP server management (CTR-0122, PRP-0185): MOVED from the chat
+            // composer. Self-probing, like the other manager triggers.
+            ...(show('sidebar.mcpTools')
+              ? [{ id: 'mcp', label: 'MCP Servers', icon: <Plug className="h-4 w-4" />, node: <McpToolManager /> }]
+              : []),
+            // 4. Ontology manager (CTR-0173, PRP-0105): ONTOLOGY_ENABLED probe.
+            ...(ontologyAvailable && show('sidebar.ontology')
+              ? [
+                  {
+                    id: 'ontology',
+                    label: 'Ontology',
+                    icon: <Network className="h-4 w-4" />,
+                    node: (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 shrink-0 text-muted-foreground"
+                        onClick={() => onOpenOntology?.()}
+                        aria-label="Ontology"
+                        title="Ontology">
+                        <Network className="h-4 w-4" />
+                      </Button>
+                    ),
+                  },
+                ]
+              : []),
+            // 5. File Explorer (CTR-0137, PRP-0091): FILE_EXPLORER_ENABLED probe.
+            ...(fileExplorerAvailable && show('sidebar.files')
+              ? [
+                  {
+                    id: 'files',
+                    label: 'File Explorer',
+                    icon: <FolderTree className="h-4 w-4" />,
+                    node: (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 shrink-0 text-muted-foreground"
+                        onClick={() => onOpenFiles?.()}
+                        aria-label="File Explorer"
+                        title="File Explorer">
+                        <FolderTree className="h-4 w-4" />
+                      </Button>
+                    ),
+                  },
+                ]
+              : []),
+            // 6. Pipeline jobs (CTR-0148, PRP-0096): PIPELINE_ENABLED probe.
+            ...(pipelineAvailable && show('sidebar.pipeline')
+              ? [
+                  {
+                    id: 'pipeline',
+                    label: 'Pipeline Jobs',
+                    icon: <Workflow className="h-4 w-4" />,
+                    node: (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 shrink-0 text-muted-foreground"
+                        onClick={() => onOpenPipeline?.()}
+                        aria-label="Pipeline Jobs"
+                        title="Pipeline Jobs">
+                        <Workflow className="h-4 w-4" />
+                      </Button>
+                    ),
+                  },
+                ]
+              : []),
+            // 7. Webhook gateway (CTR-0157, PRP-0097): WEBHOOK_ENABLED probe.
+            ...(webhookAvailable && show('sidebar.webhook')
+              ? [
+                  {
+                    id: 'webhook',
+                    label: 'Webhooks',
+                    icon: <Webhook className="h-4 w-4" />,
+                    node: (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 shrink-0 text-muted-foreground"
+                        onClick={() => onOpenWebhook?.()}
+                        aria-label="Webhooks"
+                        title="Webhooks">
+                        <Webhook className="h-4 w-4" />
+                      </Button>
+                    ),
+                  },
+                ]
+              : []),
+            // 8. Cron scheduler (CTR-0135, PRP-0089): CRON_ENABLED probe.
+            ...(cronAvailable && show('sidebar.cron')
+              ? [
+                  {
+                    id: 'cron',
+                    label: 'Cron Scheduler',
+                    icon: <Clock className="h-4 w-4" />,
+                    node: (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 shrink-0 text-muted-foreground"
+                        onClick={() => onOpenCron?.()}
+                        aria-label="Cron Scheduler"
+                        title="Cron Scheduler">
+                        <Clock className="h-4 w-4" />
+                      </Button>
+                    ),
+                  },
+                ]
+              : []),
+            // 9. Memory Management (CTR-0167, PRP-0101): always shown -- identity always exists.
+            ...(onOpenMemory && show('sidebar.memory')
+              ? [
+                  {
+                    id: 'memory',
+                    label: 'Agent Memory',
+                    icon: <Brain className="h-4 w-4" />,
+                    node: (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 shrink-0 text-muted-foreground"
+                        onClick={() => onOpenMemory()}
+                        aria-label="Agent Memory"
+                        title="Agent Memory">
+                        <Brain className="h-4 w-4" />
+                      </Button>
+                    ),
+                  },
+                ]
+              : []),
+            // 10. Token Usage Dashboard (CTR-0215, PRP-0173): no probe; the usage API
+            // is always mounted.
+            ...(onOpenUsage && show('sidebar.usage')
+              ? [
+                  {
+                    id: 'usage',
+                    label: 'Token Usage',
+                    icon: <ChartColumn className="h-4 w-4" />,
+                    node: (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 shrink-0 text-muted-foreground"
+                        onClick={() => onOpenUsage()}
+                        aria-label="Token Usage"
+                        title="Token Usage">
+                        <ChartColumn className="h-4 w-4" />
+                      </Button>
+                    ),
+                  },
+                ]
+              : []),
+            // 11. App Settings (CTR-0176, PRP-0111): self-probing icon.
+            ...(show('sidebar.appSettings')
+              ? [
+                  {
+                    id: 'appSettings',
+                    label: 'App Settings',
+                    icon: <SlidersHorizontal className="h-4 w-4" />,
+                    node: <AppSettingsManager />,
+                  },
+                ]
+              : []),
+            // 12. About: never gated, so it is the one position that never moves.
+            {
+              id: 'about',
+              label: 'About ChatWalaʻau',
+              icon: <Info className="h-4 w-4" />,
+              node: (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 shrink-0 text-muted-foreground"
+                  onClick={() => setAboutOpen(true)}
+                  aria-label="About ChatWalaʻau"
+                  title="About ChatWalaʻau">
+                  <Info className="h-4 w-4" />
+                </Button>
+              ),
+            },
+          ]}
+        />
       </div>
 
       <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>

@@ -1,279 +1,176 @@
-import { Check, ImagePlus } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { cn } from '@/lib/utils'
 
 /**
- * Image Output Options control (CTR-0120, PRP-0085, FEAT-0044, UDR-0063 D6).
+ * Built-in agent image output options (CTR-0120, FEAT-0044, PRP-0185, UDR-0167 D11).
  *
- * A compact per-session control that lets the user choose how generated/edited
- * images are produced -- Size / Quality / Format / Compression / Background. The
- * selection is reported up to ChatPanel, which sends it as AG-UI
- * state.image_options; the backend (CTR-0049) applies it as the generate_image /
- * edit_image DEFAULT (an explicit LLM tool argument still wins). Only non-default
- * fields are sent, so an untouched control changes nothing.
+ * Size / Quality / Format / Compression / Background for the images the Built-in
+ * ChatWalaʻau Core agent generates. Rendered inside the Core agent card, next to the
+ * model / effort / structured-output controls it now belongs with.
  *
- * Per-session selection persists in localStorage (the CTR-0071 / CTR-0118 pattern).
- * Compression is offered only for jpeg. When image generation is not
- * configured or in DEMO_MODE the selection is simply ignored on the backend
- * (no-op, UDR-0063 D6).
+ * It used to be a PER-SESSION control in the chat composer: the selection lived in
+ * each browser's localStorage, keyed by thread, and travelled as AG-UI
+ * state.image_options. That made a piece of the Built-in agent's configuration
+ * invisible to everyone but the browser that set it, and invisible to the operator
+ * entirely. PRP-0184 moved model / effort / structured output off the same toolbar for
+ * the same reason; this is the control it did not reach.
  *
- * v0.117.6: the values are GATED by the configured image model. These options are
- * not uniformly supported, and the control used to offer every value
- * unconditionally, so a user could pick one that failed the turn. `transparent` and
- * `webp` are withdrawn outright (gpt-image-2 rejects both); for anything else, the
- * backend reports what the deployment has been observed to reject
- * (GET /api/model `image_output`, learned from the provider's own 400s, never
- * guessed); an unsupported value is disabled here with the reason shown, and a value
- * already selected when it turns out to be unsupported is cleared.
+ * The selection is now PERSISTED in the Application Settings store (CTR-0198) and
+ * applies SERVER-WIDE, which the Core agent card states (the UDR-0158 rule, as
+ * UDR-0166 D9 applied it). It does NOT own its own Apply button: the parent writes
+ * every Built-in setting in ONE CTR-0199 PATCH, so a change here is applied with the
+ * model and effort rather than through a second, racing write.
+ *
+ * What did NOT change is the per-value deployment gating. GET /api/model
+ * `image_output` reports which values the configured image model has been observed to
+ * reject (learned from the provider's own 400s, never guessed); a rejected value is
+ * disabled here with the reason shown, and a value already selected when it turns out
+ * to be unsupported is cleared. Dropping that in the move would have handed the
+ * operator back the ability to pin a value that fails every turn.
  */
 
 export type ImageOptions = Record<string, string>
 
-interface ImageOutputOptionsProps {
-  threadId: string
-  onChange: (opts: ImageOptions) => void
-}
-
-const STORAGE_PREFIX = 'chatwalaau-image-'
-
-// v0.117.6: 2K / 4K sizes were missing entirely, so they could not be chosen.
-// Mirrors app/image_gen/capabilities.py OPTION_VALUES -- the backend validates
-// against the same surface, so the two must not drift.
+/** Mirrors app/image_gen/capabilities.py OPTION_VALUES; the backend validates the same surface. */
 const SIZE_CHOICES = ['auto', '1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '3840x2160', '2160x3840']
 const QUALITY_CHOICES = ['auto', 'low', 'medium', 'high']
 const FORMAT_CHOICES = ['png', 'jpeg']
 const BACKGROUND_CHOICES = ['auto', 'opaque']
-const FIELDS = ['size', 'quality', 'format', 'compression', 'background'] as const
-
-function storageKey(threadId: string): string {
-  return `${STORAGE_PREFIX}${threadId}`
-}
-
-function load(threadId: string): ImageOptions {
-  try {
-    const raw = localStorage.getItem(storageKey(threadId))
-    if (!raw) return {}
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
-  }
-}
+export const IMAGE_OPTION_FIELDS = ['size', 'quality', 'format', 'compression', 'background'] as const
 
 /** Image output capabilities advertised by GET /api/model (CTR-0069, v0.117.6). */
-interface ImageOutputCapability {
+export interface ImageOutputCapability {
   deployment: string
   values: Record<string, string[]>
   /** option key -> values this deployment has been observed to reject. */
   unsupported: Record<string, string[]>
 }
 
-export function ImageOutputOptions({ threadId, onChange }: ImageOutputOptionsProps) {
-  const [opts, setOpts] = useState<ImageOptions>({})
-  const [open, setOpen] = useState(false)
-  const [capability, setCapability] = useState<ImageOutputCapability | null>(null)
+interface ImageOutputOptionsProps {
+  /** Current values, keyed by option name ("" = API default). */
+  value: ImageOptions
+  /** Report a single field change; the parent owns the draft and the Apply. */
+  onFieldChange: (key: string, value: string) => void
+  /** Deployment capability report; null when no image offering is configured. */
+  capability: ImageOutputCapability | null
+  disabled?: boolean
+  className?: string
+}
 
-  // Restore the per-session selection on mount / thread change.
-  useEffect(() => {
-    setOpts(load(threadId))
-  }, [threadId])
-
-  // Which values the configured image model has been observed to reject. Re-read
-  // when the panel is opened so a restriction learned during this session (the
-  // backend records the first rejection) is reflected without a page reload.
-  useEffect(() => {
-    if (!open) return
-    let cancelled = false
-    fetch('/api/model')
-      .then((res) => res.json())
-      .then((data: { image_output?: ImageOutputCapability | null }) => {
-        if (!cancelled) setCapability(data?.image_output ?? null)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [open])
-
-  // Report only non-empty (chosen) fields to ChatPanel.
-  useEffect(() => {
-    const chosen: ImageOptions = {}
-    for (const k of FIELDS) {
-      const v = opts[k]
-      if (v) chosen[k] = v
-    }
-    onChange(chosen)
-  }, [opts, onChange])
-
-  const setField = useCallback(
-    (key: string, value: string) => {
-      setOpts((prev) => {
-        const next = { ...prev }
-        if (value) next[key] = value
-        else delete next[key]
-        // Compression only applies to the lossy format (jpeg).
-        if (key === 'format' && value !== 'jpeg') delete next.compression
-        localStorage.setItem(storageKey(threadId), JSON.stringify(next))
-        return next
-      })
-    },
-    [threadId],
-  )
-
+export function ImageOutputOptions({
+  value,
+  onFieldChange,
+  capability,
+  disabled = false,
+  className,
+}: ImageOutputOptionsProps) {
   const unsupported = useMemo(() => capability?.unsupported ?? {}, [capability])
   const isUnsupported = useCallback(
-    (field: string, value: string) => (unsupported[field] ?? []).includes(value),
+    (field: string, choice: string) => (unsupported[field] ?? []).includes(choice),
     [unsupported],
   )
 
   // A value the model turns out to reject must not stay selected: it would fail the
   // next turn exactly as before. Clearing it falls back to that model's own default.
   useEffect(() => {
-    for (const field of FIELDS) {
-      const value = opts[field]
-      if (value && (unsupported[field] ?? []).includes(value)) {
-        setField(field, '')
+    for (const field of IMAGE_OPTION_FIELDS) {
+      const current = value[field]
+      if (current && (unsupported[field] ?? []).includes(current)) {
+        onFieldChange(field, '')
         return
       }
     }
-  }, [unsupported, opts, setField])
+  }, [unsupported, value, onFieldChange])
 
-  const activeCount = FIELDS.filter((k) => opts[k]).length
-  const compressionEligible = opts.format === 'jpeg'
+  const compressionEligible = value.format === 'jpeg'
   const anyUnsupported = Object.values(unsupported).some((values) => values.length > 0)
-  // v0.117.6: the compression box accepted anything the browser would let through
-  // (a non-integer, out of range), which reached the API as an opaque 400. The
-  // backend validates the same rule; this just makes it visible before sending.
+  // The compression box used to accept anything the browser would let through (a
+  // non-integer, out of range), which reached the API as an opaque 400. The backend
+  // validates the same rule; this makes it visible before sending.
   const compressionInvalid = (() => {
-    const raw = opts.compression
+    const raw = value.compression
     if (!raw) return false
-    const value = Number(raw)
-    return !Number.isInteger(value) || value < 0 || value > 100
+    const parsed = Number(raw)
+    return !Number.isInteger(parsed) || parsed < 0 || parsed > 100
   })()
 
-  const selectClass = 'h-6 rounded-md border bg-background px-1 text-[11px] outline-none focus:ring-1 focus:ring-ring'
+  const selectClass =
+    'h-7 rounded-md border bg-background px-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50'
 
-  /** Options for one field, disabling what the deployed model cannot produce. */
   const renderChoices = (field: string, choices: string[]) =>
-    choices.map((c) => (
-      <option key={c} value={c} disabled={isUnsupported(field, c)}>
-        {c}
-        {isUnsupported(field, c) ? ' — not supported' : ''}
+    choices.map((choice) => (
+      <option key={choice} value={choice} disabled={isUnsupported(field, choice)}>
+        {choice}
+        {isUnsupported(field, choice) ? ' — not supported' : ''}
       </option>
     ))
 
   return (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((p) => !p)}
-        title="Image output options (size, quality, format, compression, background)"
-        className={cn(
-          'flex items-center gap-0.5 rounded-md border px-1.5 h-6 text-xs transition-colors',
-          activeCount > 0
-            ? 'border-primary/40 bg-primary/10 text-primary'
-            : 'border-transparent text-muted-foreground hover:bg-muted hover:text-foreground',
-        )}>
-        <ImagePlus className="h-3 w-3 shrink-0" />
-        <span className="hidden sm:inline">Image{activeCount > 0 ? ` (${activeCount})` : ''}</span>
-      </button>
-
-      {open && (
-        <>
-          <button
-            type="button"
-            tabIndex={-1}
-            className="fixed inset-0 z-40 cursor-default border-none bg-transparent"
-            onClick={() => setOpen(false)}
-            aria-label="Close image options"
+    <div className={cn('space-y-2', className)}>
+      <span className="text-[11px] font-medium text-muted-foreground">Image output</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          className={cn(selectClass, 'w-36')}
+          disabled={disabled}
+          value={value.size ?? ''}
+          aria-label="Built-in agent image size"
+          onChange={(e) => onFieldChange('size', e.target.value)}>
+          <option value="">size (default)</option>
+          {renderChoices('size', SIZE_CHOICES)}
+        </select>
+        <select
+          className={cn(selectClass, 'w-32')}
+          disabled={disabled}
+          value={value.quality ?? ''}
+          aria-label="Built-in agent image quality"
+          onChange={(e) => onFieldChange('quality', e.target.value)}>
+          <option value="">quality (default)</option>
+          {renderChoices('quality', QUALITY_CHOICES)}
+        </select>
+        <select
+          className={cn(selectClass, 'w-28')}
+          disabled={disabled}
+          value={value.format ?? ''}
+          aria-label="Built-in agent image format"
+          onChange={(e) => onFieldChange('format', e.target.value)}>
+          <option value="">format (default)</option>
+          {renderChoices('format', FORMAT_CHOICES)}
+        </select>
+        {compressionEligible && (
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            disabled={disabled}
+            value={value.compression ?? ''}
+            placeholder="compression 0-100"
+            aria-label="Built-in agent image compression"
+            aria-invalid={compressionInvalid || undefined}
+            onChange={(e) => onFieldChange('compression', e.target.value)}
+            className={cn(selectClass, 'w-40', compressionInvalid && 'border-destructive focus:ring-destructive')}
           />
-          <div className="absolute bottom-full left-0 z-50 mb-1 w-[240px] rounded-md border bg-popover p-2 shadow-md">
-            <div className="mb-1.5 flex items-center justify-between">
-              <span className="text-xs font-medium">Image output</span>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[11px] text-primary hover:bg-accent">
-                <Check className="h-3 w-3" /> Done
-              </button>
-            </div>
-            <div className="space-y-1.5">
-              <label className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-muted-foreground">Size</span>
-                <select
-                  value={opts.size ?? ''}
-                  onChange={(e) => setField('size', e.target.value)}
-                  className={selectClass}>
-                  <option value="">Default</option>
-                  {renderChoices('size', SIZE_CHOICES)}
-                </select>
-              </label>
-              <label className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-muted-foreground">Quality</span>
-                <select
-                  value={opts.quality ?? ''}
-                  onChange={(e) => setField('quality', e.target.value)}
-                  className={selectClass}>
-                  <option value="">Default</option>
-                  {renderChoices('quality', QUALITY_CHOICES)}
-                </select>
-              </label>
-              <label className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-muted-foreground">Format</span>
-                <select
-                  value={opts.format ?? ''}
-                  onChange={(e) => setField('format', e.target.value)}
-                  className={selectClass}>
-                  <option value="">Default</option>
-                  {renderChoices('format', FORMAT_CHOICES)}
-                </select>
-              </label>
-              {compressionEligible && (
-                <label className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] text-muted-foreground">Compression</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    step={1}
-                    value={opts.compression ?? ''}
-                    placeholder="0-100"
-                    onChange={(e) => setField('compression', e.target.value)}
-                    aria-invalid={compressionInvalid || undefined}
-                    className={cn(
-                      'h-6 w-[72px] rounded-md border bg-background px-1 text-[11px] outline-none focus:ring-1 focus:ring-ring',
-                      compressionInvalid && 'border-destructive focus:ring-destructive',
-                    )}
-                  />
-                </label>
-              )}
-              <label className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-muted-foreground">Background</span>
-                <select
-                  value={opts.background ?? ''}
-                  onChange={(e) => setField('background', e.target.value)}
-                  className={selectClass}>
-                  <option value="">Default</option>
-                  {renderChoices('background', BACKGROUND_CHOICES)}
-                </select>
-              </label>
-            </div>
-            <p className="mt-1.5 text-[10px] text-muted-foreground">
-              Defaults apply when image generation runs. The model may override a field when needed.
-            </p>
-            {compressionInvalid && (
-              <p className="mt-1 text-[10px] leading-snug text-destructive">
-                Compression must be a whole number between 0 and 100.
-              </p>
-            )}
-            {anyUnsupported && (
-              <p className="mt-1 text-[10px] leading-snug text-amber-700 dark:text-amber-500">
-                Values marked "not supported" were rejected by the configured image model
-                {capability?.deployment ? ` (${capability.deployment})` : ''} and are disabled.
-              </p>
-            )}
-          </div>
-        </>
+        )}
+        <select
+          className={cn(selectClass, 'w-36')}
+          disabled={disabled}
+          value={value.background ?? ''}
+          aria-label="Built-in agent image background"
+          onChange={(e) => onFieldChange('background', e.target.value)}>
+          <option value="">background (default)</option>
+          {renderChoices('background', BACKGROUND_CHOICES)}
+        </select>
+      </div>
+      {compressionInvalid && (
+        <p className="text-[11px] text-red-600 dark:text-red-400">
+          Compression must be a whole number between 0 and 100.
+        </p>
+      )}
+      {anyUnsupported && (
+        <p className="text-[11px] leading-snug text-amber-700 dark:text-amber-500">
+          Values marked "not supported" were rejected by the configured image model
+          {capability?.deployment ? ` (${capability.deployment})` : ''} and are disabled.
+        </p>
       )}
     </div>
   )

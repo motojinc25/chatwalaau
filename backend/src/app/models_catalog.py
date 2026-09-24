@@ -107,7 +107,39 @@ VALID_HOSTINGS = frozenset({"direct", "foundry"})
 # (UDR-0058 D2), so Structured Output keeps working and still returns conforming
 # JSON. The key is named for the NATIVE path precisely so its `false` does not read
 # as "structured output off".
-CAPABILITY_KEYS = frozenset({"web_search", "native_structured_output"})
+#
+# v0.166.0 (PRP-0185, UDR-0167 D1/D2/D3): the set grows to SIX and the vocabulary is
+# generalized from "hosted tool" to any AGENT TOOL CLASS. `function_calling`, `mcp`,
+# `skills` and `image_generation` join `web_search` as things a deployment may
+# WITHHOLD. The opt-out posture is unchanged and is now normative: absent means
+# ENABLED, and only an explicit `false` withholds (D1) -- so every catalog written
+# before this version behaves byte-for-byte as it did.
+#
+# `function_calling` is RECOGNIZED but FIXED-ENABLED (D3): `true` is accepted and
+# does nothing, `false` raises CatalogError. Every other tool class rides function
+# calling -- MCP tools, the three Skills tools and the two image tools ALL reach a
+# provider AS function tools -- so a catalog able to say `function_calling: false`
+# together with `mcp: true` would be incoherent. Fixing the key removes that
+# combination instead of policing it with cross-key validation, and the operational
+# rule it encodes is that a model which cannot call functions is not registered as a
+# chat offering. The key stays in the set so the App Settings UI can present all five
+# agent capabilities in ONE uniform list with this one shown as always-on.
+CAPABILITY_KEYS = frozenset(
+    {
+        "web_search",
+        "native_structured_output",
+        "function_calling",
+        "mcp",
+        "skills",
+        "image_generation",
+    }
+)
+
+# Capability keys that MUST NOT be withheld (PRP-0185, UDR-0167 D3). Declaring one
+# `false` is a CatalogError naming the operational rule, not a silently ignored value:
+# an operator who writes it has a belief about the deployment that the product cannot
+# honor, and ignoring it would leave that belief uncorrected.
+FIXED_ENABLED_CAPABILITY_KEYS = frozenset({"function_calling"})
 
 
 # ---- Task-model role registry (PRP-0115, UDR-0096) ------------------------
@@ -416,6 +448,11 @@ def _parse_capabilities(raw: Any, offering_id: str) -> dict[str, bool] | None:
     which for a capability gate means silently keeping a tool the operator meant to
     withhold. Raises :class:`CatalogError` on a non-object block, an unknown key, or a
     non-boolean value.
+
+    PRP-0185 / UDR-0167 D3: a key in :data:`FIXED_ENABLED_CAPABILITY_KEYS` may not be
+    withheld. `true` is accepted and normalized away (it declares an intention and
+    changes nothing); `false` raises, naming the operational rule, because an operator
+    who writes it holds a belief about the deployment the product cannot honor.
     """
     if raw is None:
         return None
@@ -432,6 +469,12 @@ def _parse_capabilities(raw: Any, offering_id: str) -> dict[str, bool] | None:
             continue
         if not isinstance(value, bool):
             raise CatalogError(f"offering '{offering_id}': capabilities.{key} must be a boolean")
+        if key in FIXED_ENABLED_CAPABILITY_KEYS and value is False:
+            raise CatalogError(
+                f"offering '{offering_id}': capabilities.{key} cannot be false -- every other "
+                f"tool class reaches the provider AS a function tool, so it is always enabled. "
+                f"Register only models that support function calling as chat offerings."
+            )
         out[key] = value
     return out or None
 

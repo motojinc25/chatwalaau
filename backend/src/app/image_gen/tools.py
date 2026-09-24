@@ -8,14 +8,21 @@ has one to resolve. Generated images are saved to the session upload directory
 (.uploads/{thread_id}/generated_{uuid}.{ext}).
 
 Image output options (size / quality / format / compression / background) follow a
-precedence (PRP-0085 / PRP-0114, FEAT-0044, UDR-0095 D3, reordered in v0.117.6):
-  state.image_options (an EXPLICIT per-session UI selection)
+precedence (PRP-0085 / PRP-0114, FEAT-0044, UDR-0095 D3, reordered in v0.117.6,
+re-sourced by PRP-0185 / UDR-0167 D11/D12):
+  the BUILT-IN agent's persisted setting (an EXPLICIT operator selection)
   > explicit LLM argument > offering.image_defaults > API default.
-A field the user pinned in the control wins over the model's guess; a field left on
-"Default" is not sent at all, so the model's argument applies there.
-The per-session selection is delivered by the AG-UI endpoint (CTR-0009) into the
+A field the operator pinned wins over the model's guess; a field left on "Default" is
+not sent at all, so the model's argument applies there.
+The top tier is delivered by the AG-UI endpoint (CTR-0009) into the
 current_image_options contextvar before agent.run(); the LLM tool arguments default
-to None so an omitted argument falls through to the session / offering default.
+to None so an omitted argument falls through to the offering / API default.
+
+Until PRP-0185 that tier was a PER-SESSION selection the SPA shipped as AG-UI
+state.image_options. It is now the Built-in agent's configuration, read from the
+Application Settings store: the same rank, a different owner. state.image_options is
+accepted and ignored (UDR-0167 D11). The harness and workflow lanes never set the
+contextvar, which is what scopes the setting to the Built-in agent.
 
 Tools execute in a thread pool via asyncio.to_thread() to prevent blocking
 the FastAPI async event loop during API calls.
@@ -45,12 +52,60 @@ logger = logging.getLogger(__name__)
 # Context variable for thread_id -- set by endpoint.py before agent.run()
 current_thread_id: contextvars.ContextVar[str] = contextvars.ContextVar("current_thread_id")
 
-# Per-session image output options (PRP-0085, CTR-0120/CTR-0009). Set by the AG-UI
-# endpoint before agent.run() from state.image_options; unset / empty means the
-# user made no selection (fall through to settings / API defaults).
+# Image output options for the run (PRP-0085, CTR-0120/CTR-0009; re-sourced by
+# PRP-0185, UDR-0167 D11). Set by the AG-UI endpoint before agent.run(); unset /
+# empty means no selection was made and the resolution falls through to
+# offering.image_defaults and then the API default.
+#
+# The SOURCE moved, the seam did not. Until PRP-0185 this carried a PER-SESSION UI
+# selection shipped as AG-UI state.image_options; it now carries the BUILT-IN agent's
+# persisted configuration. The harness and workflow lanes never set it, which is what
+# keeps the setting scoped to the Built-in agent.
 current_image_options: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "current_image_options", default=None
 )
+
+# The Built-in agent's image option settings, in catalog key order. The VALUES are
+# validated by app.image_gen.capabilities (OPTION_VALUES stays the single source,
+# CTR-0049) and the setting names mirror it, so a new option is one descriptor plus
+# one entry here rather than a new resolution path.
+_BUILTIN_IMAGE_SETTINGS: tuple[tuple[str, str], ...] = (
+    ("size", "core_agent_image_size"),
+    ("quality", "core_agent_image_quality"),
+    ("format", "core_agent_image_format"),
+    ("compression", "core_agent_image_compression"),
+    ("background", "core_agent_image_background"),
+)
+
+
+def builtin_image_options() -> dict[str, str]:
+    """The Built-in agent's image output options, or ``{}`` (PRP-0185, UDR-0167 D11).
+
+    Returns ``{}`` unless the ACTIVE declarative agent is the bundled Core agent.
+    That is the whole of the "Built-in only" rule (PRP-0185 Section 2.5): a Custom
+    Prompt agent has no image configuration of its own and keeps resolving from
+    ``offering.image_defaults``, so handing it Core's settings would make one
+    run-target's configuration leak into another.
+
+    Empty / unset settings are dropped, so an untouched deployment contributes
+    nothing and behaves exactly as it did before the setting existed.
+    """
+    try:
+        from app.agent.declarative.spec import CORE_AGENT_ID
+        from app.agent.declarative.store import active_spec
+
+        if active_spec().id != CORE_AGENT_ID:
+            return {}
+    except Exception:
+        logger.debug("Could not resolve the active agent for image options", exc_info=True)
+        return {}
+    out: dict[str, str] = {}
+    for key, setting in _BUILTIN_IMAGE_SETTINGS:
+        value = str(getattr(settings, setting, "") or "").strip()
+        if value:
+            out[key] = value
+    return out
+
 
 # The Images API default when no output_format is sent (and what a model falls back
 # to when the option is dropped after a rejection).
@@ -95,33 +150,43 @@ def _resolve_option(arg: str | None, key: str, default_value: object) -> str:
     that, and it looked intermittent because it depended on whether the model chose to
     pass the argument at all. It is now::
 
-        state.image_options > explicit LLM argument > offering.image_defaults > API default
+        Built-in agent setting > explicit LLM argument > offering.image_defaults > API default
 
-    The per-session block only ever contains fields the user EXPLICITLY chose (the SPA
-    sends nothing for a field left on "Default"), so it is a deliberate instruction and
+    The top block only ever contains fields that were EXPLICITLY chosen (nothing is
+    sent for a field left on "Default"), so it is a deliberate instruction and
     outranks the model's guess. The OPERATOR tier (offering.image_defaults) stays BELOW
     the model argument: that one is a fallback, not a per-request choice.
 
-    Trade-off, deliberately taken: while a field is pinned in the control, asking for a
-    different value in chat will not change it -- clear the field to let the model
-    choose again. Predictable beats occasionally-convenient here, because the pinned
-    value is visible in the UI and the override was not.
+    Trade-off, deliberately taken: while a field is pinned, asking for a different
+    value in chat will not change it -- clear the field to let the model choose again.
+    Predictable beats occasionally-convenient here, because the pinned value is
+    visible in the UI and the override was not.
+
+    PRP-0185 / UDR-0167 D12: the top tier is now the BUILT-IN AGENT SETTING rather
+    than the per-session selection, and it keeps the rank the per-session block had.
+    PRP-0185's D12 first wrote the order as "explicit tool argument > Built-in agent
+    setting"; that was drafted without noticing the v0.117.6 inversion above, and
+    implementing it literally would have restored the exact defect that inversion
+    fixed ("I set 1024x1024 and it generated 1536x1024"). The tier CONTENT moved from
+    a per-session choice to a persisted one, which makes it MORE deliberate, not
+    less, so demoting it below the model's guess has no argument behind it. D12 is
+    corrected in UDR-0167 to match this code.
 
     A blank / None value at any tier is treated as "unspecified" and falls through.
     ``default_value`` comes from models_catalog.image_output_defaults() and may be a
     str (size/quality/...) or an int (compression); it is coerced to str.
     """
-    session = current_image_options.get() or {}
-    session_value = session.get(key)
-    if session_value:
-        if arg and str(arg) != str(session_value):
+    configured = current_image_options.get() or {}
+    configured_value = configured.get(key)
+    if configured_value:
+        if arg and str(arg) != str(configured_value):
             logger.info(
-                "Image option %s: keeping the user's selection %r; ignoring the model's %r",
+                "Image option %s: keeping the configured selection %r; ignoring the model's %r",
                 key,
-                str(session_value),
+                str(configured_value),
                 arg,
             )
-        return str(session_value)
+        return str(configured_value)
     if arg:
         return arg
     if default_value is not None and str(default_value) != "":

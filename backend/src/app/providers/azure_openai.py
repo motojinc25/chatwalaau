@@ -20,7 +20,7 @@ from app.core.config import settings
 from app.providers.base import (
     EFFORT_DEFAULT,
     EFFORT_LEVELS,
-    hosted_tool_withheld,
+    capability_withheld,
     max_output_tokens_for,
     resolve_effort_level,
 )
@@ -30,6 +30,7 @@ from app.providers.structured import (
     dedupe_wire_input,
     drop_orphan_outputs,
     effective_schema,
+    has_structured_format,
     orphan_outputs,
     pairing_undecidable,
     strip_loop_iteration_marker,
@@ -94,8 +95,10 @@ class _StructuredOutputMixin:
         # here, at the chokepoint this provider already owns; inert when absent.
         if strip_loop_iteration_marker(run_options):
             logger.debug("[wire] removed MAF's internal harness-loop marker from the request")
-        text_cfg = run_options.get("text")
-        if isinstance(text_cfg, dict) and text_cfg.get("format") is not None:
+        # PRP-0185 step 2 (UDR-0167 D18): the shape test is DERIVED from
+        # `has_structured_format` so the tool surface report, which explains the drop
+        # to an operator, cannot test a different condition than the request applies.
+        if has_structured_format(run_options):
             strip_web_search(run_options)
         # Wire tracing (PRP-0141 follow-up; app.agent.wire_trace since PRP-0179): the
         # request as it will go on the wire, ids only.
@@ -391,7 +394,7 @@ class AzureOpenAIProvider:
     def web_search_tool(self, model: str) -> Any | None:
         # PRP-0129 / UDR-0112 D1: an offering may declare that its deployment cannot
         # serve the hosted tool. Undeclared is unchanged -- the tool is supplied.
-        if hosted_tool_withheld(model, "web_search"):
+        if capability_withheld(model, "web_search"):
             return None
         return openai_web_search_tool()
 
@@ -409,7 +412,7 @@ class AzureOpenAIProvider:
         # PRP-0131 / UDR-0058 D9: the default output schema is the OPEN object. It is
         # expressible here because the Responses API takes `strict: false`, which
         # lifts the closed-schema requirement -- the escape Anthropic does not have.
-        native = not hosted_tool_withheld(model, "native_structured_output")
+        native = not capability_withheld(model, "native_structured_output")
         return {
             "supported": native,
             "native": native,
