@@ -34,9 +34,7 @@ export type EntryId =
   | 'sidebar.appSettings'
   | 'sidebar.mcpTools'
   | 'sidebar.skills'
-  // composer toolbar
-  | 'toolbar.contextWindow'
-  | 'toolbar.runTargetLabel'
+  // composer control row (CTR-0221)
   | 'toolbar.runTargetAction'
   // composer
   | 'attach.file'
@@ -96,10 +94,15 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   // `toolbar.structuredOutput` are GONE from this table with the controls they gated.
   // Model, reasoning effort and structured output are configured on the run-target, so
   // there is no composer entry left to admit or withhold per tier.
-  'toolbar.contextWindow': 'all',
-  'toolbar.runTargetLabel': 'all',
-  // PRP-0176 / UDR-0158 D1: the action exists on both tiers; only its DESTINATION
-  // differs (the wide manager modal, or the narrow run-target picker, CTR-0216).
+  // PRP-0186 / UDR-0168: `toolbar.contextWindow` and `toolbar.runTargetLabel` are GONE
+  // from this table with the strip they described. Both had ALREADY been dead --
+  // declared here and referenced nowhere -- and the strip they belonged to no longer
+  // exists: occupancy is the composer's outline state and the run-target is an icon in
+  // its control row.
+  //
+  // The action survives and is still `all`, but it now gates the composer's run-target
+  // ICON rather than a labelled chip above the composer, and its destination no longer
+  // depends on the tier (UDR-0168 D7 amends UDR-0158 D1).
   'toolbar.runTargetAction': 'all',
   // PRP-0185 / UDR-0167 D11/D13: `toolbar.imageOutput`, `toolbar.mcpTools` and
   // `toolbar.skills` are GONE from this table with the controls they gated, exactly as

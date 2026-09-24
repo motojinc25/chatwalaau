@@ -1,6 +1,7 @@
-import { Bot, Check, Hammer, Loader2, Search, TriangleAlert, Workflow as WorkflowIcon } from 'lucide-react'
+import { Bot, Check, Hammer, Loader2, Search, Settings2, TriangleAlert, Workflow as WorkflowIcon } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { CoreAgentOptions } from '@/components/CoreAgentOptions'
+import { requestDeclarativeManager } from '@/components/DeclarativeAgentManager'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent } from '@/components/ui/sheet'
 import {
@@ -10,21 +11,28 @@ import {
   runTargetSelectability,
   useRunTargets,
 } from '@/hooks/useRunTargets'
+import { useChatSurfaceTier } from '@/lib/narrowSurface'
 import { cn } from '@/lib/utils'
 
 /**
- * Narrow run-target picker (CTR-0216, PRP-0176, UDR-0158 D1/D3/D4/D5/D6/D7).
+ * Run-target picker (CTR-0216, PRP-0176 / PRP-0186, UDR-0158 D3/D4/D5/D7,
+ * UDR-0168 D7/D8).
  *
- * On a phone the Declarative Agents & Workflows modal has no layout, so its entries are
- * gated (UDR-0153 D3) and the run-target used to be a read-only label. This bottom sheet
- * is the narrow destination of the composer's run-target button: it lists the Built-in
+ * The switching surface for the chat run-target on EVERY tier. It lists the Built-in
  * agent, Prompt agents, Workflows and Harness agents, searches them, and applies a
  * choice through the ONE switch module (CTR-0217).
  *
- * Browse-and-switch only (D5): no create / edit / delete / reload / YAML -- those stay on
- * the wide surface. A Prompt activation is SERVER-WIDE, so it is confirmed here with its
- * reach spelled out (D3); a Workflow / Harness choice is this browser's own and applies
- * on tap (D4).
+ * It was born as the PHONE's picker, because the Declarative Agents & Workflows modal
+ * has no layout at that width and the run-target there used to be a read-only label.
+ * PRP-0186 (UDR-0168 D7) made it the destination on the wide tier too: sending the wide
+ * viewport to a ~90% authoring modal for the FREQUENT action -- switching -- while the
+ * phone got the light surface inverted the cost. Authoring stays wide-only and stays
+ * CTR-0144's; it is reached from the "Manage agents" entry at the foot of this sheet,
+ * which is rendered on the wide tier only.
+ *
+ * Browse-and-switch only (D5): no create / edit / delete / reload / YAML happens HERE.
+ * A Prompt activation is SERVER-WIDE, so it is confirmed here with its reach spelled
+ * out (D3); a Workflow / Harness choice is this browser's own and applies on tap (D4).
  */
 
 /** Dispatched on the window to REQUEST the narrow picker (the CTR-0144 seam's shape).
@@ -69,6 +77,7 @@ function groupLabel(path: string[]): string {
 
 export function RunTargetSheet() {
   const runTargets = useRunTargets()
+  const surface = useChatSurfaceTier()
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -288,11 +297,22 @@ export function RunTargetSheet() {
                             className={cn(
                               'flex w-full items-start gap-2 px-4 py-3 text-left text-sm',
                               row.selectable ? 'active:bg-accent' : 'cursor-not-allowed opacity-50',
+                              // UDR-0168 D8: the current run-target is emphasised, IN
+                              // ADDITION TO its check and never instead of it. The
+                              // check is the non-colour signal and stays; the fill
+                              // answers "which one am I on" at a glance, which matters
+                              // more now that the composer shows an icon rather than
+                              // the name (D4).
+                              current && 'bg-primary/10',
                             )}>
-                            <span className="mt-0.5 text-muted-foreground">{icon(row.kind)}</span>
+                            <span className={cn('mt-0.5', current ? 'text-primary' : 'text-muted-foreground')}>
+                              {icon(row.kind)}
+                            </span>
                             <span className="min-w-0 flex-1">
                               <span className="flex items-center gap-2">
-                                <span className="truncate font-medium">{row.name}</span>
+                                <span className={cn('truncate font-medium', current && 'text-primary')}>
+                                  {row.name}
+                                </span>
                                 {current && <Check className="h-4 w-4 shrink-0 text-primary" />}
                               </span>
                               {row.group && (
@@ -312,6 +332,27 @@ export function RunTargetSheet() {
                   </ul>
                 </section>
               ))}
+            {/* UDR-0168 D7: the way IN to authoring, now that the composer no longer
+                opens the manager directly. Wide only, because create / edit / delete /
+                reload / YAML have no layout on a phone and their entries are gated
+                there anyway (UDR-0153 D3) -- an entry that opened an unusable screen
+                would be worse than its absence. Closing first keeps one modal surface
+                on screen at a time. */}
+            {!loading && !surface.narrow && (
+              <div className="border-t px-4 py-3">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full justify-start"
+                  onClick={() => {
+                    setOpen(false)
+                    requestDeclarativeManager()
+                  }}>
+                  <Settings2 className="mr-2 h-4 w-4" />
+                  Manage agents...
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </SheetContent>

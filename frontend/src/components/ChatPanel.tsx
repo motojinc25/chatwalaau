@@ -2,8 +2,7 @@ import { Bot, Hammer, ImageIcon, Loader2, Workflow as WorkflowIcon } from 'lucid
 import { type DragEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
-import { ContextWindowIndicator } from '@/components/ContextWindowIndicator'
-import { ACTIVE_AGENT_CHANGED_EVENT, OPEN_DECLARATIVE_MANAGER_EVENT } from '@/components/DeclarativeAgentManager'
+import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { HelpPortal } from '@/components/HelpPortal'
 import { MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { MessageNavigator } from '@/components/MessageNavigator'
@@ -24,6 +23,7 @@ import { useMessageStepNav } from '@/hooks/useMessageStepNav'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useTTS } from '@/hooks/useTTS'
 import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
+import { resolveContextOccupancy } from '@/lib/contextOccupancy'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { type EntryId, isEntryVisible, useChatSurfaceTier } from '@/lib/narrowSurface'
 import { getHarnessRunTarget, getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
@@ -130,23 +130,20 @@ export function ChatPanel({
   // Chat surface tier (PRP-0171, UDR-0153). Only the full-page /chat surface provides
   // one; the compact /popup and /sidebar panels read the wide default.
   const surface = useChatSurfaceTier()
-  const narrowSurfaceTier = surface.narrow
-  // UDR-0158 D9 decided WHERE the indicator leads per tier; PRP-0184 (UDR-0166 D12)
-  // settles WHEN it is rendered: always. The condition it replaced existed only because
-  // the per-message model controls stood in the indicator's place on a wide viewport, so
-  // the Built-in agent showed no indicator there. With those controls gone (UDR-0166 D1)
-  // there is nothing to stand in its place, and the indicator is the single statement of
-  // who answers -- and the way in to change the model, the effort and the structured
-  // output -- on every tier and in every run-target state.
-
-  // UDR-0111 D5/D6 + UDR-0158 D1: the run-target name is the entry point to a
-  // switching surface on EVERY tier. A real button (keyboard-reachable) that dispatches
-  // the open request on the existing window seam -- neither surface takes props. The
-  // TIER decides the destination: the wide manager modal (CTR-0144), or the narrow
-  // run-target picker (CTR-0216), which is the phone's switching surface.
+  // PRP-0186 (UDR-0168 D7): ONE switching surface on EVERY tier. The tier no longer
+  // chooses the destination.
+  //
+  // UDR-0158 D1 sent the wide tier to the CTR-0144 manager and the narrow tier to the
+  // CTR-0216 picker. That was right when the phone had no switching surface at all and
+  // the picker was built to give it one. With the picker in place the split inverted
+  // the cost: the wide viewport spent a ~90% authoring modal (create / edit / delete /
+  // YAML) on the FREQUENT action, switching, while the phone got the light one.
+  // Authoring stays wide-only and stays CTR-0144's (UDR-0158 D5 is unchanged); it is
+  // reached from the picker's "Manage agents" entry, one click further, which is the
+  // right trade for an action taken far less often than switching.
   const openRunTargetSurface = useCallback(() => {
-    window.dispatchEvent(new Event(narrowSurfaceTier ? OPEN_RUN_TARGET_PICKER_EVENT : OPEN_DECLARATIVE_MANAGER_EVENT))
-  }, [narrowSurfaceTier])
+    window.dispatchEvent(new Event(OPEN_RUN_TARGET_PICKER_EVENT))
+  }, [])
   // PRP-0184 (UDR-0166 D1): `/model` opens the run-target surface. The argument is
   // accepted and ignored, and `true` means "the command was handled" -- so `/model` is
   // never sent to the model as text.
@@ -155,29 +152,21 @@ export function ChatPanel({
     return true
   }, [openRunTargetSurface])
   const show = (id: EntryId) => isEntryVisible(surface, id)
+  // PRP-0186 (CTR-0221, UDR-0168 D4): the run-target is an entry in the composer's
+  // control row now, not a labelled chip above it. The icon carries the KIND; the NAME
+  // travels with it and the composer states it in `title` and `aria-label`, because an
+  // icon cannot distinguish one Prompt agent from another and a Prompt activation is
+  // server-wide (UDR-0158 D3).
   const runTargetIcon = selectedWorkflowId ? (
-    <WorkflowIcon className="h-3.5 w-3.5" />
+    <WorkflowIcon className="h-4 w-4" />
   ) : selectedHarnessId ? (
-    <Hammer className="h-3.5 w-3.5" />
+    <Hammer className="h-4 w-4" />
   ) : (
-    <Bot className="h-3.5 w-3.5" />
+    <Bot className="h-4 w-4" />
   )
-  // UDR-0158 D1: ONE button on both tiers; only where it leads differs. (Before
-  // PRP-0176 the narrow tier rendered a read-only label, because the phone had no
-  // switching surface at all -- UDR-0153 D6, now refined.)
-  const runTargetIndicator = show('toolbar.runTargetAction') ? (
-    <button
-      type="button"
-      onClick={openRunTargetSurface}
-      title={narrowSurfaceTier ? 'Choose the agent' : 'Open Declarative Agents & Workflows'}
-      aria-label={`Run target: ${runTargetText}. ${
-        narrowSurfaceTier ? 'Choose the agent' : 'Open Declarative Agents & Workflows'
-      }`}
-      className="flex min-w-0 items-center gap-1 rounded-md border border-primary bg-primary/10 px-1.5 py-1 text-xs text-primary transition-colors hover:bg-primary/20">
-      {runTargetIcon}
-      <span className="truncate">{runTargetText}</span>
-    </button>
-  ) : null
+  const composerRunTarget = show('toolbar.runTargetAction')
+    ? { name: runTargetText, icon: runTargetIcon, onOpen: openRunTargetSurface }
+    : undefined
 
   // Keep the run-target in sync with the modal (workflow selection + agent activation).
   useEffect(() => {
@@ -533,6 +522,15 @@ export function ChatPanel({
     return sawWorkflow ? { context_base_tokens: workflowTokens, context_estimated: true } : undefined
   }, [messages])
 
+  // PRP-0186 (CTR-0041 v5, UDR-0168 D5/D6): occupancy resolves to a LEVEL and a
+  // sentence, not a bar. `null` below the warning threshold -- and for a chat that has
+  // run no turn -- so the composer is quiet until something follows from the number.
+  // The thresholds and the arithmetic are unchanged from the indicator this replaced.
+  const contextOccupancy = useMemo(
+    () => resolveContextOccupancy(latestUsage, modelMaxTokens),
+    [latestUsage, modelMaxTokens],
+  )
+
   const handleSend = useCallback(
     async (content: string, images?: ImageRef[]) => {
       // Kick off the send, then clear/scroll immediately -- the commit flag is
@@ -719,20 +717,14 @@ export function ChatPanel({
 
       {compact ? (
         <div ref={inputRef}>
-          <div className="flex flex-wrap items-center justify-end gap-1 px-4">
-            {/* PRP-0184 (UDR-0166 D1/D12): EVERY run-target -- the Built-in agent
-                included -- fixes its own model and options, so the composer carries no
-                model / options / structured controls at all and names the run-target
-                instead. The name is the way in to change any of them. */}
-            {/* PRP-0185 (UDR-0167 D11/D13): the image output options, MCP management
-                and Skills management have left the composer. The options are the
-                Built-in agent's configuration (Core agent card) and the two managers
-                are sidebar-footer entries, so the composer carries no administration
-                at all -- the same move PRP-0184 made for model / effort / structured
-                output. */}
-            {runTargetIndicator}
-            <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
-          </div>
+          {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE.
+              PRP-0184 took the model / options / structured controls off the composer
+              and PRP-0185 took the image options and the two managers, leaving a row
+              whose only remaining job was to hold two indicators -- and that row cost
+              real height, because useChatScroll observes this subtree and ChatPanel
+              reserves a spacer of its measured height (CTR-0092). Both survivors moved
+              INTO the composer: who answers as an icon in its control row, how full the
+              window is as its outline. */}
           <ChatInput
             ref={chatInputRef}
             onSend={handleSend}
@@ -751,6 +743,8 @@ export function ChatPanel({
             onSlashCron={onSlashCron}
             onSlashFiles={onSlashFiles}
             temporary={temporary}
+            runTarget={composerRunTarget}
+            context={contextOccupancy ?? undefined}
           />
         </div>
       ) : (
@@ -780,24 +774,11 @@ export function ChatPanel({
               viewport, which already ends above Safari's toolbar, so an inset added the
               home-indicator height a second time (most visibly on iPad). */}
           <div className="relative bg-background">
-            <div
-              className={cn(
-                'mx-auto flex max-w-3xl items-center justify-end gap-1 px-4',
-                surface.narrow && 'flex-wrap',
-              )}>
-              {/* PRP-0184 (UDR-0166 D12): rendered in every run-target state on every
-                  tier. On a wide viewport the Built-in agent used to show nothing here,
-                  because the per-message controls stood in its place; with those gone the
-                  desktop gets what the phone already had. */}
-              {runTargetIndicator}
-              {/* PRP-0185 (UDR-0167 D11/D13): the three administration entries that
-                  stood here are gone from every tier -- not hidden, MOVED. Image
-                  output options are the Built-in agent's configuration on the Core
-                  agent card; MCP and Skills management are sidebar-footer entries
-                  (CTR-0220). Nothing is lost on the wide tier and the narrow tier
-                  never rendered them (UDR-0153 D4). */}
-              <ContextWindowIndicator usage={latestUsage} maxContextTokens={modelMaxTokens} />
-            </div>
+            {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE; see
+                the compact branch for why. Both of its survivors moved into the
+                composer, so this wrapper holds the composer alone and `inputRef`'s
+                measured height -- the chat body's bottom spacer (CTR-0092) -- is the
+                composer's height and nothing else. */}
             <ChatInput
               ref={chatInputRef}
               onSend={handleSend}
@@ -816,6 +797,8 @@ export function ChatPanel({
               onSlashCron={onSlashCron}
               onSlashFiles={onSlashFiles}
               temporary={temporary}
+              runTarget={composerRunTarget}
+              context={contextOccupancy ?? undefined}
             />
           </div>
         </div>
