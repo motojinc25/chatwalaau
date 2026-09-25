@@ -225,7 +225,7 @@ def _import_function_tool(name: str) -> Any | None:
                 top_k=settings.rag_top_k,
             )
             return rag_search
-        if name in ("generate_image", "edit_image"):
+        if name in ("image_generate", "image_edit"):
             from app.image_gen import tools as image_tools
 
             return getattr(image_tools, name, None)

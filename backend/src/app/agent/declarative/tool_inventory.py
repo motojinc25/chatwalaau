@@ -70,8 +70,10 @@ BUILTIN_FUNCTION_TOOLS: tuple[BuiltinFunctionTool, ...] = (
     ),
     BuiltinFunctionTool("file_grep", "coding", "Search workspace file contents.", lambda: settings.coding_enabled),
     BuiltinFunctionTool("rag_search", "rag", "Search the local document knowledge base.", _rag_available),
-    BuiltinFunctionTool("generate_image", "image", "Generate an image from a text prompt.", _image_available),
-    BuiltinFunctionTool("edit_image", "image", "Edit an uploaded or generated image.", _image_available),
+    BuiltinFunctionTool("image_generate", "image", "Generate an image from a text prompt.", _image_available),
+    BuiltinFunctionTool(
+        "image_edit", "image", "Edit an image, optionally with a mask and references.", _image_available
+    ),
     BuiltinFunctionTool(
         "manage_user_memory", "memory", "Curate the durable user profile.", lambda: settings.user_profile_enabled
     ),

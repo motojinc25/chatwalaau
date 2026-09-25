@@ -33,6 +33,16 @@ import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import {
+  IMAGE_BACKGROUNDS,
+  IMAGE_OUTPUT_FORMAT,
+  IMAGE_PRODUCT_DEFAULTS,
+  IMAGE_QUALITIES,
+  IMAGE_SIZE_PRESET_LABELS,
+  IMAGE_SIZE_PRESETS,
+  isUnsupportedImageValue,
+  useImageOutputCapability,
+} from '@/lib/imageOptions'
 import { cn } from '@/lib/utils'
 
 /**
@@ -67,16 +77,15 @@ type Hosting = 'direct' | 'foundry'
 type Family = 'openai-reasoning' | 'anthropic-adaptive' | 'bare'
 
 /**
- * Image output-behavior defaults (PRP-0114, UDR-0095 D3). Valid ONLY on an image
- * offering; each field is the operator DEFAULT, still overridable per session (the
- * chat-input Image button, state.image_options) and per call (the model). An unset
- * field falls through to the API default.
+ * Image output-behavior defaults (PRP-0114, UDR-0095 D3; surface PRP-0187 / UDR-0169).
+ * Valid ONLY on an image offering. Each field is the operator DEFAULT: the model may
+ * override it when the user asks for a specific value (LLM argument > catalog, D4). An
+ * unset field uses the product default, which the card names as `Default (<value>)`.
+ * The output format is fixed to png, so there is no format / compression field.
  */
 interface ImageDefaults {
   size?: string
   quality?: string
-  format?: string
-  compression?: number
   background?: string
 }
 
@@ -181,28 +190,17 @@ const FAMILIES: Family[] = ['openai-reasoning', 'anthropic-adaptive', 'bare']
 const HOSTINGS: Hosting[] = ['direct', 'foundry']
 const ALL_OPERATIONS: Operation[] = ['chat', 'embeddings', 'image']
 
-// Image output-default enums. v0.117.6: kept in step with the backend surface
-// (app/image_gen/capabilities.py OPTION_VALUES), which the catalog loader now derives
-// its validation from. They had drifted -- this screen still offered webp / transparent
-// and lacked the 2K / 4K sizes, so it accepted defaults the image tools reject.
-// An invariant test asserts all three lists stay identical.
-const IMAGE_SIZES = ['auto', '1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '3840x2160', '2160x3840']
-const IMAGE_QUALITIES = ['auto', 'low', 'medium', 'high']
-const IMAGE_FORMATS = ['png', 'jpeg']
-const IMAGE_BACKGROUNDS = ['auto', 'opaque']
 const IMAGE_DEFAULTS_HELP =
-  'Operator defaults for image generation output. Each is overridable per session (the Image button in the chat input) and per call (the model). Leave "API default" to send nothing. Compression applies to jpeg only.'
+  'Operator defaults for image generation and editing. The model may override a field when the user asks for a specific value in the conversation. A field left on "Default" uses the product default shown in brackets. Output is always PNG.'
 
-/** Keep only the set image_defaults fields; returns undefined when empty. */
+/** Keep only the set image_defaults fields; returns undefined when empty (PRP-0187). */
 function cleanImageDefaults(d: ImageDefaults | undefined): ImageDefaults | undefined {
   if (!d) return undefined
   const out: ImageDefaults = {}
-  for (const k of ['size', 'quality', 'format', 'background'] as const) {
+  for (const k of ['size', 'quality', 'background'] as const) {
     const v = d[k]
-    if (typeof v === 'string' && v.trim()) out[k] = v.trim()
-  }
-  if (typeof d.compression === 'number' && Number.isFinite(d.compression)) {
-    out.compression = Math.max(0, Math.min(100, Math.trunc(d.compression)))
+    // `auto` is no longer a value (UDR-0169 D2); an older catalog value is dropped on save.
+    if (typeof v === 'string' && v.trim() && v.trim().toLowerCase() !== 'auto') out[k] = v.trim()
   }
   return Object.keys(out).length ? out : undefined
 }
@@ -283,7 +281,7 @@ const SKILLS_CAPABILITY_HELP =
   'Skills Management and the skills on disk are unaffected; other models keep them.'
 
 const IMAGE_GENERATION_CAPABILITY_HELP =
-  'Whether THIS chat deployment may call the image tools (generate_image / edit_image). Set it ' +
+  'Whether THIS chat deployment may call the image tools (image_generate / image_edit). Set it ' +
   'to "Not available" for a chat model that must not produce images. This is a SECOND gate: an ' +
   'image offering must also exist, or the tools are not registered for any model. The image ' +
   'offering itself, and other chat models, are unaffected.'
@@ -479,6 +477,9 @@ function OfferingCard({
     onChange(index, { capabilities: Object.keys(next).length ? next : undefined })
   }
   const imgDefaults = offering.image_defaults ?? {}
+  // Values this deployment has been observed to reject are shown disabled (PRP-0187;
+  // the gating CTR-0120 carried until it was deprecated).
+  const imageCapability = useImageOutputCapability()
   const setImgDefault = (patch: Partial<ImageDefaults>) =>
     onChange(index, { image_defaults: { ...imgDefaults, ...patch } })
   const envNames = offeringEnvNames(offering)
@@ -809,19 +810,24 @@ function OfferingCard({
             Image output defaults
             <Help text={IMAGE_DEFAULTS_HELP} />
           </span>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Field label="Size">
               <select
                 className={CONTROL_CLASS}
                 value={imgDefaults.size ?? ''}
                 disabled={readOnly}
                 onChange={(e) => setImgDefault({ size: e.target.value || undefined })}>
-                <option value="">API default</option>
-                {IMAGE_SIZES.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
+                <option value="">Default ({IMAGE_SIZE_PRESET_LABELS[IMAGE_PRODUCT_DEFAULTS.size]})</option>
+                {IMAGE_SIZE_PRESETS.map((s) => (
+                  <option key={s} value={s} disabled={isUnsupportedImageValue(imageCapability, 'size', s)}>
+                    {IMAGE_SIZE_PRESET_LABELS[s]}
+                    {isUnsupportedImageValue(imageCapability, 'size', s) ? ' (not supported)' : ''}
                   </option>
                 ))}
+                {/* A hand-authored rule-valid size is kept and shown, never dropped. */}
+                {imgDefaults.size && !(IMAGE_SIZE_PRESETS as readonly string[]).includes(imgDefaults.size) && (
+                  <option value={imgDefaults.size}>Custom ({imgDefaults.size})</option>
+                )}
               </select>
             </Field>
             <Field label="Quality">
@@ -830,27 +836,19 @@ function OfferingCard({
                 value={imgDefaults.quality ?? ''}
                 disabled={readOnly}
                 onChange={(e) => setImgDefault({ quality: e.target.value || undefined })}>
-                <option value="">API default</option>
+                <option value="">Default ({IMAGE_PRODUCT_DEFAULTS.quality})</option>
                 {IMAGE_QUALITIES.map((q) => (
-                  <option key={q} value={q}>
+                  <option key={q} value={q} disabled={isUnsupportedImageValue(imageCapability, 'quality', q)}>
                     {q}
+                    {isUnsupportedImageValue(imageCapability, 'quality', q) ? ' (not supported)' : ''}
                   </option>
                 ))}
               </select>
             </Field>
-            <Field label="Format">
-              <select
-                className={CONTROL_CLASS}
-                value={imgDefaults.format ?? ''}
-                disabled={readOnly}
-                onChange={(e) => setImgDefault({ format: e.target.value || undefined })}>
-                <option value="">API default</option>
-                {IMAGE_FORMATS.map((f) => (
-                  <option key={f} value={f}>
-                    {f}
-                  </option>
-                ))}
-              </select>
+            <Field label="Output Format" hint="Fixed: image editing requires PNG.">
+              <div className="flex h-8 items-center rounded-md border bg-muted/40 px-2 text-xs text-muted-foreground">
+                {IMAGE_OUTPUT_FORMAT} (fixed)
+              </div>
             </Field>
             <Field label="Background">
               <select
@@ -858,27 +856,14 @@ function OfferingCard({
                 value={imgDefaults.background ?? ''}
                 disabled={readOnly}
                 onChange={(e) => setImgDefault({ background: e.target.value || undefined })}>
-                <option value="">API default</option>
+                <option value="">Default ({IMAGE_PRODUCT_DEFAULTS.background})</option>
                 {IMAGE_BACKGROUNDS.map((b) => (
-                  <option key={b} value={b}>
+                  <option key={b} value={b} disabled={isUnsupportedImageValue(imageCapability, 'background', b)}>
                     {b}
+                    {isUnsupportedImageValue(imageCapability, 'background', b) ? ' (not supported)' : ''}
                   </option>
                 ))}
               </select>
-            </Field>
-            <Field label="Compression" hint="0-100; applies to jpeg / webp only.">
-              <Input
-                type="number"
-                min={0}
-                max={100}
-                className="h-8 text-xs"
-                value={imgDefaults.compression ?? ''}
-                disabled={readOnly}
-                placeholder="API default"
-                onChange={(e) =>
-                  setImgDefault({ compression: e.target.value ? Number.parseInt(e.target.value, 10) : undefined })
-                }
-              />
             </Field>
           </div>
         </div>

@@ -89,6 +89,7 @@ from app.auth.web_auth import router as web_auth_router
 from app.core.config import settings
 from app.core.version import get_app_version
 from app.demo import is_demo_mode
+from app.image_gen.drafts import router as image_edit_draft_router
 from app.image_gen.router import router as image_edit_router
 from app.mcp.lifecycle import activate_mcp, prepare_mcp, shutdown_mcp
 from app.mcp_apps.router import router as mcp_apps_router
@@ -531,6 +532,7 @@ app.include_router(paint_router)
 
 # Mask-based image editing API (CTR-0053, PRP-0028)
 app.include_router(image_edit_router)
+app.include_router(image_edit_draft_router)
 
 # MCP Apps RPC bridge and HTML serving (CTR-0067, PRP-0034)
 app.include_router(mcp_apps_router)
@@ -810,9 +812,9 @@ def _model_capabilities_map() -> dict:
 
 
 def _image_output_capabilities() -> dict | None:
-    """Image output option capabilities for the SPA control (CTR-0120, v0.117.6).
+    """Image output option capabilities for the catalog image card (CTR-0069; PRP-0187).
 
-    None when no image offering is configured -- the control has nothing to gate and
+    None when no image offering is configured -- the card has nothing to gate and
     the tools are not registered anyway (CTR-0050). Never raises: a capability lookup
     must not be able to break the model endpoint.
     """
@@ -823,7 +825,17 @@ def _image_output_capabilities() -> dict | None:
         config = models_catalog.image_config()
         if config is None:
             return None
-        return capabilities.capability_map(config.deployment)
+        report = capabilities.capability_map(config.deployment)
+        # PRP-0187 (UDR-0169 D2/D4): what an OMITTED option resolves to right now --
+        # the catalog's value where it sets one, the product default otherwise. The
+        # image editor renders it as "Default (<value>)" for its per-edit choices.
+        catalog = {
+            key: str(value)
+            for key, value in models_catalog.image_output_defaults().items()
+            if key in capabilities.OPTION_KEYS and str(value).strip().lower() not in ("", "auto")
+        }
+        report["effective_defaults"] = {**capabilities.PRODUCT_DEFAULTS, **catalog}
+        return report
     except Exception:  # pragma: no cover - defensive
         import logging as _logging
 

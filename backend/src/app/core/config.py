@@ -126,16 +126,8 @@ class Settings(BaseSettings):
     # rather than breaking the build.
     core_agent_output_format: str = ""
     core_agent_output_schema: str = ""
-    # Image output options for the Built-in agent (PRP-0185, UDR-0167 D11). "" means
-    # "API default" for each, so an untouched deployment behaves exactly as it did
-    # while these were a per-session control. The allowed VALUES are owned by
-    # app.image_gen.capabilities.OPTION_VALUES (CTR-0049) and the descriptors derive
-    # their enums from it, so a new value cannot drift between the two.
-    core_agent_image_size: str = ""
-    core_agent_image_quality: str = ""
-    core_agent_image_format: str = ""
-    core_agent_image_background: str = ""
-    core_agent_image_compression: str = ""
+    # PRP-0187 / UDR-0169 D4: the Built-in agent image options (core_agent_image_*)
+    # are removed; image output defaults live only on the catalog image offering.
 
     # OpenAI API key (OPENAI_API_KEY). RETAINED (UDR-0094 D6): consumed by image
     # generation (app.image_gen) and the RAG embedder plain-OpenAI path; also a

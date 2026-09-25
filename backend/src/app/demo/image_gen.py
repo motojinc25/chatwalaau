@@ -22,7 +22,7 @@ from typing import Any
 import uuid
 
 from app.core.config import settings
-from app.image_gen.tools import DELIVERED_GUIDANCE
+from app.image_gen.tools import DELIVERED_GUIDANCE, IMAGE_EDIT_TOOL, IMAGE_GENERATE_TOOL, clamp_n
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +60,9 @@ _TINY_PNG_BYTES = bytes.fromhex(
 )
 
 
-def _copy_into_session(thread_id: str, source: Path, output_format: str = "png") -> tuple[str, str]:
-    """Copy a placeholder PNG into the session upload directory."""
-    ext = output_format if output_format in ("png", "jpeg", "webp") else "png"
-    filename = f"generated_{uuid.uuid4().hex[:12]}.{ext}"
+def _copy_into_session(thread_id: str, source: Path) -> tuple[str, str]:
+    """Copy a placeholder PNG into the session upload directory (output is png, UDR-0169 D3)."""
+    filename = f"generated_{uuid.uuid4().hex[:12]}.png"
     save_dir = Path(settings.upload_dir) / thread_id
     save_dir.mkdir(parents=True, exist_ok=True)
     target = save_dir / filename
@@ -78,7 +77,7 @@ def _copy_into_session(thread_id: str, source: Path, output_format: str = "png")
 
 def _build_payload(thread_id: str, prompt: str, n: int, *, tool: str, generate: bool) -> str:
     """Return the JSON payload expected by the SPA ImageGenerationResult."""
-    n = max(1, min(n, 4))
+    n = clamp_n(n)
     images: list[dict[str, Any]] = []
     for _ in range(n):
         source = _next_placeholder(generate=generate)
@@ -107,15 +106,14 @@ def _build_payload(thread_id: str, prompt: str, n: int, *, tool: str, generate: 
 async def demo_generate_image(*, prompt: str, n: int, thread_id: str) -> str:
     """Return a JSON payload with bundled placeholder PNG URIs."""
     await asyncio.sleep(0)  # cooperative yield
-    return await asyncio.to_thread(_build_payload, thread_id, prompt, n, tool="generate_image", generate=True)
+    return await asyncio.to_thread(_build_payload, thread_id, prompt, n, tool=IMAGE_GENERATE_TOOL, generate=True)
 
 
-async def demo_edit_image(*, prompt: str, n: int, thread_id: str, image_filename: str) -> str:
+async def demo_edit_image(*, prompt: str, n: int, thread_id: str, image_filenames: list[str]) -> str:
     """Return a JSON payload with the demo 'edited' placeholder PNG.
 
-    ``image_filename`` is preserved in the response for parity with the
-    live tool, but the actual image content is the bundled
-    ``placeholder_image_edit.png``.
+    ``image_filenames`` is echoed as ``inputs`` for parity with the live tool, but the
+    actual image content is the bundled ``placeholder_image_edit.png``.
     """
     await asyncio.sleep(0)
     payload_json = await asyncio.to_thread(
@@ -123,33 +121,33 @@ async def demo_edit_image(*, prompt: str, n: int, thread_id: str, image_filename
         thread_id,
         prompt,
         n,
-        tool="edit_image",
+        tool=IMAGE_EDIT_TOOL,
         generate=False,
     )
     payload = json.loads(payload_json)
-    payload["source_image"] = image_filename
+    payload["inputs"] = list(image_filenames)
     return json.dumps(payload)
 
 
-def demo_mask_edit_sync(*, prompt: str, thread_id: str) -> dict[str, Any]:
-    """Return the dict expected by CTR-0053 POST /api/images/edit.
+def demo_mask_edit_sync(*, prompt: str, thread_id: str, n: int = 1, inputs: list[str] | None = None) -> dict[str, Any]:
+    """Return the result expected by CTR-0053 POST /api/images/edit (v2, PRP-0187).
 
-    Synchronous so the existing router can call it in the same
-    ``asyncio.to_thread`` slot used for the live API call.
+    The same shape as the live ``image_edit`` result, so the editor turn persisted by
+    the endpoint renders like any other edit. Synchronous so the router can call it in
+    the same ``asyncio.to_thread`` slot used for the live API call.
     """
-    source = _next_placeholder(generate=False)
-    filename, uri = _copy_into_session(thread_id, source)
+    images = []
+    for _ in range(clamp_n(n)):
+        source = _next_placeholder(generate=False)
+        filename, uri = _copy_into_session(thread_id, source)
+        images.append({"url": uri, "filename": filename, "revised_prompt": f"[DEMO image edit] {prompt}"})
     return {
-        "images": [
-            {
-                "url": uri,
-                "filename": filename,
-                "revised_prompt": f"[DEMO mask edit] {prompt}",
-            }
-        ],
-        "count": 1,
-        "tool": "mask_edit",
+        "images": images,
+        "count": len(images),
+        "tool": IMAGE_EDIT_TOOL,
+        "inputs": list(inputs or []),
         "demo": True,
+        "guidance": DELIVERED_GUIDANCE,
     }
 
 

@@ -1,37 +1,35 @@
-"""Image generation tools for the main agent (CTR-0049, PRP-0027).
+"""Image generation tools for the main agent (CTR-0049, PRP-0027; renamed by PRP-0187).
 
-Provides generate_image and edit_image as MAF function tools.
-Uses Azure OpenAI Images API with the deployment declared by the single ``image``
+Provides ``image_generate`` and ``image_edit`` as MAF function tools (named category +
+verb since PRP-0187 / UDR-0169 D6; they were ``generate_image`` / ``edit_image``).
+Uses the Azure OpenAI Images API with the deployment declared by the single ``image``
 offering in the Model Offering Catalog (PRP-0114, UDR-0095 D1): the tools are only
 registered when such an offering exists (or DEMO_MODE), so a non-demo call always
 has one to resolve. Generated images are saved to the session upload directory
-(.uploads/{thread_id}/generated_{uuid}.{ext}).
+(.uploads/{thread_id}/generated_{uuid}.png).
 
-Image output options (size / quality / format / compression / background) follow a
-precedence (PRP-0085 / PRP-0114, FEAT-0044, UDR-0095 D3, reordered in v0.117.6,
-re-sourced by PRP-0185 / UDR-0167 D11/D12):
-  the BUILT-IN agent's persisted setting (an EXPLICIT operator selection)
-  > explicit LLM argument > offering.image_defaults > API default.
-A field the operator pinned wins over the model's guess; a field left on "Default" is
-not sent at all, so the model's argument applies there.
-The top tier is delivered by the AG-UI endpoint (CTR-0009) into the
-current_image_options contextvar before agent.run(); the LLM tool arguments default
-to None so an omitted argument falls through to the offering / API default.
+Image output options (size / quality / background) resolve by precedence
+(PRP-0187, UDR-0169 D2/D4, superseding UDR-0167 D11/D12)::
 
-Until PRP-0185 that tier was a PER-SESSION selection the SPA shipped as AG-UI
-state.image_options. It is now the Built-in agent's configuration, read from the
-Application Settings store: the same rank, a different owner. state.image_options is
-accepted and ignored (UDR-0167 D11). The harness and workflow lanes never set the
-contextvar, which is what scopes the setting to the Built-in agent.
+    explicit LLM argument > offering.image_defaults > PRODUCT_DEFAULTS
 
-Tools execute in a thread pool via asyncio.to_thread() to prevent blocking
-the FastAPI async event loop during API calls.
+An edit adds one tier between the argument and the catalog for SIZE: the first input
+image's own shape (``normalize_size``), so editing a square image does not come back
+16:9. Every call sends explicit values -- there is no "API default" tier any more --
+and the output format is fixed to png (UDR-0169 D3), so ``output_format`` and
+``compression`` are not tool arguments at all.
+
+The Built-in agent image tier PRP-0185 introduced (``core_agent_image_*``, delivered
+through a contextvar) is removed: the catalog is the ONE place image defaults live.
+
+Tools execute in a thread pool via asyncio.to_thread() to prevent blocking the
+FastAPI async event loop during API calls.
 """
 
 import asyncio
 import base64
-import contextlib
 import contextvars
+from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
@@ -46,85 +44,38 @@ from app.azure_credential import get_azure_openai_kwargs
 from app.core import provider_errors
 from app.core.config import settings
 from app.image_gen import capabilities
+from app.image_gen.imageinfo import read_image_info
+from app.image_gen.names import IMAGE_EDIT_TOOL, IMAGE_GENERATE_TOOL
 
 logger = logging.getLogger(__name__)
 
 # Context variable for thread_id -- set by endpoint.py before agent.run()
 current_thread_id: contextvars.ContextVar[str] = contextvars.ContextVar("current_thread_id")
 
-# Image output options for the run (PRP-0085, CTR-0120/CTR-0009; re-sourced by
-# PRP-0185, UDR-0167 D11). Set by the AG-UI endpoint before agent.run(); unset /
-# empty means no selection was made and the resolution falls through to
-# offering.image_defaults and then the API default.
-#
-# The SOURCE moved, the seam did not. Until PRP-0185 this carried a PER-SESSION UI
-# selection shipped as AG-UI state.image_options; it now carries the BUILT-IN agent's
-# persisted configuration. The harness and workflow lanes never set it, which is what
-# keeps the setting scoped to the Built-in agent.
-current_image_options: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
-    "current_image_options", default=None
-)
-
-# The Built-in agent's image option settings, in catalog key order. The VALUES are
-# validated by app.image_gen.capabilities (OPTION_VALUES stays the single source,
-# CTR-0049) and the setting names mirror it, so a new option is one descriptor plus
-# one entry here rather than a new resolution path.
-_BUILTIN_IMAGE_SETTINGS: tuple[tuple[str, str], ...] = (
-    ("size", "core_agent_image_size"),
-    ("quality", "core_agent_image_quality"),
-    ("format", "core_agent_image_format"),
-    ("compression", "core_agent_image_compression"),
-    ("background", "core_agent_image_background"),
-)
-
-
-def builtin_image_options() -> dict[str, str]:
-    """The Built-in agent's image output options, or ``{}`` (PRP-0185, UDR-0167 D11).
-
-    Returns ``{}`` unless the ACTIVE declarative agent is the bundled Core agent.
-    That is the whole of the "Built-in only" rule (PRP-0185 Section 2.5): a Custom
-    Prompt agent has no image configuration of its own and keeps resolving from
-    ``offering.image_defaults``, so handing it Core's settings would make one
-    run-target's configuration leak into another.
-
-    Empty / unset settings are dropped, so an untouched deployment contributes
-    nothing and behaves exactly as it did before the setting existed.
-    """
-    try:
-        from app.agent.declarative.spec import CORE_AGENT_ID
-        from app.agent.declarative.store import active_spec
-
-        if active_spec().id != CORE_AGENT_ID:
-            return {}
-    except Exception:
-        logger.debug("Could not resolve the active agent for image options", exc_info=True)
-        return {}
-    out: dict[str, str] = {}
-    for key, setting in _BUILTIN_IMAGE_SETTINGS:
-        value = str(getattr(settings, setting, "") or "").strip()
-        if value:
-            out[key] = value
-    return out
-
-
-# The Images API default when no output_format is sent (and what a model falls back
-# to when the option is dropped after a rejection).
-DEFAULT_OUTPUT_FORMAT = "png"
+# The Images API default when a retry has dropped options. Output is always png.
+DEFAULT_OUTPUT_FORMAT = capabilities.OUTPUT_FORMAT
 
 
 def _option_help(option: str) -> str:
     """Tool-argument description for ``option``, generated from the offered surface.
 
-    v0.117.6: these were hand-written and had gone stale -- they still advertised
-    `webp` and `transparent` (withdrawn) and omitted the 2K / 4K sizes, so the model
-    was being told to pass values the API now rejects. Generated from OPTION_VALUES so
-    they cannot drift again.
+    Generated rather than hand-written so it cannot drift from OPTION_VALUES
+    (v0.117.6 (k)). Every description tells the model to OMIT the argument unless the
+    user asked, because under "LLM argument > catalog" an unrequested argument
+    overrides the operator's default (UDR-0169 D4).
     """
-    allowed = ", ".join(capabilities.OPTION_VALUES[option])
-    return (
-        f"{option.capitalize()}: {allowed}. OMIT THIS unless the user asked for a "
-        f"specific one in this request -- omitting it honors their saved preference."
+    omit = (
+        "OMIT THIS unless the user asked for a specific one in this request -- omitting it uses the configured default."
     )
+    if option == "size":
+        presets = ", ".join(capabilities.SIZE_PRESETS)
+        return (
+            f"Size as WIDTHxHEIGHT (e.g. {presets}). Both edges multiples of 16, aspect ratio "
+            f"1:3 to 3:1, longest edge <= 3840, above 2560x1440 is experimental. {omit}"
+        )
+    allowed = ", ".join(capabilities.OPTION_VALUES[option])
+    extra = " xhigh and max take noticeably longer and cost more." if option == "quality" else ""
+    return f"{option.capitalize()}: {allowed}.{extra} {omit}"
 
 
 def _uses_v1_surface(api_version: str) -> bool:
@@ -137,61 +88,31 @@ def _uses_v1_surface(api_version: str) -> bool:
     return api_version.strip().lower() == "preview"
 
 
-def _resolve_option(arg: str | None, key: str, default_value: object) -> str:
-    """Resolve one image output option by precedence (PRP-0114, UDR-0095 D3).
+def _stored_default(value: object) -> str:
+    """A tier value from STORED configuration, or "" when it is unset.
 
-    v0.117.6 -- the ORDER CHANGED. It was::
-
-        explicit LLM argument > state.image_options > offering.image_defaults > API default
-
-    which meant a size the user had picked in the Image Output Options control was
-    silently overridden whenever the model decided a different one suited the prompt.
-    The user's report -- "I set 1024x1024 and it generated 1536x1024" -- is exactly
-    that, and it looked intermittent because it depended on whether the model chose to
-    pass the argument at all. It is now::
-
-        Built-in agent setting > explicit LLM argument > offering.image_defaults > API default
-
-    The top block only ever contains fields that were EXPLICITLY chosen (nothing is
-    sent for a field left on "Default"), so it is a deliberate instruction and
-    outranks the model's guess. The OPERATOR tier (offering.image_defaults) stays BELOW
-    the model argument: that one is a fallback, not a per-request choice.
-
-    Trade-off, deliberately taken: while a field is pinned, asking for a different
-    value in chat will not change it -- clear the field to let the model choose again.
-    Predictable beats occasionally-convenient here, because the pinned value is
-    visible in the UI and the override was not.
-
-    PRP-0185 / UDR-0167 D12: the top tier is now the BUILT-IN AGENT SETTING rather
-    than the per-session selection, and it keeps the rank the per-session block had.
-    PRP-0185's D12 first wrote the order as "explicit tool argument > Built-in agent
-    setting"; that was drafted without noticing the v0.117.6 inversion above, and
-    implementing it literally would have restored the exact defect that inversion
-    fixed ("I set 1024x1024 and it generated 1536x1024"). The tier CONTENT moved from
-    a per-session choice to a persisted one, which makes it MORE deliberate, not
-    less, so demoting it below the model's guess has no argument behind it. D12 is
-    corrected in UDR-0167 to match this code.
-
-    A blank / None value at any tier is treated as "unspecified" and falls through.
-    ``default_value`` comes from models_catalog.image_output_defaults() and may be a
-    str (size/quality/...) or an int (compression); it is coerced to str.
+    ``auto`` was the old "let the API decide" sentinel; UDR-0169 D2 removes it, and a
+    stored ``auto`` (an older catalog file) is read as unset rather than an error.
     """
-    configured = current_image_options.get() or {}
-    configured_value = configured.get(key)
-    if configured_value:
-        if arg and str(arg) != str(configured_value):
-            logger.info(
-                "Image option %s: keeping the configured selection %r; ignoring the model's %r",
-                key,
-                str(configured_value),
-                arg,
-            )
-        return str(configured_value)
-    if arg:
-        return arg
-    if default_value is not None and str(default_value) != "":
-        return str(default_value)
-    return ""
+    text = str(value).strip() if value is not None else ""
+    return "" if text.lower() == "auto" else text
+
+
+def _resolve_option(arg: str | None, key: str, *fallbacks: object) -> str:
+    """Resolve one image output option by precedence (UDR-0169 D4).
+
+    ``arg`` is the explicit LLM argument and always wins when given -- an invalid one
+    is reported by validation, never silently replaced. The fallbacks are tried in
+    order (for an edit's size: the source-derived size, then the catalog), and the
+    product default closes the chain, so the result is never empty.
+    """
+    if arg is not None and str(arg).strip():
+        return str(arg).strip()
+    for fallback in fallbacks:
+        value = _stored_default(fallback)
+        if value:
+            return value
+    return capabilities.PRODUCT_DEFAULTS[key]
 
 
 def _get_client():
@@ -264,59 +185,40 @@ def _image_deployment() -> str:
     return config.deployment if config is not None else ""
 
 
-def _resolve_image_params(
+def resolve_image_params(
     size: str | None,
     quality: str | None,
-    output_format: str | None,
     background: str | None,
-    compression: str | None,
+    *,
+    source_size: str | None = None,
 ) -> dict:
-    """Resolve the effective image output parameters by precedence (UDR-0095 D3).
+    """Resolve the effective Images API parameters (UDR-0169 D2/D4).
 
-    Returns a kwargs dict for the Azure Images API. The operator DEFAULT tier is the
-    image offering's ``image_defaults`` block (PRP-0114), replacing the removed
-    CTR-0006 IMAGE_* settings. output_compression is included only when the resolved
-    format is jpeg or webp and a compression value exists.
+    Returns explicit ``size`` / ``quality`` / ``background`` plus the fixed
+    ``output_format="png"``. ``source_size`` is the edit tier: the first input image's
+    shape, already normalized to a rule-valid size.
     """
     defaults = models_catalog.image_output_defaults()
-    fmt = _resolve_option(output_format, "format", defaults.get("format")) or "png"
-    params: dict = {
-        "size": _resolve_option(size, "size", defaults.get("size")) or "auto",
-        "quality": _resolve_option(quality, "quality", defaults.get("quality")) or "auto",
-        "output_format": fmt,
-        "background": _resolve_option(background, "background", defaults.get("background")) or "auto",
+    return {
+        "size": _resolve_option(size, "size", source_size, defaults.get("size")),
+        "quality": _resolve_option(quality, "quality", defaults.get("quality")),
+        "background": _resolve_option(background, "background", defaults.get("background")),
+        "output_format": capabilities.OUTPUT_FORMAT,
     }
-    if fmt in capabilities.COMPRESSION_FORMATS:
-        comp = _resolve_option(compression, "compression", defaults.get("compression"))
-        if comp:
-            with contextlib.suppress(TypeError, ValueError):
-                params["output_compression"] = max(0, min(100, int(comp)))
-    return params
 
 
-def _validate_params(params: dict) -> list[str]:
-    """Problems with the RESOLVED option values, or an empty list (v0.117.6).
+def validate_params(params: dict) -> list[str]:
+    """Problems with the RESOLVED option values, or an empty list (v0.117.6 (e)).
 
-    The resolved values used to go to the Images API unchecked, so a typo in an
-    ``image_defaults`` block, a stale localStorage entry, or an LLM-invented argument
-    became an opaque provider 400. Checked against the documented value surface only
-    (CTR-0049); whether a given model honors a supported value is the separate,
-    learned question handled by the retry path.
+    Checked against the documented value surface only; whether a given model honors a
+    supported value is the separate, learned question handled by the retry path.
     """
     problems: list[str] = []
     for param, option in capabilities.PARAM_TO_OPTION.items():
         problem = capabilities.validate_option(option, str(params.get(param) or ""))
         if problem:
             problems.append(problem)
-    if "output_compression" in params:
-        problem = capabilities.validate_option("compression", str(params["output_compression"]))
-        if problem:
-            problems.append(problem)
     return problems
-
-
-# Option keys whose value is sent under a different Images API parameter name.
-_OPTION_TO_PARAM = {option: param for param, option in capabilities.PARAM_TO_OPTION.items()}
 
 
 def _drop_unsupported_option(params: dict, option: str) -> str:
@@ -324,25 +226,20 @@ def _drop_unsupported_option(params: dict, option: str) -> str:
 
     Dropping the key (rather than substituting a value of our own) makes the retry
     fall back to whatever that model's own default is -- we do not know what a model
-    we have just learned about accepts, so we must not pick for it. Compression goes
-    with the format: it is only meaningful for jpeg / webp.
+    we have just learned about accepts, so we must not pick for it.
     """
-    param = _OPTION_TO_PARAM.get(option, option)
-    previous = str(params.pop(param, "") or "")
-    if option == "format":
-        params.pop("output_compression", None)
-    return previous
+    param = {option_key: p for p, option_key in capabilities.PARAM_TO_OPTION.items()}.get(option, option)
+    return str(params.pop(param, "") or "")
 
 
-def _call_with_capability_retry(call, params: dict, deployment: str, action: str) -> tuple[object, list[str]]:
+def call_with_capability_retry(call, params: dict, deployment: str, action: str) -> tuple[object, list[str]]:
     """Invoke the Images API, retrying once without an option the model rejected.
 
-    v0.117.6. The output options are not uniformly supported across image models,
-    and the SPA used to offer all of them unconditionally. When the API rejects one
-    (HTTP 400 naming the parameter), the value is recorded as unsupported for this
-    deployment -- so ``GET /api/model`` can stop offering it -- the option is dropped,
-    and the call is retried ONCE. The user still gets their image, and the tool result
-    carries a warning saying which preference could not be honored.
+    v0.117.6. When the API rejects one of our options (HTTP 400 naming the parameter),
+    the value is recorded as unsupported for this deployment -- so ``GET /api/model``
+    can stop offering it -- the option is dropped, and the call is retried ONCE. The
+    user still gets their image, and the result carries a warning saying which
+    preference could not be honored.
 
     Returns ``(result, warnings)``. Raises the original error when the rejection is
     not about one of our options, or when the retry fails too.
@@ -369,23 +266,19 @@ def _call_with_capability_retry(call, params: dict, deployment: str, action: str
             f"The image model does not support {option}={dropped!r}"
             f"{f' ({provider_message})' if provider_message else ''}. "
             f"The image was produced with that model's default {option} instead. "
-            f"This option is now disabled in the image options control."
+            f"This option is now disabled in the catalog image settings."
         )
         return call(**params), warnings
 
 
-def _image_error(action: str, exc: Exception) -> str:
+def image_error(action: str, exc: Exception) -> str:
     """Tool result for an image call that could not be completed.
 
     v0.117.6: the raw provider exception used to be interpolated straight into the
-    result. A model reading "Error code: 400 - {...}" has no idea what to do, and in
-    practice started hunting the filesystem with shell commands for an image that was
-    never created. The message now states plainly that nothing was written and that
-    there is no file to look for.
+    result, and a model reading "Error code: 400 - {...}" started hunting the
+    filesystem for an image that was never created. The message states plainly that
+    nothing was written and that there is no file to look for.
     """
-    # v0.117.6: read through provider_errors. This used to look for
-    # body["error"]["message"], but the OpenAI SDK unwraps that key, so the lookup
-    # always missed and the operator got a bare "BadRequestError" with no reason.
     detail = provider_errors.error_message(exc) or type(exc).__name__
     return json.dumps(
         {
@@ -394,8 +287,23 @@ def _image_error(action: str, exc: Exception) -> str:
             "guidance": (
                 "No image file was written, so there is nothing to locate on disk. "
                 "Do not search the filesystem or run shell commands. Report this "
-                "message to the user and, if it names an unsupported option, suggest "
-                "changing it in the image options control next to the message box."
+                "message to the user."
+            ),
+        }
+    )
+
+
+def _invalid_result(action: str, problems: list[str]) -> str:
+    """Tool result for a call rejected before it reached the provider."""
+    logger.warning("Image %s called with invalid options: %s", action, "; ".join(problems))
+    return json.dumps(
+        {
+            "error": f"Image {action} failed: " + "; ".join(problems),
+            "no_file_created": True,
+            "guidance": (
+                "No image file was written. Do not search the filesystem or run shell "
+                "commands. Correct the argument (or omit it to use the configured default) "
+                "and try again, or tell the user which value is invalid."
             ),
         }
     )
@@ -411,13 +319,12 @@ DELIVERED_GUIDANCE = (
 )
 
 
-def _save_image(thread_id: str, image_b64: str, output_format: str) -> tuple[str, str]:
-    """Decode base64 image data and save to the upload directory.
+def _save_image(thread_id: str, image_b64: str) -> tuple[str, str]:
+    """Decode base64 image data and save it as png in the upload directory.
 
-    Returns (filename, uri) tuple.
+    Returns (filename, uri) tuple. Output is always png (UDR-0169 D3).
     """
-    ext = output_format if output_format in ("png", "jpeg", "webp") else "png"
-    filename = f"generated_{uuid.uuid4().hex[:12]}.{ext}"
+    filename = f"generated_{uuid.uuid4().hex[:12]}.{capabilities.OUTPUT_FORMAT}"
     save_dir = Path(settings.upload_dir) / thread_id
     save_dir.mkdir(parents=True, exist_ok=True)
     file_path = save_dir / filename
@@ -427,13 +334,45 @@ def _save_image(thread_id: str, image_b64: str, output_format: str) -> tuple[str
     return filename, uri
 
 
+def _used_parameters(params: dict) -> dict:
+    """The options actually USED (v0.117.6 (i)): what survived a capability retry."""
+    used = {option: params.get(param) for param, option in capabilities.PARAM_TO_OPTION.items()}
+    used["format"] = capabilities.OUTPUT_FORMAT
+    return {k: v for k, v in used.items() if v not in (None, "")}
+
+
+def _collect_images(thread_id: str, result: object, params: dict, fallback_prompt: str) -> list[dict]:
+    images = []
+    for item in getattr(result, "data", None) or []:
+        b64 = getattr(item, "b64_json", None)
+        if not b64:
+            continue
+        filename, uri = _save_image(thread_id, b64)
+        images.append(
+            {
+                "url": uri,
+                "filename": filename,
+                "revised_prompt": getattr(item, "revised_prompt", None) or fallback_prompt,
+                "size": params.get("size") or "",
+            }
+        )
+    return images
+
+
+def clamp_n(n: int | None) -> int:
+    """Images per request, clamped into the documented 1-10 (PRP-0187 Q3)."""
+    try:
+        value = int(n or 1)
+    except (TypeError, ValueError):
+        value = 1
+    return max(1, min(value, capabilities.MAX_IMAGES_PER_REQUEST))
+
+
 def _generate_image_sync(
     prompt: str,
     size: str | None,
     quality: str | None,
-    output_format: str | None,
     background: str | None,
-    compression: str | None,
     n: int,
 ) -> str:
     """Synchronous image generation implementation."""
@@ -441,53 +380,18 @@ def _generate_image_sync(
     if not thread_id:
         return json.dumps({"error": "No active session (thread_id not set)"})
 
+    n = clamp_n(n)
+    params = resolve_image_params(size, quality, background)
+    # v0.117.6 / PRP-0187 F1: reject a value the API cannot accept BEFORE calling out.
+    invalid = validate_params(params)
+    if invalid:
+        return _invalid_result("generation", invalid)
+
     client = _get_client()
-    n = max(1, min(n, 4))
-    params = _resolve_image_params(size, quality, output_format, background, compression)
     deployment = _image_deployment()
-
-    # v0.117.6: reject a value the API cannot accept BEFORE calling out, so the
-    # operator sees which option is wrong instead of an opaque provider 400.
-    invalid = _validate_params(params)
-    if invalid:
-        logger.warning("Image %s called with invalid options: %s", "editing", "; ".join(invalid))
-        return json.dumps(
-            {
-                "error": "Image editing failed: " + "; ".join(invalid),
-                "no_file_created": True,
-                "guidance": (
-                    "No image file was written. Do not search the filesystem or run shell "
-                    "commands. Tell the user which option is invalid so they can correct it "
-                    "in the image options control next to the message box."
-                ),
-            }
-        )
-
-    # v0.117.6: reject a value the API cannot accept BEFORE calling out, so the
-    # operator sees which option is wrong instead of an opaque provider 400.
-    invalid = _validate_params(params)
-    if invalid:
-        logger.warning("Image %s called with invalid options: %s", "generation", "; ".join(invalid))
-        return json.dumps(
-            {
-                "error": "Image generation failed: " + "; ".join(invalid),
-                "no_file_created": True,
-                "guidance": (
-                    "No image file was written. Do not search the filesystem or run shell "
-                    "commands. Tell the user which option is invalid so they can correct it "
-                    "in the image options control next to the message box."
-                ),
-            }
-        )
-
-    logger.info(
-        "Image generation: deployment=%s n=%d params=%s",
-        deployment,
-        n,
-        params,
-    )
+    logger.info("Image generation: deployment=%s n=%d params=%s", deployment, n, params)
     try:
-        result, warnings = _call_with_capability_retry(
+        result, warnings = call_with_capability_retry(
             lambda **kw: client.images.generate(model=deployment, prompt=prompt, n=n, **kw),
             params,
             deployment,
@@ -495,42 +399,14 @@ def _generate_image_sync(
         )
     except Exception as exc:
         logger.exception("Image generation API error")
-        return _image_error("generation", exc)
+        return image_error("generation", exc)
 
-    # v0.117.6: the retry DROPS the rejected option, so `params` may no longer
-    # carry output_format / size. Indexing them here raised KeyError('output_format')
-    # AFTER a successful retry -- the image was generated and then thrown away. A
-    # dropped format means the model used its own default, which is png.
-    effective_format = params.get("output_format") or DEFAULT_OUTPUT_FORMAT
-    # v0.117.6: report the parameters actually USED. Without this there was no way to
-    # tell a display problem from a resolution problem when the result did not match
-    # what the user had selected. `requested` is what we sent; `used` is what survived
-    # a capability retry, which may have dropped an option.
-    used = {option: params.get(param) for param, option in capabilities.PARAM_TO_OPTION.items()}
-    used["format"] = effective_format
-    if "output_compression" in params:
-        used["compression"] = params["output_compression"]
-    used = {k: v for k, v in used.items() if v not in (None, "")}
-    images = []
-    for item in result.data:
-        b64 = item.b64_json
-        if not b64:
-            continue
-        filename, uri = _save_image(thread_id, b64, effective_format)
-        images.append(
-            {
-                "url": uri,
-                "filename": filename,
-                "revised_prompt": getattr(item, "revised_prompt", None) or prompt,
-                "size": params.get("size") or "auto",
-            }
-        )
-
+    images = _collect_images(thread_id, result, params, prompt)
     payload: dict = {
         "images": images,
         "count": len(images),
-        "tool": "generate_image",
-        "parameters": used,
+        "tool": IMAGE_GENERATE_TOOL,
+        "parameters": _used_parameters(params),
         "guidance": DELIVERED_GUIDANCE,
     }
     if warnings:
@@ -538,130 +414,182 @@ def _generate_image_sync(
     return json.dumps(payload)
 
 
-def _edit_image_sync(
-    prompt: str,
-    image_filename: str,
-    size: str | None,
-    quality: str | None,
-    output_format: str | None,
-    background: str | None,
-    compression: str | None,
-    n: int,
-) -> str:
-    """Synchronous image editing implementation."""
-    thread_id = current_thread_id.get("")
-    if not thread_id:
-        return json.dumps({"error": "No active session (thread_id not set)"})
+@dataclass(frozen=True)
+class EditInputs:
+    """Resolved files for one edit: ordered inputs plus an optional mask."""
 
-    # Resolve source image path
-    image_path = Path(settings.upload_dir) / thread_id / image_filename
-    if not image_path.is_file():
-        # Try to find the file by searching the session directory
-        session_dir = Path(settings.upload_dir) / thread_id
-        if session_dir.is_dir():
-            candidates = list(session_dir.iterdir())
-            file_names = [f.name for f in candidates if f.is_file()]
-            return json.dumps(
-                {
-                    "error": f"Image not found: {image_filename}. Available files: {file_names}",
-                }
+    images: list[Path]
+    mask: Path | None
+    source_size: str  # the first input's shape, normalized (UDR-0169 D4)
+
+
+class EditInputError(ValueError):
+    """An edit input is missing, unreadable, or breaks an Images API requirement."""
+
+
+def _session_file(thread_id: str, name: str) -> Path:
+    """Resolve a single-segment filename inside the session upload directory."""
+    if not name or Path(name).name != name or name.startswith("."):
+        raise EditInputError(f"Invalid file name: {name!r}")
+    path = Path(settings.upload_dir) / thread_id / name
+    if not path.is_file():
+        raise EditInputError(f"Image not found: {name}")
+    return path
+
+
+def resolve_edit_inputs(thread_id: str, image_filenames: list[str], mask_filename: str | None) -> EditInputs:
+    """Validate and resolve the files of an edit (UDR-0169 D7/D9).
+
+    Every input must be PNG or JPEG under 50 MB; there may be 1-16 of them; the mask
+    (if any) must be a PNG with an alpha channel and the FIRST image's dimensions --
+    the documented requirements, checked here so a violation is a clear message
+    rather than a provider 400.
+    """
+    if not image_filenames:
+        raise EditInputError("At least one input image is required.")
+    if len(image_filenames) > capabilities.MAX_INPUT_IMAGES:
+        raise EditInputError(f"At most {capabilities.MAX_INPUT_IMAGES} input images are allowed.")
+    paths = [_session_file(thread_id, name) for name in image_filenames]
+    first_info = None
+    for index, path in enumerate(paths):
+        if path.stat().st_size >= capabilities.MAX_INPUT_BYTES:
+            raise EditInputError(f"{path.name} is 50 MB or larger.")
+        info = read_image_info(path.read_bytes())
+        if info is None or info.format not in ("png", "jpeg"):
+            raise EditInputError(f"{path.name} must be a PNG or JPEG image.")
+        if index == 0:
+            first_info = info
+    assert first_info is not None
+    mask_path = None
+    if mask_filename:
+        mask_path = _session_file(thread_id, mask_filename)
+        mask_info = read_image_info(mask_path.read_bytes())
+        if mask_info is None or mask_info.format != "png":
+            raise EditInputError("The mask must be a PNG file.")
+        if not mask_info.has_alpha:
+            raise EditInputError("The mask must have an alpha channel (transparent pixels mark the edit area).")
+        if (mask_info.width, mask_info.height) != (first_info.width, first_info.height):
+            raise EditInputError(
+                f"The mask is {mask_info.width}x{mask_info.height} but the image being edited is "
+                f"{first_info.width}x{first_info.height}; they must match."
             )
-        return json.dumps({"error": f"Image not found: {image_filename}"})
+    source_size = capabilities.normalize_size(first_info.width, first_info.height, stable=True)
+    return EditInputs(images=paths, mask=mask_path, source_size=source_size)
 
+
+def run_edit(
+    thread_id: str,
+    inputs: EditInputs,
+    prompt: str,
+    params: dict,
+    n: int,
+) -> tuple[dict | None, str | None]:
+    """Call the Images edit API and save the results.
+
+    Shared by the ``image_edit`` tool and the editor's direct endpoint (CTR-0053 v2,
+    UDR-0169 D8). Returns ``(payload, None)`` on success or ``(None, error_json)``.
+    """
     client = _get_client()
-    n = max(1, min(n, 4))
-    params = _resolve_image_params(size, quality, output_format, background, compression)
     deployment = _image_deployment()
 
     def _edit(**kw):
-        # Reopened per attempt: the retry re-sends the body, and a consumed file
+        # Files are reopened per attempt: the retry re-sends the body, and a consumed
         # handle would upload zero bytes.
-        with image_path.open("rb") as f:
-            return client.images.edit(model=deployment, image=f, prompt=prompt, n=n, **kw)
+        handles = [path.open("rb") for path in inputs.images]
+        mask_handle = inputs.mask.open("rb") if inputs.mask else None
+        try:
+            extra = {"mask": mask_handle} if mask_handle else {}
+            image_arg = handles if len(handles) > 1 else handles[0]
+            return client.images.edit(model=deployment, image=image_arg, prompt=prompt, n=n, **extra, **kw)
+        finally:
+            for handle in handles:
+                handle.close()
+            if mask_handle:
+                mask_handle.close()
 
     logger.info(
-        "Image editing: deployment=%s source=%s n=%d params=%s",
+        "Image editing: deployment=%s inputs=%s mask=%s n=%d params=%s",
         deployment,
-        image_filename,
+        [p.name for p in inputs.images],
+        inputs.mask.name if inputs.mask else None,
         n,
         params,
     )
     try:
-        result, warnings = _call_with_capability_retry(_edit, params, deployment, "editing")
+        result, warnings = call_with_capability_retry(_edit, params, deployment, "editing")
     except Exception as exc:
         logger.exception("Image edit API error")
-        return _image_error("editing", exc)
+        return None, image_error("editing", exc)
 
-    # v0.117.6: the retry DROPS the rejected option, so `params` may no longer
-    # carry output_format / size. Indexing them here raised KeyError('output_format')
-    # AFTER a successful retry -- the image was generated and then thrown away. A
-    # dropped format means the model used its own default, which is png.
-    effective_format = params.get("output_format") or DEFAULT_OUTPUT_FORMAT
-    # v0.117.6: report the parameters actually USED. Without this there was no way to
-    # tell a display problem from a resolution problem when the result did not match
-    # what the user had selected. `requested` is what we sent; `used` is what survived
-    # a capability retry, which may have dropped an option.
-    used = {option: params.get(param) for param, option in capabilities.PARAM_TO_OPTION.items()}
-    used["format"] = effective_format
-    if "output_compression" in params:
-        used["compression"] = params["output_compression"]
-    used = {k: v for k, v in used.items() if v not in (None, "")}
-    images = []
-    for item in result.data:
-        b64 = getattr(item, "b64_json", None)
-        if not b64:
-            continue
-        filename, uri = _save_image(thread_id, b64, effective_format)
-        images.append(
-            {
-                "url": uri,
-                "filename": filename,
-                "revised_prompt": getattr(item, "revised_prompt", None) or prompt,
-                "size": params.get("size") or "auto",
-            }
-        )
-
+    images = _collect_images(thread_id, result, params, prompt)
     payload: dict = {
         "images": images,
         "count": len(images),
-        "tool": "edit_image",
-        "source_image": image_filename,
-        "parameters": used,
+        "tool": IMAGE_EDIT_TOOL,
+        "inputs": [p.name for p in inputs.images],
+        "parameters": _used_parameters(params),
         "guidance": DELIVERED_GUIDANCE,
     }
+    if inputs.mask:
+        payload["mask"] = inputs.mask.name
     if warnings:
         payload["warnings"] = warnings
-    return json.dumps(payload)
+    return payload, None
+
+
+def _edit_image_sync(
+    prompt: str,
+    image_filenames: list[str],
+    mask_filename: str | None,
+    size: str | None,
+    quality: str | None,
+    background: str | None,
+    n: int,
+) -> str:
+    """Synchronous image editing implementation (the chat-path tool)."""
+    thread_id = current_thread_id.get("")
+    if not thread_id:
+        return json.dumps({"error": "No active session (thread_id not set)"})
+
+    try:
+        inputs = resolve_edit_inputs(thread_id, list(image_filenames or []), mask_filename)
+    except EditInputError as exc:
+        session_dir = Path(settings.upload_dir) / thread_id
+        available = sorted(f.name for f in session_dir.iterdir() if f.is_file()) if session_dir.is_dir() else []
+        return json.dumps({"error": str(exc), "no_file_created": True, "available_files": available})
+
+    params = resolve_image_params(size, quality, background, source_size=inputs.source_size)
+    # PRP-0187 F2: the edit path validates too.
+    invalid = validate_params(params)
+    if invalid:
+        return _invalid_result("editing", invalid)
+
+    payload, error = run_edit(thread_id, inputs, prompt, params, clamp_n(n))
+    return error if error is not None else json.dumps(payload)
 
 
 # ---- Public async tool functions (registered on MAF agent) ----
 
 
-async def generate_image(
+async def image_generate(
     prompt: Annotated[str, Field(description="Detailed description of the image to generate")],
-    size: Annotated[
-        str | None,
-        Field(description=_option_help("size")),
-    ] = None,
+    size: Annotated[str | None, Field(description=_option_help("size"))] = None,
     quality: Annotated[str | None, Field(description=_option_help("quality"))] = None,
-    output_format: Annotated[str | None, Field(description=_option_help("format"))] = None,
     background: Annotated[str | None, Field(description=_option_help("background"))] = None,
-    compression: Annotated[
-        str | None,
-        Field(description="Output compression 0-100 (jpeg only). OMIT THIS unless the user asked for a specific one."),
-    ] = None,
     n: Annotated[
         int,
         Field(
-            description="How many images to produce from THIS prompt (1-4). To make several, call ONCE with n set -- do not call the tool repeatedly."
+            description=(
+                "How many images to produce from THIS prompt (1-10). To make several, call ONCE "
+                "with n set -- do not call the tool repeatedly."
+            )
         ),
     ] = 1,
 ) -> str:
-    """Generate an image from a text description using AI.
+    """Generate an image from a text description using AI. Output is always PNG.
 
-    Omit size/quality/output_format/background/compression to honor the user's
-    per-session Image Output Options. A field the user has pinned in that control is
-    used even if you pass a different value, so passing one has no effect there.
+    Omit size/quality/background to use the configured defaults; pass one only when the
+    user asked for a specific value.
 
     For SEVERAL images of the same subject, make ONE call with n=<count>. Calling this
     tool repeatedly produces separate requests, is slower, and shows the user one
@@ -676,44 +604,52 @@ async def generate_image(
         thread_id = current_thread_id.get("")
         if not thread_id:
             return json.dumps({"error": "No active session (thread_id not set)"})
-        return await demo_generate_image(prompt=prompt, n=n, thread_id=thread_id)
+        return await demo_generate_image(prompt=prompt, n=clamp_n(n), thread_id=thread_id)
 
-    return await asyncio.to_thread(
-        _generate_image_sync,
-        prompt,
-        size,
-        quality,
-        output_format,
-        background,
-        compression,
-        n,
-    )
+    return await asyncio.to_thread(_generate_image_sync, prompt, size, quality, background, n)
 
 
-async def edit_image(
-    prompt: Annotated[str, Field(description="Description of the desired edit to the image")],
-    image_filename: Annotated[
-        str, Field(description="Filename of the source image in the session (e.g., photo.jpg, generated_abc123.png)")
+async def image_edit(
+    prompt: Annotated[
+        str,
+        Field(
+            description=(
+                "The edit, written as two labelled parts: 'Change:' (what must be different) and "
+                "'Preserve:' (what must stay exactly as it is). Example: 'Change: the background to "
+                "a beach at sunset. Preserve: the product's shape, logo and colors.'"
+            )
+        ),
     ],
-    size: Annotated[
+    image_filenames: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Session image filenames (1-16, e.g. photo.jpg, generated_abc123.png). The FIRST is "
+                "the image being edited; any others are references. PNG or JPEG only."
+            )
+        ),
+    ],
+    mask_filename: Annotated[
         str | None,
         Field(
-            description="Output image size: auto, 1024x1024, 1024x1536, or 1536x1024 (omit to use the user's default)"
+            description=(
+                "Optional PNG mask with the SAME size as the first image; its fully transparent "
+                "pixels mark the area that may change. Omit for a whole-image edit."
+            )
         ),
     ] = None,
-    quality: Annotated[str | None, Field(description=_option_help("quality"))] = None,
-    output_format: Annotated[str | None, Field(description=_option_help("format"))] = None,
-    background: Annotated[str | None, Field(description=_option_help("background"))] = None,
-    compression: Annotated[
+    size: Annotated[
         str | None,
-        Field(description="Output compression 0-100 (jpeg only). OMIT THIS unless the user asked for a specific one."),
+        Field(description=_option_help("size") + " By default an edit keeps the first image's shape."),
     ] = None,
-    n: Annotated[int, Field(description="Number of edited images to generate (1-4)")] = 1,
+    quality: Annotated[str | None, Field(description=_option_help("quality"))] = None,
+    background: Annotated[str | None, Field(description=_option_help("background"))] = None,
+    n: Annotated[int, Field(description="Number of edited images to produce (1-10).")] = 1,
 ) -> str:
-    """Edit an existing image based on a text description (full image edit, no mask).
+    """Edit an existing image, optionally using reference images and a mask. Output is PNG.
 
-    Omit size/quality/output_format/background/compression to honor the user's
-    per-session Image Output Options; pass an explicit value only when needed.
+    Write the prompt as 'Change: ... Preserve: ...'. Omit size/quality/background to
+    use the defaults (an edit keeps its source's shape).
     """
     # PRP-0066 / UDR-0041 D3: demo lane returns bundled placeholder PNG.
     from app.demo import is_demo_mode
@@ -726,19 +662,18 @@ async def edit_image(
             return json.dumps({"error": "No active session (thread_id not set)"})
         return await demo_edit_image(
             prompt=prompt,
-            n=n,
+            n=clamp_n(n),
             thread_id=thread_id,
-            image_filename=image_filename,
+            image_filenames=list(image_filenames or []),
         )
 
     return await asyncio.to_thread(
         _edit_image_sync,
         prompt,
-        image_filename,
+        list(image_filenames or []),
+        mask_filename,
         size,
         quality,
-        output_format,
         background,
-        compression,
         n,
     )

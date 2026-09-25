@@ -66,7 +66,7 @@ def _record_turn(
 def _collect_generated_images(content: Any, out: list[str]) -> None:
     """Extract /api/uploads image URLs from an image-generation tool result.
 
-    The generate_image / edit_image tools return a JSON result
+    The image_generate / image_edit tools return a JSON result
     ``{"images": [{"url": "/api/uploads/<thread>/generated_*.png", ...}], ...}``.
     Other tools' results are ignored. Collected in order, de-duplicated.
     """

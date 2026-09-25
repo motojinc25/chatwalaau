@@ -452,10 +452,9 @@ export function useChat(options?: UseChatOptions) {
         // run-target's configuration, applied at agent construction; sending a
         // per-message copy was the second lane this release removed.
         //
-        // PRP-0185 (UDR-0167 D11): no `image_options` either. Image output options are
-        // the Built-in agent's configuration now, read server-side from the Application
-        // Settings store; the backend accepts and ignores the key, so nothing here has
-        // to keep sending it for compatibility.
+        // No `image_options` either (PRP-0185; PRP-0187 / UDR-0169 D4): image output
+        // defaults live only on the catalog image offering, and the backend accepts and
+        // ignores the key, so nothing here has to keep sending it for compatibility.
         const aguiState: Record<string, unknown> = {}
         if (temporaryRef.current) aguiState.temporary = true
         // Declarative Workflow run-target (PRP-0118, CTR-0009, UDR-0101 D5). When set,
@@ -1244,6 +1243,40 @@ export function useChat(options?: UseChatOptions) {
       })
   }, [])
 
+  /**
+   * A turn the SERVER persists (PRP-0187 / UDR-0169 D8): the image editor's direct
+   * edit, which calls the Images API without an agent run. Both bubbles render at once
+   * -- the user message and an assistant message with a running tool indicator -- and
+   * `run` performs the request and returns the fields that finish the assistant
+   * message (and optionally the user message, e.g. uploaded image URLs replacing local
+   * previews). Nothing is saved from here: the endpoint appended both messages itself,
+   * idempotently by these ids.
+   */
+  const runDirectTurn = useCallback(
+    async (
+      user: ChatMessage,
+      assistant: ChatMessage,
+      run: () => Promise<{ assistant: Partial<ChatMessage>; user?: Partial<ChatMessage> }>,
+    ): Promise<boolean> => {
+      if (savingRef.current) return false
+      setMessages((prev) => [...prev, user, assistant])
+      try {
+        const patch = await run()
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (msg.id === assistant.id) return { ...msg, ...patch.assistant }
+            if (msg.id === user.id && patch.user) return { ...msg, ...patch.user }
+            return msg
+          }),
+        )
+      } finally {
+        onStreamCompleteRef.current?.()
+      }
+      return true
+    },
+    [],
+  )
+
   const stopGeneration = useCallback(() => {
     abortRef.current?.abort()
   }, [])
@@ -1258,6 +1291,7 @@ export function useChat(options?: UseChatOptions) {
     /** A failed save is being retried; the chat is locked meanwhile (UDR-0156 D4). */
     saveRetry,
     sendMessage,
+    runDirectTurn,
     retryTurn,
     stopGeneration,
     clearMessages,

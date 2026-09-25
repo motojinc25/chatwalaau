@@ -229,21 +229,35 @@ DEFAULT_EMBEDDING_API_VERSION = "2024-10-21"
 
 
 # Allowed values for the image offering's optional ``image_defaults`` block
-# (PRP-0114, UDR-0095 D3). Values are the operator DEFAULTS -- the per-session
-# ``state.image_options`` and an explicit LLM tool argument still override them.
+# (PRP-0114, UDR-0095 D3). The values are operator DEFAULTS: an explicit LLM tool
+# argument overrides them (PRP-0187 / UDR-0169 D4).
 #
-# v0.117.6: DERIVED from app.image_gen.capabilities.OPTION_VALUES instead of being a
-# second hand-maintained copy. The two lists had already drifted -- the catalog still
-# offered webp / transparent and lacked the 2K / 4K sizes -- so the Model Settings
-# screen accepted values the tools would reject. Imported lazily: models_catalog is a
-# low-level module and must not gain an import-time dependency on a feature package.
-def _image_default_enums() -> dict[str, frozenset[str]]:
-    from app.image_gen.capabilities import OPTION_VALUES
+# v0.117.6: DERIVED from app.image_gen.capabilities instead of being a second
+# hand-maintained copy. Imported lazily: models_catalog is a low-level module and must
+# not gain an import-time dependency on a feature package.
+def _image_default_problem(key: str, value: str) -> str | None:
+    from app.image_gen.capabilities import validate_option
 
-    return {option: frozenset(values) for option, values in OPTION_VALUES.items()}
+    return validate_option(key, value)
 
 
-_IMAGE_DEFAULT_KEYS = frozenset({"size", "quality", "format", "background", "compression"})
+_IMAGE_DEFAULT_KEYS = frozenset({"size", "quality", "background"})
+
+# Keys an older catalog file may still carry. PRP-0187 / UDR-0169 D3 fixes the output
+# format to png, so `format` and `compression` mean nothing any more: they are IGNORED
+# with an advisory instead of failing the whole catalog load.
+_WITHDRAWN_IMAGE_DEFAULT_KEYS = frozenset({"format", "compression"})
+
+# One advisory per (offering, key) per process: the catalog is re-read on every change.
+_image_default_advisories: set[tuple[str, str]] = set()
+
+
+def _image_default_advisory(offering_id: str, key: str, message: str) -> None:
+    if (offering_id, key) in _image_default_advisories:
+        return
+    _image_default_advisories.add((offering_id, key))
+    logger.warning("Model catalog: offering '%s': %s", offering_id, message)
+
 
 # Keys that would embed a raw secret in the catalog file; rejected at load so
 # an operator is steered to api_key_env / auth_profiles (UDR-0087 D4).
@@ -497,6 +511,14 @@ def _parse_image_defaults(raw: Any, offering_id: str, operations: list[str]) -> 
         raise CatalogError(f"offering '{offering_id}': 'image_defaults' must be an object")
     out: dict[str, Any] = {}
     for key, value in raw.items():
+        if key in _WITHDRAWN_IMAGE_DEFAULT_KEYS:
+            _image_default_advisory(
+                offering_id,
+                key,
+                f"image_defaults.{key} is ignored -- image output is always png (PRP-0187). "
+                "Remove it, or save the image card once to drop it.",
+            )
+            continue
         if key not in _IMAGE_DEFAULT_KEYS:
             raise CatalogError(
                 f"offering '{offering_id}': unknown image_defaults key {key!r} "
@@ -504,16 +526,18 @@ def _parse_image_defaults(raw: Any, offering_id: str, operations: list[str]) -> 
             )
         if value is None:
             continue
-        if key == "compression":
-            if isinstance(value, bool) or not isinstance(value, int) or not (0 <= value <= 100):
-                raise CatalogError(f"offering '{offering_id}': image_defaults.compression must be an integer 0-100")
-            out[key] = value
-            continue
-        allowed = _image_default_enums()[key]
-        if not isinstance(value, str) or value not in allowed:
-            raise CatalogError(
-                f"offering '{offering_id}': image_defaults.{key} must be one of {sorted(allowed)}, got {value!r}"
+        if isinstance(value, str) and value.strip().lower() == "auto":
+            # `auto` was the old "let the API decide" sentinel (UDR-0169 D2): read it as
+            # unset so the product default applies, instead of rejecting the file.
+            _image_default_advisory(
+                offering_id,
+                key,
+                f"image_defaults.{key}='auto' is no longer a value and is treated as unset (PRP-0187).",
             )
+            continue
+        problem = _image_default_problem(key, value) if isinstance(value, str) else f"{key} must be a string"
+        if problem:
+            raise CatalogError(f"offering '{offering_id}': image_defaults.{problem}")
         out[key] = value
     return out or None
 
@@ -1002,11 +1026,10 @@ def image_output_defaults() -> dict[str, Any]:
     """The image offering's ``image_defaults`` block, or ``{}`` (PRP-0114, UDR-0095 D3).
 
     Consumed by image generation (CTR-0049) as the operator DEFAULT tier for the
-    output-behavior options (size / quality / format / compression / background),
-    replacing the removed CTR-0006 ``IMAGE_*`` settings. Returns an empty dict when
-    there is no catalog, no image offering, or the offering declares no defaults;
-    the per-session ``state.image_options`` and an explicit LLM tool argument still
-    override these (precedence in app.image_gen.tools._resolve_option).
+    output-behavior options (size / quality / background). Returns an empty dict when
+    there is no catalog, no image offering, or the offering declares no defaults; an
+    explicit LLM tool argument overrides these, and the product defaults fill what
+    they leave unset (PRP-0187 / UDR-0169 D4, app.image_gen.tools._resolve_option).
     """
     catalog = active_catalog()
     if catalog is None:

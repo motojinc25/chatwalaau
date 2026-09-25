@@ -42,6 +42,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from app.image_gen.names import IMAGE_RESULT_TOOL_NAMES
 from app.session.storage import (
     SESSION_INDEX_FILENAME,
     read_session_file,
@@ -63,7 +64,9 @@ _MTIME_KEY = "_mtime_ns"
 # the atomic temp-file + replace in write_json_atomic is sufficient.
 _write_lock = asyncio.Lock()
 
-_IMAGE_GEN_TOOLS = frozenset({"generate_image", "edit_image"})
+# Current AND legacy names: stored history keeps the name it was written with
+# (PRP-0187 / UDR-0169 D6).
+_IMAGE_GEN_TOOLS = IMAGE_RESULT_TOOL_NAMES
 
 
 def index_path() -> Path:

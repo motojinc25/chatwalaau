@@ -1,10 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import {
-  IMAGE_OPTION_FIELDS,
-  type ImageOptions,
-  type ImageOutputCapability,
-  ImageOutputOptions,
-} from '@/components/ImageOutputOptions'
 import { Button } from '@/components/ui/button'
 import { ACTIVE_AGENT_CHANGED_EVENT } from '@/hooks/useRunTargets'
 import { parseSchemaText, validateStrictSchema } from '@/lib/structuredSchema'
@@ -46,8 +40,6 @@ interface ModelInfo {
   default_model: string
   model_options?: Record<string, { options: OptionDescriptor[] }>
   structured_output?: Record<string, StructuredCapability>
-  /** Per-value deployment gating for the image controls (CTR-0069, v0.117.6). */
-  image_output?: ImageOutputCapability | null
   /** Per-model tool capability states (CTR-0069, PRP-0185, UDR-0167). */
   model_capabilities?: Record<string, Record<string, boolean>>
 }
@@ -77,17 +69,16 @@ interface CoreAgentOptionsProps {
 const CONTROL =
   'h-7 rounded-md border bg-background px-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50'
 
-/** The settings keys this surface owns (UDR-0166 D8; image keys PRP-0185, UDR-0167 D11). */
+/**
+ * The settings keys this surface owns (UDR-0166 D8). The image output options PRP-0185
+ * added here are gone again (PRP-0187 / UDR-0169 D4): image defaults live only on the
+ * catalog image offering.
+ */
 interface CoreSettings {
   core_agent_model: string
   core_agent_effort: string
   core_agent_output_format: string
   core_agent_output_schema: string
-  core_agent_image_size: string
-  core_agent_image_quality: string
-  core_agent_image_format: string
-  core_agent_image_background: string
-  core_agent_image_compression: string
 }
 
 const EMPTY: CoreSettings = {
@@ -95,15 +86,7 @@ const EMPTY: CoreSettings = {
   core_agent_effort: '',
   core_agent_output_format: '',
   core_agent_output_schema: '',
-  core_agent_image_size: '',
-  core_agent_image_quality: '',
-  core_agent_image_format: '',
-  core_agent_image_background: '',
-  core_agent_image_compression: '',
 }
-
-/** Settings key for one image option field. */
-const imageSettingKey = (field: string) => `core_agent_image_${field}` as keyof CoreSettings
 
 export function CoreAgentOptions({ withStructuredOutput = false, onSaved, className }: CoreAgentOptionsProps) {
   const [info, setInfo] = useState<ModelInfo | null>(null)
@@ -131,11 +114,6 @@ export function CoreAgentOptions({ withStructuredOutput = false, onSaved, classN
         core_agent_effort: String(values.core_agent_effort ?? ''),
         core_agent_output_format: String(values.core_agent_output_format ?? ''),
         core_agent_output_schema: String(values.core_agent_output_schema ?? ''),
-        core_agent_image_size: String(values.core_agent_image_size ?? ''),
-        core_agent_image_quality: String(values.core_agent_image_quality ?? ''),
-        core_agent_image_format: String(values.core_agent_image_format ?? ''),
-        core_agent_image_background: String(values.core_agent_image_background ?? ''),
-        core_agent_image_compression: String(values.core_agent_image_compression ?? ''),
       }
       setStored(next)
       setDraft(next)
@@ -180,26 +158,6 @@ export function CoreAgentOptions({ withStructuredOutput = false, onSaved, classN
     draft.core_agent_output_schema.trim() !== '' &&
     parseError !== null
 
-  // The image draft, projected out of the flat settings map for the control.
-  const imageOptions: ImageOptions = useMemo(() => {
-    const out: ImageOptions = {}
-    for (const field of IMAGE_OPTION_FIELDS) {
-      const value = draft[imageSettingKey(field)]
-      if (value) out[field] = value
-    }
-    return out
-  }, [draft])
-
-  const setImageField = useCallback((field: string, next: string) => {
-    setDraft((d) => {
-      const updated = { ...d, [imageSettingKey(field)]: next }
-      // Compression only applies to the lossy format, exactly as the composer control
-      // enforced it -- a stored compression under png would be sent and rejected.
-      if (field === 'format' && next !== 'jpeg') updated.core_agent_image_compression = ''
-      return updated
-    })
-  }, [])
-
   // What this model withholds (CTR-0069, PRP-0185, UDR-0167). Named here because the
   // alternative is an operator watching the Built-in agent stop using a tool with
   // nothing on any screen to explain it -- the failure UDR-0102 exists to prevent.
@@ -227,10 +185,8 @@ export function CoreAgentOptions({ withStructuredOutput = false, onSaved, classN
     setBusy(true)
     setError(null)
     try {
-      // The image options travel on EVERY surface, unlike structured output: the
-      // narrow tier withholds the schema editor (UDR-0166 D10), but a size or format
-      // is a one-select choice with nothing to withhold. Omitting them from the
-      // narrow body would silently drop an edit the same screen had just accepted.
+      // The narrow tier withholds the schema editor (UDR-0166 D10), so its body omits
+      // the structured-output keys rather than overwrite them with an unseen draft.
       const { core_agent_output_format, core_agent_output_schema, ...withoutStructured } = draft
       const body = withStructuredOutput ? draft : withoutStructured
       const res = await fetch('/api/app-settings', {
@@ -330,20 +286,6 @@ export function CoreAgentOptions({ withStructuredOutput = false, onSaved, classN
           aria-label="Built-in agent output schema"
           value={draft.core_agent_output_schema}
           onChange={(e) => setDraft((d) => ({ ...d, core_agent_output_schema: e.target.value }))}
-        />
-      )}
-
-      {/* PRP-0185 / UDR-0167 D11: the image options live with the rest of the
-          Built-in agent's configuration. Hidden when no image offering is configured
-          -- the tools are not registered at all then (UDR-0095 D1), so the controls
-          would set a default nothing reads. */}
-      {info?.image_output && (
-        <ImageOutputOptions
-          value={imageOptions}
-          onFieldChange={setImageField}
-          capability={info.image_output}
-          disabled={!available || busy}
-          className="border-t pt-2"
         />
       )}
 

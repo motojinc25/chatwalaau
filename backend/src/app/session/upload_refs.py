@@ -6,6 +6,7 @@ A message points at its attachments -- uploaded, generated or paint-origin -- as
 ``.uploads/<source_thread_id>/``, breaks every image in the new one.
 """
 
+import json
 import logging
 from pathlib import Path
 import re
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 # Paint-origin images carry a re-edit sidecar keyed by the image stem (CTR-0022 /
 # app.paint.router). It travels with its image.
 PAINT_SIDECAR_SUFFIX = ".paint.json"
+# The image editor draft (CTR-0222, PRP-0187) also travels with its image, and so do
+# the uploads it references (its reference images and layers), with its URLs rewritten.
+IMAGE_EDIT_DRAFT_SUFFIX = ".imgedit.json"
 
 
 def rewrite_upload_refs(data: Any, old_id: str, new_id: str) -> Any:
@@ -71,8 +75,18 @@ def copy_referenced_uploads(data: Any, source_id: str, target_id: str) -> int:
         return 0
 
     copied = 0
-    for name in sorted(referenced_upload_names(data, source_id)):
-        candidates = [name, f"{Path(name).stem}{PAINT_SIDECAR_SUFFIX}"]
+    names = set(referenced_upload_names(data, source_id))
+    # An image's editor draft names further uploads (references, layers) the messages
+    # may not mention; they belong to the forked session too.
+    for name in list(names):
+        draft = (source_dir / f"{Path(name).stem}{IMAGE_EDIT_DRAFT_SUFFIX}").resolve()
+        if draft.is_relative_to(source_dir) and draft.is_file():
+            try:
+                names |= referenced_upload_names(json.loads(draft.read_text(encoding="utf-8")), source_id)
+            except (OSError, ValueError):
+                logger.warning("Image edit draft %s of session %s is unreadable", draft.name, source_id)
+    for name in sorted(names):
+        candidates = [name, f"{Path(name).stem}{PAINT_SIDECAR_SUFFIX}", f"{Path(name).stem}{IMAGE_EDIT_DRAFT_SUFFIX}"]
         for candidate in candidates:
             src = (source_dir / candidate).resolve()
             if not src.is_relative_to(source_dir):
@@ -82,6 +96,14 @@ def copy_referenced_uploads(data: Any, source_id: str, target_id: str) -> int:
                     logger.warning("Upload %s of session %s is missing; not copied", name, source_id)
                 continue
             target_dir.mkdir(parents=True, exist_ok=True)
+            if candidate.endswith(IMAGE_EDIT_DRAFT_SUFFIX):
+                try:
+                    draft = rewrite_upload_refs(json.loads(src.read_text(encoding="utf-8")), source_id, target_id)
+                    (target_dir / candidate).write_text(json.dumps(draft, ensure_ascii=False), encoding="utf-8")
+                    copied += 1
+                except (OSError, ValueError):
+                    logger.warning("Image edit draft %s of session %s not copied", candidate, source_id)
+                continue
             shutil.copy2(src, target_dir / candidate)
             copied += 1
     return copied

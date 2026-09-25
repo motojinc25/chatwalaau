@@ -82,7 +82,7 @@ def _is_mcp_tool(obj: Any) -> bool:
 
     Matched by TYPE, never by name: an MCP tool's ``.name`` is the SERVER name, which
     an operator chooses, so a name-based test would be defeated by a server called
-    ``generate_image``. ``MCPTool`` is the common base of the stdio and the streamable
+    ``image_generate``. ``MCPTool`` is the common base of the stdio and the streamable
     HTTP transports, both of which stay supported (UDR-0167, PRP-0185 Section 2.1).
     """
     try:

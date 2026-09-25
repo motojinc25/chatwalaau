@@ -74,7 +74,7 @@ def _workspace_file_reference_note() -> str:
     into the workspace; the same model already runs bash_execute inside it.
 
     PRP-0177 / UDR-0159 D1 scopes the rule to what the agent PRODUCES with these tools.
-    A generated image is NOT that: generate_image saves it under UPLOAD_DIR and returns
+    A generated image is NOT that: image_generate saves it under UPLOAD_DIR and returns
     /api/uploads/..., which the chat renders itself (CTR-0049 / CTR-0051), so this text
     used to make the model shell-copy an already delivered image into the workspace and
     hand back a workspace: link. Everything PRP-0166 promised is kept verbatim in
@@ -270,17 +270,22 @@ def _build_tools_and_instructions(
     # advisory (app.main) surfaces a leftover IMAGE_DEPLOYMENT_NAME.
     _image_offering = models_catalog.image_config()
     if _image_offering is not None or is_demo_mode():
-        from app.image_gen.tools import edit_image, generate_image
+        from app.image_gen.tools import image_edit, image_generate
 
-        image_tools = [t for t in (generate_image, edit_image) if _fn_ok(t.__name__)]
+        image_tools = [t for t in (image_generate, image_edit) if _fn_ok(t.__name__)]
         if image_tools:
             tools.extend(image_tools)
             guidance.append(
                 ToolGuidance(
                     "image",
-                    "You can generate images from text descriptions using generate_image. "
-                    "You can also edit existing images using edit_image by providing the filename "
-                    "of an uploaded or previously generated image. "
+                    "You can generate images from text descriptions using image_generate. "
+                    "You can also edit existing images using image_edit: pass the filename of the "
+                    "uploaded or previously generated image FIRST in image_filenames, then any "
+                    "reference images. Write the edit prompt as two parts -- 'Change:' what must be "
+                    "different, and 'Preserve:' what must stay exactly as it is (for example: "
+                    "'Change: the background only. Preserve: the product shape, logo and colors.'). "
+                    "Leave size, quality and background out unless the user asked for a specific "
+                    "value; output is always PNG. "
                     "After generating or editing an image, describe what was created. "
                     # UDR-0159 D2: a tool whose result the chat renders says so itself,
                     # or another tool-guide's file rule takes over (PRP-0177).

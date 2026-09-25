@@ -2,6 +2,7 @@ import { Paintbrush } from 'lucide-react'
 import { useMemo } from 'react'
 import { AuthedImage } from '@/components/AuthedImage'
 import { Button } from '@/components/ui/button'
+import { IMAGE_RESULT_TOOLS } from '@/lib/imageTools'
 import { openUploadFullSize } from '@/lib/uploads'
 import type { ToolCall } from '@/types/chat'
 
@@ -16,11 +17,12 @@ interface ImageGenResult {
   images: GeneratedImage[]
   count: number
   tool: string
+  /** Legacy edit results (before PRP-0187) name one source image. */
   source_image?: string
+  /** PRP-0187: the ordered inputs an edit actually sent. */
+  inputs?: string[]
   error?: string
 }
-
-const IMAGE_TOOLS = new Set(['generate_image', 'edit_image'])
 
 function ImageResultCard({ toolCall, onMaskEdit }: { toolCall: ToolCall; onMaskEdit?: (imageUrl: string) => void }) {
   const parsed = useMemo<ImageGenResult | null>(() => {
@@ -61,7 +63,7 @@ function ImageResultCard({ toolCall, onMaskEdit }: { toolCall: ToolCall; onMaskE
                   e.stopPropagation()
                   onMaskEdit(img.url)
                 }}
-                aria-label="Edit with mask">
+                aria-label="Edit image">
                 <Paintbrush className="h-3 w-3" />
                 Edit
               </Button>
@@ -84,7 +86,7 @@ export function ImageGenerationResults({
   onMaskEdit?: (imageUrl: string) => void
 }) {
   const imageResults = useMemo(
-    () => toolCalls.filter((tc) => IMAGE_TOOLS.has(tc.name) && tc.status === 'completed' && tc.result),
+    () => toolCalls.filter((tc) => IMAGE_RESULT_TOOLS.has(tc.name) && tc.status === 'completed' && tc.result),
     [toolCalls],
   )
 

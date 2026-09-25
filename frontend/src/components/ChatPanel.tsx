@@ -4,7 +4,7 @@ import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { HelpPortal } from '@/components/HelpPortal'
-import { MaskEditorDialog } from '@/components/MaskEditorDialog'
+import { type ImageEditSubmission, MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { MessageNavigator } from '@/components/MessageNavigator'
 import { MessageStepButton } from '@/components/MessageStepButton'
 import { OPEN_RUN_TARGET_PICKER_EVENT } from '@/components/RunTargetSheet'
@@ -24,7 +24,9 @@ import { useTemplates } from '@/hooks/useTemplates'
 import { useTTS } from '@/hooks/useTTS'
 import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
 import { resolveContextOccupancy } from '@/lib/contextOccupancy'
+import { IMAGE_EDIT_TOOL } from '@/lib/imageTools'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
+import { requestImageEdit, uploadSessionImage } from '@/lib/maskApi'
 import { type EntryId, isEntryVisible, useChatSurfaceTier } from '@/lib/narrowSurface'
 import { getHarnessRunTarget, getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
@@ -214,6 +216,7 @@ export function ChatPanel({
     isLoading,
     saveRetry,
     sendMessage,
+    runDirectTurn,
     retryTurn,
     stopGeneration,
     editUserMessage,
@@ -347,68 +350,121 @@ export function ChatPanel({
     setMaskEditorState({ imageUrl })
   }, [])
 
+  // PRP-0187 / UDR-0169 D8: the editor's Generate calls the Images API DIRECTLY
+  // (CTR-0053 v2) instead of asking the agent, so it works whatever run-target is
+  // selected and the 16 inputs cannot be reordered or the prompt paraphrased. Both
+  // bubbles render at once (D13: preview -> annotated -> references); the server
+  // persists the turn itself, idempotently by the ids minted here.
   const handleMaskGenerate = useCallback(
-    async (compositedBlob: Blob, previewBlob: Blob, prompt: string) => {
+    async (edit: ImageEditSubmission) => {
       setMaskEditorState(null)
       if (!threadId) return
-
-      // PRP-0073: render the user message immediately, then upload in the
-      // background. The composited filename is already disk/URL-safe, so the
-      // dispatched instruction can be built up-front (the upload stores it
-      // verbatim) -- no need to wait for the upload response before showing
-      // the bubble. The preview shows a local object URL instantly and is
-      // swapped for the durable uploaded URI by the prepare() hook.
-      // Both uploads MUST carry a unique name. They land in the session's shared
-      // upload directory (.uploads/<thread_id>/) and the endpoint overwrites by
-      // path, so a fixed name makes every mask edit in a thread collide on ONE
-      // file: the newest edit silently replaces the bytes of every earlier one,
-      // and export/import keeps a single copy for all of them (v0.121.1 defect).
-      // The pair shares one id so a source and its preview stay recognisably
-      // related on disk.
       const editId = crypto.randomUUID().slice(0, 12)
-      const compositedFilename = `mask_source_${editId}.png`
-      const previewFilename = `mask_preview_${editId}.png`
-      const instruction = `Edit the masked areas of the image "${compositedFilename}": ${prompt}`
-      const previewObjectUrl = URL.createObjectURL(previewBlob)
+      const userId = crypto.randomUUID()
+      const assistantId = crypto.randomUUID()
+      const toolCallId = `edit_${editId}`
+      const now = new Date().toISOString()
 
-      await sendMessage(instruction, [{ uri: previewObjectUrl, media_type: 'image/png' }], {
-        prepare: async () => {
-          try {
-            // Upload composited source (edit regions) + display preview in
-            // parallel so the agent can read the source as soon as possible.
-            const compositedForm = new FormData()
-            compositedForm.append('file', new File([compositedBlob], compositedFilename, { type: 'image/png' }))
-            const previewForm = new FormData()
-            previewForm.append('file', new File([previewBlob], previewFilename, { type: 'image/png' }))
+      const localUrls: string[] = []
+      const local = (blob: Blob) => {
+        const url = URL.createObjectURL(blob)
+        localUrls.push(url)
+        return url
+      }
+      // Without a mask the first image is the source itself: the image being edited.
+      const firstDisplay = edit.previewBlob ? local(edit.previewBlob) : edit.sourceUrl
+      const displayImages: ImageRef[] = [
+        { uri: firstDisplay, media_type: 'image/png' },
+        ...(edit.annotatedBlob ? [{ uri: local(edit.annotatedBlob), media_type: 'image/png' }] : []),
+        ...edit.references.map((r) => ({ uri: r.uri, media_type: 'image/png' })),
+      ]
+      const displayText = [
+        `Change: ${edit.change}`,
+        ...edit.annotations.filter((a) => a.note).map((a) => `${a.label}: ${a.note}`),
+        ...(edit.preserve ? [`Preserve: ${edit.preserve}`] : []),
+      ].join('\n')
 
-            const [compositedRes, previewRes] = await Promise.all([
-              fetch(`/api/upload/${threadId}`, { method: 'POST', body: compositedForm }),
-              fetch(`/api/upload/${threadId}`, { method: 'POST', body: previewForm }),
-            ])
+      const user: ChatMessage = {
+        id: userId,
+        role: 'user',
+        content: displayText,
+        createdAt: now,
+        images: displayImages,
+      }
+      const assistant: ChatMessage = {
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        createdAt: now,
+        toolCalls: [{ id: toolCallId, name: IMAGE_EDIT_TOOL, status: 'running' }],
+      }
 
-            const compositedData = compositedRes.ok ? await compositedRes.json() : null
-            const previewData = previewRes.ok ? await previewRes.json() : null
-
-            if (!compositedData?.filename) {
-              setNotification({ type: 'error', message: 'Failed to upload source image' })
-              return null
-            }
-
-            const images: ImageRef[] = previewData?.uri ? [{ uri: previewData.uri, media_type: 'image/png' }] : []
-            return { images }
-          } catch (err) {
-            setNotification({
-              type: 'error',
-              message: err instanceof Error ? err.message : 'Failed to start mask edit',
-            })
-            return null
+      await runDirectTurn(user, assistant, async () => {
+        try {
+          // Every upload carries a unique name (the v0.121.1 collision lesson).
+          const [src, mask, annotated, preview] = await Promise.all([
+            edit.sourceBlob ? uploadSessionImage(threadId, edit.sourceBlob, `imgedit_src_${editId}.png`) : null,
+            edit.maskBlob ? uploadSessionImage(threadId, edit.maskBlob, `imgedit_mask_${editId}.png`) : null,
+            edit.annotatedBlob ? uploadSessionImage(threadId, edit.annotatedBlob, `imgedit_annot_${editId}.png`) : null,
+            edit.previewBlob ? uploadSessionImage(threadId, edit.previewBlob, `imgedit_preview_${editId}.png`) : null,
+          ])
+          const storedImages: ImageRef[] = [
+            { uri: preview?.uri ?? edit.sourceUrl, media_type: 'image/png' },
+            ...(annotated ? [{ uri: annotated.uri, media_type: 'image/png' }] : []),
+            ...edit.references.map((r) => ({ uri: r.uri, media_type: 'image/png' })),
+          ]
+          const result = await requestImageEdit({
+            thread_id: threadId,
+            source: src?.filename ?? edit.sourceName,
+            mask: mask?.filename ?? null,
+            annotated: annotated?.filename ?? null,
+            references: edit.references.map((r) => r.filename),
+            change: edit.change,
+            preserve: edit.preserve,
+            annotations: edit.annotations,
+            quality: edit.quality,
+            background: edit.background,
+            n: edit.n,
+            user_message_id: userId,
+            assistant_message_id: assistantId,
+            display_text: displayText,
+            display_images: storedImages,
+          })
+          const names = result.images.map((img) => img.filename).join(', ')
+          return {
+            user: { images: storedImages },
+            assistant: {
+              content: names ? `Edited image saved as ${names}.` : '',
+              toolCalls: [
+                { id: toolCallId, name: IMAGE_EDIT_TOOL, status: 'completed', result: JSON.stringify(result) },
+              ],
+            },
           }
-        },
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Image editing failed'
+          setNotification({ type: 'error', message })
+          return {
+            assistant: {
+              content: `Image editing failed: ${message}`,
+              toolCalls: [
+                {
+                  id: toolCallId,
+                  name: IMAGE_EDIT_TOOL,
+                  status: 'completed',
+                  result: JSON.stringify({ error: message, no_file_created: true }),
+                },
+              ],
+            },
+          }
+        } finally {
+          // The bubbles keep showing the object URLs until the uploaded URIs arrive.
+          setTimeout(() => {
+            for (const url of localUrls) URL.revokeObjectURL(url)
+          }, 60_000)
+        }
       })
-
-      URL.revokeObjectURL(previewObjectUrl)
     },
-    [threadId, sendMessage],
+    [threadId, runDirectTurn],
   )
 
   const [isDragging, setIsDragging] = useState(false)
@@ -827,12 +883,14 @@ export function ChatPanel({
         onSave={createTemplate}
         onNotify={(message, type) => setNotification({ type, message })}
       />
-      {maskEditorState && (
+      {maskEditorState && threadId && (
         <MaskEditorDialog
           open={!!maskEditorState}
           onOpenChange={(open) => !open && setMaskEditorState(null)}
           imageUrl={maskEditorState.imageUrl}
+          threadId={threadId}
           onGenerate={handleMaskGenerate}
+          onNotify={(message) => setNotification({ type: 'error', message })}
         />
       )}
       {paintState && (

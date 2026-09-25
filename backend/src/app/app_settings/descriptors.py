@@ -73,7 +73,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 from app.core.config import COMPACTION_BOUND_MAX, COMPACTION_BOUND_MIN, Settings
-from app.image_gen.capabilities import OPTION_VALUES as _IMAGE_OPTION_VALUES
 
 # ---- Scope values (UDR-0120 D3) ------------------------------------------
 
@@ -263,83 +262,10 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
             "Unparsable text falls back to the provider's default schema."
         ),
     ),
-    # Image output options for the Built-in agent (PRP-0185, UDR-0167 D11). They were
-    # a PER-SESSION chat-input control persisted in each browser's localStorage; they
-    # are the Built-in agent's CONFIGURATION now, for the reason PRP-0184 moved model /
-    # effort / structured output out of the same toolbar. SCOPE_RUNTIME, not
-    # SCOPE_REBUILD: the image tools read the value at CALL time through the AG-UI
-    # contextvar, so no Agent has to be rebuilt for a change to take effect.
-    #
-    # The enums are DERIVED from app.image_gen.capabilities.OPTION_VALUES, never
-    # restated (CTR-0049 stays the single source): a value added there must not have to
-    # be added here too, or the two drift and the screen offers something the tool
-    # rejects. "" is prepended as the "API default" member.
-    SettingDescriptor(
-        "core_agent_image_size",
-        "Built-in agent image size",
-        "generation",
-        "enum",
-        SCOPE_RUNTIME,
-        enum=("", *_IMAGE_OPTION_VALUES["size"]),
-        help=(
-            "Default size for images the Built-in ChatWalaʻau Core agent generates. "
-            "Empty uses the image offering's own default, then the API default. A "
-            "pinned value outranks a size the model asks for. Applies server-wide."
-        ),
-    ),
-    SettingDescriptor(
-        "core_agent_image_quality",
-        "Built-in agent image quality",
-        "generation",
-        "enum",
-        SCOPE_RUNTIME,
-        enum=("", *_IMAGE_OPTION_VALUES["quality"]),
-        help=(
-            "Default quality for images the Built-in ChatWalaʻau Core agent generates. "
-            "Empty uses the image offering's own default, then the API default. "
-            "Applies server-wide."
-        ),
-    ),
-    SettingDescriptor(
-        "core_agent_image_format",
-        "Built-in agent image format",
-        "generation",
-        "enum",
-        SCOPE_RUNTIME,
-        enum=("", *_IMAGE_OPTION_VALUES["format"]),
-        help=(
-            "Default file format for images the Built-in ChatWalaʻau Core agent "
-            "generates. Empty uses the image offering's own default, then the API "
-            "default (png). Applies server-wide."
-        ),
-    ),
-    SettingDescriptor(
-        "core_agent_image_background",
-        "Built-in agent image background",
-        "generation",
-        "enum",
-        SCOPE_RUNTIME,
-        enum=("", *_IMAGE_OPTION_VALUES["background"]),
-        help=(
-            "Default background handling for images the Built-in ChatWalaʻau Core "
-            "agent generates. Empty uses the image offering's own default, then the "
-            "API default. Applies server-wide."
-        ),
-    ),
-    SettingDescriptor(
-        "core_agent_image_compression",
-        "Built-in agent image compression",
-        "generation",
-        "str",
-        SCOPE_RUNTIME,
-        parent="core_agent_image_format",
-        enabled_when="jpeg",
-        help=(
-            "Compression level 0-100 for JPEG output from the Built-in ChatWalaʻau "
-            "Core agent. Empty uses the API default. Offered only while the format is "
-            "jpeg, which is the only format that accepts it. Applies server-wide."
-        ),
-    ),
+    # PRP-0187 / UDR-0169 D4: the Built-in agent image options (core_agent_image_*,
+    # PRP-0185) are REMOVED. Image output defaults live only on the catalog image
+    # offering. A value still stored under one of those keys lands in the preserved
+    # unknown-key bag (UDR-0120 D5) and has no effect.
     SettingDescriptor(
         "prompt_cache_enabled",
         "Prompt caching",

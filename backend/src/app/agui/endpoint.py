@@ -67,8 +67,6 @@ from app.auth import verify_api_key
 from app.core import provider_errors
 from app.core.config import settings
 from app.demo import is_demo_mode
-from app.image_gen.tools import builtin_image_options
-from app.image_gen.tools import current_image_options as _image_gen_options
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
 from app.providers.structured import soft_validate
 
@@ -1279,16 +1277,12 @@ async def _stream_with_reasoning(
         # UDR-0119 D3 already did for the Harness run-target to all four.
         #
         # What the state still carries is per-run context that is NOT a generation
-        # option: the image-tool defaults and the Temporary Chat flag.
+        # option: the Temporary Chat flag.
         temporary = False
-        # Image output options are the BUILT-IN agent's CONFIGURATION since PRP-0185
-        # (UDR-0167 D11), not a per-session selection: they are read from the
-        # Application Settings store, not from the request. `state.image_options` is
-        # ACCEPTED AND IGNORED like the other retired state keys (the UDR-0154 D2
-        # posture) -- an older client keeps working, the value simply stops having an
-        # effect. The contextvar stays the seam, so the resolution order inside the
-        # image tools is untouched and only its SOURCE moved.
-        image_options: dict[str, Any] = builtin_image_options()
+        # `state.image_options` is ACCEPTED AND IGNORED (the UDR-0154 D2 posture). Since
+        # PRP-0187 (UDR-0169 D4) image output defaults live ONLY on the catalog image
+        # offering and the model's own argument outranks them; there is no per-run or
+        # per-agent image tier left for this endpoint to deliver.
         if request_body.state:
             # Temporary Chat (PRP-0076, CTR-0106, UDR-0052). When the SPA marks
             # the run temporary the thread_id is temp_-prefixed and routes to the
@@ -1519,12 +1513,6 @@ async def _stream_with_reasoning(
 
         # Set thread_id for image generation tools (CTR-0050, PRP-0027)
         _image_gen_thread_id.set(thread_id)
-        # Built-in agent image output options (CTR-0120/CTR-0049, PRP-0185). The tools
-        # read this as their default when the LLM omits a value. Set ONLY on this lane,
-        # which is what scopes it to the Built-in agent (UDR-0167 D11): the harness and
-        # workflow lanes never set the contextvar, so they keep resolving from
-        # offering.image_defaults.
-        _image_gen_options.set(image_options)
 
         # ONE run per turn (PRP-0179, UDR-0161 D2). No tool is approval-gated, so
         # there is no outer re-run loop: the turn is bounded by the framework's own

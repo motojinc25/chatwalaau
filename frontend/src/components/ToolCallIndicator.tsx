@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import { useMcpToolNames } from '@/hooks/useMcpToolNames'
+import { IMAGE_RESULT_TOOLS } from '@/lib/imageTools'
 import type { ToolCall } from '@/types/chat'
 
 interface ToolCallIndicatorProps {
@@ -46,6 +47,9 @@ const toolDisplayNames: Record<string, { label: string; doneLabel: string; icon:
   bash_execute: { label: 'Executing command...', doneLabel: 'Executed command', icon: Terminal },
   file_glob: { label: 'Searching files...', doneLabel: 'Searched files', icon: FolderSearch },
   file_grep: { label: 'Searching content...', doneLabel: 'Searched content', icon: Search },
+  image_generate: { label: 'Generating image...', doneLabel: 'Generated image', icon: ImagePlus },
+  image_edit: { label: 'Editing image...', doneLabel: 'Edited image', icon: Pencil },
+  // Legacy names (before PRP-0187), kept so stored conversations keep their labels.
   generate_image: { label: 'Generating image...', doneLabel: 'Generated image', icon: ImagePlus },
   edit_image: { label: 'Editing image...', doneLabel: 'Edited image', icon: Pencil },
   rag_search: { label: 'Searching documents...', doneLabel: 'Searched documents', icon: Search },
@@ -128,7 +132,7 @@ function formatJson(raw: string): string {
 }
 
 /** Tools whose effective options are worth showing on the collapsed line. */
-const PARAMETER_TOOLS = new Set(['generate_image', 'edit_image'])
+const PARAMETER_TOOLS = IMAGE_RESULT_TOOLS
 
 /**
  * Compact "size=1024x1024 · quality=high · format=png" summary for an image call
@@ -156,7 +160,15 @@ function imageParameterSummary(toolCall: ToolCall): string | null {
     try {
       const parsed = JSON.parse(toolCall.args)
       if (parsed && typeof parsed === 'object') {
-        const { prompt: _prompt, image_filename: _image, ...rest } = parsed as Record<string, unknown>
+        const {
+          prompt: _prompt,
+          image_filename: _image,
+          image_filenames: _images,
+          mask_filename: _mask,
+          source: _source,
+          references: _references,
+          ...rest
+        } = parsed as Record<string, unknown>
         source = rest
       }
     } catch {

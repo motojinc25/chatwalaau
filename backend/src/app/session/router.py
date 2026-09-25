@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from app.auth import verify_api_key
 from app.core.config import settings
+from app.image_gen.names import IMAGE_RESULT_TOOL_NAMES
 from app.session import index_store
 from app.session.bundle import BundleValidationError, build_export_bundle, import_bundle
 from app.session.storage import (
@@ -56,7 +57,9 @@ def _sessions_dir() -> Path:
     return sessions_dir()
 
 
-_IMAGE_GEN_TOOLS = frozenset({"generate_image", "edit_image"})
+# Current AND legacy names: stored history keeps the name it was written with
+# (PRP-0187 / UDR-0169 D6).
+_IMAGE_GEN_TOOLS = IMAGE_RESULT_TOOL_NAMES
 
 
 def _count_images(messages: list[dict[str, Any]]) -> int:

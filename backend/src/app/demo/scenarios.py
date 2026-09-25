@@ -14,7 +14,7 @@ scripts cover every UI surface the demo needs to exercise:
   fans out to the tool loop, the model is invoked again -- the demo
   client then emits a short text summary instead of a second tool
   call.
-- ``image``: triggers ``generate_image`` (which routes to the demo
+- ``image``: triggers ``image_generate`` (which routes to the demo
   image provider when DEMO_MODE=true).
 - ``rag`` / ``search documents``: triggers ``rag_search`` which queries
   ChromaDB with the bundled demo corpus.
@@ -177,7 +177,7 @@ _MARKDOWN_TEXT = (
     "|---|---|---|\n"
     "| Chat | Azure OpenAI | DemoChatClient |\n"
     "| Weather | Open-Meteo | Open-Meteo |\n"
-    "| Image | gpt-image-1.5 | placeholder PNG |\n"
+    "| Image | gpt-image-2.5-sunburst | placeholder PNG |\n"
     "| TTS | ElevenLabs | bundled MP3 |\n\n"
     "## Horizontal rule\n\n"
     "---\n\n"
@@ -302,7 +302,7 @@ _IMAGE_INTRO = (
 )
 
 _IMAGE_SECOND_PASS = (
-    "Above is the generated image. In demo mode, `generate_image` returns "
+    "Above is the generated image. In demo mode, `image_generate` returns "
     "one of two bundled 1024x1024 placeholder PNGs, rotating "
     "deterministically per call. The full UI surface (inline render, "
     "click-to-open full-size, ImageGenerationResult component) is "
@@ -363,7 +363,7 @@ def build_script(
         return [
             TextStep(_IMAGE_INTRO),
             FunctionCallStep(
-                name="generate_image",
+                name="image_generate",
                 arguments={"prompt": user_text or "a cute cat in pixel art style"},
             ),
         ]

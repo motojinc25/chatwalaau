@@ -42,6 +42,7 @@ import zipfile
 
 from app.core.config import settings
 from app.core.version import get_app_version
+from app.image_gen.names import IMAGE_RESULT_TOOL_NAMES
 from app.session.storage import (
     create_session_json,
     ensure_session_defaults,
@@ -75,6 +76,9 @@ MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024  # 256 MiB total expanded size
 # re-editable after import. Kept in sync with app.paint.router.MAX_SCENE_SIZE_BYTES
 # (a local constant avoids a session -> paint import edge).
 PAINT_SIDECAR_SUFFIX = ".paint.json"
+# Image editor draft sidecar (CTR-0222, PRP-0187). It holds /api/uploads/<thread>/...
+# URLs, so on import its references are rewritten to the new thread like the session.
+IMAGE_EDIT_DRAFT_SUFFIX = ".imgedit.json"
 MAX_SIDECAR_BYTES = 25 * 1024 * 1024
 
 # Per-session metadata fields removed on import so an imported chat lands as an
@@ -215,6 +219,9 @@ def import_bundle(zip_bytes: bytes) -> dict[str, Any]:
         if validated_uploads:
             upload_root.mkdir(parents=True, exist_ok=True)
             for basename, payload in validated_uploads:
+                if basename.endswith(IMAGE_EDIT_DRAFT_SUFFIX) and old_thread_id:
+                    draft = rewrite_upload_refs(json.loads(payload.decode("utf-8")), old_thread_id, new_thread_id)
+                    payload = json.dumps(draft, ensure_ascii=False).encode("utf-8")
                 (upload_root / basename).write_bytes(payload)
 
         new_data = _build_imported_session(session_data, old_thread_id, new_thread_id)
@@ -345,9 +352,9 @@ def _classify_upload_entry(basename: str, payload: bytes) -> tuple[bool, str | N
     if not basename or basename.startswith("."):
         return False, f"Skipped an attachment with an unsafe name: {basename!r}."
 
-    # Paint scene sidecar (CTR-0161): validate as well-formed JSON + size cap and
-    # carry it so a paint-origin attachment stays re-editable after import.
-    if basename.endswith(PAINT_SIDECAR_SUFFIX):
+    # Paint scene sidecar (CTR-0161) and image editor draft (CTR-0222): validate as
+    # well-formed JSON + size cap and carry it so the image stays re-editable.
+    if basename.endswith((PAINT_SIDECAR_SUFFIX, IMAGE_EDIT_DRAFT_SUFFIX)):
         if len(payload) > MAX_SIDECAR_BYTES:
             return False, (
                 f"Skipped an oversized paint scene '{basename}'; the image still "
@@ -405,7 +412,9 @@ def _build_imported_session(session_data: dict[str, Any], old_thread_id: str, ne
 
 def _count_images(messages: list[dict[str, Any]]) -> int:
     """Count image_url contents and generated images (mirrors the router)."""
-    image_gen_tools = frozenset({"generate_image", "edit_image"})
+    # Current AND legacy names: stored history keeps the name it was written with
+    # (PRP-0187 / UDR-0169 D6).
+    image_gen_tools = IMAGE_RESULT_TOOL_NAMES
     count = 0
     for msg in messages:
         if not isinstance(msg, dict):

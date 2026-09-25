@@ -215,8 +215,16 @@ def _annotate_tool_warnings(spec: DeclarativeAgentSpec) -> DeclarativeAgentSpec:
         return spec
     unknown = [i for i in spec.tool_allowlist if i not in known]
     if unknown:
+        # PRP-0187 / UDR-0169 D6: a renamed tool names its successor, so a spec written
+        # before the rename says exactly what to change instead of just "not recognized".
+        from app.image_gen.names import LEGACY_IMAGE_TOOL_NAMES
+
+        renamed = [
+            f"'{i}' was renamed to '{LEGACY_IMAGE_TOOL_NAMES[i]}'" for i in unknown if i in LEGACY_IMAGE_TOOL_NAMES
+        ]
+        hint = f" ({'; '.join(renamed)})" if renamed else ""
         spec.warnings.append(
-            f"tool(s) {unknown} are not recognized (check the tool name / MCP server / "
+            f"tool(s) {unknown} are not recognized{hint} (check the tool name / MCP server / "
             "skill against the tool inventory). Fix or remove them to activate the agent."
         )
     return spec
