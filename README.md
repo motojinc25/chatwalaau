@@ -86,7 +86,7 @@ See the [Configuration guide](https://www.chatwalaau.com/docs/getting-started/co
 
 | Area | What you can do |
 | --- | --- |
-| **Chat & media** | Render Markdown, code, math, and Mermaid diagrams. Use voice, image analysis, PDF attachments, web search with citations, and a built-in paint canvas. |
+| **Chat & media** | Render Markdown, code, math, and Mermaid diagrams. Use voice (including real-time Live conversation), image analysis, PDF attachments, web search with citations, and a built-in paint canvas. |
 | **Conversation controls** | Use slash commands, search and bookmark chats, navigate messages, start temporary chats, and mask your content with Privacy Screen for screen sharing. Continue chatting from a phone: the chat and chat list adapt to small screens, with a drawer chat list and touch-friendly controls. |
 | **Models** | Azure OpenAI, OpenAI, Microsoft Foundry, and Claude (direct or on Foundry), all configured in one model catalog. Availability depends on the model and deployment. |
 | **Tools & Skills** | Use image, weather, and coding tools, prompt templates, and catalog-installed Agent Skills with license/update tracking. Choose which tools each agent has; enabled tools run without an approval step. |
@@ -127,7 +127,7 @@ Some features require explicit enablement or additional provider configuration. 
 Full guides are available in **English and 日本語**, with full-text search.
 
 - **Get started:** [Installation](https://www.chatwalaau.com/docs/getting-started/installation) · [Desktop app (Windows)](https://www.chatwalaau.com/docs/getting-started/desktop) · [Configuration](https://www.chatwalaau.com/docs/getting-started/configuration) · [Authentication](https://www.chatwalaau.com/docs/api-and-cli/authentication)
-- **Use the app:** [Chat & UI](https://www.chatwalaau.com/docs/features/chat-and-ui) · [Models & Reasoning](https://www.chatwalaau.com/docs/features/models-and-reasoning) · [Memory & Sessions](https://www.chatwalaau.com/docs/features/memory-and-sessions)
+- **Use the app:** [Chat & UI](https://www.chatwalaau.com/docs/features/chat-and-ui) · [Voice & Live conversation](https://www.chatwalaau.com/docs/features/voice-and-speech) · [Models & Reasoning](https://www.chatwalaau.com/docs/features/models-and-reasoning) · [Memory & Sessions](https://www.chatwalaau.com/docs/features/memory-and-sessions)
 - **Build agents:** [Tools & Skills](https://www.chatwalaau.com/docs/features/agents-and-tools) · [Knowledge & MCP](https://www.chatwalaau.com/docs/features/knowledge-and-mcp) · [Declarative Agents](https://www.chatwalaau.com/docs/features/declarative-agents)
 - **Integrate:** [OpenAI-compatible API](https://www.chatwalaau.com/docs/api-and-cli/openai-compatible-api) · [CLI](https://www.chatwalaau.com/docs/api-and-cli/cli) · [Usage Statistics](https://www.chatwalaau.com/docs/api-and-cli/usage-statistics) · [Token Usage Dashboard](https://www.chatwalaau.com/docs/features/token-usage-dashboard)
 - **Develop & deploy:** [Development Setup](https://www.chatwalaau.com/docs/deployment/development) · [Networking & Operations](https://www.chatwalaau.com/docs/deployment/operations)

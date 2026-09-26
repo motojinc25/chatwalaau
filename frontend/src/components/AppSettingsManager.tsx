@@ -53,7 +53,7 @@ import { cn } from '@/lib/utils'
  * right detail pane.
  *
  * The list carries TWO kinds of item. The first is the Model Offering Catalog
- * editor, which COMPOSES the chat/embeddings/image model offerings and their auth
+ * editor, which COMPOSES the chat/embeddings/image/live model offerings and their auth
  * references (CTR-0175). Auth is referenced only by environment-variable NAME;
  * secret values are never displayed or accepted here -- the server reports
  * whether each referenced name is set (checked live via /env-status), rendered as
@@ -72,7 +72,7 @@ import { cn } from '@/lib/utils'
  */
 
 type Provider = 'azure-openai' | 'anthropic' | 'openai' | 'foundry'
-type Operation = 'chat' | 'embeddings' | 'image'
+type Operation = 'chat' | 'embeddings' | 'image' | 'live'
 type Hosting = 'direct' | 'foundry'
 type Family = 'openai-reasoning' | 'anthropic-adaptive' | 'bare'
 
@@ -188,7 +188,7 @@ type EditableOffering = Offering & { _key: string }
 const PROVIDERS: Provider[] = ['azure-openai', 'anthropic', 'openai', 'foundry']
 const FAMILIES: Family[] = ['openai-reasoning', 'anthropic-adaptive', 'bare']
 const HOSTINGS: Hosting[] = ['direct', 'foundry']
-const ALL_OPERATIONS: Operation[] = ['chat', 'embeddings', 'image']
+const ALL_OPERATIONS: Operation[] = ['chat', 'embeddings', 'image', 'live']
 
 const IMAGE_DEFAULTS_HELP =
   'Operator defaults for image generation and editing. The model may override a field when the user asks for a specific value in the conversation. A field left on "Default" uses the product default shown in brackets. Output is always PNG.'
@@ -209,13 +209,21 @@ function cleanImageDefaults(d: ImageDefaults | undefined): ImageDefaults | undef
 const CATALOG_ITEM = {
   id: 'catalog',
   label: 'Model Offering Catalog',
-  description: 'Compose the chat, embeddings, and image model offerings and their auth references.',
+  description: 'Compose the chat, embeddings, image, and live model offerings and their auth references.',
 } as const
 
 const SECTIONS: Array<{ op: Operation; title: string; hint: string }> = [
   { op: 'chat', title: 'Chat', hint: 'At least one chat offering; exactly one is the default.' },
   { op: 'embeddings', title: 'Embeddings', hint: 'Optional; at most one embeddings offering.' },
   { op: 'image', title: 'Image', hint: 'Optional; at most one image offering.' },
+  // PRP-0188 step 2 (UDR-0170 D11): registering this offering is what turns the Live
+  // conversation on. The chat model its delegations run on is the "Live delegation"
+  // task model assignment below.
+  {
+    op: 'live',
+    title: 'Live',
+    hint: 'Optional; at most one live offering -- the GPT-Live voice deployment (azure-openai, e.g. gpt-live-1). Registering it enables the Live conversation button.',
+  },
 ]
 
 const AUTH_HELP =
@@ -1080,7 +1088,8 @@ export function AppSettingsManager() {
       const fresh: EditableOffering = {
         _key: key,
         id: '',
-        provider: 'openai',
+        // GPT-Live is reached on Azure OpenAI only (UDR-0170 D11).
+        provider: op === 'live' ? 'azure-openai' : 'openai',
         model_ref: '',
         operations: [op],
         default: op === 'chat' && !hasChatDefault ? true : undefined,
@@ -1161,11 +1170,15 @@ export function AppSettingsManager() {
     const chat = offerings.filter((o) => opsOf(o).includes('chat'))
     const emb = offerings.filter((o) => opsOf(o).includes('embeddings'))
     const img = offerings.filter((o) => opsOf(o).includes('image'))
+    const live = offerings.filter((o) => opsOf(o).includes('live'))
     if (chat.length < 1) out.push('At least one chat offering is required.')
     const defaults = chat.filter((o) => o.default).length
     if (chat.length >= 1 && defaults !== 1) out.push('Exactly one chat offering must be marked default.')
     if (emb.length > 1) out.push('At most one embeddings offering is allowed.')
     if (img.length > 1) out.push('At most one image offering is allowed.')
+    if (live.length > 1) out.push('At most one live offering is allowed.')
+    if (live.some((o) => opsOf(o).length > 1)) out.push('A live offering cannot serve other operations.')
+    if (live.some((o) => o.provider !== 'azure-openai')) out.push('A live offering must use the azure-openai provider.')
     return out
   }, [offerings])
 

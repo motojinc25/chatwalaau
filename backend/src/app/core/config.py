@@ -375,6 +375,20 @@ class Settings(BaseSettings):
     # streamed PCM16 is encoded to MP3 at this rate. Allowed: 16000, 24000.
     tts_realtime_audio_rate: int = 24000
 
+    # GPT-Live full-duplex voice (PRP-0188, UDR-0170, FEAT-0070).
+    # PRP-0188 step 2 (UDR-0170 D11): Live exists when the Model Offering Catalog
+    # registers a `live` offering -- there is no environment gate and no deployment
+    # setting. These are application settings (speech group, runtime scope), read
+    # when a Live session is created.
+    # Output voice (UDR-0170 D8). One of app.live.client.LIVE_VOICES.
+    gpt_live_voice: str = "marin"
+    # Session length limit in seconds (operator answer A9: 10 minutes).
+    gpt_live_max_session_seconds: int = 600
+    # Close after this many seconds with no speech from either side (A9: 60 s).
+    gpt_live_idle_timeout_seconds: int = 60
+    # Upper bound for one delegated agent run (CTR-0226).
+    gpt_live_delegation_timeout_seconds: int = 120
+
     # Image Generation (CTR-0049, CTR-0050).
     # PRP-0114 / UDR-0095: image model routing (deployment / api_version) AND the
     # output-behavior defaults (size / quality / format / compression / background)

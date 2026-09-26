@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
+import { useMicLevel } from '@/hooks/useMicLevel'
 
 export type VoiceState = 'idle' | 'recording' | 'transcribing'
 
@@ -10,53 +11,27 @@ interface UseVoiceInputReturn {
   error: string | null
 }
 
-const ANALYSER_FFT_SIZE = 64
-const WAVEFORM_BARS = ANALYSER_FFT_SIZE / 2
-
 export function useVoiceInput(onTranscribed: (text: string) => void): UseVoiceInputReturn {
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
-  const [waveformData, setWaveformData] = useState<number[]>(() => Array.from({ length: WAVEFORM_BARS }, () => 0))
   const [error, setError] = useState<string | null>(null)
+  // The level meter follows the recording stream (the shared analyser, PRP-0188).
+  const [stream, setStream] = useState<MediaStream | null>(null)
+  const waveformData = useMicLevel(stream)
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const audioContextRef = useRef<AudioContext | null>(null)
-  const analyserRef = useRef<AnalyserNode | null>(null)
-  const animationRef = useRef<number | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const streamRef = useRef<MediaStream | null>(null)
 
   const cleanup = useCallback(() => {
-    if (animationRef.current !== null) {
-      cancelAnimationFrame(animationRef.current)
-      animationRef.current = null
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close()
-      audioContextRef.current = null
-    }
     if (streamRef.current) {
       for (const track of streamRef.current.getTracks()) {
         track.stop()
       }
       streamRef.current = null
     }
-    analyserRef.current = null
+    setStream(null)
     mediaRecorderRef.current = null
     chunksRef.current = []
-    setWaveformData(Array.from({ length: WAVEFORM_BARS }, () => 0))
-  }, [])
-
-  const updateWaveform = useCallback(() => {
-    const analyser = analyserRef.current
-    if (!analyser) return
-
-    const dataArray = new Uint8Array(analyser.frequencyBinCount)
-    analyser.getByteFrequencyData(dataArray)
-
-    const normalized = Array.from(dataArray, (v) => v / 255)
-    setWaveformData(normalized)
-
-    animationRef.current = requestAnimationFrame(updateWaveform)
   }, [])
 
   const startRecording = useCallback(async () => {
@@ -65,14 +40,6 @@ export function useVoiceInput(onTranscribed: (text: string) => void): UseVoiceIn
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
-
-      const audioContext = new AudioContext()
-      audioContextRef.current = audioContext
-      const source = audioContext.createMediaStreamSource(stream)
-      const analyser = audioContext.createAnalyser()
-      analyser.fftSize = ANALYSER_FFT_SIZE
-      source.connect(analyser)
-      analyserRef.current = analyser
 
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
@@ -128,8 +95,8 @@ export function useVoiceInput(onTranscribed: (text: string) => void): UseVoiceIn
       }
 
       recorder.start(250)
+      setStream(stream)
       setVoiceState('recording')
-      updateWaveform()
     } catch (err) {
       cleanup()
       setVoiceState('idle')
@@ -139,7 +106,7 @@ export function useVoiceInput(onTranscribed: (text: string) => void): UseVoiceIn
         setError(err instanceof Error ? err.message : 'Failed to start recording')
       }
     }
-  }, [onTranscribed, cleanup, updateWaveform])
+  }, [onTranscribed, cleanup])
 
   const stopRecording = useCallback(() => {
     const recorder = mediaRecorderRef.current

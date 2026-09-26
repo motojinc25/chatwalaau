@@ -163,7 +163,9 @@ class FileHistoryProvider(HistoryProvider):
 
         self._normalize_content_types(raw_messages)
         # Strip frontend-only fields before Message.from_dict(); MAF Message doesn't accept them
-        _frontend_keys = {"tool_calls", "usage", "activity_log"}
+        # `source` / `live` mark a Live voice turn (CTR-0227, PRP-0188); the model sees
+        # only its text, like any other message.
+        _frontend_keys = {"tool_calls", "usage", "activity_log", "source", "live"}
         messages = [Message.from_dict({k: v for k, v in m.items() if k not in _frontend_keys}) for m in raw_messages]
         self._resolve_image_contents(messages, raw_messages)
         # Reasoning is a per-turn scratchpad persisted only for frontend display

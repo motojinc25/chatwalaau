@@ -1,4 +1,5 @@
 import {
+  AudioLines,
   File,
   FileText,
   Folder,
@@ -22,11 +23,13 @@ import {
   useState,
 } from 'react'
 import { ImageThumbnails } from '@/components/ImageThumbnails'
+import { LiveConversationBar } from '@/components/LiveConversationBar'
 import { PdfFileCard } from '@/components/PdfFileCard'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { WaveformVisualizer } from '@/components/WaveformVisualizer'
 import type { ImageAttachment } from '@/hooks/useImageAttachment'
+import type { LiveState } from '@/hooks/useLiveVoice'
 import { useVoiceInput } from '@/hooks/useVoiceInput'
 import type { ContextLevel } from '@/lib/contextOccupancy'
 import { isCommandOfferedOnNarrow, useChatSurfaceTier } from '@/lib/narrowSurface'
@@ -120,6 +123,30 @@ interface ChatInputProps {
    * operator and silent to a screen reader.
    */
   context?: { level: ContextLevel; description: string }
+  /**
+   * Live voice conversation (CTR-0228 / CTR-0221, PRP-0188, UDR-0170 D9 / D11).
+   *
+   * ABSENT means Live is not offered here -- the server has it off, the run-target is
+   * not a Prompt agent, or this is not the /chat surface -- and the entry is simply
+   * not rendered (the caller decides membership, CTR-0221). Present, the entry sits
+   * right of Voice Input; while a session runs the whole control row becomes the Live
+   * row. Step 3 reverses Q2: typing stays possible and goes to the Live conversation.
+   */
+  live?: {
+    state: LiveState
+    levels: number[]
+    muted: boolean
+    working: boolean
+    workingCount?: number
+    remainingSeconds: number | null
+    error: string | null
+    notice: string | null
+    onStart: () => void
+    onStop: () => void
+    onToggleMute: () => void
+    /** Step 3: text typed during Live. Resolves false when it was not accepted. */
+    onSendText?: (text: string) => Promise<boolean>
+  }
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
@@ -142,6 +169,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     temporary = false,
     runTarget,
     context,
+    live,
   },
   ref,
 ) {
@@ -444,6 +472,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   )
 
   const handleSend = async () => {
+    // Step 3 (UDR-0170 D13): during Live, typed text joins the Live conversation. No
+    // slash commands and no attachments there -- text only.
+    if (liveActive && live?.onSendText) {
+      const text = value.trim()
+      if (!text) return
+      setValue('')
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+      const ok = await live.onSendText(text)
+      if (!ok && textareaRef.current?.value === '') setValueAndResize(text, text.length)
+      return
+    }
     if ((!value.trim() && attachments.length === 0) || isLoading || isUploading) return
     // Slash command dispatch (UDR-0066 D1/D3): only when the head token resolves
     // in the inventory; otherwise the input is sent as a normal message.
@@ -549,6 +588,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
 
   const isRecording = voiceState === 'recording'
   const isTranscribing = voiceState === 'transcribing'
+  // A Live session owns the composer until it ends (PRP-0188, Q2).
+  const liveActive = live !== undefined && live.state !== 'idle'
 
   return (
     <div className="p-4 pb-5">
@@ -676,7 +717,13 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 onKeyUp={handleKeyUp}
                 onClick={() => void recompute()}
                 onBlur={() => closeMenu()}
-                placeholder={isTranscribing ? 'Transcribing...' : 'Type a message...'}
+                placeholder={
+                  liveActive
+                    ? 'Type to add to the Live conversation'
+                    : isTranscribing
+                      ? 'Transcribing...'
+                      : 'Type a message...'
+                }
                 rows={1}
                 className={cn(
                   // No BOTTOM padding: row 2 sits directly beneath and supplies the
@@ -697,14 +744,33 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 name ONCE and that string is both its `title` and its `aria-label`
                 (the CTR-0220 v2 rule, applied to the second row that needed it).
 
-                NO overflow menu (D3): membership is bounded at four entries, two of
-                which are already tier-gated, so the dynamic probe-gated growth that
-                forced CTR-0220's menu cannot happen here. Its absence is a decision.
+                NO overflow menu (D3): membership is bounded -- five entries since
+                PRP-0188 added Live (UDR-0170 D9 amends the bound of four) -- and every
+                entry is caller-gated, so the dynamic probe-gated growth that forced
+                CTR-0220's menu cannot happen here. Its absence is a decision.
 
                 No TOP padding: row 1's text area ends flush against this row, so the
                 pair reads as one control. */}
             <div className="flex items-center gap-0.5 px-1 pb-1 pt-0">
-              {isRecording ? (
+              {liveActive && live ? (
+                /* Live takes the whole row, like a recording (CTR-0228): its mic level in
+                   teal, the state, the time left, mute and stop. Same bar ceiling as the
+                   recording row, so the composer's height never changes (CTR-0092). */
+                <LiveConversationBar
+                  state={live.state}
+                  levels={live.levels}
+                  muted={live.muted}
+                  working={live.working}
+                  workingCount={live.workingCount}
+                  remainingSeconds={live.remainingSeconds}
+                  onStop={live.onStop}
+                  onToggleMute={live.onToggleMute}
+                  canSend={live.state === 'live' && Boolean(value.trim())}
+                  onSend={() => void handleSend()}
+                  barHeight={surface.narrow ? 24 : 18}
+                  controlClassName={controlSize}
+                />
+              ) : isRecording ? (
                 /* Recording takes the whole control row: the attach menu, the
                    run-target and Send have nothing to do until it ends, and a level
                    meter squeezed between them would be unreadable. The bar ceiling is
@@ -851,6 +917,25 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                             )}
                           </button>
                         )}
+                        {/* Live conversation (CTR-0228), immediately right of Voice
+                            Input. Its name is stated once, as title and aria-label. */}
+                        {live && (
+                          <button
+                            type="button"
+                            onClick={live.onStart}
+                            disabled={isTranscribing}
+                            className={cn(
+                              'inline-flex items-center justify-center rounded-md',
+                              controlSize,
+                              'text-muted-foreground hover:text-cyan-600 dark:hover:text-cyan-400',
+                              'disabled:pointer-events-none disabled:opacity-50',
+                              'transition-colors',
+                            )}
+                            aria-label="Live conversation"
+                            title="Live conversation">
+                            <AudioLines className="h-4 w-4" />
+                          </button>
+                        )}
                         <Button
                           size="icon"
                           className={controlSize}
@@ -869,6 +954,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
           </div>
         }
         {voiceError && <p className="mt-1 text-xs text-destructive">{voiceError}</p>}
+        {live?.error && <p className="mt-1 text-xs text-destructive">{live.error}</p>}
+        {live?.notice && <p className="mt-1 text-xs text-muted-foreground">{live.notice}</p>}
         {temporary && (
           // UDR-0052: honest wording -- "not in history / not used for
           // personalization", NOT "never stored anywhere" (the conversation is

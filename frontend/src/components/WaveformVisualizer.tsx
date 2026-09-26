@@ -22,6 +22,12 @@ interface WaveformVisualizerProps {
   onStop: () => void
   className?: string
   /**
+   * Bar colour class (PRP-0188, UDR-0170 D9). Voice Input keeps the default red; the
+   * Live conversation draws the same meter in the brand teal so the two modes can
+   * never be mistaken for each other.
+   */
+  barClassName?: string
+  /**
    * Tallest bar, in px. The caller sizes it to its control row so starting a
    * recording never changes the composer's height (a jump there would move the chat
    * body, which reserves a spacer measured from it -- CTR-0092).
@@ -31,33 +37,49 @@ interface WaveformVisualizerProps {
   stopClassName?: string
 }
 
+/** The bars alone, shared by Voice Input and the Live conversation row (CTR-0228). */
+export function WaveformBars({
+  data,
+  barHeight = 32,
+  barClassName = 'bg-red-500',
+}: {
+  data: number[]
+  barHeight?: number
+  barClassName?: string
+}) {
+  return (
+    <div
+      className="flex flex-1 items-center justify-center gap-[2px] overflow-hidden"
+      style={{ height: barHeight }}
+      // The bars are decoration; the state they report is announced by the controls
+      // next to them, which are the only things here a keyboard or screen reader can
+      // act on.
+      aria-hidden="true">
+      {Array.from(data, (value, i) => {
+        const key = `b${i}`
+        return (
+          <div
+            key={key}
+            className={cn('w-[3px] shrink-0 rounded-full transition-all duration-75', barClassName)}
+            style={{ height: `${Math.max(3, value * barHeight)}px` }}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
 export function WaveformVisualizer({
   data,
   onStop,
   className,
+  barClassName = 'bg-red-500',
   barHeight = 32,
   stopClassName,
 }: WaveformVisualizerProps) {
   return (
     <div className={cn('flex w-full items-center gap-3', className)}>
-      <div
-        className="flex flex-1 items-center justify-center gap-[2px] overflow-hidden"
-        style={{ height: barHeight }}
-        // The bars are decoration; the state they report is announced by the stop
-        // button's label, which is the only thing here a keyboard or screen reader
-        // can act on.
-        aria-hidden="true">
-        {Array.from(data, (value, i) => {
-          const key = `b${i}`
-          return (
-            <div
-              key={key}
-              className="w-[3px] shrink-0 rounded-full bg-red-500 transition-all duration-75"
-              style={{ height: `${Math.max(3, value * barHeight)}px` }}
-            />
-          )
-        })}
-      </div>
+      <WaveformBars data={data} barHeight={barHeight} barClassName={barClassName} />
       <Button
         variant="destructive"
         size="icon"

@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  AudioLines,
   Bot,
   Check,
   Copy,
@@ -190,6 +191,39 @@ function MemoryLikeButton({
         <ThumbsUp className={cn('h-3 w-3', liked && status !== 'failed' && 'fill-current')} />
       )}
     </Button>
+  )
+}
+
+/**
+ * The Live marker (CTR-0228 / CTR-0227, PRP-0188): says a message came from a Live
+ * voice conversation, whether it was talked over, whether it is still being spoken
+ * (a provisional caption), and whether a delegated run failed. Always visible -- not
+ * hover-revealed -- because it changes how the text should be read.
+ */
+function LiveBadge({ message }: { message: ChatMessage }) {
+  const live = message.live
+  if (message.source !== 'live' || !live) return null
+  const parts: string[] = []
+  if (live.kind === 'delegation') parts.push('agent answer')
+  if (live.kind === 'typed') parts.push('typed')
+  if (live.provisional) parts.push('speaking...')
+  if (live.interrupted) parts.push('(interrupted)')
+  if (live.cancelled) parts.push('cancelled')
+  else if (live.failed) parts.push('did not complete')
+  return (
+    <div className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground">
+      <span
+        className="inline-flex items-center gap-1 rounded-full border border-cyan-500/60 px-1.5 py-px text-cyan-600 dark:text-cyan-400"
+        title={
+          live.kind === 'delegation'
+            ? 'The full answer of an agent run started from a Live conversation'
+            : 'Transcribed from a Live conversation; transcripts can contain recognition errors'
+        }>
+        <AudioLines className="h-3 w-3" />
+        Live
+      </span>
+      {parts.length > 0 && <span className={cn(live.failed && 'text-red-500')}>{parts.join(' ')}</span>}
+    </div>
   )
 }
 
@@ -576,7 +610,10 @@ function ChatMessageItemImpl({
               collapse threshold, the ResizeObserver measurement, and Show more /
               Show less all behave identically on scrambled text.
             */}
-            <CollapsibleUserText content={redact(message.content, `msg:${message.id}`)} />
+            <div className={cn(message.live?.provisional && 'opacity-60')}>
+              <CollapsibleUserText content={redact(message.content, `msg:${message.id}`)} />
+            </div>
+            <LiveBadge message={message} />
             {/*
               Pre-commit send failure (CTR-0004 v2, PRP-0110 / UDR-0088 D3). The turn
               never reached the agent, so it is safe to re-send: nothing was persisted
@@ -655,7 +692,9 @@ function ChatMessageItemImpl({
               // Structured output (CTR-0012 v11, PRP-0082, UDR-0058 D5): render the
               // JSON answer as a `json` code block (reuses CodeBlock copy/download)
               // instead of Markdown. Streaming partial JSON shows as it arrives.
-              <MarkdownRenderer content={message.structured ? toJsonCodeFence(message.content) : message.content} />
+              <div className={cn(message.live?.provisional && 'opacity-60')}>
+                <MarkdownRenderer content={message.structured ? toJsonCodeFence(message.content) : message.content} />
+              </div>
             ) : (
               !isWaiting && !workflowState && <span className="inline-block h-4 w-1 animate-pulse bg-current" />
             )}
@@ -665,6 +704,7 @@ function ChatMessageItemImpl({
                 the run fully completes. Common to Prompt agents and Workflows (a
                 workflow may pause between nodes / while an agent node thinks, which
                 would otherwise look finished). */}
+            {!isUser && <LiveBadge message={message} />}
             {!isUser && isLoading && hasTextContent && (
               <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/70">
                 <Loader2 className="h-3 w-3 animate-spin" />

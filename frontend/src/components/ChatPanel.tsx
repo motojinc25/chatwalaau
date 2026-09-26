@@ -4,6 +4,7 @@ import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { HelpPortal } from '@/components/HelpPortal'
+import { LiveDelegationMarker } from '@/components/LiveDelegationMarker'
 import { type ImageEditSubmission, MaskEditorDialog } from '@/components/MaskEditorDialog'
 import { MessageNavigator } from '@/components/MessageNavigator'
 import { MessageStepButton } from '@/components/MessageStepButton'
@@ -17,6 +18,7 @@ import { useActiveModel } from '@/hooks/useActiveModel'
 import { useChat } from '@/hooks/useChat'
 import { useChatScroll } from '@/hooks/useChatScroll'
 import { type ImageAttachment, useImageAttachment } from '@/hooks/useImageAttachment'
+import { useLiveVoice } from '@/hooks/useLiveVoice'
 import { useMemoryCuration } from '@/hooks/useMemoryCuration'
 import { useMessageNavigator } from '@/hooks/useMessageNavigator'
 import { useMessageStepNav } from '@/hooks/useMessageStepNav'
@@ -57,6 +59,12 @@ interface ChatPanelProps {
   onAttachConsumed?: () => void
   /** Temporary Chat mode (CTR-0107, PRP-0076): dark input, no history. */
   temporary?: boolean
+  /**
+   * Live voice conversation (CTR-0228, PRP-0188, UDR-0170 D11). Only the full-page
+   * /chat surface passes it: the compact /popup and /sidebar panels share this
+   * component and do not offer Live (operator answer Q3).
+   */
+  liveCapable?: boolean
 }
 
 function buildStreamingKey(messages: ChatMessage[], isLoading: boolean): string {
@@ -101,6 +109,7 @@ export function ChatPanel({
   attachFile,
   onAttachConsumed,
   temporary = false,
+  liveCapable = false,
 }: ChatPanelProps) {
   const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null)
   // Which model answers is the RUN-TARGET's business since PRP-0184 (UDR-0166 D1):
@@ -217,6 +226,9 @@ export function ChatPanel({
     saveRetry,
     sendMessage,
     runDirectTurn,
+    applyLiveMessage,
+    applyLiveDelegation,
+    settleLiveDelegations,
     retryTurn,
     stopGeneration,
     editUserMessage,
@@ -317,6 +329,83 @@ export function ChatPanel({
   )
 
   const tts = useTTS()
+
+  // Live voice conversation (CTR-0228, PRP-0188, UDR-0170 D11). Offered only when the
+  // server has it on (CTR-0223 status), on /chat, for a Prompt run-target (Core or
+  // Custom -- not a Workflow or Harness), in a secure context (getUserMedia).
+  const [liveOffered, setLiveOffered] = useState(false)
+  useEffect(() => {
+    if (!liveCapable) return
+    let cancelled = false
+    fetch('/api/live/status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setLiveOffered(Boolean(d?.offered))
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [liveCapable])
+  const liveHadMessagesRef = useRef(false)
+  liveHadMessagesRef.current = messages.length > 0
+  const live = useLiveVoice({
+    threadId,
+    onMessage: applyLiveMessage,
+    // Step 3: queued / running delegations show as markers in the chat.
+    onDelegation: applyLiveDelegation,
+    onStarted: useCallback(() => {
+      // A Live-first chat now exists on the server: show it in the sidebar at once.
+      if (!liveHadMessagesRef.current && !temporary && threadId) {
+        onSessionCreated?.({ threadId, title: 'Live conversation' })
+      }
+    }, [onSessionCreated, temporary, threadId]),
+    // Refresh the sidebar (title, order) once the conversation is over.
+    onEnded: useCallback(() => {
+      settleLiveDelegations()
+      onStreamComplete?.()
+    }, [onStreamComplete, settleLiveDelegations]),
+  })
+  const liveActive = live.state !== 'idle'
+  const promptRunTarget = !selectedWorkflowId && !selectedHarnessId
+  const secureContext = typeof window !== 'undefined' && window.isSecureContext
+  const composerLive =
+    liveCapable && liveOffered && promptRunTarget && secureContext && show('composer.live')
+      ? {
+          state: live.state,
+          levels: live.levels,
+          muted: live.muted,
+          working: live.working,
+          workingCount: live.workingCount,
+          remainingSeconds: live.remainingSeconds,
+          error: live.error,
+          notice: live.notice,
+          onSendText: live.sendText,
+          onStart: () => {
+            // Nothing else may speak while Live runs (CTR-0040).
+            tts.stop()
+            void live.start()
+          },
+          onStop: live.stop,
+          onToggleMute: live.toggleMute,
+        }
+      : liveActive
+        ? // The run-target changed mid-session: keep the controls so it can be stopped.
+          {
+            state: live.state,
+            levels: live.levels,
+            muted: live.muted,
+            working: live.working,
+            workingCount: live.workingCount,
+            remainingSeconds: live.remainingSeconds,
+            error: live.error,
+            notice: live.notice,
+            onSendText: live.sendText,
+            onStart: () => undefined,
+            onStop: live.stop,
+            onToggleMute: live.toggleMute,
+          }
+        : undefined
 
   // Slash commands (CTR-0128, PRP-0088): /help opens the Help Portal. Since
   // PRP-0184 (UDR-0166 D1) /model has no per-message selector to drive, so it OPENS
@@ -689,6 +778,17 @@ export function ChatPanel({
             // CTR-0165: offer the "remember this turn" like only for a complete
             // turn (has an assistant reply) and only when the feature is enabled.
             const turn = memory.enabled ? resolveTurn(i) : null
+            // Step 3 (CTR-0228): a Live delegation still queued or running is a marker,
+            // replaced in place by its answer (same id).
+            if (msg.live?.pending) {
+              return (
+                <LiveDelegationMarker
+                  key={msg.id}
+                  message={msg}
+                  onCancel={liveActive ? live.cancelDelegation : undefined}
+                />
+              )
+            }
             return (
               <ChatMessageItem
                 key={msg.id}
@@ -696,7 +796,8 @@ export function ChatPanel({
                 messageIndex={i}
                 compact={compact}
                 isLoading={isLoading && i === messages.length - 1}
-                tts={tts}
+                // TTS is withdrawn while Live speaks (CTR-0040, PRP-0188).
+                tts={liveActive ? undefined : tts}
                 onEditUser={editUserMessage}
                 onRetryTurn={handleRetryTurn}
                 onEditAssistant={editAssistantMessage}
@@ -801,6 +902,7 @@ export function ChatPanel({
             temporary={temporary}
             runTarget={composerRunTarget}
             context={contextOccupancy ?? undefined}
+            live={composerLive}
           />
         </div>
       ) : (
@@ -855,6 +957,7 @@ export function ChatPanel({
               temporary={temporary}
               runTarget={composerRunTarget}
               context={contextOccupancy ?? undefined}
+              live={composerLive}
             />
           </div>
         </div>

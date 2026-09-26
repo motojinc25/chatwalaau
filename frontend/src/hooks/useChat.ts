@@ -1,6 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { LiveDelegationEvent } from '@/hooks/useLiveVoice'
 import { finalizeHarnessProgress, parseHarnessProgress } from '@/lib/harnessProgress'
-import type { ChatMessage, HarnessProgress, ImageRef, McpAppEvent, PersistedWorkflowRun, UsageInfo } from '@/types/chat'
+import type {
+  ChatMessage,
+  HarnessProgress,
+  ImageRef,
+  LiveMeta,
+  McpAppEvent,
+  PersistedWorkflowRun,
+  ToolCall,
+  UsageInfo,
+} from '@/types/chat'
+
+/** Shown on a delegation marker still pending when Live ended (step 3). */
+const LIVE_ENDED_TEXT =
+  '(Live ended before this task finished. If it was already running, its answer is saved to this chat -- reload to see it.)'
+
+/** One CTR-0224 `live.message` payload (PRP-0188). */
+export interface LiveMessageUpdate {
+  message_id: string
+  role: 'user' | 'assistant'
+  text: string
+  final: boolean
+  live: LiveMeta
+  tool_calls?: Pick<ToolCall, 'id' | 'name' | 'args' | 'result'>[]
+  activity_log?: ChatMessage['activityLog']
+  usage?: { model?: string } & Record<string, unknown>
+}
 
 /**
  * AG-UI protocol event types (CTR-0009).
@@ -1277,6 +1303,112 @@ export function useChat(options?: UseChatOptions) {
     [],
   )
 
+  /**
+   * A Live voice message (CTR-0224 `live.message`, PRP-0188). The backend groups and
+   * persists Live turns itself (CTR-0227), so this only mirrors them on screen: it
+   * inserts a new message or replaces the one with the same id (a provisional caption
+   * becoming final). Nothing is saved from here.
+   */
+  const applyLiveMessage = useCallback((update: LiveMessageUpdate) => {
+    const next: ChatMessage = {
+      id: update.message_id,
+      role: update.role,
+      content: update.text,
+      createdAt: new Date().toISOString(),
+      source: 'live',
+      live: { ...update.live, ...(update.final ? {} : { provisional: true }) },
+      // Always set, so a final answer replaces the tool list a pending marker showed.
+      toolCalls:
+        update.tool_calls && update.tool_calls.length > 0
+          ? update.tool_calls.map((tc) => ({ ...tc, status: 'completed' as const }))
+          : undefined,
+      activityLog: update.tool_calls && update.tool_calls.length > 0 ? update.activity_log : undefined,
+      ...(update.usage ? { usage: update.usage as UsageInfo } : {}),
+      ...(update.usage?.model ? { model: update.usage.model } : {}),
+    }
+    setMessages((prev) => {
+      const index = prev.findIndex((m) => m.id === next.id)
+      if (index === -1) return [...prev, next]
+      const copy = prev.slice()
+      copy[index] = { ...copy[index], ...next }
+      return copy
+    })
+  }, [])
+
+  /**
+   * The in-chat marker of a Live delegation (step 3, CTR-0228). A queued or running
+   * delegation shows as a pending assistant message under the id its final answer will
+   * carry, with the streamed progress (text, tool calls) kept on it; the final
+   * `live.message` replaces it. Terminal states are ignored here -- the answer is.
+   */
+  const applyLiveDelegation = useCallback((event: LiveDelegationEvent) => {
+    if (!event.message_id) return
+    if (event.state === 'completed' || event.state === 'failed' || event.state === 'cancelled') return
+    setMessages((prev) => {
+      const index = prev.findIndex((m) => m.id === event.message_id)
+      const current = index === -1 ? undefined : prev[index]
+      if (current && !current.live?.pending) return prev // the answer already arrived
+      const base: ChatMessage = current ?? {
+        id: event.message_id,
+        role: 'assistant',
+        content: '',
+        createdAt: new Date().toISOString(),
+        source: 'live',
+        live: {
+          session_id: '',
+          kind: 'delegation',
+          delegation_id: event.delegation_id,
+          pending: true,
+          state: 'queued',
+        },
+      }
+      const next: ChatMessage = {
+        ...base,
+        live: {
+          ...(base.live as LiveMeta),
+          pending: true,
+          ...(event.state ? { state: event.state as 'queued' | 'started' | 'cancelling' } : {}),
+        },
+        ...(event.text !== undefined ? { content: event.text } : {}),
+        ...(event.tools
+          ? {
+              toolCalls: event.tools.map((t) => ({
+                id: t.id,
+                name: t.name,
+                status: t.status === 'completed' ? ('completed' as const) : ('running' as const),
+              })),
+            }
+          : {}),
+      }
+      if (index === -1) return [...prev, next]
+      const copy = prev.slice()
+      copy[index] = next
+      return copy
+    })
+  }, [])
+
+  /**
+   * Live ended while delegations were still queued or running (step 3). Their markers
+   * stop spinning and say so; a task that was already running still saves its answer
+   * to the chat on the server, where a reload shows it.
+   */
+  const settleLiveDelegations = useCallback(() => {
+    setMessages((prev) =>
+      prev.some((m) => m.live?.pending)
+        ? prev.map((m) =>
+            m.live?.pending
+              ? {
+                  ...m,
+                  content: LIVE_ENDED_TEXT,
+                  toolCalls: undefined,
+                  live: { ...m.live, pending: false, state: undefined, failed: true },
+                }
+              : m,
+          )
+        : prev,
+    )
+  }, [])
+
   const stopGeneration = useCallback(() => {
     abortRef.current?.abort()
   }, [])
@@ -1292,6 +1424,9 @@ export function useChat(options?: UseChatOptions) {
     saveRetry,
     sendMessage,
     runDirectTurn,
+    applyLiveMessage,
+    applyLiveDelegation,
+    settleLiveDelegations,
     retryTurn,
     stopGeneration,
     clearMessages,

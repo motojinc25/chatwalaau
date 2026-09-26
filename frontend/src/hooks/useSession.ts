@@ -9,6 +9,7 @@ import {
   type FolderColor,
   type ImageRef,
   type ImportResult,
+  type LiveMeta,
   type ReasoningBlock,
   type SessionActionResult,
   type SessionFolder,
@@ -194,6 +195,9 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
       // Restore the structured-output flag so a reloaded JSON answer still renders
       // as a code block (CTR-0118 / CTR-0012 v11, PRP-0082, UDR-0058 D9).
       ...(usage?.structured ? { structured: true } : {}),
+      // Live voice turns (CTR-0227, PRP-0188): keep the marker so the chip survives reload.
+      ...(msg.source === 'live' ? { source: 'live' as const } : {}),
+      ...(msg.live && typeof msg.live === 'object' ? { live: msg.live as LiveMeta } : {}),
     })
   }
   return result

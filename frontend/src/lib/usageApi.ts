@@ -64,7 +64,17 @@ export const GROUP_KEYS = [
 
 export type GroupKey = (typeof GROUP_KEYS)[number]
 
-export const LANES = ['spa-prompt', 'spa-harness', 'workflow', 'workflow-job', 'teams', 'openai-api', 'helper'] as const
+export const LANES = [
+  'spa-prompt',
+  'spa-harness',
+  'workflow',
+  'workflow-job',
+  'teams',
+  'openai-api',
+  // Agent runs started from a Live voice conversation (PRP-0188, UDR-0170 D10).
+  'live',
+  'helper',
+] as const
 
 /** Keys the backend uses for rows that cannot name a chat (CTR-0201). */
 export const TEMPORARY_KEY = '(temporary)'

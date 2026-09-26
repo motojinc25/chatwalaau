@@ -372,6 +372,8 @@ export function ChatPage() {
                 attachFile={attachFile}
                 onAttachConsumed={() => setAttachFile(null)}
                 temporary={temp.isTemporary}
+                // Live voice is offered on the full-page chat only (PRP-0188, Q3).
+                liveCapable
               />
             )}
           </div>

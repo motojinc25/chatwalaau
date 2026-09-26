@@ -39,9 +39,10 @@ rejected.
 
 Validation is fail-fast at load (UDR-0087 D3): at least one ``chat`` offering,
 at most one ``default: true`` chat offering, unique ids, a known provider, a
-v1 operation (``chat`` / ``embeddings`` / ``image``; anything else -- audio,
-managed agents -- is rejected, not silently ignored), at most one
-``embeddings`` offering and at most one ``image`` offering.
+v1 operation (``chat`` / ``embeddings`` / ``image`` / ``live``; anything else --
+audio, managed agents -- is rejected, not silently ignored), at most one
+``embeddings`` offering, at most one ``image`` offering and at most one ``live``
+offering (the GPT-Live voice deployment, PRP-0188 step 2).
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ from app.mcp.config import _strip_jsonc_comments
 logger = logging.getLogger(__name__)
 
 VALID_PROVIDERS = frozenset({"azure-openai", "anthropic", "openai", "foundry"})
-VALID_OPERATIONS = frozenset({"chat", "embeddings", "image"})
+VALID_OPERATIONS = frozenset({"chat", "embeddings", "image", "live"})
 VALID_FAMILIES = frozenset({"openai-reasoning", "anthropic-adaptive", "bare"})
 
 # Which option-catalog families each provider can actually serve (PRP-0184,
@@ -189,6 +190,13 @@ TASK_ROLES: tuple[TaskRole, ...] = (
         "ontology_nl",
         "Ontology NL to SPARQL",
         "Converts a natural-language question into a SPARQL query.",
+    ),
+    # PRP-0188 step 2 (UDR-0170 D4): the chat model a Live voice conversation's client
+    # delegation runs on. Unset -> the selected agent's own model.
+    TaskRole(
+        "live_delegation",
+        "Live delegation",
+        "Runs the work a Live voice conversation delegates, with the selected agent's tools.",
     ),
 )
 
@@ -323,6 +331,10 @@ class Offering:
     def is_image(self) -> bool:
         return "image" in self.operations
 
+    @property
+    def is_live(self) -> bool:
+        return "live" in self.operations
+
     def capability(self, name: str) -> bool | None:
         """Declared value of hosted-tool capability ``name``, or None when undeclared.
 
@@ -406,6 +418,9 @@ class Catalog:
 
     def image_offering(self) -> Offering | None:
         return next((o for o in self._offerings if o.is_image), None)
+
+    def live_offering(self) -> Offering | None:
+        return next((o for o in self._offerings if o.is_live), None)
 
 
 # ---- Loading + validation (UDR-0087 D1/D2/D3/D4) --------------------------
@@ -578,6 +593,14 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
             )
         if op not in operations:
             operations.append(op)
+    # A live offering is a GPT-Live voice deployment (PRP-0188 step 2, UDR-0170 D11): it
+    # serves no other operation, and GPT-Live is reached on the Azure OpenAI
+    # /openai/v1/live namespace only.
+    if "live" in operations:
+        if len(operations) > 1:
+            raise CatalogError(f"offering '{offering_id}': 'live' cannot be combined with other operations")
+        if provider != "azure-openai":
+            raise CatalogError(f"offering '{offering_id}': a 'live' offering must use the azure-openai provider")
 
     hosting = entry.get("hosting")
     if hosting is not None:
@@ -779,6 +802,8 @@ def parse_catalog(data: Any) -> Catalog:
         raise CatalogError("at most one 'embeddings' offering is supported (v1)")
     if len([o for o in offerings if o.is_image]) > 1:
         raise CatalogError("at most one 'image' offering is supported (v1)")
+    if len([o for o in offerings if o.is_live]) > 1:
+        raise CatalogError("at most one 'live' offering is supported")
 
     return Catalog(offerings, roles=roles)
 
@@ -1020,6 +1045,21 @@ def image_config() -> ResolvedModelConfig | None:
     if catalog is None:
         return None
     return _resolved(catalog.image_offering())
+
+
+def live_config() -> ResolvedModelConfig | None:
+    """Resolved config for the single live (GPT-Live) offering, or None.
+
+    PRP-0188 step 2 (UDR-0170 D11): the Live conversation exists only when the catalog
+    registers a live offering -- there is no environment gate. ``deployment`` is the
+    GPT-Live deployment name sent as ``session.model``; ``endpoint`` falls back to the
+    shared ``AZURE_OPENAI_ENDPOINT`` and ``api_key`` to the shared Azure credential lane
+    (``app.azure_credential``) when the offering omits them.
+    """
+    catalog = active_catalog()
+    if catalog is None:
+        return None
+    return _resolved(catalog.live_offering())
 
 
 def image_output_defaults() -> dict[str, Any]:

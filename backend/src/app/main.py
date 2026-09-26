@@ -411,6 +411,11 @@ async def lifespan(_app: FastAPI):
     # Drain in-flight background tasks (PRP-0077, CTR-0108). Best-effort: gives
     # running tasks a brief grace period, then cancels stragglers. A cancelled
     # title task simply leaves the truncation title.
+    # Close every running Live session (PRP-0188, CTR-0225): each ends with
+    # reason server_shutdown and its live_sessions[] entry is recorded.
+    from app.live import shutdown as shutdown_live
+
+    await shutdown_live()
     from app.background import shutdown as shutdown_background
 
     await shutdown_background()
@@ -594,6 +599,12 @@ agent_registry = create_agent_registry()
 
 # AG-UI endpoint (CTR-0009) -- receives registry for per-request model selection
 register_agui_endpoints(app, agent_registry=agent_registry)
+
+# Live voice conversation (CTR-0223 / CTR-0224, PRP-0188) -- GPT-Live over WebRTC;
+# client delegations run on this same registry's active Prompt agent (CTR-0226).
+from app.live import register_live
+
+register_live(app, agent_registry=agent_registry)
 
 # MCP Tool Management API (CTR-0121, PRP-0086) -- runtime gating of the active MCP
 # tool set. Receives the same registry so PUT can rebuild it atomically (CTR-0070).

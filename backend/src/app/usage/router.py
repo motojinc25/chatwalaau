@@ -121,6 +121,24 @@ def usage_summary(
     return result
 
 
+@router.get("/voice", dependencies=[Depends(verify_api_key)])
+def usage_voice(
+    from_: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    tz: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Live voice seconds over an inclusive local date range (PRP-0188 step 3).
+
+    Read from the voice stream beside the token ledger (``app.usage.voice``): totals,
+    per local day and per chat. Seconds only -- nothing is priced (UDR-0155 D7).
+    """
+    from app.usage.voice import summarize_voice
+
+    zone, zone_name = _parse_tz(tz)
+    start, end = _parse_range(from_, to, zone)
+    return summarize_voice(start=start, end=end, tz=zone, tz_name=zone_name)
+
+
 def _filename_slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-") or "UTC"
 

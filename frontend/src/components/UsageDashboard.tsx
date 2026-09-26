@@ -8,6 +8,7 @@ import { TimeZonePicker } from '@/components/usage/TimeZonePicker'
 import { UsageKpis } from '@/components/usage/UsageKpis'
 import { ByModelView, ByTypeView, DailyView, MonthlyView, OverviewView } from '@/components/usage/UsageViews'
 import { useUsageSummary } from '@/components/usage/useUsageSummary'
+import { VoiceUsageView } from '@/components/usage/VoiceUsageView'
 import {
   daysBetween,
   LANES,
@@ -39,7 +40,7 @@ import { downloadUrl } from '@/lib/workspace-download'
  * (UDR-0155 D6).
  */
 
-type View = 'overview' | 'daily' | 'monthly' | 'type' | 'model' | 'sessions'
+type View = 'overview' | 'daily' | 'monthly' | 'type' | 'model' | 'sessions' | 'voice'
 
 const VIEWS: Array<{ id: View; label: string; hint: string }> = [
   { id: 'overview', label: 'Overview', hint: 'Trend and top consumers' },
@@ -48,6 +49,8 @@ const VIEWS: Array<{ id: View; label: string; hint: string }> = [
   { id: 'type', label: 'By type', hint: 'Lane, run target, workflow node' },
   { id: 'model', label: 'By model', hint: 'Token kinds, cache, errors' },
   { id: 'sessions', label: 'Sessions', hint: 'Per chat, open a chat' },
+  // PRP-0188 step 3 (UDR-0170 D10): Live voice time, from its own stream (seconds, not tokens).
+  { id: 'voice', label: 'Live voice', hint: 'Voice minutes per day and chat' },
 ]
 
 interface UsageDashboardProps {
@@ -295,6 +298,7 @@ export function UsageDashboard({ open, onOpenChange, onOpenChat }: UsageDashboar
                 {view === 'type' && <ByTypeView {...viewProps} />}
                 {view === 'model' && <ByModelView {...viewProps} />}
                 {view === 'sessions' && <SessionsView {...viewProps} onRequestOpen={requestOpen} />}
+                {view === 'voice' && <VoiceUsageView {...viewProps} onRequestOpen={requestOpen} />}
               </div>
             )}
           </div>

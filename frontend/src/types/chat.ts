@@ -253,6 +253,38 @@ export interface ChatMessage {
    * affordance. Ephemeral: never written to the session file.
    */
   failed?: boolean
+  /**
+   * Live voice conversation (CTR-0227, PRP-0188). `source: 'live'` marks a message that
+   * came from a GPT-Live session: a transcribed user / assistant turn, or the full
+   * answer of a delegated agent run. Persisted by the backend, restored on reload.
+   */
+  source?: 'live'
+  live?: LiveMeta
+}
+
+/** The `live` object of a Live message (CTR-0227). */
+export interface LiveMeta {
+  session_id: string
+  /** `typed`: typed during Live (step 3). */
+  kind: 'transcript' | 'delegation' | 'typed'
+  start_ms?: number
+  end_ms?: number
+  /** An assistant turn that stopped because the user talked over it. */
+  interrupted?: boolean
+  delegation_id?: string
+  /** A delegated run that timed out or failed. */
+  failed?: boolean
+  /** A delegated run the user cancelled (step 3). */
+  cancelled?: boolean
+  /**
+   * Render-time only (step 3): the in-chat marker of a delegation still queued or
+   * running. Replaced in place by the final answer (same id). Never stored.
+   */
+  pending?: boolean
+  /** Render-time only (step 3): where the pending delegation is. */
+  state?: 'queued' | 'started' | 'cancelling'
+  /** Render-time only: a caption still being spoken, not yet committed. Never stored. */
+  provisional?: boolean
 }
 
 export interface PromptTemplate {

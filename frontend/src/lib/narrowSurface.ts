@@ -41,6 +41,7 @@ export type EntryId =
   | 'attach.paint'
   | 'attach.templates'
   | 'composer.voice'
+  | 'composer.live'
   | 'slash.help'
   | 'slash.cron'
   | 'slash.files'
@@ -114,6 +115,9 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   'attach.paint': 'wide-only',
   'attach.templates': 'wide-only',
   'composer.voice': 'all',
+  // PRP-0188 (UDR-0170 D11): Live conversation is offered on phones too; the secure-
+  // context, server, run-target and /chat-only checks are the caller's (CTR-0228).
+  'composer.live': 'all',
   'slash.help': 'wide-only',
   'slash.cron': 'wide-only',
   'slash.files': 'wide-only',
