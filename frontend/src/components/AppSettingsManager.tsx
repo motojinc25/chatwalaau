@@ -125,6 +125,11 @@ interface OfferingCapabilities {
   mcp?: boolean
   skills?: boolean
   image_generation?: boolean
+  /**
+   * PRP-0189 / UDR-0171 D2: the computer_* desktop tools. Needs a model that reads images
+   * in function results; the `foundry` provider lane is closed in code regardless.
+   */
+  computer_use?: boolean
 }
 
 interface Offering {
@@ -240,6 +245,7 @@ const CAPABILITY_KEYS = [
   'mcp',
   'skills',
   'image_generation',
+  'computer_use',
 ] as const
 
 const STRUCTURED_OUTPUT_CAPABILITY_HELP =
@@ -293,6 +299,13 @@ const IMAGE_GENERATION_CAPABILITY_HELP =
   'to "Not available" for a chat model that must not produce images. This is a SECOND gate: an ' +
   'image offering must also exist, or the tools are not registered for any model. The image ' +
   'offering itself, and other chat models, are unaffected.'
+
+const COMPUTER_USE_CAPABILITY_HELP =
+  'Whether THIS chat deployment may operate the desktop with the computer_* tools (Computer Use). ' +
+  'The model must read images returned by tools; set "Not available" for a model without vision or ' +
+  'with poor click accuracy. The tools exist at all only when COMPUTER_USE_ENABLED=true on a Windows ' +
+  'host the backend runs on locally, and are always closed for the Foundry provider, whose client ' +
+  'drops images in tool results.'
 
 const ENDPOINT_HELP =
   'endpoint = Azure OpenAI / Foundry resource URL. base_url = OpenAI-compatible gateway URL -- EXCEPT for ' +
@@ -802,6 +815,18 @@ function OfferingCard({
                   value={capabilityValue('image_generation')}
                   disabled={readOnly}
                   onChange={(e) => setCapability('image_generation', e.target.value)}>
+                  <option value="">Default (available)</option>
+                  <option value="true">Available</option>
+                  <option value="false">Not available on this deployment</option>
+                </select>
+              </Field>
+
+              <Field label="Computer Use" hint={COMPUTER_USE_CAPABILITY_HELP}>
+                <select
+                  className={CONTROL_CLASS}
+                  value={capabilityValue('computer_use')}
+                  disabled={readOnly}
+                  onChange={(e) => setCapability('computer_use', e.target.value)}>
                   <option value="">Default (available)</option>
                   <option value="true">Available</option>
                   <option value="false">Not available on this deployment</option>

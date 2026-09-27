@@ -253,6 +253,11 @@ def _import_function_tool(name: str) -> Any | None:
             from app.ontology.tool import query_ontology
 
             return query_ontology
+        if name.startswith("computer_"):
+            # PRP-0189 amendment A7: Computer Use is mountable into a harness run.
+            from app.computer_use import tools as computer_tools
+
+            return getattr(computer_tools, name, None)
     except Exception:
         logger.warning("Harness tool function:%s failed to import; skipped.", name, exc_info=True)
         return None
@@ -300,12 +305,25 @@ def resolve_tools(spec: HarnessAgentSpec) -> list[Any]:
 
     image_withheld = capability_withheld(spec.model_id, "image_generation")
     image_names = {t.name for t in BUILTIN_FUNCTION_TOOLS if t.category == "image"}
+    # PRP-0189 amendment A7 / UDR-0171 D2: the offering's computer_use opt-out and the
+    # foundry lane close the Computer category here too.
+    from app.agent.model_capabilities import computer_use_closed
+
+    computer_names = {t.name for t in BUILTIN_FUNCTION_TOOLS if t.category == "computer_use"}
+    computer_closed = computer_use_closed(spec.model_id)
 
     fn_names: list[str] = []
     mcp_servers: list[str] = []
     for ident in spec.tool_allowlist:
         kind, _, rest = ident.partition(":")
         if kind == "function" and rest:
+            if computer_closed and rest in computer_names:
+                logger.info(
+                    "Harness tool function:%s is withheld for offering %s (computer_use); skipped.",
+                    rest,
+                    spec.model_id,
+                )
+                continue
             if image_withheld and rest in image_names:
                 logger.info(
                     "Harness tool function:%s is withheld for offering %s (image_generation); skipped.",
@@ -453,6 +471,20 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
     client = providers.build_chat_client(spec.model_id)
 
     tools = resolve_tools(spec)
+    # PRP-0189 amendment A7: when a computer_* tool is mounted, the harness gets the
+    # computer_use guidance (appended to its agent instructions) and the CTR-0234
+    # retention middleware, exactly like the Prompt lane.
+    computer_mounted = any(getattr(t, "__name__", "").startswith("computer_") for t in tools)
+    agent_instructions = _resolve_agent_instructions(spec)
+    harness_middleware: list[Any] = []
+    if computer_mounted:
+        from app.agent.capability_guidance import ToolGuidance, render_capability_guidance
+        from app.computer_use.guidance import COMPUTER_USE_GUIDANCE_NAME, COMPUTER_USE_INSTRUCTION
+        from app.computer_use.retention import ObservationRetentionMiddleware
+
+        guide = render_capability_guidance([ToolGuidance(COMPUTER_USE_GUIDANCE_NAME, COMPUTER_USE_INSTRUCTION)])
+        agent_instructions = f"{agent_instructions}\n\n{guide}".strip()
+        harness_middleware.append(ObservationRetentionMiddleware())
 
     # Workspace-scoped capabilities (UDR-0119 D7): omitted entirely when
     # CODING_WORKSPACE_DIR is unset (the harness degrades gracefully).
@@ -539,7 +571,7 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         name=spec.name,
         description=spec.description or None,
         harness_instructions=spec.harness_instructions,
-        agent_instructions=_resolve_agent_instructions(spec),
+        agent_instructions=agent_instructions,
         tools=tools or None,
         max_context_window_tokens=max_window,
         max_output_tokens=max_output,
@@ -610,6 +642,9 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         # an "unexpected keyword argument 'store'" TypeError from AsyncMessages.create
         # since PRP-0135 (operator-reported at v0.163.0; not a MAF 1.19 change).
         default_options=_harness_default_options(spec),
+        # Only when a computer_* tool is mounted (CTR-0234); otherwise no middleware
+        # argument at all -- no approval middleware on this lane (UDR-0161 D2).
+        **({"middleware": harness_middleware} if harness_middleware else {}),
     )
     # The resolved compaction budget is logged so "is compaction actually
     # configured for this agent" is answerable from the log alone (UDR-0125 D3);

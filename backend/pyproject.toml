@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.169.0"
+version = "0.170.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -181,6 +181,9 @@ dependencies = [
     # RDF-star is subsumed as RDF 1.2 triple terms. Imported lazily inside
     # app.ontology so the feature gate (ONTOLOGY_ENABLED) bounds its blast radius.
     "pyoxigraph>=0.5",
+    # Computer Use desktop provider
+    "chatwalaau-computer-use>=0.1,<0.2; sys_platform == 'win32' and platform_machine == 'AMD64'",
+    "mcp>=1.26,<2",
 ]
 
 [project.optional-dependencies]
@@ -216,3 +219,10 @@ dev = [
     "pyyaml>=6.0",
     "httpx2>=2.12.0",
 ]
+
+# TEMPORARY (PRP-0191, CTR-0238): until chatwalaau-computer-use is on PyPI, uv resolves
+# it from the crate in this repository (building it needs the Rust toolchain, rustup + MSVC).
+# Remove this section right after the first publish, then `uv lock` again -- the published
+# wheel keeps uv.lock free of local paths, which the Desktop payload needs.
+[tool.uv.sources]
+chatwalaau-computer-use = { path = "../computer-use" }

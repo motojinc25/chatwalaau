@@ -68,7 +68,7 @@ const CLOSE_FALLBACK_MS = 12_000
 function describeClose(reason: string, limits: LiveLimits | null): string | null {
   switch (reason) {
     case 'max_duration':
-      return `Live ended after ${Math.round((limits?.max_session_seconds ?? 600) / 60)} minutes.`
+      return `Live ended after ${Math.round((limits?.max_session_seconds ?? 1200) / 60)} minutes.`
     case 'idle_timeout':
       return `Live ended after ${limits?.idle_timeout_seconds ?? 60} s of silence.`
     case 'expired':

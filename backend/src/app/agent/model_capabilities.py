@@ -38,7 +38,33 @@ logger = logging.getLogger(__name__)
 _GUIDANCE_FOR_CAPABILITY: dict[str, str] = {
     "image_generation": "image",
     "mcp": "mcp",
+    "computer_use": "computer_use",
 }
+
+# Provider lanes whose MAF chat client drops images carried in FUNCTION RESULTS
+# (PRP-0189 Section 1.2: agent_framework_foundry sets SUPPORTS_RICH_FUNCTION_OUTPUT =
+# False and omits them without a warning). The computer_* tools would act blind there,
+# so the lane is closed in code, independent of the catalog (UDR-0171 D2).
+NO_RICH_FUNCTION_OUTPUT_PROVIDERS = frozenset({"foundry"})
+
+
+def computer_use_closed(model: str) -> bool:
+    """True when ``model`` must not get the computer_* tools (UDR-0171 D2).
+
+    Closed when the offering withholds ``computer_use`` (the UDR-0167 D1 opt-out), or
+    when its provider lane cannot return a screenshot to the model. Never raises: an
+    unknown model resolves like any other capability lookup.
+    """
+    from app.providers.base import capability_withheld
+
+    if capability_withheld(model, "computer_use"):
+        return True
+    try:
+        from app import providers
+
+        return providers.provider_for(model).name in NO_RICH_FUNCTION_OUTPUT_PROVIDERS
+    except Exception:  # pragma: no cover - defensive; a lookup must not break a build
+        return False
 
 
 @dataclass(frozen=True)
@@ -75,6 +101,13 @@ def _image_tool_names() -> set[str]:
     from app.agent.declarative.tool_inventory import BUILTIN_FUNCTION_TOOLS
 
     return {t.name for t in BUILTIN_FUNCTION_TOOLS if t.category == "image"}
+
+
+def _computer_tool_names() -> set[str]:
+    """Names of the built-in function tools in the ``computer_use`` category (CTR-0178)."""
+    from app.agent.declarative.tool_inventory import BUILTIN_FUNCTION_TOOLS
+
+    return {t.name for t in BUILTIN_FUNCTION_TOOLS if t.category == "computer_use"}
 
 
 def _is_mcp_tool(obj: Any) -> bool:
@@ -147,6 +180,15 @@ def subset_for_model(
             drop_guidance("image_generation")
             withheld.append("image_generation")
 
+        # -- Computer Use (PRP-0189, UDR-0171 D2) -----------------------------
+        # Recorded as withheld only when the category is on the surface at all, so a
+        # host without Computer Use does not report every Foundry model as withholding it.
+        computer_names = _computer_tool_names()
+        if any(_tool_name(t) in computer_names for t in out_tools) and computer_use_closed(model):
+            out_tools = [t for t in out_tools if _tool_name(t) not in computer_names]
+            drop_guidance("computer_use")
+            withheld.append("computer_use")
+
         # -- MCP -------------------------------------------------------------
         if capability_withheld(model, "mcp"):
             out_tools = [t for t in out_tools if not _is_mcp_tool(t)]
@@ -202,7 +244,16 @@ def capability_states(model: str) -> dict[str, bool]:
     from app.models_catalog import CAPABILITY_KEYS
     from app.providers.base import capability_withheld
 
-    return {key: not capability_withheld(model, key) for key in sorted(CAPABILITY_KEYS)}
+    states = {key: not capability_withheld(model, key) for key in sorted(CAPABILITY_KEYS)}
+    # The one key with a code-side closure as well (UDR-0171 D2): report what applies.
+    states["computer_use"] = not computer_use_closed(model)
+    return states
 
 
-__all__ = ["ModelToolSurface", "capability_states", "subset_for_model"]
+__all__ = [
+    "NO_RICH_FUNCTION_OUTPUT_PROVIDERS",
+    "ModelToolSurface",
+    "capability_states",
+    "computer_use_closed",
+    "subset_for_model",
+]

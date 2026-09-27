@@ -65,6 +65,9 @@ __pycache__/
 # Token usage ledger (PRP-0158, CTR-0200; default USAGE_DIR=.usage)
 .usage/
 
+# Computer Use traces and capture history
+.computeruse/
+
 # TLS Certificates
 .certs/
 

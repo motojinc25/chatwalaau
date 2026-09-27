@@ -91,6 +91,20 @@ _SETTINGS_DETAIL: dict[str, str] = {
     "manage_pipeline": "PIPELINE_ENABLED=false",
     "manage_webhook": "WEBHOOK_ENABLED=false",
     "query_ontology": "ONTOLOGY_ENABLED=false",
+    # PRP-0189: the gate AND the host facts (Windows, interactive session, loopback);
+    # the exact reason code is appended by _computer_use_detail at report time.
+    **dict.fromkeys(
+        (
+            "computer_list_windows",
+            "computer_focus_window",
+            "computer_capture_screen",
+            "computer_perform_actions",
+            "computer_get_active_window",
+            "computer_wait_for_change",
+            "computer_abort",
+        ),
+        "COMPUTER_USE_ENABLED=false or this host cannot offer it",
+    ),
 }
 
 
@@ -268,6 +282,30 @@ def _model_withholds(model: str, capability: str) -> bool:
         return False
 
 
+def _computer_use_closed(model: str) -> bool:
+    if not model:
+        return False
+    try:
+        from app.agent.model_capabilities import computer_use_closed
+
+        return computer_use_closed(model)
+    except Exception:
+        logger.debug("computer_use closure probe failed for %r", model, exc_info=True)
+        return False
+
+
+def _computer_use_detail(category: str) -> str:
+    """Why the Computer Use category is off on this host (UDR-0171 D1 reason codes)."""
+    if category != "computer_use":
+        return ""
+    try:
+        from app.computer_use.availability import availability
+
+        return f"Computer Use: {availability().reason or 'offered'}"
+    except Exception:
+        return "Computer Use: unavailable"
+
+
 def _agent_has_structured_format(agent: Any) -> bool:
     """True when the built agent's default options carry a structured-output format.
 
@@ -360,6 +398,8 @@ def _function_rows(
     """
     actual = _actual_function_tools(agent)
     image_withheld = _model_withholds(model, "image_generation")
+    # PRP-0189 / UDR-0171 D2: the offering's `computer_use` opt-out OR the foundry lane.
+    computer_closed = _computer_use_closed(model)
     rows: list[ToolRow] = []
     known: set[str] = set()
 
@@ -371,7 +411,9 @@ def _function_rows(
         except Exception:
             logger.debug("Availability probe failed for %s", name, exc_info=True)
             gate_open = False
-        capability_open = not (image_withheld and builtin.category == "image")
+        capability_open = not (image_withheld and builtin.category == "image") and not (
+            computer_closed and builtin.category == "computer_use"
+        )
         selected = allow is None or allow.allows_function(name)
         predicted = gate_open and capability_open and selected
         present = name in actual
@@ -387,7 +429,7 @@ def _function_rows(
             rows.append(ToolRow(name, STATUS_ACTIVE, note=note))
         elif not present and not predicted:
             if not gate_open:
-                detail = _SETTINGS_DETAIL.get(name, "")
+                detail = _computer_use_detail(builtin.category) or _SETTINGS_DETAIL.get(name, "")
                 reason = f"{REASON_SETTINGS} ({detail})" if detail else REASON_SETTINGS
             elif not capability_open:
                 reason = f"{REASON_PROVIDER_CAPABILITY} ({model})"

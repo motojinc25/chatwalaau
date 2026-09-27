@@ -194,6 +194,11 @@ GROUPS: tuple[SettingGroup, ...] = (
         "Agent Skills",
         "Skill catalog and installation: the switch, its source table, and its bounds.",
     ),
+    SettingGroup(
+        "computer_use",
+        "Computer Use",
+        "Desktop automation tuning: window size, screenshot size, change and stability detection, and limits.",
+    ),
 )
 
 
@@ -1006,6 +1011,105 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         max=100_000,
         parent="skill_install_enabled",
         help="Number of files allowed for ONE skill. An over-cap download is refused before anything is written.",
+    ),
+    # ---- Computer Use (PRP-0189, UDR-0171) ---------------------------------------
+    # Tuning only. The gate COMPUTER_USE_ENABLED, the target allowlist and the secrets
+    # file stay in .env (UDR-0120 D1) and deliberately have no descriptor. Every key is
+    # read per tool call, so all are SCOPE_RUNTIME.
+    SettingDescriptor(
+        "computer_use_window_size",
+        "Target window size",
+        "computer_use",
+        "enum",
+        SCOPE_RUNTIME,
+        enum=("1920x1080", "1600x900", "1440x900", "1366x768", "1280x800", "1280x720", "none"),
+        help=(
+            "computer_focus_window resizes the target to this (clamped to its monitor's work area), so screenshots "
+            "have a stable geometry. 'none' leaves the window as it is."
+        ),
+    ),
+    SettingDescriptor(
+        "computer_use_image_max_edge",
+        "Screenshot long edge sent to the model (px)",
+        "computer_use",
+        "int",
+        SCOPE_RUNTIME,
+        min=640,
+        max=1920,
+        help=(
+            "Screenshots are downscaled to at most this long edge. On Anthropic models they are further limited to "
+            "what the service accepts without resizing, so click coordinates stay exact."
+        ),
+    ),
+    SettingDescriptor(
+        "computer_use_ui_elements_max",
+        "UI elements per screenshot",
+        "computer_use",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=300,
+        help="UI Automation elements listed with each screenshot as click targets. 0 turns the list off.",
+    ),
+    SettingDescriptor(
+        "computer_use_change_threshold_bp",
+        "Change threshold (basis points)",
+        "computer_use",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=5000,
+        help="Share of screen blocks that must change to count as 'changed', in 1/100 of a percent (20 = 0.2%).",
+    ),
+    SettingDescriptor(
+        "computer_use_stable_ms",
+        "Stable after (ms)",
+        "computer_use",
+        "int",
+        SCOPE_RUNTIME,
+        min=100,
+        max=3000,
+        help="The screen counts as settled once nothing changed for this long. No fixed sleep is used anywhere.",
+    ),
+    SettingDescriptor(
+        "computer_use_change_timeout_ms",
+        "Wait timeout (ms)",
+        "computer_use",
+        "int",
+        SCOPE_RUNTIME,
+        min=500,
+        max=30000,
+        help="Default upper bound of every wait. A timed-out wait returns the current screen and lets the model decide.",
+    ),
+    SettingDescriptor(
+        "computer_use_max_steps_per_batch",
+        "Steps per batch",
+        "computer_use",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=100,
+        help="Upper bound of executed steps in one computer_perform_actions call, repeats expanded.",
+    ),
+    SettingDescriptor(
+        "computer_use_max_cycles_per_turn",
+        "Computer calls per turn",
+        "computer_use",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=38,
+        help="Upper bound of computer_* calls in one reply (kept below the framework's 40 model round trips).",
+    ),
+    SettingDescriptor(
+        "computer_use_keep_images",
+        "Screenshots kept in context",
+        "computer_use",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=3,
+        help="Older screenshots of the same reply are replaced by a placeholder before each model call.",
     ),
 )
 

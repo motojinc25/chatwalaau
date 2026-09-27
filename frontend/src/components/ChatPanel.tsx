@@ -2,6 +2,8 @@ import { Bot, Hammer, ImageIcon, Loader2, Workflow as WorkflowIcon } from 'lucid
 import { type DragEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
+import { ComputerUseBanner } from '@/components/ComputerUseBanner'
+import { ComputerUseCaptureView } from '@/components/ComputerUseCaptureView'
 import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { HelpPortal } from '@/components/HelpPortal'
 import { LiveDelegationMarker } from '@/components/LiveDelegationMarker'
@@ -25,6 +27,7 @@ import { useMessageStepNav } from '@/hooks/useMessageStepNav'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useTTS } from '@/hooks/useTTS'
 import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
+import { isComputerUseTool } from '@/lib/computerUse'
 import { resolveContextOccupancy } from '@/lib/contextOccupancy'
 import { IMAGE_EDIT_TOOL } from '@/lib/imageTools'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
@@ -562,6 +565,14 @@ export function ChatPanel({
   // intent, ScrollToBottom affordance, and bottom spacer sized by the
   // observed ChatInput height.
   const streamingKey = buildStreamingKey(messages, isLoading)
+  // Computer Use (CTR-0235, PRP-0189): while a reply that drives the desktop is still
+  // streaming, the agent holds the mouse and keyboard -- including between its tool
+  // calls, when the model is deciding -- so the banner stays up for the whole stream.
+  const lastMessage = messages[messages.length - 1]
+  const computerUseActive =
+    isLoading &&
+    lastMessage?.role === 'assistant' &&
+    (lastMessage.toolCalls ?? []).some((tc) => isComputerUseTool(tc.name))
   const { scrollRef, inputRef, showScrollToBottomButton, bottomSpacerHeightPx, scrollToBottom } =
     useChatScroll(streamingKey)
 
@@ -860,6 +871,12 @@ export function ChatPanel({
         </div>
       )}
 
+      {/* PRP-0189 amendment A4 (CTR-0235): what the agent sees, full-width /chat only.
+          In Live, only while delegated work runs -- the Live session itself outlives it. */}
+      {!compact && !surface.narrow && (
+        <ComputerUseCaptureView threadId={threadId} active={computerUseActive || (liveActive && live.working)} />
+      )}
+
       {notification && (
         <div
           className={cn(
@@ -874,6 +891,7 @@ export function ChatPanel({
 
       {compact ? (
         <div ref={inputRef}>
+          <ComputerUseBanner active={computerUseActive} />
           {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE.
               PRP-0184 took the model / options / structured controls off the composer
               and PRP-0185 took the image options and the two managers, leaving a row
@@ -932,6 +950,7 @@ export function ChatPanel({
               viewport, which already ends above Safari's toolbar, so an inset added the
               home-indicator height a second time (most visibly on iPad). */}
           <div className="relative bg-background">
+            <ComputerUseBanner active={computerUseActive} />
             {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE; see
                 the compact branch for why. Both of its survivors moved into the
                 composer, so this wrapper holds the composer alone and `inputRef`'s

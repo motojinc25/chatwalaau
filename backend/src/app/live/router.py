@@ -19,12 +19,12 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import models_catalog
-from app.auth import verify_api_key
+from app.auth import is_client_loopback, verify_api_key
 from app.core.config import settings
 from app.live import persist
 from app.live.client import LiveUpstreamError, connect_sideband, create_session, delete_session
@@ -106,7 +106,7 @@ async def live_status() -> dict[str, Any]:
 
 
 @router.post("/sessions", dependencies=[Depends(verify_api_key)])
-async def start_live_session(body: StartRequest) -> dict[str, Any]:
+async def start_live_session(body: StartRequest, request: Request) -> dict[str, Any]:
     offered, reason = availability()
     if not offered:
         raise HTTPException(status_code=503, detail={"code": "live_unavailable", "reason": reason})
@@ -161,6 +161,9 @@ async def start_live_session(body: StartRequest) -> dict[str, Any]:
         live_session_id=created.session_id,
         thread_id=body.thread_id,
         temporary=is_temporary(body.thread_id),
+        # PRP-0189 amendment A5: delegations of a session started from THIS machine may
+        # use the computer_* tools (H7); a LAN caller's may not.
+        local_origin=is_client_loopback(request.client.host if request.client else None),
         agent_registry=_agent_registry,
         agent=agent,
         limits=limits,

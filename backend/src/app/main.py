@@ -416,6 +416,10 @@ async def lifespan(_app: FastAPI):
     from app.live import shutdown as shutdown_live
 
     await shutdown_live()
+    # Computer Use (PRP-0189): release the kill-switch hotkey and the desktop worker.
+    from app.computer_use import shutdown as shutdown_computer_use
+
+    shutdown_computer_use()
     from app.background import shutdown as shutdown_background
 
     await shutdown_background()
@@ -605,6 +609,13 @@ register_agui_endpoints(app, agent_registry=agent_registry)
 from app.live import register_live
 
 register_live(app, agent_registry=agent_registry)
+
+# Computer Use Control API (CTR-0233, PRP-0189) -- status / abort / metrics. The
+# computer_* tools themselves ride the agent registry above (CTR-0229); the router and
+# the Ctrl+Alt+End hotkey exist here, the hotkey only when the host offers it.
+from app.computer_use import register_computer_use
+
+register_computer_use(app)
 
 # MCP Tool Management API (CTR-0121, PRP-0086) -- runtime gating of the active MCP
 # tool set. Receives the same registry so PUT can rebuild it atomically (CTR-0070).

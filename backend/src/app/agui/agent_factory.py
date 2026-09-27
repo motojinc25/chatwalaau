@@ -126,6 +126,7 @@ def _build_tools_and_instructions(
     include_mcp: bool,
     include_rag: bool,
     spec: Any = None,
+    include_computer_use: bool = False,
 ) -> tuple[list[Any], list[Any], list[ToolGuidance], list[Any]]:
     """Assemble (tools, context_providers, guidance, middleware) from current settings.
 
@@ -145,9 +146,15 @@ def _build_tools_and_instructions(
     UDR-0130 D1 requires to happen once.
 
     The fourth return element ``middleware`` is the agent-level middleware list
-    shared by every per-model Agent. It is EMPTY since PRP-0179 (UDR-0161 D1/D2):
-    no tool is approval-gated, so no approval middleware exists. The seam stays so a
-    future non-approval middleware has a place to go.
+    shared by every per-model Agent. No approval middleware exists since PRP-0179
+    (UDR-0161 D1/D2). Since PRP-0189 it carries the Computer Use observation-retention
+    ChatMiddleware (CTR-0234) -- and ONLY when the computer_use category is on the
+    surface; it is empty otherwise.
+
+    ``include_computer_use`` (PRP-0189, UDR-0171 D12) is True only for the
+    AgentRegistry (the SPA Prompt lane). A workflow node -- unattended, with nobody at
+    the kill switch -- never receives the computer_* tools, which is why the flag
+    defaults to False and the workflow callers do not pass it.
     """
     history_provider = FileHistoryProvider(
         sessions_dir=Path(settings.sessions_dir),
@@ -437,6 +444,28 @@ def _build_tools_and_instructions(
         tools.append(query_ontology)
         guidance.append(ToolGuidance("ontology", ONTOLOGY_TOOL_INSTRUCTION))
 
+    # Computer Use (PRP-0189, FEAT-0071, UDR-0171). Registered only where the backend
+    # owns the user's screen (H1-H6, generic host facts -- never Desktop detection, D1)
+    # and only for the AgentRegistry (include_computer_use). A loopback AG-UI origin is
+    # checked per call (H7), so Teams / the OpenAI-compatible API get origin_not_local
+    # from the shared agent. The per-model closure (the `computer_use` opt-out and the
+    # `foundry` lane) is applied by subset_for_model (D2).
+    computer_middleware: list[Any] = []
+    if include_computer_use:
+        from app.computer_use.availability import offered as _computer_use_offered
+
+        if _computer_use_offered():
+            from app.computer_use.guidance import COMPUTER_USE_GUIDANCE_NAME, COMPUTER_USE_INSTRUCTION
+            from app.computer_use.retention import ObservationRetentionMiddleware
+            from app.computer_use.tools import COMPUTER_TOOLS
+
+            computer_tools = [t for t in COMPUTER_TOOLS if _fn_ok(t.__name__)]
+            if computer_tools:
+                tools.extend(computer_tools)
+                guidance.append(ToolGuidance(COMPUTER_USE_GUIDANCE_NAME, COMPUTER_USE_INSTRUCTION))
+                computer_middleware.append(ObservationRetentionMiddleware())
+                logger.info("Computer Use tools enabled (%d)", len(computer_tools))
+
     # The collected slot-#3 blocks are returned UNRENDERED (PRP-0185, UDR-0167 D7).
     # Rendering happens at the consumer, which knows the model and can therefore drop
     # a withheld capability's block alongside its tools (D6). The renderer and its
@@ -451,7 +480,7 @@ def _build_tools_and_instructions(
 
     # Context providers (CTR-0043, PRP-0024)
     context_providers: list[Any] = [history_provider]
-    middleware: list[Any] = []
+    middleware: list[Any] = [*computer_middleware]
     # Per-agent Skills subset (PRP-0117, UDR-0100 D2/D3): when the active agent has a
     # tool_allowlist, only the selected skill names survive (an allow-list with no
     # skill entries yields the empty set -> no skills). None => inherit all.
@@ -475,6 +504,7 @@ def create_agent_registry() -> AgentRegistry:
     tools, context_providers, guidance, middleware = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
+        include_computer_use=True,
     )
     compaction_strategy = resolve_compaction_strategy()
     return AgentRegistry(
@@ -505,6 +535,7 @@ async def rebuild_agent_registry(registry: AgentRegistry) -> None:
     tools, context_providers, guidance, middleware = _build_tools_and_instructions(
         include_mcp=True,
         include_rag=True,
+        include_computer_use=True,
     )
     await registry.rebuild(
         tools=tools,

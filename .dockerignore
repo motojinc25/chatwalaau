@@ -76,6 +76,7 @@ backend/.prompts/
 backend/.ontologies/
 backend/.auth/
 backend/.usage/
+backend/.computeruse/
 backend/batch-server.log
 
 # Operator-owned Model Offering Catalog (CTR-0174): runtime state that belongs on

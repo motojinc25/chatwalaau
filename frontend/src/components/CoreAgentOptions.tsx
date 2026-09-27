@@ -56,6 +56,8 @@ const REPORTED_CAPABILITIES: Array<[string, string]> = [
   ['mcp', 'MCP'],
   ['skills', 'Skills'],
   ['image_generation', 'image generation'],
+  // PRP-0189 (UDR-0171 D2): withheld per offering, and always on the Foundry lane.
+  ['computer_use', 'Computer Use'],
 ]
 
 interface CoreAgentOptionsProps {

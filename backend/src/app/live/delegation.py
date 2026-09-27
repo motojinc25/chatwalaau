@@ -138,6 +138,7 @@ async def run_delegated_agent(
     thread_id: str,
     agent_registry: Any,
     temporary: bool,
+    local_origin: bool = False,
     text_sink: list[str] | None = None,
     progress: Callable[..., None] | None = None,
 ) -> tuple[DelegationOutcome, dict[str, Any] | None, int, str]:
@@ -171,6 +172,18 @@ async def run_delegated_agent(
 
     set_temporary_run(temporary)
     _image_gen_thread_id.set(thread_id)
+    # PRP-0189 amendment A5 (UDR-0171 D12 as amended): a delegation of a Live session
+    # started from this machine runs with a Computer Use run state, so the computer_*
+    # tools on the active agent can act (H7). The state is per delegation task.
+    from app.agui.endpoint import _provider_name
+    from app.computer_use.state import begin_run as begin_computer_use_run
+
+    begin_computer_use_run(
+        thread_id=thread_id,
+        local_origin=local_origin,
+        model=effective_model or "",
+        provider=_provider_name(effective_model),
+    )
     profile_snapshot = None if temporary else session_user_profile_snapshot(thread_id)
     memory_snapshot = None if temporary else session_agent_memory_snapshot(thread_id)
     run_options: dict[str, Any] = {}

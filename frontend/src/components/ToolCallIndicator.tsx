@@ -1,4 +1,5 @@
 import {
+  AppWindow,
   BookOpen,
   Calendar,
   ChevronRight,
@@ -9,13 +10,19 @@ import {
   FileText,
   FolderSearch,
   Globe,
+  Hourglass,
   ImagePlus,
   Layers,
   ListTodo,
+  ListTree,
   MapPin,
+  Monitor,
+  MousePointerClick,
   Network,
+  OctagonX,
   Pencil,
   Plug,
+  ScanEye,
   Search,
   Terminal,
   ToggleLeft,
@@ -24,7 +31,9 @@ import {
   Wrench,
 } from 'lucide-react'
 import { useState } from 'react'
+import { ComputerUseResultCard } from '@/components/ComputerUseResultCard'
 import { useMcpToolNames } from '@/hooks/useMcpToolNames'
+import { isComputerUseTool } from '@/lib/computerUse'
 import { IMAGE_RESULT_TOOLS } from '@/lib/imageTools'
 import type { ToolCall } from '@/types/chat'
 
@@ -121,6 +130,23 @@ const toolDisplayNames: Record<string, { label: string; doneLabel: string; icon:
   manage_memory: { label: 'Updating agent memory...', doneLabel: 'Updated agent memory', icon: BookOpen },
   manage_user_memory: { label: 'Updating your preferences...', doneLabel: 'Updated your preferences', icon: BookOpen },
   query_ontology: { label: 'Querying the ontology...', doneLabel: 'Queried the ontology', icon: Network },
+
+  // ---- Computer Use (CTR-0235, PRP-0189) ---------------------------------------
+  computer_list_windows: { label: 'Listing windows...', doneLabel: 'Listed windows', icon: ListTree },
+  computer_focus_window: { label: 'Focusing window...', doneLabel: 'Focused window', icon: AppWindow },
+  computer_capture_screen: { label: 'Looking at the screen...', doneLabel: 'Looked at the screen', icon: ScanEye },
+  computer_perform_actions: {
+    label: 'Operating the desktop...',
+    doneLabel: 'Operated the desktop',
+    icon: MousePointerClick,
+  },
+  computer_get_active_window: {
+    label: 'Checking the active window...',
+    doneLabel: 'Checked the active window',
+    icon: Monitor,
+  },
+  computer_wait_for_change: { label: 'Waiting for the screen...', doneLabel: 'Waited for the screen', icon: Hourglass },
+  computer_abort: { label: 'Ending the desktop task...', doneLabel: 'Ended the desktop task', icon: OctagonX },
 }
 
 function formatJson(raw: string): string {
@@ -245,6 +271,8 @@ export function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
           <ChevronRight className={`h-3 w-3 shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
         )}
       </button>
+      {/* PRP-0189 (CTR-0235): status, steps, expectations and timings at a glance. */}
+      {!isRunning && isComputerUseTool(toolCall.name) && <ComputerUseResultCard result={toolCall.result} />}
       {expanded && hasDetails && (
         <div className="mt-1 ml-5 max-h-60 overflow-y-auto rounded-md bg-muted/50 p-2.5 text-xs leading-relaxed text-muted-foreground">
           {toolCall.args && (

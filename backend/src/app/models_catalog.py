@@ -133,6 +133,11 @@ CAPABILITY_KEYS = frozenset(
         "mcp",
         "skills",
         "image_generation",
+        # PRP-0189 / UDR-0171 D2: the computer_* tools need a model that reads images
+        # in FUNCTION RESULTS. Opt-out like the others (absent = enabled); the
+        # `foundry` provider lane is additionally closed in code, because its client
+        # drops such images silently (agent_framework_foundry SUPPORTS_RICH_FUNCTION_OUTPUT).
+        "computer_use",
     }
 )
 

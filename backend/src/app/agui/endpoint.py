@@ -46,7 +46,7 @@ from agent_framework import AgentSession, Content, add_usage_details
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import StreamingResponse
 from openai import NotFoundError as OpenAINotFoundError
 from pydantic import AliasChoices, BaseModel, Field
@@ -63,7 +63,8 @@ from app.agent.user_memory import session_user_profile_snapshot
 from app.agui.agent_registry import AgentRegistry
 from app.agui.sanitize import TextSanitizer
 from app.agui.token_usage import context_base_tokens, turn_summary
-from app.auth import verify_api_key
+from app.auth import is_client_loopback, verify_api_key
+from app.computer_use.state import begin_run as begin_computer_use_run
 from app.core import provider_errors
 from app.core.config import settings
 from app.demo import is_demo_mode
@@ -1048,9 +1049,21 @@ def _first_user_text(messages: list[dict[str, Any]]) -> str:
     return ""
 
 
+def _provider_name(model: str | None) -> str:
+    """The provider lane of ``model`` (Computer Use image clamp, PRP-0189). Never raises."""
+    if not model:
+        return ""
+    try:
+        return providers.provider_for(model).name
+    except Exception:  # pragma: no cover - defensive; a lookup must not fail a run
+        return ""
+
+
 async def _stream_with_reasoning(
     agent_registry: AgentRegistry,
     request_body: AGUIRequest,
+    *,
+    local_origin: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Stream AG-UI events including REASONING_* for text_reasoning content.
 
@@ -1395,6 +1408,17 @@ async def _stream_with_reasoning(
         # on reload) and merge the per-run remainder (Memory Block slot #2 +
         # capability guidance) so the prompt is Identity -> Memory -> capabilities.
         set_temporary_run(temporary)
+        # Computer Use run state (PRP-0189, UDR-0171 D1 H7 / D11): whether this request
+        # came from a loopback peer, and the provider lane for the image-size clamp. A
+        # fresh state per run also clears a previous turn's abort. Lanes that never
+        # reach here (Teams, OpenAI-compatible API, Live, workflows) have no state, so
+        # every computer_* call there answers origin_not_local.
+        begin_computer_use_run(
+            thread_id=thread_id,
+            local_origin=local_origin,
+            model=effective_model or "",
+            provider=_provider_name(effective_model),
+        )
         profile_snapshot = None
         memory_snapshot = None
         extra_instructions: str | None = None
@@ -2192,9 +2216,11 @@ def register_agui_endpoints(app: FastAPI, *, agent_registry: AgentRegistry) -> N
     """
 
     @app.post("/ag-ui/", tags=["AG-UI"], dependencies=[Depends(verify_api_key)])
-    async def agui_endpoint(request_body: AGUIRequest):
+    async def agui_endpoint(request_body: AGUIRequest, request: Request):
+        # H7 (PRP-0189, UDR-0171 D1): the one place the caller's address is known.
+        local_origin = is_client_loopback(request.client.host if request.client else None)
         return StreamingResponse(
-            _stream_with_reasoning(agent_registry, request_body),
+            _stream_with_reasoning(agent_registry, request_body, local_origin=local_origin),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

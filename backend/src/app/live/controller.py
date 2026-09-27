@@ -85,6 +85,7 @@ class LiveSession:
         thread_id: str,
         temporary: bool,
         agent_registry: Any,
+        local_origin: bool = False,
         agent: dict[str, str],
         limits: LiveLimits,
         ws: Any,
@@ -93,6 +94,7 @@ class LiveSession:
         self.live_session_id = live_session_id
         self.thread_id = thread_id
         self.temporary = temporary
+        self.local_origin = local_origin
         self.agent_registry = agent_registry
         self.agent = agent
         self.limits = limits
@@ -641,6 +643,7 @@ class LiveSession:
                         thread_id=self.thread_id,
                         agent_registry=self.agent_registry,
                         temporary=self.temporary,
+                        local_origin=self.local_origin,
                         text_sink=partial,
                         progress=self._progress(delegation_id, msg_id),
                     ),

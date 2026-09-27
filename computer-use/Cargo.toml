@@ -1,0 +1,62 @@
+[package]
+name = "chatwalaau-computer-use"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "ChatWalaau Computer Use desktop provider: the chatwalaau.computer-use/1 MCP stdio server (CTR-0236)"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "chatwalaau-computer-use"
+path = "src/main.rs"
+
+[features]
+# Test-only: a scripted fake desktop instead of the real one (UDR-0173 D8).
+# NEVER enabled in a published wheel (tests/invariants/test_prp0191_rust_provider.py).
+fake-desktop = []
+
+[dependencies]
+rmcp = { version = "3.4", default-features = false, features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["rt", "macros", "io-std", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.23"
+png = "0.18"
+fast_image_resize = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+uiautomation = "0.25"
+arboard = { version = "3.6", default-features = false }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Com",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# UDR-0173 D5: an optimised, stripped native executable.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+debug-assertions = false
+overflow-checks = false
+incremental = false
+# Build paths (the user's home in dependency panic locations, this checkout) are removed with
+# --remap-path-prefix, set by scripts/build-wheel.ps1 and the CI workflow (`trim-paths` is not
+# stable in Cargo yet) -- UDR-0173 D5, CTR-0238.

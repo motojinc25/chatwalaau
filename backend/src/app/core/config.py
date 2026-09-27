@@ -382,12 +382,12 @@ class Settings(BaseSettings):
     # when a Live session is created.
     # Output voice (UDR-0170 D8). One of app.live.client.LIVE_VOICES.
     gpt_live_voice: str = "marin"
-    # Session length limit in seconds (operator answer A9: 10 minutes).
-    gpt_live_max_session_seconds: int = 600
+    # Session length limit in seconds.
+    gpt_live_max_session_seconds: int = 1200
     # Close after this many seconds with no speech from either side (A9: 60 s).
     gpt_live_idle_timeout_seconds: int = 60
-    # Upper bound for one delegated agent run (CTR-0226).
-    gpt_live_delegation_timeout_seconds: int = 120
+    # Upper bound for one delegated agent run.
+    gpt_live_delegation_timeout_seconds: int = 300
 
     # Image Generation (CTR-0049, CTR-0050).
     # PRP-0114 / UDR-0095: image model routing (deployment / api_version) AND the
@@ -408,6 +408,34 @@ class Settings(BaseSettings):
     # Upper bound on bytes read by file_read in a single call (PRP-0047).
     # Prevents memory/context blow-up on very large files.
     coding_file_read_max_bytes: int = 1_048_576
+
+    # Computer Use (CTR-0006, CTR-0229..0234, PRP-0189, UDR-0171). The gate, the data
+    # directory and the secrets location are .env keys (UDR-0120 D1): a GUI user must
+    # not be able to switch on desktop control. COMPUTER_USE_DIR holds the cycle traces
+    # (trace-YYYY-MM.jsonl, no sub-folder) and the capture history (captures/<thread>/).
+    # The window allowlist was withdrawn before release (PRP-0189 amendment A1). The
+    # tuning below is store-owned (group ``computer_use``, UDR-0120 D2).
+    computer_use_enabled: bool = False
+    computer_use_dir: str = ".computeruse"
+    computer_use_secrets_file: str = ""
+    # The desktop primitives always run in the stdio MCP desktop provider (CTR-0236,
+    # PRP-0190 amendment A1), started on first use: the native `chatwalaau-computer-use`
+    # executable of the chatwalaau-computer-use wheel (PRP-0191, CTR-0238).
+    # COMPUTER_USE_PROVIDER_COMMAND replaces that command (PRP-0190 Q4, e.g. a locally built
+    # computer-use\target\release\chatwalaau-computer-use.exe). Empty = the installed provider.
+    computer_use_provider_command: str = ""
+    computer_use_window_size: str = "1920x1080"
+    # Q2 (operator): 1920. On the Anthropic lane the image is additionally clamped to
+    # what the service accepts unresized, so the coordinate mapping stays exact.
+    computer_use_image_max_edge: int = 1920
+    computer_use_ui_elements_max: int = 80
+    # Basis points of changed blocks that count as "changed" (the store has no float).
+    computer_use_change_threshold_bp: int = 20
+    computer_use_stable_ms: int = 400
+    computer_use_change_timeout_ms: int = 5000
+    computer_use_max_steps_per_batch: int = 30
+    computer_use_max_cycles_per_turn: int = 30
+    computer_use_keep_images: int = 1
 
     # File Explorer (CTR-0006, CTR-0136/0137, PRP-0091, UDR-0069)
     # Human-facing file browse/edit over the coding workspace. OFF unless

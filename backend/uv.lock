@@ -1183,7 +1183,7 @@ wheels = [
 
 [[package]]
 name = "chatwalaau"
-version = "0.169.0"
+version = "0.170.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework" },
@@ -1195,12 +1195,14 @@ dependencies = [
     { name = "agent-framework-tools" },
     { name = "av" },
     { name = "azure-identity" },
+    { name = "chatwalaau-computer-use", marker = "platform_machine == 'AMD64' and sys_platform == 'win32'" },
     { name = "chromadb" },
     { name = "croniter" },
     { name = "elevenlabs" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "httpx-sse" },
+    { name = "mcp" },
     { name = "microsoft-teams-apps" },
     { name = "openai" },
     { name = "pydantic-settings" },
@@ -1237,12 +1239,14 @@ requires-dist = [
     { name = "agent-framework-tools", specifier = "==1.0.0b260918" },
     { name = "av", specifier = ">=12.0" },
     { name = "azure-identity", specifier = ">=1.23.0" },
+    { name = "chatwalaau-computer-use", marker = "platform_machine == 'AMD64' and sys_platform == 'win32'", directory = "../computer-use" },
     { name = "chromadb", specifier = ">=1.0.0" },
     { name = "croniter", specifier = ">=2.0.0,<3" },
     { name = "elevenlabs", specifier = ">=2.39.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "httpx-sse", specifier = ">=0.4.0" },
+    { name = "mcp", specifier = ">=1.26,<2" },
     { name = "microsoft-teams-apps", specifier = ">=2.0.13" },
     { name = "openai", specifier = ">=2.54,<3" },
     { name = "pip-system-certs", marker = "extra == 'corp'", specifier = ">=4.0" },
@@ -1264,6 +1268,11 @@ dev = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.15.5" },
 ]
+
+[[package]]
+name = "chatwalaau-computer-use"
+version = "0.1.0"
+source = { directory = "../computer-use" }
 
 [[package]]
 name = "chromadb"

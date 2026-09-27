@@ -53,6 +53,12 @@ def _image_available() -> bool:
     return models_catalog.image_config() is not None or is_demo_mode()
 
 
+def _computer_use_available() -> bool:
+    from app.computer_use.availability import offered
+
+    return offered()
+
+
 # Static registry mirroring the conditional blocks of the assembly chokepoint. When
 # a new built-in function tool is added to _build_tools_and_instructions, add it here
 # too (the one maintenance point called out in UDR-0100 Consequences).
@@ -96,6 +102,42 @@ BUILTIN_FUNCTION_TOOLS: tuple[BuiltinFunctionTool, ...] = (
     ),
     BuiltinFunctionTool(
         "query_ontology", "knowledge", "Query the RDF concept models.", lambda: settings.ontology_enabled
+    ),
+    # Computer Use (PRP-0189, UDR-0171 D1): available only where the backend owns the
+    # user's screen (H1-H6). Not mountable into a harness (Q4) -- see
+    # app.agent.harness.mapping.COMPUTER_TOOL_IDS.
+    BuiltinFunctionTool(
+        "computer_list_windows", "computer_use", "List the visible desktop windows.", _computer_use_available
+    ),
+    BuiltinFunctionTool(
+        "computer_focus_window",
+        "computer_use",
+        "Select and lock the window to operate.",
+        _computer_use_available,
+    ),
+    BuiltinFunctionTool(
+        "computer_capture_screen",
+        "computer_use",
+        "Screenshot and UI elements of the target window.",
+        _computer_use_available,
+    ),
+    BuiltinFunctionTool(
+        "computer_perform_actions",
+        "computer_use",
+        "Run one batch of mouse / keyboard steps and wait until stable.",
+        _computer_use_available,
+    ),
+    BuiltinFunctionTool(
+        "computer_get_active_window", "computer_use", "The foreground window and dialog state.", _computer_use_available
+    ),
+    BuiltinFunctionTool(
+        "computer_wait_for_change",
+        "computer_use",
+        "Wait until the target window changes and settles.",
+        _computer_use_available,
+    ),
+    BuiltinFunctionTool(
+        "computer_abort", "computer_use", "End the desktop task with a reason.", _computer_use_available
     ),
 )
 
