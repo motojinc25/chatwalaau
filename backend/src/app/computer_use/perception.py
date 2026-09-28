@@ -47,6 +47,10 @@ ANTHROPIC_MAX_EDGE = 1568
 ANTHROPIC_MAX_PIXELS = 1_150_000
 #: Upper bound for the zoom factor of a region capture.
 MAX_ZOOM = 3.0
+#: Path input (PRP-0192): points sent to the provider at most, and the spacing (physical px)
+#: of an expanded smooth curve.
+MAX_WIRE_POINTS = 2_000
+CURVE_SPACING_PX = 4.0
 
 
 class Aborted(Exception):
@@ -113,6 +117,83 @@ class Mapping:
         left, top = self.to_screen(min(x1, x2), min(y1, y2))
         right, bottom = self.to_screen(max(x1, x2), max(y1, y2))
         return Rect(left, top, max(right, left + 1), max(bottom, top + 1))
+
+
+# ---- Paths (PRP-0192, UDR-0174 D5) -------------------------------------------------------
+
+
+def _catmull_rom(p0, p1, p2, p3, spacing: float) -> list[tuple[float, float]]:
+    """Points of the centripetal Catmull-Rom segment p1 -> p2 (p2 excluded)."""
+
+    def knot(t: float, a: tuple[float, float], b: tuple[float, float]) -> float:
+        return t + max(math.dist(a, b), 1e-6) ** 0.5
+
+    t0 = 0.0
+    t1 = knot(t0, p0, p1)
+    t2 = knot(t1, p1, p2)
+    t3 = knot(t2, p2, p3)
+
+    def lerp(a, b, ta, tb, t):
+        w = (t - ta) / (tb - ta)
+        return (a[0] + (b[0] - a[0]) * w, a[1] + (b[1] - a[1]) * w)
+
+    steps = max(1, math.ceil(math.dist(p1, p2) / spacing))
+    out: list[tuple[float, float]] = []
+    for i in range(steps):
+        t = t1 + (t2 - t1) * i / steps
+        a1, a2, a3 = lerp(p0, p1, t0, t1, t), lerp(p1, p2, t1, t2, t), lerp(p2, p3, t2, t3, t)
+        b1, b2 = lerp(a1, a2, t0, t2, t), lerp(a2, a3, t1, t3, t)
+        out.append(lerp(b1, b2, t1, t2, t))
+    return out
+
+
+def smooth_path(points: list[tuple[float, float]], spacing: float = CURVE_SPACING_PX) -> list[tuple[float, float]]:
+    """A centripetal Catmull-Rom curve THROUGH ``points`` (no cusps, no self-loops per segment).
+
+    The ends are extended by reflection. A closed shape (first point == last point) wraps around,
+    so a circle from 8 to 12 points closes smoothly.
+    """
+    pts = [p for i, p in enumerate(points) if i == 0 or p != points[i - 1]]
+    if len(pts) < 3:
+        return pts
+    closed = pts[0] == pts[-1]
+    if closed:
+        ring = pts[:-1]
+        before, after = ring[-1], ring[1] if len(ring) > 1 else ring[0]
+    else:
+        before = (2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1])
+        after = (2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1])
+    ext = [before, *pts, after]
+    out: list[tuple[float, float]] = []
+    for i in range(1, len(ext) - 2):
+        out.extend(_catmull_rom(ext[i - 1], ext[i], ext[i + 1], ext[i + 2], spacing))
+    out.append(pts[-1])
+    return out
+
+
+def map_path(mapping: Mapping, image_points: list[tuple[int, int]], smooth: bool) -> list[tuple[int, int]]:
+    """Image points of an observation -> the physical path the provider follows.
+
+    Mapped with the observation's own mapping (R6), expanded when ``smooth``, consecutive
+    duplicates dropped, and resampled to at most MAX_WIRE_POINTS. The caller checks that EVERY
+    returned point lies in the target window (UDR-0174 D5).
+    """
+    screen = [
+        (mapping.rect.left + (x + 0.5) * mapping.sx, mapping.rect.top + (y + 0.5) * mapping.sy) for x, y in image_points
+    ]
+    if smooth:
+        screen = smooth_path(screen)
+    out: list[tuple[int, int]] = []
+    for x, y in screen:
+        p = (round(x), round(y))
+        if not out or out[-1] != p:
+            out.append(p)
+    if len(out) > MAX_WIRE_POINTS:
+        step = (len(out) - 1) / (MAX_WIRE_POINTS - 1)
+        out = [out[round(i * step)] for i in range(MAX_WIRE_POINTS)]
+    if len(out) == 1:
+        out.append(out[0])
+    return out
 
 
 # ---- Change detection ------------------------------------------------------------------
@@ -498,7 +579,9 @@ __all__ = [
     "differs",
     "ignore_rects",
     "image_size_for",
+    "map_path",
     "mask_blocks",
+    "smooth_path",
     "wait_for_change",
     "wait_until_stable",
 ]

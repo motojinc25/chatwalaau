@@ -210,48 +210,54 @@ async def run_delegated_agent(
     turn_usage: dict[str, Any] | None = None
     model_calls = 0
 
-    async for update in _resilient_run(agent, input_messages, session, run_options):
-        if isinstance(update, _RetryNotice):
-            continue
-        for content in getattr(update, "contents", None) or []:
-            ctype = getattr(content, "type", None)
-            if ctype == "text":
-                text = getattr(content, "text", None)
-                if text:
-                    text_parts.append(text)
-                    if text_sink is not None:
-                        text_sink.append(text)
-            elif ctype == "usage":
-                details = getattr(content, "usage_details", None) or {}
-                turn_usage = dict(add_usage_details(turn_usage, dict(details)))
-                model_calls += 1
-            elif ctype == "function_call":
-                # Streamed like the AG-UI seam sees it: the first chunk names the
-                # tool, later chunks carry argument deltas for the current call.
-                call_id = getattr(content, "call_id", None)
-                name = getattr(content, "name", None)
-                if name and call_id not in calls:
-                    call_id = call_id or uuid.uuid4().hex
-                    calls[call_id] = {"id": call_id, "name": name, "status": "running"}
-                    activity.append({"type": "toolCall", "id": call_id})
-                    current_call = call_id
-                target = calls.get(call_id) if call_id in calls else calls.get(current_call or "")
-                args = _args_text(content)
-                if target is not None and args:
-                    target["args"] = (target.get("args") or "") + args
-            elif ctype == "function_result":
-                call_id = getattr(content, "call_id", None)
-                entry = calls.get(call_id) if call_id else None
-                if entry is not None:
-                    entry["status"] = "completed"
-                    result = _tool_result_text(content)
-                    if result is not None:
-                        entry["result"] = result
-        if progress is not None:
-            try:
-                progress("".join(text_parts), list(calls.values()))
-            except Exception:  # progress is display only; it never fails the run
-                logger.debug("Live: progress callback failed", exc_info=True)
+    try:
+        async for update in _resilient_run(agent, input_messages, session, run_options):
+            if isinstance(update, _RetryNotice):
+                continue
+            for content in getattr(update, "contents", None) or []:
+                ctype = getattr(content, "type", None)
+                if ctype == "text":
+                    text = getattr(content, "text", None)
+                    if text:
+                        text_parts.append(text)
+                        if text_sink is not None:
+                            text_sink.append(text)
+                elif ctype == "usage":
+                    details = getattr(content, "usage_details", None) or {}
+                    turn_usage = dict(add_usage_details(turn_usage, dict(details)))
+                    model_calls += 1
+                elif ctype == "function_call":
+                    # Streamed like the AG-UI seam sees it: the first chunk names the
+                    # tool, later chunks carry argument deltas for the current call.
+                    call_id = getattr(content, "call_id", None)
+                    name = getattr(content, "name", None)
+                    if name and call_id not in calls:
+                        call_id = call_id or uuid.uuid4().hex
+                        calls[call_id] = {"id": call_id, "name": name, "status": "running"}
+                        activity.append({"type": "toolCall", "id": call_id})
+                        current_call = call_id
+                    target = calls.get(call_id) if call_id in calls else calls.get(current_call or "")
+                    args = _args_text(content)
+                    if target is not None and args:
+                        target["args"] = (target.get("args") or "") + args
+                elif ctype == "function_result":
+                    call_id = getattr(content, "call_id", None)
+                    entry = calls.get(call_id) if call_id else None
+                    if entry is not None:
+                        entry["status"] = "completed"
+                        result = _tool_result_text(content)
+                        if result is not None:
+                            entry["result"] = result
+            if progress is not None:
+                try:
+                    progress("".join(text_parts), list(calls.values()))
+                except Exception:  # progress is display only; it never fails the run
+                    logger.debug("Live: progress callback failed", exc_info=True)
+    finally:
+        # The delegation is over: hide the glow around a window it controlled (PRP-0192).
+        from app.computer_use.glow import end_run as end_computer_use_run
+
+        end_computer_use_run()
 
     cleaned, stripped = sanitize_text("".join(text_parts))
     if stripped:

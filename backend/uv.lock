@@ -1183,7 +1183,7 @@ wheels = [
 
 [[package]]
 name = "chatwalaau"
-version = "0.170.0"
+version = "0.171.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework" },
@@ -1239,7 +1239,7 @@ requires-dist = [
     { name = "agent-framework-tools", specifier = "==1.0.0b260918" },
     { name = "av", specifier = ">=12.0" },
     { name = "azure-identity", specifier = ">=1.23.0" },
-    { name = "chatwalaau-computer-use", marker = "platform_machine == 'AMD64' and sys_platform == 'win32'", directory = "../computer-use" },
+    { name = "chatwalaau-computer-use", marker = "platform_machine == 'AMD64' and sys_platform == 'win32'", specifier = ">=0.2,<0.3" },
     { name = "chromadb", specifier = ">=1.0.0" },
     { name = "croniter", specifier = ">=2.0.0,<3" },
     { name = "elevenlabs", specifier = ">=2.39.0" },
@@ -1271,8 +1271,11 @@ dev = [
 
 [[package]]
 name = "chatwalaau-computer-use"
-version = "0.1.0"
-source = { directory = "../computer-use" }
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/93/93/6aa8bbfacf23683372601855cf40e388a7bf8ab3dd6d3f0536466a1d1bd6/chatwalaau_computer_use-0.2.0-py3-none-win_amd64.whl", hash = "sha256:c06907545bc5445818adcc87df9a1da2b37d6ff8c804b0aee09dc4787fc173b4", size = 1139421, upload-time = "2026-09-26T07:22:26.367Z" },
+]
 
 [[package]]
 name = "chromadb"

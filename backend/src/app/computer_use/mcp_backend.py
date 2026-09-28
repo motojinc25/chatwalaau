@@ -22,6 +22,9 @@ touches the desktop itself.
   scripts directory, then on ``PATH``; ``COMPUTER_USE_PROVIDER_COMMAND`` replaces it.
 * REPAINTS: a provider declaring ``screen.changes`` answers ``changes()`` (PRP-0191 A1); a
   refusal of that call is reported as ``Changes(available=False)`` so the wait polls instead.
+* PATHS: ``path()`` waits for ``input_path`` in slices and sends ``input_cancel`` as soon as
+  ``should_cancel()`` holds (the hotkey, Stop, Abort); a provider lost DURING a path gets
+  ``input_release`` on its next start, so no button or modifier stays down (PRP-0192, UDR-0174 D6).
 * FAILURE: a timeout, a closed pipe or an incompatible provider raises
   :class:`ProviderUnavailable` (``provider_unavailable``); the next call restarts the
   provider, at most :data:`MAX_RESTARTS` times in :data:`RESTART_WINDOW_S` (Q3).
@@ -56,6 +59,7 @@ from app.computer_use.backend import (
     Changes,
     Element,
     Frame,
+    PathResult,
     Rect,
     WindowInfo,
 )
@@ -81,6 +85,8 @@ START_TIMEOUT_S = 30.0
 INPUT_TIMEOUT_S = 5.0
 CAPTURE_TIMEOUT_S = 10.0
 STOP_TIMEOUT_S = 2.0
+#: How often a running path is checked for an abort to forward as ``input_cancel``.
+PATH_POLL_S = 0.05
 #: Handles that are not ``hwnd:0x...`` map to integers from here up (never a real HWND).
 _SURROGATE_BASE = 1 << 48
 
@@ -189,13 +195,16 @@ class _Link:
         self._main = asyncio.run_coroutine_threadsafe(main(), self.loop)
         ready.result(timeout)
 
-    def call(self, name: str, args: dict[str, Any], timeout: float) -> Any:
+    def submit(self, name: str, args: dict[str, Any], timeout: float) -> Future[Any]:
         session = self.session
         if session is None or self.dead:
             raise ConnectionError("the provider session is closed")
-        fut = asyncio.run_coroutine_threadsafe(
+        return asyncio.run_coroutine_threadsafe(
             session.call_tool(name, args, read_timeout_seconds=timedelta(seconds=timeout)), self.loop
         )
+
+    def call(self, name: str, args: dict[str, Any], timeout: float) -> Any:
+        fut = self.submit(name, args, timeout)
         try:
             return fut.result(timeout + 1.0)
         except FutureTimeout:
@@ -240,6 +249,9 @@ class McpDesktopBackend:
         self._wire: frozenset[str] = frozenset()
         self._h2i: dict[str, int] = {}
         self._i2h: dict[int, str] = {}
+        # A provider lost while it held a button (UDR-0174 D6): release on the next start.
+        self._path_in_flight = False
+        self._release_pending = False
 
     # -- lifecycle -------------------------------------------------------------------------------
 
@@ -312,6 +324,15 @@ class McpDesktopBackend:
         # Handles and element keys of an earlier provider process mean nothing now.
         self._h2i.clear()
         self._i2h.clear()
+        if self._release_pending and "input.path" in declared:
+            self._release_pending = False
+            try:
+                released = _structured(link.call("input_release", {}, INPUT_TIMEOUT_S)).get("released") or []
+                logger.warning(
+                    "Computer Use: released %s after a provider was lost during a path", released or "nothing"
+                )
+            except Exception:
+                logger.warning("Computer Use: input_release after a lost path failed", exc_info=True)
         logger.info(
             "Computer Use provider %s %s running (pid %s)",
             (described.get("provider") or {}).get("name"),
@@ -351,6 +372,8 @@ class McpDesktopBackend:
 
     def _lost(self, reason: str, detail: str) -> NoReturn:
         logger.warning("Computer Use provider %s (%s); it restarts on the next call", reason, detail)
+        if self._path_in_flight:
+            self._release_pending = True
         with self._lock:
             self._drop()
             self.failure = f"{reason}: {detail}"
@@ -534,6 +557,83 @@ class McpDesktopBackend:
             seq=int(body.get("seq") or 0),
             changed=bool(body.get("changed")),
         )
+
+    # -- path input and the glow (PRP-0192) --------------------------------------------------------
+
+    def path(
+        self,
+        points: list[tuple[int, int]],
+        button: str,
+        modifiers: list[str],
+        hold_ms: int,
+        duration_ms: int,
+        hover_ms: int,
+        takeover_px: int,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> PathResult:
+        """``input_path``; sends ``input_cancel`` once ``should_cancel()`` holds (UDR-0174 D7)."""
+        args = {
+            "points": [[int(x), int(y)] for x, y in points],
+            "button": button,
+            "modifiers": list(modifiers),
+            "hold_ms": int(hold_ms),
+            "duration_ms": int(duration_ms),
+            "hover_ms": int(hover_ms),
+            "takeover_px": int(takeover_px),
+        }
+        timeout = INPUT_TIMEOUT_S + (hold_ms + duration_ms + hover_ms) / 1000
+        link = self._ensure()
+        self._path_in_flight = True
+        try:
+            try:
+                fut = link.submit("input_path", args, timeout)
+            except Exception as exc:
+                self._lost("lost", f"input_path: {type(exc).__name__}")
+            deadline = time.monotonic() + timeout + 1.0
+            cancel_sent = False
+            while True:
+                try:
+                    result = fut.result(PATH_POLL_S)
+                    break
+                except FutureTimeout:
+                    if not cancel_sent and should_cancel is not None and should_cancel():
+                        cancel_sent = True
+                        with contextlib.suppress(Exception):
+                            link.call("input_cancel", {}, INPUT_TIMEOUT_S)
+                    if time.monotonic() > deadline:
+                        fut.cancel()
+                        self._lost("timeout", "input_path")
+                except Exception as exc:
+                    reason = "timeout" if "timed out" in str(exc).lower() else "lost"
+                    self._lost(reason, f"input_path: {type(exc).__name__}")
+        finally:
+            self._path_in_flight = False
+        body = _structured(result)
+        if getattr(result, "isError", False):
+            code, message = str(body.get("error") or "internal"), str(body.get("message") or "")
+            if code == "input_blocked":
+                raise OSError(message or "input blocked")
+            raise ProviderCallError(code, message)
+        interrupted = body.get("interrupted")
+        return PathResult(
+            completed=bool(body.get("completed")),
+            interrupted=str(interrupted) if interrupted else None,
+            moved=int(body.get("moved") or 0),
+        )
+
+    def release_input(self) -> list[str]:
+        body, _ = self._call("input_release", {}, INPUT_TIMEOUT_S)
+        return [str(n) for n in body.get("released") or []]
+
+    def overlay_show(self, hwnd: int, ttl_s: float) -> bool:
+        args = {"handle": self._handle(hwnd), "ttl_ms": max(1000, min(600_000, int(ttl_s * 1000)))}
+        body, _ = self._call("overlay_show", args, INPUT_TIMEOUT_S)
+        if not body.get("shown"):
+            logger.debug("Computer Use glow not shown: %s", body.get("reason"))
+        return bool(body.get("shown"))
+
+    def overlay_hide(self) -> None:
+        self._call("overlay_hide", {}, INPUT_TIMEOUT_S)
 
     # -- input -----------------------------------------------------------------------------------
 

@@ -9,6 +9,11 @@ target window. Before EVERY input step it checks, in this order:
 3. the target lock: the foreground window belongs to the target's process (a
    same-process dialog is part of the target) -- otherwise ``focus_lost``.
 
+A ``drag`` with options and ``draw`` run as ONE provider path (``input.path``, PRP-0192):
+every point is checked against the target window before anything moves, the provider checks
+the takeover rule and the abort event (through ``input_cancel``) DURING the path and always
+releases the button and modifiers; an interrupted path is ``aborted``.
+
 Waits and ``if`` / ``repeat`` conditions are evaluated LOCALLY: the model is called
 again only when the batch ends (R5). There is no fixed sleep: waits poll and end as
 soon as their condition holds.
@@ -24,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.computer_use import dsl
 from app.computer_use.backend import has
-from app.computer_use.perception import Aborted, differs, wait_for_change, wait_until_stable
+from app.computer_use.perception import Aborted, differs, map_path, wait_for_change, wait_until_stable
 from app.computer_use.policy import SecretUnavailable, secret_value
 
 if TYPE_CHECKING:
@@ -159,6 +164,33 @@ class Executor:
     def _pointer(self, x: int, y: int) -> None:
         self.run.last_cursor = (x, y)
 
+    def _on_target(self, x: int, y: int, fg: WindowInfo | None, rect: Rect) -> bool:
+        on_dialog = fg is not None and fg.pid == self.target.pid and fg.rect.contains(x, y)
+        return rect.contains(x, y) or on_dialog
+
+    def _path(self, points: list[tuple[int, int]], button: str, modifiers: list[str], timing: tuple[int, int, int]):
+        """Run one provider path; an interruption is an abort (UDR-0174 D7)."""
+        fg = self.backend.foreground()
+        rect = self._window_rect()
+        if not all(self._on_target(x, y, fg, rect) for x, y in points):
+            raise StepFailed("the target point is outside the target window")
+        hold, duration, hover = timing
+        result = self.backend.path(
+            points,
+            button,
+            modifiers,
+            hold,
+            duration,
+            hover,
+            TAKEOVER_PX,
+            should_cancel=lambda: self._abort_check(0) is not None,
+        )
+        if result.interrupted == "user_mouse":
+            raise Aborted("user_mouse")
+        if result.interrupted is not None:
+            raise Aborted(self._abort_check(0) or "stop")
+        self._pointer(*points[-1])
+
     # -- conditions --------------------------------------------------------------------------
 
     def _condition(self, cond: dsl.Condition, base: bytes | None) -> bool:
@@ -219,8 +251,26 @@ class Executor:
             self._guard_input()
             x1, y1 = self._resolve(step.from_)
             x2, y2 = self._resolve(step.to)
-            self.backend.drag(x1, y1, x2, y2)
-            self._pointer(x2, y2)
+            if has(self.backend, "input.path"):
+                self._path([(x1, y1), (x2, y2)], step.button or "left", list(step.modifiers or []), step.timing())
+            elif step.has_options():
+                # Never degrade silently: Ctrl turns a move into a copy (UDR-0174 D9).
+                raise StepFailed(
+                    "drag options (button, modifiers, timing) need a desktop provider with input.path", "unsupported"
+                )
+            else:
+                self.backend.drag(x1, y1, x2, y2)
+                self._pointer(x2, y2)
+        elif isinstance(step, dsl.Draw):
+            self._guard_input()
+            if not has(self.backend, "input.path"):
+                raise StepFailed("draw needs a desktop provider with input.path", "unsupported")
+            w, h = self.obs.mapping.image_w, self.obs.mapping.image_h
+            outside = next(((x, y) for x, y in step.points if x >= w or y >= h), None)
+            if outside is not None:
+                raise StepFailed(f"({outside[0]}, {outside[1]}) is outside the {w}x{h} image")
+            points = map_path(self.obs.mapping, step.points, step.smooth)
+            self._path(points, step.button, list(step.modifiers), (step.hold_ms, step.duration_ms, step.hover_ms))
         elif isinstance(step, dsl.TypeText):
             self._guard_input()
             if step.secret is not None:

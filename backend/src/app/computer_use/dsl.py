@@ -26,6 +26,14 @@ MAX_DEPTH = 3
 MAX_REPEAT = 10
 MAX_TIMEOUT_MS = 30_000
 BATCH_WALL_CLOCK_S = 120.0
+#: Path input limits (PRP-0192 Q6, UDR-0174 D8): points the model may give, the movement, one
+#: pause, and one step in total. The wire limit (2,000 expanded points) is the perception layer's.
+MAX_PATH_POINTS = 200
+MAX_PATH_MS = 5_000
+MAX_PAUSE_MS = 2_000
+MAX_STEP_MS = 9_000
+#: The drop-friendly drag timing (PRP-0192 Q5): hold after the drag start, movement, hover.
+DRAG_TIMING = (150, 400, 300)
 #: A literal ``text`` at least this long that equals a secret value is refused (D4).
 SECRET_LITERAL_MIN_LEN = 5
 
@@ -167,12 +175,75 @@ class Move(_Targeted):
     type: Literal["move"]
 
 
+Button = Literal["left", "right", "middle"]
+Modifier = Literal["ctrl", "shift", "alt", "win"]
+
+
+def _check_modifiers(modifiers: list[str] | None) -> None:
+    if modifiers and len(set(modifiers)) != len(modifiers):
+        raise ValueError("a modifier is listed twice")
+
+
+def _check_total(hold_ms: int, duration_ms: int, hover_ms: int) -> None:
+    if hold_ms + duration_ms + hover_ms > MAX_STEP_MS:
+        raise ValueError(f"hold_ms + duration_ms + hover_ms exceed {MAX_STEP_MS} ms")
+
+
 class Drag(BaseModel):
+    """``{from, to}`` as always; the options need a provider with ``input.path`` (PRP-0192)."""
+
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     type: Literal["drag"]
     from_: Point = Field(alias="from")
     to: Point
+    button: Button | None = None
+    modifiers: list[Modifier] | None = Field(default=None, max_length=4)
+    hold_ms: int | None = Field(default=None, ge=0, le=MAX_PAUSE_MS)
+    duration_ms: int | None = Field(default=None, ge=50, le=MAX_PATH_MS)
+    hover_ms: int | None = Field(default=None, ge=0, le=MAX_PAUSE_MS)
+
+    @model_validator(mode="after")
+    def _limits(self) -> Drag:
+        _check_modifiers(self.modifiers)
+        _check_total(*self.timing())
+        return self
+
+    def has_options(self) -> bool:
+        options = (self.button, self.modifiers, self.hold_ms, self.duration_ms, self.hover_ms)
+        return any(o is not None for o in options)
+
+    def timing(self) -> tuple[int, int, int]:
+        hold, duration, hover = DRAG_TIMING
+        return (
+            hold if self.hold_ms is None else self.hold_ms,
+            duration if self.duration_ms is None else self.duration_ms,
+            hover if self.hover_ms is None else self.hover_ms,
+        )
+
+
+class Draw(BaseModel):
+    """A polyline (or, with ``smooth``, a curve through the points) drawn in one step (PRP-0192)."""
+
+    model_config = _STRICT
+
+    type: Literal["draw"]
+    points: list[tuple[int, int]] = Field(min_length=2, max_length=MAX_PATH_POINTS)
+    smooth: bool = False
+    button: Button = "left"
+    modifiers: list[Modifier] = Field(default_factory=list, max_length=4)
+    hold_ms: int = Field(default=0, ge=0, le=MAX_PAUSE_MS)
+    duration_ms: int = Field(default=800, ge=50, le=MAX_PATH_MS)
+    hover_ms: int = Field(default=0, ge=0, le=MAX_PAUSE_MS)
+
+    @model_validator(mode="after")
+    def _limits(self) -> Draw:
+        for x, y in self.points:
+            if not (0 <= x <= 10_000 and 0 <= y <= 10_000):
+                raise ValueError("draw points are image coordinates (0..10000)")
+        _check_modifiers(self.modifiers)
+        _check_total(self.hold_ms, self.duration_ms, self.hover_ms)
+        return self
 
 
 class TypeText(BaseModel):
@@ -294,6 +365,7 @@ Action = Annotated[
     | RightClick
     | Move
     | Drag
+    | Draw
     | TypeText
     | Keypress
     | Scroll
@@ -431,9 +503,14 @@ def parse_conditions(raw: Any) -> list[Condition]:
 __all__ = [
     "AFTER_MODES",
     "BATCH_WALL_CLOCK_S",
+    "DRAG_TIMING",
     "KEY_NAMES",
     "MAX_DEPTH",
+    "MAX_PATH_MS",
+    "MAX_PATH_POINTS",
+    "MAX_PAUSE_MS",
     "MAX_REPEAT",
+    "MAX_STEP_MS",
     "MAX_TIMEOUT_MS",
     "OBSERVE_MODES",
     "ActionBatch",

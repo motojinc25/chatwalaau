@@ -436,6 +436,8 @@ class Settings(BaseSettings):
     computer_use_max_steps_per_batch: int = 30
     computer_use_max_cycles_per_turn: int = 30
     computer_use_keep_images: int = 1
+    # PRP-0192 (UDR-0174 D4): a capture-excluded glow around the controlled window.
+    computer_use_overlay: bool = True
 
     # File Explorer (CTR-0006, CTR-0136/0137, PRP-0091, UDR-0069)
     # Human-facing file browse/edit over the coding workspace. OFF unless

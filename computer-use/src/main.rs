@@ -13,6 +13,7 @@ mod desktop;
 #[cfg(feature = "fake-desktop")]
 mod fake;
 mod imaging;
+mod path;
 mod platform;
 mod protocol;
 mod server;

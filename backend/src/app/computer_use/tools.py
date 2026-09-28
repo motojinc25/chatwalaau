@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from agent_framework import Content
 from pydantic import Field
 
-from app.computer_use import captures, dsl, engine, trace, worker
+from app.computer_use import captures, dsl, engine, glow, trace, worker
 from app.computer_use import state as run_state
 from app.computer_use.availability import availability
 from app.computer_use.backend import has
@@ -115,6 +115,8 @@ async def _invoke(
             out = engine.OpOutput({"status": "desktop_locked", "reason": "the Windows session is locked"})
         else:
             out = await worker.run(op, run, cfg, *args)
+        # The glow around the target (PRP-0192, UDR-0174 D4); never fails the tool.
+        await worker.run(glow.refresh, run)
     except asyncio.CancelledError:
         # The Stop button: the fetch was aborted and this coroutine cancelled. The
         # worker keeps running its job until it checks the event, so set it (D11).
@@ -187,7 +189,10 @@ async def computer_capture_screen(
 
 _ACTIONS_HELP = (
     "Steps executed in order. Each is an object with 'type': "
-    "click|double_click|right_click|move {element | x,y}; drag {from:{..}, to:{..}}; "
+    "click|double_click|right_click|move {element | x,y}; "
+    "drag {from:{..}, to:{..}, button?, modifiers?:['ctrl'|'shift'|'alt'|'win'], hold_ms?, duration_ms?, hover_ms?} "
+    "(drag-and-drop; Ctrl copies); draw {points:[[x,y],..] 2..200 image coords, smooth?, button?, modifiers?, "
+    "duration_ms? <=5000} (one stroke; smooth:true curves through the points, 8-12 points draw a circle); "
     "type_text {text | secret}; keypress {keys: ['ctrl','s'] or 'enter'}; "
     "scroll {dy, dx?, element|x,y?} (dy>0 scrolls down); "
     "wait_for_change {timeout_ms?}; wait_until_stable {stable_ms?, timeout_ms?}; "

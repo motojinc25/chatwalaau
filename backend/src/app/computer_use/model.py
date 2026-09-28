@@ -21,9 +21,19 @@ if TYPE_CHECKING:
 REQUIRED_FEATURES: frozenset[str] = frozenset(
     {"windows.list", "windows.focus", "screen.capture", "input.pointer", "input.keys", "input.text"}
 )
-#: Precision / convenience layers, each with a host fallback.
+#: Precision / convenience layers, each with a host fallback. ``input.path`` (drag options,
+#: draw) and ``ui.overlay`` (the glow around the controlled window) came with PRP-0192.
 OPTIONAL_FEATURES: frozenset[str] = frozenset(
-    {"windows.resize", "windows.dialog", "session.lock", "ui.elements", "ui.caret", "input.clipboard"}
+    {
+        "windows.resize",
+        "windows.dialog",
+        "session.lock",
+        "ui.elements",
+        "ui.caret",
+        "input.clipboard",
+        "input.path",
+        "ui.overlay",
+    }
 )
 #: Transport-level features of the MCP protocol (CTR-0236, PRP-0190 Section 2.3): a
 #: thumbnail with every capture and in-memory frame handles rendered on request. OPTIONAL in
@@ -103,6 +113,15 @@ class Changes:
     changed: bool = False
 
 
+@dataclass(frozen=True)
+class PathResult:
+    """One ``input_path`` answer (PRP-0192): ``interrupted`` is ``user_mouse`` or ``cancelled``."""
+
+    completed: bool
+    interrupted: str | None = None
+    moved: int = 0
+
+
 @dataclass
 class Frame:
     """One capture of a screen rectangle.
@@ -128,6 +147,7 @@ __all__ = [
     "Changes",
     "Element",
     "Frame",
+    "PathResult",
     "Rect",
     "WindowInfo",
 ]

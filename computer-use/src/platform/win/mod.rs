@@ -7,6 +7,9 @@
 //!   Duplication as an internal fast path with GDI fallback (UDR-0173 D3, `dxgi.rs`);
 //! * repaint reports (`screen.changes`, PRP-0191 A1): DXGI dirty / move rectangles, from the
 //!   same duplication that captures (`dxgi.rs`);
+//! * path input (`input.path`, PRP-0192): the follower of `crate::path` over `SetCursorPos` +
+//!   `SendInput`, with the system drag threshold; the capture-excluded glow (`ui.overlay`,
+//!   `overlay.rs`);
 //! * elements: UI Automation (control view walk, interactive controls first);
 //! * input: ``SendInput`` -- mouse, key chords (extended keys, modifier order) and Unicode
 //!   text (``KEYEVENTF_UNICODE``); clipboard paste with restore (``arboard``).
@@ -15,6 +18,7 @@
 //! COM-initialised (STA); UI Automation elements never leave it.
 
 mod dxgi;
+mod overlay;
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -35,25 +39,28 @@ use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_SWITCHDESKTOP, GetUserObjectInformationW, OpenInputDesktop, UOI_NAME,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, IsWindowEnabled, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
-    MOUSEINPUT, SendInput, VIRTUAL_KEY,
+    MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput, VIRTUAL_KEY, GetAsyncKeyState,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GUITHREADINFO, GW_OWNER, GWL_EXSTYLE, GetCursorPos, GetForegroundWindow,
     GetGUIThreadInfo, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed, SW_RESTORE, SWP_NOACTIVATE,
-    SWP_NOZORDER, SetCursorPos, SetForegroundWindow, SetWindowPos, ShowWindow, WS_EX_TOOLWINDOW,
+    SWP_NOZORDER, SetCursorPos, SetForegroundWindow, SetWindowPos, ShowWindow, WS_EX_TOOLWINDOW, GetSystemMetrics,
+    SM_CXDRAG, SM_CYDRAG,
 };
 use windows::core::{BOOL, PWSTR};
 
 use crate::changes::ChangeReport;
 use crate::desktop::{Captured, Desktop};
+use crate::path::{PathIo, PathReport, PathSpec};
 use crate::imaging::{RgbImage, encode_png, gray_thumbnail};
 use crate::protocol::*;
 
@@ -61,7 +68,8 @@ const WHEEL_DELTA: i32 = 120;
 const VK_MENU: u16 = 0x12;
 const VK_RETURN: u16 = 0x0D;
 /// Keys that need ``KEYEVENTF_EXTENDEDKEY`` (page / arrows / home / end / ins / del / apps).
-const EXTENDED_VK: [u16; 11] = [0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5D];
+/// and the Windows keys, which only `input_path` modifiers press.
+const EXTENDED_VK: [u16; 13] = [0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5D, 0x5B, 0x5C];
 const MODIFIERS: [&str; 3] = ["ctrl", "shift", "alt"];
 
 /// Control types offered as click targets, in priority order (PRP-0189 Section 2.7).
@@ -432,7 +440,10 @@ impl Desktop for Win32Desktop {
         unsafe extern "system" fn cb(h: HWND, lp: LPARAM) -> BOOL {
             let found = unsafe { &mut *(lp.0 as *mut Vec<HWND>) };
             unsafe {
-                if IsWindowVisible(h).as_bool()
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(h, Some(&mut pid));
+                if pid != GetCurrentProcessId()
+                    && IsWindowVisible(h).as_bool()
                     && GetWindow(h, GW_OWNER).map(|o| o.0.is_null()).unwrap_or(true)
                     && (GetWindowLongW(h, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0) == 0
                     && GetWindowTextLengthW(h) > 0
@@ -558,7 +569,57 @@ impl Desktop for Win32Desktop {
     }
 
     fn changes(&mut self, rect: Rect, since: Option<u64>, timeout: Duration, ignore: &[Rect]) -> OpResult<ChangeReport> {
-        Ok(self.dxgi.changes(rect, since, timeout, ignore))
+        // The glow's own band (and what it just left) is never a repaint (UDR-0174 D2).
+        let mut ignore = ignore.to_vec();
+        ignore.extend(overlay::self_rects());
+        Ok(self.dxgi.changes(rect, since, timeout, &ignore))
+    }
+
+    fn path(&mut self, spec: &PathSpec) -> OpResult<PathReport> {
+        let threshold = unsafe { GetSystemMetrics(SM_CXDRAG).max(GetSystemMetrics(SM_CYDRAG)) }.max(1);
+        let plan = crate::path::plan(spec, threshold);
+        let mut io = WinIo { t0: Instant::now() };
+        crate::path::follow(&mut io, spec, &plan)
+    }
+
+    fn release_input(&mut self) -> OpResult<Vec<&'static str>> {
+        // Mouse buttons first, then the modifiers (UDR-0174 D6: after a provider was lost mid-path).
+        const HELD: [(u16, &str); 8] = [
+            (0x01, "left"),
+            (0x02, "right"),
+            (0x04, "middle"),
+            (0x11, "ctrl"),
+            (0x10, "shift"),
+            (0x12, "alt"),
+            (0x5B, "win"),
+            (0x5C, "win"),
+        ];
+        let mut released = Vec::new();
+        for (vk, name) in HELD {
+            let down = unsafe { GetAsyncKeyState(i32::from(vk)) } as u16 & 0x8000 != 0;
+            if !down {
+                continue;
+            }
+            let event = match vk {
+                0x01 => Self::mouse(MOUSEEVENTF_LEFTUP, 0),
+                0x02 => Self::mouse(MOUSEEVENTF_RIGHTUP, 0),
+                0x04 => Self::mouse(MOUSEEVENTF_MIDDLEUP, 0),
+                _ => Self::key(vk, true),
+            };
+            if Self::send(&[event]).is_ok() && !released.contains(&name) {
+                released.push(name);
+            }
+        }
+        Ok(released)
+    }
+
+    fn overlay_show(&mut self, id: i64, ttl: Duration) -> OpResult<(bool, Option<&'static str>)> {
+        Ok(overlay::show(id, ttl))
+    }
+
+    fn overlay_hide(&mut self) -> OpResult<()> {
+        overlay::hide();
+        Ok(())
     }
 
     fn elements(&mut self, id: i64, max: usize, budget: Duration) -> OpResult<Vec<ElementInfo>> {
@@ -746,6 +807,63 @@ impl Desktop for Win32Desktop {
     }
 }
 
+/// `crate::path::PathIo` on the real desktop. Moves are `SetCursorPos` (pixel-exact) plus a
+/// zero relative `SendInput` move, so applications receive a real mouse-move input event.
+struct WinIo {
+    t0: Instant,
+}
+
+fn modifier_vk(name: &str) -> u16 {
+    match name {
+        "ctrl" => 0x11,
+        "shift" => 0x10,
+        "alt" => 0x12,
+        _ => 0x5B, // win
+    }
+}
+
+fn button_flags(button: &str) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS) {
+    match button {
+        "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+        _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+    }
+}
+
+impl PathIo for WinIo {
+    fn now_ms(&mut self) -> u64 {
+        u64::try_from(self.t0.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+    fn sleep_ms(&mut self, ms: u32) {
+        // std's sleep uses a high-resolution waitable timer on Windows (not the 15.6 ms tick).
+        std::thread::sleep(Duration::from_millis(u64::from(ms)));
+    }
+    fn cursor(&mut self) -> (i32, i32) {
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        (pt.x, pt.y)
+    }
+    fn move_to(&mut self, x: i32, y: i32) -> OpResult<()> {
+        unsafe { SetCursorPos(x, y) }.map_err(|_| ProviderError::new(ErrorCode::InputBlocked, "SetCursorPos failed"))?;
+        Win32Desktop::send(&[Win32Desktop::mouse(MOUSEEVENTF_MOVE, 0)])
+    }
+    fn press(&mut self, spec: &PathSpec) -> OpResult<()> {
+        for m in &spec.modifiers {
+            Win32Desktop::send(&[Win32Desktop::key(modifier_vk(m), false)])?;
+        }
+        Win32Desktop::send(&[Win32Desktop::mouse(button_flags(spec.button).0, 0)])
+    }
+    fn release(&mut self, spec: &PathSpec) {
+        // Each event on its own: one refused "up" must not keep the others down.
+        let _ = Win32Desktop::send(&[Win32Desktop::mouse(button_flags(spec.button).1, 0)]);
+        for m in spec.modifiers.iter().rev() {
+            let _ = Win32Desktop::send(&[Win32Desktop::key(modifier_vk(m), true)]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,5 +925,33 @@ mod tests {
         assert!(!far.available);
         // Captures still work from the same duplication.
         assert!(dup.capture(area).is_some() || capture_gdi(area).is_ok());
+    }
+
+    /// Real desktop only (`cargo test --release -- --ignored --test-threads=1`): the glow around
+    /// the foreground window never appears in a capture (UDR-0174 D1). The band area is grabbed
+    /// with GDI while the glow is shown and after it is hidden; teal-tinted pixels must not grow.
+    #[test]
+    #[ignore]
+    fn the_glow_is_not_captured_on_the_real_desktop() {
+        init_desktop_thread();
+        let fg = unsafe { GetForegroundWindow() };
+        assert!(!fg.0.is_null(), "no foreground window");
+        let mut r = RECT::default();
+        unsafe { GetWindowRect(fg, &mut r) }.expect("window rect");
+        // A strip just above the window's top edge (inside the band when it fits outside).
+        let area = Rect::new(r.left.max(0), (r.top - 8).max(0), (r.left + 400).max(1), (r.top + 2).max(1));
+        let (shown, reason) = overlay::show(fg.0 as i64, Duration::from_secs(10));
+        if !shown {
+            eprintln!("glow not shown ({reason:?}); nothing to check on this machine");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let with_glow = capture_gdi(area).expect("GDI capture with the glow");
+        overlay::hide();
+        std::thread::sleep(Duration::from_millis(300));
+        let without = capture_gdi(area).expect("GDI capture without the glow");
+        let teal = |img: &RgbImage| img.data.chunks_exact(3).filter(|p| p[2] > p[0] + 60 && p[1] > p[0] + 40).count();
+        eprintln!("teal-ish pixels: with glow {}, without {}", teal(&with_glow), teal(&without));
+        assert!(teal(&with_glow) <= teal(&without) + 4, "the glow leaked into a GDI capture");
     }
 }

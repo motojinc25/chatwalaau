@@ -20,6 +20,11 @@ dialog detection, window resize, session-lock detection and clipboard paste. The
 engine degrades when an optional feature is absent instead of failing the tool: an
 element target is refused with ``unsupported`` and the model falls back to x / y.
 
+PATH input and the GLOW (PRP-0192, OPTIONAL ``input.path`` / ``ui.overlay``): drag options and
+``draw`` run as one timed path with a held button that the provider always releases; the glow
+is a capture-excluded band around the target. Without ``input.path`` only the plain straight
+``drag`` exists; without ``ui.overlay`` there is no glow.
+
 EVENT features (PRP-0191 A1): ``screen.changes`` lets the waits of the perception layer
 capture only after the provider reported a repaint; without it (or when a rectangle cannot
 be watched) they poll. The verdict is the same thumbnail comparison either way.
@@ -27,7 +32,7 @@ be watched) they poll. The verdict is the same thumbnail comparison either way.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 # The seam types and the feature vocabulary (app.computer_use.model, PRP-0191 moved them
 # back from the retired Python provider package); re-exported here unchanged.
@@ -41,9 +46,13 @@ from app.computer_use.model import (
     Changes,
     Element,
     Frame,
+    PathResult,
     Rect,
     WindowInfo,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def has(backend: object, feature: str) -> bool:
@@ -103,6 +112,24 @@ class DesktopBackend(Protocol):
 
     def paste_text(self, text: str) -> None: ...  # OPTIONAL input.clipboard
 
+    def path(  # OPTIONAL input.path
+        self,
+        points: list[tuple[int, int]],
+        button: str,
+        modifiers: list[str],
+        hold_ms: int,
+        duration_ms: int,
+        hover_ms: int,
+        takeover_px: int,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> PathResult: ...
+
+    def release_input(self) -> list[str]: ...  # OPTIONAL input.path
+
+    def overlay_show(self, hwnd: int, ttl_s: float) -> bool: ...  # OPTIONAL ui.overlay
+
+    def overlay_hide(self) -> None: ...  # OPTIONAL ui.overlay
+
 
 __all__ = [
     "EVENT_FEATURES",
@@ -115,6 +142,7 @@ __all__ = [
     "DesktopBackend",
     "Element",
     "Frame",
+    "PathResult",
     "Rect",
     "WindowInfo",
     "has",

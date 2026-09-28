@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import contextlib
 import logging
 import sys
 import threading
@@ -90,6 +91,25 @@ async def run[T](fn: Callable[..., T], *args: Any) -> T:
     """Run ``fn(backend, *args)`` on the desktop worker and await it."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_pool(), lambda: fn(_get_backend(), *args))
+
+
+def submit(fn: Callable[..., Any]) -> None:
+    """Fire-and-forget ``fn(backend)`` on the desktop worker, only when a backend exists.
+
+    For cleanup from places that must not await (a stream's ``finally``): it never starts the
+    provider and never raises.
+    """
+    if _backend is None:
+        return
+
+    def job() -> None:
+        try:
+            fn(_get_backend())
+        except Exception:
+            logger.debug("computer use cleanup failed", exc_info=True)
+
+    with contextlib.suppress(RuntimeError):  # the pool is shutting down
+        _pool().submit(job)
 
 
 # ---- hotkey -----------------------------------------------------------------------------------

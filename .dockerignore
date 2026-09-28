@@ -110,3 +110,9 @@ CLAUDE.md
 
 # ---- Desktop build artifacts ----
 desktop/
+
+# ---- Computer Use provider (PRP-0191) ----
+# Only computer-use/pyproject.toml + README.md are copied (uv metadata while the temporary
+# path source exists); the Rust build output and wheels never enter the build context.
+computer-use/target/
+computer-use/dist/

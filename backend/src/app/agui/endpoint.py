@@ -64,6 +64,7 @@ from app.agui.agent_registry import AgentRegistry
 from app.agui.sanitize import TextSanitizer
 from app.agui.token_usage import context_base_tokens, turn_summary
 from app.auth import is_client_loopback, verify_api_key
+from app.computer_use.glow import end_run as end_computer_use_run
 from app.computer_use.state import begin_run as begin_computer_use_run
 from app.core import provider_errors
 from app.core.config import settings
@@ -2038,6 +2039,10 @@ async def _stream_with_reasoning(
         # double-dispatch. Sync dispatch only; never yields.
         if sys.exc_info()[0] is not None:
             _dispatch_title_clear()
+
+        # Computer Use (PRP-0192, UDR-0174 D4): the run is over on EVERY exit, so the glow
+        # around the window it controlled goes away. Fire-and-forget; never yields.
+        end_computer_use_run()
 
         # Token Usage Ledger (CTR-0200, PRP-0158, UDR-0136 D5/D6/D8). The turn is
         # recorded HERE, in the finally, because this is the only place that runs on

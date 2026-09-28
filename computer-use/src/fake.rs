@@ -10,15 +10,19 @@
 //!
 //! Two test tools exist only here and are never listed: `fake_events` (the input log) and
 //! `fake_set` (foreground / cursor / locked / change_screen, and for `screen.changes`:
-//! `dirty` -- a repaint without a pixel change -- and `changes_available`). A published wheel
-//! never contains this module.
+//! `dirty` -- a repaint without a pixel change -- and `changes_available`; for `input.path`:
+//! `takeover_after_ms` -- the "user" grabs the mouse that long into the next path -- and `held`,
+//! what `input_release` finds down). A path runs the REAL follower (`path.rs`) on a real clock,
+//! so release, takeover and cancel behave as on Windows. A published wheel never contains this
+//! module.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
 use crate::changes::{ChangeLog, ChangeReport};
 use crate::desktop::{Captured, Desktop};
+use crate::path::{PathIo, PathReport, PathSpec};
 use crate::protocol::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,6 +72,42 @@ pub struct FakeDesktop {
     elements: Vec<ElementInfo>,
     repaints: ChangeLog,
     changes_available: bool,
+    takeover_after_ms: Option<u64>,
+    held: Vec<&'static str>,
+}
+
+/// The follower's view of the fake: a real clock, the fake cursor, events for the tests.
+struct FakeIo<'a> {
+    desk: &'a mut FakeDesktop,
+    t0: Instant,
+    grab_at: Option<u64>,
+}
+
+impl PathIo for FakeIo<'_> {
+    fn now_ms(&mut self) -> u64 {
+        self.t0.elapsed().as_millis() as u64
+    }
+    fn sleep_ms(&mut self, ms: u32) {
+        std::thread::sleep(Duration::from_millis(u64::from(ms)));
+    }
+    fn cursor(&mut self) -> (i32, i32) {
+        let now = self.now_ms();
+        match self.grab_at {
+            Some(t) if now >= t => (self.desk.cursor.0 + 500, self.desk.cursor.1),
+            _ => self.desk.cursor,
+        }
+    }
+    fn move_to(&mut self, x: i32, y: i32) -> OpResult<()> {
+        self.desk.cursor = (x, y);
+        Ok(())
+    }
+    fn press(&mut self, spec: &PathSpec) -> OpResult<()> {
+        self.desk.event(json!(["press", spec.button, spec.modifiers]));
+        Ok(())
+    }
+    fn release(&mut self, spec: &PathSpec) {
+        self.desk.event(json!(["release", spec.button, spec.modifiers]));
+    }
 }
 
 fn win(hwnd: i64, title: &str, process: &str, pid: u32, rect: Rect, monitor: i32) -> WindowInfo {
@@ -99,6 +139,8 @@ impl FakeDesktop {
                 log
             },
             changes_available: true,
+            takeover_after_ms: None,
+            held: Vec::new(),
         }
     }
 
@@ -216,6 +258,31 @@ impl Desktop for FakeDesktop {
         std::thread::sleep(timeout);
         Ok(self.repaints.report(&rect, since, ignore))
     }
+    fn path(&mut self, spec: &PathSpec) -> OpResult<PathReport> {
+        let first = spec.points.first().copied().unwrap_or((0, 0));
+        let last = spec.points.last().copied().unwrap_or(first);
+        self.event(json!([
+            "path", spec.button, spec.modifiers, spec.points.len(), [first.0, first.1], [last.0, last.1],
+            spec.hold_ms, spec.duration_ms, spec.hover_ms
+        ]));
+        let plan = crate::path::plan(spec, 4);
+        let grab_at = self.takeover_after_ms.take();
+        let mut io = FakeIo { desk: self, t0: Instant::now(), grab_at };
+        crate::path::follow(&mut io, spec, &plan)
+    }
+    fn release_input(&mut self) -> OpResult<Vec<&'static str>> {
+        let released = std::mem::take(&mut self.held);
+        self.event(json!(["release_all", released]));
+        Ok(released)
+    }
+    fn overlay_show(&mut self, hwnd: i64, ttl: Duration) -> OpResult<(bool, Option<&'static str>)> {
+        self.event(json!(["overlay_show", hwnd, ttl.as_millis() as u64]));
+        Ok((true, None))
+    }
+    fn overlay_hide(&mut self) -> OpResult<()> {
+        self.event(json!(["overlay_hide"]));
+        Ok(())
+    }
     fn test_tool(&mut self, name: &str, args: &Map<String, Value>) -> Option<OpResult<Value>> {
         match name {
             "fake_events" => Some(Ok(json!({"events": self.events}))),
@@ -245,6 +312,16 @@ impl Desktop for FakeDesktop {
                 }
                 if let Some(a) = args.get("changes_available").and_then(Value::as_bool) {
                     self.changes_available = a;
+                }
+                if let Some(ms) = args.get("takeover_after_ms").and_then(Value::as_u64) {
+                    self.takeover_after_ms = Some(ms);
+                }
+                if let Some(names) = args.get("held").and_then(Value::as_array) {
+                    self.held = names
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter_map(|n| ["left", "right", "middle", "ctrl", "shift", "alt", "win"].into_iter().find(|k| *k == n))
+                        .collect();
                 }
                 Some(Ok(json!({})))
             }

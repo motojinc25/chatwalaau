@@ -19,14 +19,16 @@ pub const REQUIRED_FEATURES: [&str; 6] = [
     "input.keys",
     "input.text",
 ];
-/// Precision / convenience layers (RES-0007 F2).
-pub const OPTIONAL_FEATURES: [&str; 6] = [
+/// Precision / convenience layers (RES-0007 F2), plus path input and the glow (PRP-0192).
+pub const OPTIONAL_FEATURES: [&str; 8] = [
     "windows.resize",
     "windows.dialog",
     "session.lock",
     "ui.elements",
     "ui.caret",
     "input.clipboard",
+    "input.path",
+    "ui.overlay",
 ];
 /// Transport features of the MCP protocol (CTR-0236, PRP-0190 Section 2.3).
 pub const PROTOCOL_FEATURES: [&str; 2] = ["screen.thumbnail", "screen.frames"];
@@ -43,7 +45,7 @@ pub const FRAME_CACHE: usize = 4;
 pub const ELEMENT_GENERATIONS: usize = 2;
 
 /// operation (tool) name -> the feature that must be declared for it.
-pub const OPERATIONS: [(&str, Option<&str>); 22] = [
+pub const OPERATIONS: [(&str, Option<&str>); 27] = [
     ("describe", None),
     ("windows_list", Some("windows.list")),
     ("windows_get", Some("windows.list")),
@@ -66,6 +68,11 @@ pub const OPERATIONS: [(&str, Option<&str>); 22] = [
     ("input_keys", Some("input.keys")),
     ("input_type_text", Some("input.text")),
     ("input_paste", Some("input.clipboard")),
+    ("input_path", Some("input.path")),
+    ("input_cancel", Some("input.path")),
+    ("input_release", Some("input.path")),
+    ("overlay_show", Some("ui.overlay")),
+    ("overlay_hide", Some("ui.overlay")),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -239,7 +246,7 @@ mod tests {
 
     #[test]
     fn operations_match_ctr0236() {
-        assert_eq!(OPERATIONS.len(), 22);
+        assert_eq!(OPERATIONS.len(), 27);
         assert_eq!(OPERATIONS[0].0, "describe");
     }
 }

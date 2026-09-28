@@ -1111,6 +1111,17 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         max=3,
         help="Older screenshots of the same reply are replaced by a placeholder before each model call.",
     ),
+    SettingDescriptor(
+        "computer_use_overlay",
+        "Glow around the controlled window",
+        "computer_use",
+        "bool",
+        SCOPE_RUNTIME,
+        help=(
+            "While the agent controls a window, a soft glow surrounds it so you can see which window is in use. "
+            "It never appears in the agent's screenshots."
+        ),
+    ),
 )
 
 

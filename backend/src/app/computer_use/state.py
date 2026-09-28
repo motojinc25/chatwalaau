@@ -44,6 +44,9 @@ class RunState:
     obs_seq: int = 0
     last_cursor: tuple[int, int] | None = None
     last_return: float | None = None
+    # The glow around the target (PRP-0192, UDR-0174 D4): the window it is shown on, and when.
+    glow_hwnd: int | None = None
+    glow_at: float = 0.0
 
     def next_obs_id(self) -> str:
         self.obs_seq += 1

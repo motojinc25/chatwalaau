@@ -1,5 +1,9 @@
 //! The MCP stdio server (CTR-0236): `describe`, the 20 RES-0007 operations and
-//! `screen_changes` (PRP-0191 A1) as tools.
+//! `screen_changes` (PRP-0191 A1), path input and the glow (PRP-0192) as tools.
+//!
+//! `input_cancel` is answered HERE, on the MCP task: the desktop thread is busy following the
+//! path it must stop (UDR-0174 D7). An MCP `notifications/cancelled` for a running
+//! `input_path` has the same effect.
 //!
 //! Results: JSON as structured content and as text; a PNG as `image` content. Errors: an
 //! `isError` result whose text and structured content are `{"error": code, "message": ...}`.
@@ -114,6 +118,26 @@ fn tools() -> Vec<Tool> {
         ),
         ("input_type_text", "Type Unicode text with key events.", json!({"text": s}), vec!["text"]),
         ("input_paste", "Paste text through the clipboard (restored afterwards).", json!({"text": s}), vec!["text"]),
+        (
+            "input_path",
+            "Follow a polyline (physical [x, y] points, 2..2000) with a held button: drag threshold first, then              hold_ms, the path over duration_ms (50..5000), hover_ms, release. Stops and releases when the              cursor is moved more than takeover_px by the user, or on input_cancel.",
+            json!({
+                "points": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}},
+                "button": {"type": "string", "enum": ["left", "right", "middle"]},
+                "modifiers": {"type": "array", "items": {"type": "string", "enum": ["ctrl", "shift", "alt", "win"]}},
+                "hold_ms": int, "duration_ms": int, "hover_ms": int, "takeover_px": int
+            }),
+            vec!["points"],
+        ),
+        ("input_cancel", "Stop the running input_path (it releases everything).", json!({}), vec![]),
+        ("input_release", "Release every mouse button and modifier key that is down.", json!({}), vec![]),
+        (
+            "overlay_show",
+            "Show the capture-excluded glow around a window for ttl_ms (1000..600000).",
+            json!({"handle": handle, "ttl_ms": int}),
+            vec!["handle"],
+        ),
+        ("overlay_hide", "Hide the glow.", json!({}), vec![]),
     ];
     defs.into_iter()
         .map(|(name, desc, props, required)| Tool::new(name, desc, Arc::new(schema(props, &required))))
@@ -153,11 +177,38 @@ impl ServerHandler for DesktopServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let name = request.name.to_string();
         let args = request.arguments.unwrap_or_default();
-        let result = match self.desktop.call(name, args).await {
+        if name == "input_cancel" {
+            // Never queued: the desktop thread is the one to stop (UDR-0174 D7).
+            let body = json!({"cancelled": crate::path::request_cancel()});
+            let mut ok = CallToolResult::success(vec![ContentBlock::text(body.to_string())]);
+            ok.structured_content = Some(body);
+            return Ok(CallToolResponse::Complete(ok));
+        }
+        let is_path = name == "input_path";
+        if is_path {
+            crate::path::PENDING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let call = self.desktop.call(name, args);
+        let outcome = if is_path {
+            tokio::pin!(call);
+            tokio::select! {
+                done = &mut call => done,
+                _ = context.ct.cancelled() => {
+                    crate::path::request_cancel();
+                    call.await
+                }
+            }
+        } else {
+            call.await
+        };
+        if is_path {
+            crate::path::path_done();
+        }
+        let result = match outcome {
             Ok((body, png)) => {
                 let mut content = vec![ContentBlock::text(body.to_string())];
                 if let Some(png) = png {

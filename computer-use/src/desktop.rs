@@ -16,6 +16,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use serde_json::{Map, Value, json};
 
 use crate::changes::{ChangeReport, MAX_IGNORE, MAX_TIMEOUT_MS};
+use crate::path::{PathReport, PathSpec};
 use crate::protocol::*;
 
 /// One capture. `gray` is the 192x108 thumbnail; `encode` renders a PNG of it at w x h.
@@ -53,6 +54,21 @@ pub trait Desktop {
     /// token at once), waiting up to `timeout` for one. Only called when declared.
     fn changes(&mut self, _rect: Rect, since: Option<u64>, _timeout: Duration, _ignore: &[Rect]) -> OpResult<ChangeReport> {
         Ok(ChangeReport::unavailable(since.unwrap_or(0), "unsupported"))
+    }
+    /// `input.path` (PRP-0192): follow `spec` with a held button; releases on EVERY exit.
+    fn path(&mut self, _spec: &PathSpec) -> OpResult<PathReport> {
+        Err(ProviderError::new(ErrorCode::Unsupported, "input.path is not available"))
+    }
+    /// `input_release`: lift every mouse button / modifier reported down; their names.
+    fn release_input(&mut self) -> OpResult<Vec<&'static str>> {
+        Ok(Vec::new())
+    }
+    /// `ui.overlay` (PRP-0192): show the glow around `hwnd` for `ttl`; (shown, reason).
+    fn overlay_show(&mut self, _hwnd: i64, _ttl: Duration) -> OpResult<(bool, Option<&'static str>)> {
+        Ok((false, Some("unsupported")))
+    }
+    fn overlay_hide(&mut self) -> OpResult<()> {
+        Ok(())
     }
     /// Test builds only: extra tools a fake desktop answers (never listed).
     fn test_tool(&mut self, _name: &str, _args: &Map<String, Value>) -> Option<OpResult<Value>> {
@@ -170,6 +186,30 @@ impl Provider {
             "screen_capture" => self.capture(args),
             "screen_encode" => self.encode(args),
             "screen_changes" => self.changes(args),
+            "input_path" => {
+                let spec = crate::path::parse(args)?;
+                none(self.desktop.path(&spec)?.to_json())
+            }
+            // Normally answered by the server without queueing (server.rs); kept for completeness.
+            "input_cancel" => none(json!({"cancelled": crate::path::request_cancel()})),
+            "input_release" => none(json!({"released": self.desktop.release_input()?})),
+            "overlay_show" => {
+                let hwnd = hwnd_of(args)?;
+                let ttl = int_arg(args, "ttl_ms", Some(300_000))?;
+                if !(1_000..=600_000).contains(&ttl) {
+                    return Err(ProviderError::invalid("ttl_ms is 1000..600000"));
+                }
+                let (shown, reason) = self.desktop.overlay_show(hwnd, Duration::from_millis(ttl as u64))?;
+                let mut body = json!({"shown": shown});
+                if let Some(reason) = reason {
+                    body["reason"] = Value::String(reason.into());
+                }
+                none(body)
+            }
+            "overlay_hide" => {
+                self.desktop.overlay_hide()?;
+                none(json!({}))
+            }
             "ui_elements" => self.ui_elements(args),
             "ui_element_rect" => {
                 let key = str_arg(args, "key");

@@ -14,7 +14,7 @@ build-backend = "maturin"
 
 [project]
 name = "chatwalaau-computer-use"
-version = "0.1.0"
+version = "0.2.0"
 description = "ChatWalaau Computer Use desktop provider: a native stdio MCP server (chatwalaau.computer-use/1)"
 readme = "README.md"
 requires-python = ">=3.12"
