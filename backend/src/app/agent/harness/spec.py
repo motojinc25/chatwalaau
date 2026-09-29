@@ -109,6 +109,8 @@ class HarnessAgentSpec:
     file_memory_disabled: bool = False
     file_access_disable_write_tools: bool = False
     web_search_disabled: bool = False
+    # PRP-0193 / UDR-0175 D5: `codeAct: {disabled: true}` removes the CodeAct provider.
+    code_act_disabled: bool = False
     # None => MAF harness DEFAULT_MAX_ITERATIONS; always clamped to it (D4).
     loop_max_iterations: int | None = None
 

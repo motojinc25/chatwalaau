@@ -439,6 +439,14 @@ class Settings(BaseSettings):
     # PRP-0192 (UDR-0174 D4): a capture-excluded glow around the controlled window.
     computer_use_overlay: bool = True
 
+    # CodeAct compute sandbox (PRP-0193, CTR-0239, UDR-0175 D5 / D7). App Settings keys
+    # (CTR-0198), all `runtime`: read by the provider's before_run on every run. OFF by
+    # default (operator C3). The bounds are the operator's first configuration (Q2):
+    # 10 s and 64 MB per execution; one execution at a time is fixed in code.
+    codeact_enabled: bool = False
+    codeact_max_duration_secs: int = 10
+    codeact_max_memory_mb: int = 64
+
     # File Explorer (CTR-0006, CTR-0136/0137, PRP-0091, UDR-0069)
     # Human-facing file browse/edit over the coding workspace. OFF unless
     # FILE_EXPLORER_ENABLED; every file operation ADDITIONALLY requires

@@ -136,6 +136,15 @@ def _is_skills_provider(obj: Any) -> bool:
     return type(obj).__name__.endswith("SkillsProvider")
 
 
+def _is_codeact_provider(obj: Any) -> bool:
+    """True when ``obj`` is the CodeAct context provider (by type, CTR-0239)."""
+    try:
+        from app.agent.codeact.provider import is_codeact_provider
+    except Exception:  # pragma: no cover - defensive; the package is a declared dependency
+        return False
+    return is_codeact_provider(obj)
+
+
 def _tool_name(obj: Any) -> str:
     return str(getattr(obj, "name", None) or getattr(obj, "__name__", None) or "")
 
@@ -203,6 +212,14 @@ def subset_for_model(
         if capability_withheld(model, "skills"):
             out_providers = [p for p in out_providers if not _is_skills_provider(p)]
             withheld.append("skills")
+
+        # -- CodeAct (PRP-0193, UDR-0175 D5) ---------------------------------
+        # Like Skills: a context provider that injects its tool and guidance per run,
+        # so withholding it means dropping the provider (tool and guidance go
+        # together, UDR-0167 D6). Recorded only when the provider is on the surface.
+        if any(_is_codeact_provider(p) for p in out_providers) and capability_withheld(model, "code_act"):
+            out_providers = [p for p in out_providers if not _is_codeact_provider(p)]
+            withheld.append("code_act")
 
         # -- hosted web search -----------------------------------------------
         # Attached LAST so it is never a candidate for the filters above, and decided

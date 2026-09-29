@@ -130,6 +130,11 @@ interface OfferingCapabilities {
    * in function results; the `foundry` provider lane is closed in code regardless.
    */
   computer_use?: boolean
+  /**
+   * PRP-0193 / UDR-0175 D5: execute_code, the CodeAct compute sandbox. `false` drops the
+   * provider for THIS model; the sandbox exists at all only while App Settings > CodeAct is on.
+   */
+  code_act?: boolean
 }
 
 interface Offering {
@@ -246,6 +251,7 @@ const CAPABILITY_KEYS = [
   'skills',
   'image_generation',
   'computer_use',
+  'code_act',
 ] as const
 
 const STRUCTURED_OUTPUT_CAPABILITY_HELP =
@@ -306,6 +312,11 @@ const COMPUTER_USE_CAPABILITY_HELP =
   'with poor click accuracy. The tools exist at all only when COMPUTER_USE_ENABLED=true on a Windows ' +
   'host the backend runs on locally, and are always closed for the Foundry provider, whose client ' +
   'drops images in tool results.'
+
+const CODE_ACT_CAPABILITY_HELP =
+  'Whether THIS chat deployment is offered execute_code, the CodeAct compute sandbox (a Python ' +
+  'snippet run with no files, no network and no other tools). Set "Not available" for a model with ' +
+  'weak function calling. The sandbox is offered at all only when App Settings > CodeAct is on.'
 
 const ENDPOINT_HELP =
   'endpoint = Azure OpenAI / Foundry resource URL. base_url = OpenAI-compatible gateway URL -- EXCEPT for ' +
@@ -827,6 +838,18 @@ function OfferingCard({
                   value={capabilityValue('computer_use')}
                   disabled={readOnly}
                   onChange={(e) => setCapability('computer_use', e.target.value)}>
+                  <option value="">Default (available)</option>
+                  <option value="true">Available</option>
+                  <option value="false">Not available on this deployment</option>
+                </select>
+              </Field>
+
+              <Field label="CodeAct" hint={CODE_ACT_CAPABILITY_HELP}>
+                <select
+                  className={CONTROL_CLASS}
+                  value={capabilityValue('code_act')}
+                  disabled={readOnly}
+                  onChange={(e) => setCapability('code_act', e.target.value)}>
                   <option value="">Default (available)</option>
                   <option value="true">Available</option>
                   <option value="false">Not available on this deployment</option>

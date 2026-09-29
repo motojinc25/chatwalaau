@@ -553,6 +553,27 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
     else:
         skills_provider = create_skills_provider(allowlist_names=spec.skill_allowlist)
 
+    # CodeAct compute sandbox (PRP-0193, CTR-0193, UDR-0175 D4 / D5). Removed at build
+    # time by the YAML switch or the offering's `code_act` opt-out (the chokepoint
+    # skills uses); otherwise attached, and the provider itself decides per run
+    # (App Setting codeact_enabled) -- which is what reaches this runtime while it is
+    # cached per conversation, because an App Settings apply does not rebuild it.
+    context_providers: list[Any] = []
+    if spec.code_act_disabled:
+        logger.info("Harness %s: CodeAct disabled by its YAML (codeAct.disabled).", spec.id)
+    elif capability_withheld(spec.model_id, "code_act"):
+        logger.info(
+            "Harness %s: CodeAct withheld for offering %s (capability gate); no provider.",
+            spec.id,
+            spec.model_id,
+        )
+    else:
+        from app.agent.codeact.provider import create_codeact_provider
+
+        codeact_provider = create_codeact_provider()
+        if codeact_provider is not None:
+            context_providers.append(codeact_provider)
+
     max_window, max_output, _budget_source = resolve_compaction_budget(spec)
     # Canary, unreachable by construction above. A declared-enabled compaction
     # that resolved to no strategy MUST fail loudly at build time rather than
@@ -642,6 +663,9 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         # an "unexpected keyword argument 'store'" TypeError from AsyncMessages.create
         # since PRP-0135 (operator-reported at v0.163.0; not a MAF 1.19 change).
         default_options=_harness_default_options(spec),
+        # PRP-0193: the CodeAct provider (or no argument at all), next to MAF's own
+        # harness providers.
+        **({"context_providers": context_providers} if context_providers else {}),
         # Only when a computer_* tool is mounted (CTR-0234); otherwise no middleware
         # argument at all -- no approval middleware on this lane (UDR-0161 D2).
         **({"middleware": harness_middleware} if harness_middleware else {}),
@@ -659,13 +683,14 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
     else:
         _compaction_desc = "off"
     logger.info(
-        "Harness agent built: id=%s model=%s tools=%d web_search=%s workspace=%s skills=%s compaction=%s",
+        "Harness agent built: id=%s model=%s tools=%d web_search=%s workspace=%s skills=%s code_act=%s compaction=%s",
         spec.id,
         spec.model_id,
         len(tools),
         not disable_web_search,
         workspace is not None,
         skills_provider is not None,
+        bool(context_providers),
         _compaction_desc,
     )
     return HarnessRuntime(agent, shell_executor)

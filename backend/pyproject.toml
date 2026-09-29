@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.171.0"
+version = "0.172.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -73,6 +73,17 @@ dependencies = [
     # $LASTEXITCODE in PERSISTENT sessions, which the stateless workspace shell
     # does not use.
     "agent-framework-tools==1.0.0b260918",
+    # CodeAct compute sandbox (PRP-0193, UDR-0175 D10). DECLARED because ChatWalaʻau
+    # SUBCLASSES it: app/agent/codeact `ChatWalaauCodeActProvider(MontyCodeActProvider)`
+    # and `OffLoopExecuteCodeTool(MontyExecuteCodeTool)`, which overrides the private
+    # `_run_code`. The transitively locked 1.0.0b260730 was INCOMPATIBLE with the
+    # pydantic-monty 0.0.19 it pulled (`Monty(code, ...)` against the new worker-pool
+    # API: every execute_code failed with a TypeError); 1.0.0b260918 requires >=0.0.23.
+    "agent-framework-monty==1.0.0b260918",
+    # EXACT pin (UDR-0175 D10): app/agent/codeact/bridge.py drives the pydantic-monty
+    # worker-pool API directly (off the event loop, D6), and that pre-1.0 API changed
+    # incompatibly between 0.0.19 and 0.0.23.
+    "pydantic-monty==0.0.23",
     # Declared because ChatWalaʻau SUBCLASSES it and overrides the private
     # `_prepare_options` chokepoint (app/providers/azure_openai.py, PRP-0082 /
     # UDR-0058). An undeclared package is an unpinned package (UDR-0109 D2).

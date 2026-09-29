@@ -199,6 +199,12 @@ GROUPS: tuple[SettingGroup, ...] = (
         "Computer Use",
         "Desktop automation tuning: window size, screenshot size, change and stability detection, and limits.",
     ),
+    # PRP-0193 (CTR-0198, UDR-0175): the CodeAct compute sandbox.
+    SettingGroup(
+        "codeact",
+        "CodeAct",
+        "A Python compute sandbox the agent can use for exact calculation and data shaping. No files, no network.",
+    ),
 )
 
 
@@ -1121,6 +1127,49 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
             "While the agent controls a window, a soft glow surrounds it so you can see which window is in use. "
             "It never appears in the agent's screenshots."
         ),
+    ),
+    # ---- CodeAct (runtime -- read by the provider's before_run) -------------
+    # PRP-0193 / UDR-0175 D5: a GATE in this store, allowed by UDR-0149's condition --
+    # the floor it protects is enforced where the store cannot reach: the sandbox has
+    # no filesystem, network or OS in code, DEMO_MODE (.env) closes it regardless, and
+    # every write here is CTR-0083 gated. `runtime`, not `rebuild`: the provider is
+    # attached unconditionally and decides per run, which is also what reaches the
+    # cached harness runtimes an App Settings apply does not rebuild.
+    SettingDescriptor(
+        "codeact_enabled",
+        "CodeAct compute sandbox",
+        "codeact",
+        "bool",
+        SCOPE_RUNTIME,
+        help=(
+            "Offer every agent the execute_code tool: a Python sandbox for exact arithmetic, dates, "
+            "data shaping and regular expressions. It has no files, no network and no other tools. "
+            "Demo deployments never offer it."
+        ),
+    ),
+    SettingDescriptor(
+        "codeact_max_duration_secs",
+        "Time limit per execution (s)",
+        "codeact",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=60,
+        parent="codeact_enabled",
+        enabled_when=True,
+        help="A snippet that runs longer is stopped and the agent gets a time-limit error.",
+    ),
+    SettingDescriptor(
+        "codeact_max_memory_mb",
+        "Memory limit per execution (MB)",
+        "codeact",
+        "int",
+        SCOPE_RUNTIME,
+        min=32,
+        max=1024,
+        parent="codeact_enabled",
+        enabled_when=True,
+        help="A snippet that allocates more is stopped and the agent gets a memory error.",
     ),
 )
 

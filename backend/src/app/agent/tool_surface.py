@@ -383,6 +383,42 @@ def _provider_supplied_rows(agent: Any, model: str) -> list[ToolRow]:
     return [ToolRow("web_search", STATUS_ACTIVE, note="per-model, not selectable per agent")]
 
 
+def _codeact_rows(agent: Any, model: str) -> list[ToolRow]:
+    """The ``execute_code`` row (PRP-0193, UDR-0175 D9), modelled on ``web_search``.
+
+    ACTUAL is whether the CodeAct context provider is attached to the built agent;
+    PREDICTED is the offering's ``code_act`` opt-out (a build-time gate), then the two
+    per-run gates the provider evaluates itself (DEMO_MODE, ``codeact_enabled``).
+    Withheld by the offering yet attached is a build-vs-configuration divergence and is
+    reported as MISMATCH (UDR-0102 D4). No provider and not withheld means the package
+    could not load: nothing to explain on this screen, so no row.
+    """
+    from app.agent.codeact.provider import is_codeact_provider
+    from app.core.config import settings
+    from app.demo import is_demo_mode
+    from app.providers.base import capability_withheld
+
+    present = any(is_codeact_provider(p) for p in getattr(agent, "context_providers", None) or [])
+    withheld = bool(model) and capability_withheld(model, "code_act")
+    if withheld:
+        if present:
+            return [
+                ToolRow(
+                    "execute_code",
+                    STATUS_MISMATCH,
+                    reason="withheld by the offering but present on the built agent",
+                )
+            ]
+        return [ToolRow("execute_code", STATUS_EXCLUDED, reason=f"{REASON_PROVIDER_CAPABILITY} ({model})")]
+    if not present:
+        return []
+    if is_demo_mode():
+        return [ToolRow("execute_code", STATUS_EXCLUDED, reason=f"{REASON_SETTINGS} (DEMO_MODE)")]
+    if not settings.codeact_enabled:
+        return [ToolRow("execute_code", STATUS_EXCLUDED, reason=f"{REASON_SETTINGS} (codeact_enabled=false)")]
+    return [ToolRow("execute_code", STATUS_ACTIVE, note="per-model, compute sandbox, 0 sandbox tools")]
+
+
 def _function_rows(
     agent: Any,
     allow: ResolvedAllowlist | None,
@@ -674,6 +710,7 @@ async def describe_tool_surface(
         report = ToolSurfaceReport(model=model)
         report.functions, report.provider_supplied = _function_rows(agent, allow, model)
         report.provider_supplied.extend(_provider_supplied_rows(agent, model))
+        report.provider_supplied.extend(_codeact_rows(agent, model))
         report.mcp = _mcp_rows(agent, allow, model)
         report.skills = await _skill_rows(agent, allow, notes, model)
         report.notes = notes

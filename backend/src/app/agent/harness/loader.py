@@ -181,6 +181,16 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
                 web_search = "withheld"  # per-offering gate (UDR-0119 D5)
         except Exception:
             logger.debug("Web search gate probe failed for %s", spec.model_id, exc_info=True)
+    # PRP-0193 / UDR-0175 D9: what a run would do with execute_code -- the YAML switch,
+    # then the offering's opt-out, then the per-run App Setting.
+    if spec.code_act_disabled:
+        code_act = "disabled"
+    elif not capabilities.get("code_act", True):
+        code_act = "withheld"
+    elif not settings.codeact_enabled:
+        code_act = "off"
+    else:
+        code_act = "enabled"
     return {
         "model": spec.model_id,
         # PRP-0184 / UDR-0166 D11: the declared reasoning effort, or "" when the model
@@ -188,6 +198,7 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
         # does this harness think" is answerable without opening the YAML.
         "effort": spec.effort,
         "web_search": web_search,
+        "code_act": code_act,
         "file_memory": bool(workspace) and not spec.file_memory_disabled,
         "file_access": bool(workspace),
         "shell": bool(workspace),

@@ -138,6 +138,9 @@ CAPABILITY_KEYS = frozenset(
         # `foundry` provider lane is additionally closed in code, because its client
         # drops such images silently (agent_framework_foundry SUPPORTS_RICH_FUNCTION_OUTPUT).
         "computer_use",
+        # PRP-0193 / UDR-0175 D5: the CodeAct compute sandbox (execute_code). Opt-out like
+        # the others; withholding it drops the context provider, as `skills` does.
+        "code_act",
     }
 )
 

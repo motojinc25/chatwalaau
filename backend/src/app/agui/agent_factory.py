@@ -491,6 +491,19 @@ def _build_tools_and_instructions(
         # middleware is attached on any lane (D2).
         context_providers.append(skills_provider)
 
+    # CodeAct compute sandbox (PRP-0193, CTR-0239, UDR-0175 D4). An AMBIENT capability,
+    # like hosted web search: attached here for every consumer of this chokepoint
+    # (Prompt lane, workflow nodes, and every lane served by the AgentRegistry),
+    # regardless of the tool_allowlist. The provider decides PER RUN (D5) -- App
+    # Setting codeact_enabled, DEMO_MODE -- so it injects nothing while off and needs no
+    # rebuild when turned on; subset_for_model() removes it for an offering that
+    # withholds `code_act`.
+    from app.agent.codeact.provider import create_codeact_provider
+
+    codeact_provider = create_codeact_provider()
+    if codeact_provider is not None:
+        context_providers.append(codeact_provider)
+
     # Return the slot-#3 guidance BLOCKS. The Identity (slot #1) and -- when enabled
     # -- the per-session Memory Block (slot #2) are assembled by the consumer:
     # AgentRegistry bakes Identity-only and supplies the capability/memory remainder

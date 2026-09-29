@@ -24,6 +24,7 @@ import {
   Plug,
   ScanEye,
   Search,
+  SquareCode,
   Terminal,
   ToggleLeft,
   Trash2,
@@ -54,6 +55,8 @@ const toolDisplayNames: Record<string, { label: string; doneLabel: string; icon:
   file_read: { label: 'Reading file...', doneLabel: 'Read file', icon: File },
   file_write: { label: 'Writing file...', doneLabel: 'Wrote file', icon: FilePen },
   bash_execute: { label: 'Executing command...', doneLabel: 'Executed command', icon: Terminal },
+  // PRP-0193 (CTR-0013): the CodeAct compute sandbox, injected per run by its provider.
+  execute_code: { label: 'Running code...', doneLabel: 'Ran code', icon: SquareCode },
   file_glob: { label: 'Searching files...', doneLabel: 'Searched files', icon: FolderSearch },
   file_grep: { label: 'Searching content...', doneLabel: 'Searched content', icon: Search },
   image_generate: { label: 'Generating image...', doneLabel: 'Generated image', icon: ImagePlus },
@@ -147,6 +150,20 @@ const toolDisplayNames: Record<string, { label: string; doneLabel: string; icon:
   },
   computer_wait_for_change: { label: 'Waiting for the screen...', doneLabel: 'Waited for the screen', icon: Hourglass },
   computer_abort: { label: 'Ending the desktop task...', doneLabel: 'Ended the desktop task', icon: OctagonX },
+}
+
+/**
+ * PRP-0193 (CTR-0013): the `code` argument of an execute_code call, shown as the code it
+ * is rather than as an escaped JSON string. `null` for any other shape.
+ */
+function executeCodeSource(toolCall: ToolCall): string | null {
+  if (toolCall.name !== 'execute_code' || !toolCall.args) return null
+  try {
+    const parsed = JSON.parse(toolCall.args)
+    return typeof parsed?.code === 'string' ? parsed.code : null
+  } catch {
+    return null
+  }
 }
 
 function formatJson(raw: string): string {
@@ -251,6 +268,7 @@ export function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
   const label = isRunning ? display.label : display.doneLabel
   const hasDetails = toolCall.args || toolCall.result
   const parameters = imageParameterSummary(toolCall)
+  const codeSource = executeCodeSource(toolCall)
 
   return (
     <div className="mb-1">
@@ -277,8 +295,14 @@ export function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
         <div className="mt-1 ml-5 max-h-60 overflow-y-auto rounded-md bg-muted/50 p-2.5 text-xs leading-relaxed text-muted-foreground">
           {toolCall.args && (
             <div className="mb-2">
-              <div className="mb-1 font-medium text-foreground/70">Arguments</div>
-              <pre className="whitespace-pre-wrap break-all font-mono text-[0.7rem]">{formatJson(toolCall.args)}</pre>
+              <div className="mb-1 font-medium text-foreground/70">{codeSource !== null ? 'Code' : 'Arguments'}</div>
+              {codeSource !== null ? (
+                <pre className="overflow-x-auto whitespace-pre rounded bg-background/60 p-2 font-mono text-[0.7rem] text-foreground/80">
+                  {codeSource}
+                </pre>
+              ) : (
+                <pre className="whitespace-pre-wrap break-all font-mono text-[0.7rem]">{formatJson(toolCall.args)}</pre>
+              )}
             </div>
           )}
           {toolCall.result && (

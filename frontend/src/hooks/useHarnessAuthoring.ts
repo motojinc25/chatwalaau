@@ -28,12 +28,16 @@ export interface HarnessDocument {
   fileMemory: { disabled?: boolean }
   fileAccess: { disableWriteTools?: boolean }
   webSearch: { disabled?: boolean }
+  /** PRP-0193: the CodeAct compute sandbox switch. Optional: older documents omit it. */
+  codeAct?: { disabled?: boolean }
   loop: { maxIterations?: number | null }
 }
 
 export interface HarnessPolicy {
   model: string
   web_search: 'enabled' | 'disabled' | 'withheld'
+  /** PRP-0193 (UDR-0175 D9): YAML switch, offering opt-out, then the App Setting. */
+  code_act?: 'enabled' | 'disabled' | 'withheld' | 'off'
   file_memory: boolean
   file_access: boolean
   shell: boolean

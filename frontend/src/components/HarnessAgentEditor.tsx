@@ -29,6 +29,7 @@ import {
   Repeat2,
   Route,
   Sparkles,
+  SquareCode,
   TerminalSquare,
   TriangleAlert,
   Wrench,
@@ -95,6 +96,7 @@ function emptyDocument(): HarnessDocument {
     fileMemory: { disabled: false },
     fileAccess: { disableWriteTools: false },
     webSearch: { disabled: false },
+    codeAct: { disabled: false },
     loop: { maxIterations: null },
   }
 }
@@ -208,6 +210,13 @@ function blockParts(doc: HarnessDocument): Array<{ id: string; label: string; su
   parts.push({ id: 'b-shell', label: 'Shell', sub: 'workspace-scoped', icon: <TerminalSquare className="h-4 w-4" /> })
   if (!doc.webSearch.disabled)
     parts.push({ id: 'b-web', label: 'Web search', sub: 'offering-gated', icon: <Globe className="h-4 w-4" /> })
+  if (!doc.codeAct?.disabled)
+    parts.push({
+      id: 'b-codeact',
+      label: 'CodeAct',
+      sub: 'App Setting-gated',
+      icon: <SquareCode className="h-4 w-4" />,
+    })
   if (!doc.compaction.disabled)
     parts.push({ id: 'b-compact', label: 'Compaction', sub: 'token budget', icon: <Repeat2 className="h-4 w-4" /> })
   return parts
@@ -572,6 +581,12 @@ export function HarnessAgentEditor({ open, onOpenChange, editId, onSaved }: Prop
                   checked={!doc.webSearch.disabled}
                   onChange={(on) => patch({ webSearch: { disabled: !on } })}
                   note="Withheld automatically when the offering's gate is off."
+                />
+                <SwitchField
+                  label="CodeAct (compute sandbox)"
+                  checked={!doc.codeAct?.disabled}
+                  onChange={(on) => patch({ codeAct: { disabled: !on } })}
+                  note="Offered only while App Settings > CodeAct is on, and withheld when the offering's gate is off."
                 />
                 <SwitchField
                   label="Context compaction"

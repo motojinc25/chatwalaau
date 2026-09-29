@@ -58,6 +58,8 @@ const REPORTED_CAPABILITIES: Array<[string, string]> = [
   ['image_generation', 'image generation'],
   // PRP-0189 (UDR-0171 D2): withheld per offering, and always on the Foundry lane.
   ['computer_use', 'Computer Use'],
+  // PRP-0193 (UDR-0175 D5): the CodeAct compute sandbox, withheld per offering.
+  ['code_act', 'CodeAct'],
 ]
 
 interface CoreAgentOptionsProps {
