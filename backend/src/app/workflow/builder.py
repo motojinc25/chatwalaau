@@ -24,6 +24,7 @@ from app.agent.identity import load_identity
 from app.agent.model_capabilities import subset_for_model
 from app.agui.agent_registry import _build_chat_client
 from app.demo import is_demo_mode, resolve_demo_models
+from app.workflow.transport import collect_via_stream
 
 if TYPE_CHECKING:
     from app.workflow.usage import WorkflowUsageCollector
@@ -88,6 +89,12 @@ def build_prompt_agent(
     # _build_chat_client short-circuits to DemoChatClient in DEMO_MODE, so the
     # demo lane needs no special-casing here (UDR-0045 D7).
     client = _build_chat_client(model)
+    # PRP-0194 / UDR-0176: the declarative executor calls the node NON-streaming, which
+    # the provider SDKs refuse (Anthropic) or time out (OpenAI) at the effort ladder's
+    # output budget. Serve those calls with the streaming transport, collected below
+    # every MAF layer, so the tool loop and the usage recorder are unchanged. This is
+    # the only call site: the client is this node agent's own instance.
+    client = collect_via_stream(client)
     model_options = None
     if not is_demo_mode():
         # A workflow prompt node IS model-bound, so it goes through the same per-model
