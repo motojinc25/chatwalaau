@@ -196,6 +196,15 @@ interface UseChatOptions {
  */
 export const SAVE_RETRY_DELAYS_MS = [1000, 2000, 4000] as const
 
+/**
+ * A workflow turn whose stream ended before the run's own end event (PRP-0195, UDR-0177
+ * D5). A lost connection cancels the run on the server, so the message says it stopped.
+ */
+export const WORKFLOW_CONNECTION_LOST_MESSAGE =
+  'Connection to the server was lost before the workflow finished. The run was stopped on the server'
+export const WORKFLOW_STOPPED_MESSAGE = 'Stopped.'
+const WORKFLOW_STREAM_ENDED_EARLY = 'the stream ended before the workflow finished'
+
 /** A save that is being retried: which retry is running, out of how many. */
 export interface SaveRetryStatus {
   attempt: number
@@ -428,6 +437,20 @@ export function useChat(options?: UseChatOptions) {
 
       abortRef.current = new AbortController()
       let streamSuccess = true
+      // PRP-0195 / UDR-0177 D5: a workflow turn whose stream ends before the run's own end
+      // event -- a front end's idle cut, a sleeping laptop, a network change, Stop -- never
+      // receives workflow_completed / workflow_failed / RUN_FINISHED / RUN_ERROR, so the
+      // indicator and the run canvas would keep showing a running step. The turn ends it
+      // here with the two notices the server sends on a failure. No new event kind, no
+      // retry (UDR-0088 D6), no watchdog (UDR-0088 D5).
+      let workflowTurn = false
+      let workflowRunEnded = false
+      const endUnfinishedWorkflow = (message: string) => {
+        if (!workflowTurn || workflowRunEnded) return
+        workflowRunEnded = true
+        onCustomEventRef.current?.('workflow_failed', { message })
+        onWorkflowEventRef.current?.({ kind: 'run_error', message })
+      }
       // Images dispatched to the agent + persisted. Starts as the optimistic
       // images and is replaced by prepare()'s durable refs when provided.
       let dispatchImages = options?.images
@@ -744,23 +767,28 @@ export function useChat(options?: UseChatOptions) {
                 // Workflow branch ONLY (UDR-0106 D1): a Prompt-agent turn never emits
                 // these, so the handlers below are inert for every other run.
                 case 'STEP_STARTED': {
+                  workflowTurn = true
                   if (event.stepName) onWorkflowEventRef.current?.({ kind: 'step_started', step: event.stepName })
                   break
                 }
                 case 'STEP_FINISHED': {
+                  workflowTurn = true
                   if (event.stepName) onWorkflowEventRef.current?.({ kind: 'step_finished', step: event.stepName })
                   break
                 }
                 case 'ACTIVITY_SNAPSHOT': {
                   const content = ((event as { content?: unknown }).content ?? {}) as unknown
                   if (event.activityType === 'workflow_node') {
+                    workflowTurn = true
                     onWorkflowEventRef.current?.({ kind: 'node', activity: content as WorkflowNodeActivity })
                   } else if (event.activityType === 'workflow_state') {
+                    workflowTurn = true
                     onWorkflowEventRef.current?.({ kind: 'state', snapshot: content as Record<string, unknown> })
                   }
                   break
                 }
                 case 'RUN_FINISHED': {
+                  workflowRunEnded = true
                   // A workflow paused on human-in-the-loop ends the turn with an
                   // interrupt outcome (UDR-0106 D5); the canvas renders the input form
                   // and the answer is sent on the next request as state.workflow_resume.
@@ -770,6 +798,7 @@ export function useChat(options?: UseChatOptions) {
                   break
                 }
                 case 'RUN_ERROR': {
+                  workflowRunEnded = true
                   streamSuccess = false
                   onWorkflowEventRef.current?.({ kind: 'run_error', message: event.message ?? 'An error occurred' })
                   const errorMsg = event.message ?? 'An error occurred'
@@ -797,6 +826,8 @@ export function useChat(options?: UseChatOptions) {
                   // useChat acts on the ones it owns, so a consumer (the workflow
                   // run state) reacts without duplicating SSE parsing.
                   onCustomEventRef.current?.(event.name, event.value)
+                  if (event.name?.startsWith('workflow_')) workflowTurn = true
+                  if (event.name === 'workflow_completed' || event.name === 'workflow_failed') workflowRunEnded = true
                   if (event.name === 'run_retry' && event.value) {
                     // v0.77.1 (CTR-0009): the backend hit a transient upstream
                     // 5xx before any output and is auto-resending. Surface a
@@ -893,6 +924,10 @@ export function useChat(options?: UseChatOptions) {
           }
         }
 
+        // A proxy can also close the stream CLEANLY: read() reports done, nothing throws, and
+        // the run's end event never came. That is the same lost connection (UDR-0177 D5).
+        if (workflowTurn && !workflowRunEnded) throw new Error(WORKFLOW_STREAM_ENDED_EARLY)
+
         // Save messages to session after stream completes. A declarative workflow that
         // produced no chat reply (workflowCompleted, no body) is ALSO saved so the turn
         // finalizes (history + session-list refresh + title); it persists as a compact
@@ -985,9 +1020,15 @@ export function useChat(options?: UseChatOptions) {
           // The user pressed Stop. Treat as committed so the composer does not
           // resurrect a message the user deliberately cancelled (UDR-0088 D3).
           committed = true
+          endUnfinishedWorkflow(WORKFLOW_STOPPED_MESSAGE)
         } else {
           streamSuccess = false
-          const errorContent = error instanceof Error ? error.message : 'An unexpected error occurred'
+          const browserMessage = error instanceof Error ? error.message : 'An unexpected error occurred'
+          // A workflow turn that lost its stream says so (PRP-0195 Q2: workflow turns only);
+          // every other lane keeps the browser's own message.
+          const workflowLost = committed && workflowTurn && !workflowRunEnded
+          const errorContent = workflowLost ? `${WORKFLOW_CONNECTION_LOST_MESSAGE} (${browserMessage})` : browserMessage
+          if (workflowLost) endUnfinishedWorkflow(WORKFLOW_CONNECTION_LOST_MESSAGE)
           if (!committed && !options?.skipUserMessage) {
             // Pre-commit failure (server down / restarting / 401 before the first
             // event). The turn never reached the agent, so drop the empty assistant

@@ -1098,14 +1098,22 @@ async def _stream_with_reasoning(
         _wf_input = "" if _wf_resume else _latest_user_text(request_body.messages)
         _wf_result: dict[str, Any] = {}
         _wf_temporary = bool((request_body.state or {}).get("temporary"))
-        async for _chunk in stream_workflow(
-            str(_workflow_id),
-            _wf_input,
-            encoder,
-            thread_id=thread_id,
-            result=_wf_result,
-            resume=_wf_resume,
-            temporary=_wf_temporary,
+        # PRP-0195 / UDR-0177 D1: a workflow node can be silent for many minutes (UDR-0176
+        # D4 forwards no model deltas), longer than the production front ends keep an idle
+        # connection open. Send an SSE comment after every silent 15 s -- this branch only
+        # (operator decision Q1); the Prompt and Harness lanes are unchanged.
+        from app.agui.keepalive import with_keepalive
+
+        async for _chunk in with_keepalive(
+            stream_workflow(
+                str(_workflow_id),
+                _wf_input,
+                encoder,
+                thread_id=thread_id,
+                result=_wf_result,
+                resume=_wf_resume,
+                temporary=_wf_temporary,
+            )
         ):
             yield _chunk
         # Auto Session Title (PRP-0077, CTR-0109, UDR-0053 D17): the workflow branch
