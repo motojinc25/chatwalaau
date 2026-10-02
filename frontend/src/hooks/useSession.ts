@@ -207,7 +207,21 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
 // before the failure is shown (PRP-0174, UDR-0156 D8).
 const LOAD_RETRY_DELAY_MS = 1000
 
-type SessionLoadResult = { status: 'ok'; messages: ChatMessage[] } | { status: 'not_found' } | { status: 'failed' }
+type SessionLoadResult =
+  | { status: 'ok'; messages: ChatMessage[]; folderId: string | null }
+  | { status: 'not_found' }
+  | { status: 'failed' }
+
+/**
+ * The folder of the open chat (PRP-0196, UDR-0178 D1). Keyed by thread id so a value
+ * can never leak onto another chat. `pending` marks a "New chat in folder" whose record
+ * does not exist yet: the folder is sent on its first send (D7).
+ */
+interface OpenChatFolder {
+  threadId: string
+  folderId: string | null
+  pending: boolean
+}
 
 /**
  * Fetch a chat's history. `not_found` means a fresh chat; `failed` means the history
@@ -219,7 +233,10 @@ async function fetchSessionMessages(threadId: string): Promise<SessionLoadResult
       const res = await fetch(`/api/sessions/${threadId}`)
       if (res.ok) {
         const data = await res.json()
-        return { status: 'ok', messages: convertMafMessages(data.messages ?? []) }
+        // Keep the record's folder (PRP-0196, UDR-0178 D1): the sidebar list may not hold
+        // this chat (a collapsed folder's rows are not loaded), the record always does.
+        const folderId = typeof data.folder_id === 'string' && data.folder_id ? data.folder_id : null
+        return { status: 'ok', messages: convertMafMessages(data.messages ?? []), folderId }
       }
       if (res.status === 404) return { status: 'not_found' }
     } catch {
@@ -248,6 +265,7 @@ export function useSession() {
   const [isSwitching, setIsSwitching] = useState(false)
   // The chat whose history could not be loaded (PRP-0174, UDR-0156 D8), or null.
   const [loadFailedThreadId, setLoadFailedThreadId] = useState<string | null>(null)
+  const [openFolder, setOpenFolder] = useState<OpenChatFolder | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null)
@@ -520,6 +538,7 @@ export function useSession() {
       if (result.status === 'ok') {
         setLoadFailedThreadId(null)
         setInitialMessages(result.messages)
+        setOpenFolder({ threadId: id, folderId: result.folderId, pending: false })
       } else if (result.status === 'failed') {
         setLoadFailedThreadId(id)
       }
@@ -539,6 +558,7 @@ export function useSession() {
     if (result.status === 'ok') {
       setInitialMessages(result.messages)
       setLoadFailedThreadId(null)
+      setOpenFolder({ threadId: id, folderId: result.folderId, pending: false })
     } else if (result.status === 'not_found') {
       setInitialMessages([])
       setLoadFailedThreadId(null)
@@ -550,15 +570,41 @@ export function useSession() {
     abortRef.current = abortFn
   }, [])
 
-  const createSession = useCallback(() => {
-    abortRef.current?.()
-    const newId = crypto.randomUUID()
-    setLoadFailedThreadId(null)
-    setInitialMessages([])
-    setThreadId(newId)
-    navigate('/chat', { replace: true })
-    if (shouldAutoCloseSidebar()) setSidebarOpen(false)
-  }, [navigate])
+  /**
+   * Start a new chat. With `folderId` ("New chat in folder", PRP-0196) nothing is written
+   * yet (UDR-0178 D7): the folder is held as pending and sent on the first send, and the
+   * folder cue shows on the still-empty chat.
+   */
+  const createSession = useCallback(
+    (folderId?: string | null) => {
+      abortRef.current?.()
+      const newId = crypto.randomUUID()
+      setLoadFailedThreadId(null)
+      setInitialMessages([])
+      setThreadId(newId)
+      setOpenFolder(folderId ? { threadId: newId, folderId, pending: true } : null)
+      navigate('/chat', { replace: true })
+      if (shouldAutoCloseSidebar()) setSidebarOpen(false)
+    },
+    [navigate],
+  )
+
+  /**
+   * The init call created the record (PRP-0196). `folderId` is the folder the server
+   * actually stored -- null when the chosen folder was deleted meanwhile (UDR-0178 D6).
+   * The folder becomes a loaded scope so the refresh that follows fetches the new row.
+   */
+  const confirmSessionFolder = useCallback((createdThreadId: string, folderId: string | null) => {
+    if (folderId) loadedFolderIdsRef.current.add(folderId)
+    setOpenFolder((prev) =>
+      prev && prev.threadId === createdThreadId ? { threadId: createdThreadId, folderId, pending: false } : prev,
+    )
+  }, [])
+
+  /** Drop a pending folder that was never sent (UDR-0178 D7: e.g. entering Temporary Chat). */
+  const clearPendingFolder = useCallback(() => {
+    setOpenFolder((prev) => (prev?.pending ? null : prev))
+  }, [])
 
   const switchSession = useCallback(
     async (targetThreadId: string) => {
@@ -573,6 +619,9 @@ export function useSession() {
       const result = await fetchSessionMessages(targetThreadId)
       setInitialMessages(result.status === 'ok' ? result.messages : [])
       setLoadFailedThreadId(result.status === 'failed' ? targetThreadId : null)
+      setOpenFolder(
+        result.status === 'ok' ? { threadId: targetThreadId, folderId: result.folderId, pending: false } : null,
+      )
 
       setThreadId(targetThreadId)
       switchedRef.current = true
@@ -906,6 +955,8 @@ export function useSession() {
       try {
         const res = await fetch(`/api/sessions/folders/${folderId}`, { method: 'DELETE' })
         if (!res.ok) throw new Error('Failed to delete folder')
+        // The server cleared folder_id on the folder's chats, the open one included.
+        setOpenFolder((prev) => (prev && prev.folderId === folderId ? { ...prev, folderId: null } : prev))
 
         await Promise.all([refreshFolders(), refreshSessions()])
         return true
@@ -936,6 +987,9 @@ export function useSession() {
           body: JSON.stringify({ folder_id: folderId }),
         })
         if (!res.ok) throw new Error('Failed to move session')
+        setOpenFolder((prev) =>
+          prev && prev.threadId === targetThreadId ? { ...prev, folderId, pending: false } : prev,
+        )
 
         await Promise.all([refreshFolders(), refreshSessions()])
         return true
@@ -1025,6 +1079,12 @@ export function useSession() {
     movingSessionId,
     isImporting,
     createSession,
+    /** The open chat's folder id (PRP-0196, UDR-0178 D1), or null. */
+    currentFolderId: openFolder && openFolder.threadId === threadId ? openFolder.folderId : null,
+    /** The folder a not-yet-created chat will start in (UDR-0178 D7), or null. */
+    pendingFolderId: openFolder && openFolder.threadId === threadId && openFolder.pending ? openFolder.folderId : null,
+    confirmSessionFolder,
+    clearPendingFolder,
     exportSession,
     importSession,
     createFolder,

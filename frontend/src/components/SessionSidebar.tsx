@@ -48,6 +48,7 @@ import {
   RefreshCw,
   Search,
   SlidersHorizontal,
+  SquarePen,
   Trash2,
   Upload,
   Webhook,
@@ -105,6 +106,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useAuth } from '@/hooks/useAuth'
 import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
 import { formatSessionDateTime } from '@/lib/datetime'
+import { FOLDER_COLOR_CLASSES, folderColorClasses } from '@/lib/folderColors'
 import { type EntryId, isEntryVisible, useChatSurfaceTier } from '@/lib/narrowSurface'
 import { cn } from '@/lib/utils'
 import {
@@ -141,6 +143,20 @@ interface SessionSidebarProps {
   onArchive: (threadId: string) => Promise<SessionActionResult>
   onPin: (threadId: string, pinned: boolean) => void
   onCreate: () => void
+  /**
+   * "New chat in folder" (PRP-0196, CTR-0016): start a new chat that is created inside
+   * this folder on its first send. Disabled while `temporaryActive` (UDR-0178 D8).
+   */
+  onCreateInFolder?: (folderId: string) => void
+  /** A Temporary Chat is active: "New chat in folder" is disabled (UDR-0178 D8). */
+  temporaryActive?: boolean
+  /**
+   * Reveal a folder (PRP-0196: the chat-area folder badge was clicked): expand the
+   * Folders section and the folder, and scroll it into view. `nonce` makes a repeat
+   * click a new request; `onRevealHandled` clears it once applied.
+   */
+  revealFolderRequest?: { folderId: string; nonce: number } | null
+  onRevealHandled?: () => void
   onClose: () => void
   /**
    * Session list pagination (CTR-0016 v6, PRP-0112 Part 4 / UDR-0091 D3+D4).
@@ -208,19 +224,8 @@ function loadCollapsedSections(): Set<SidebarSection> {
   return new Set()
 }
 
-// Palette token -> theme-controlled classes (UDR-0046 D2). Written as literal
-// strings so the Tailwind scanner includes them. `neutral` is the uncolored
-// (pre-PRP-0070) look.
-const FOLDER_COLOR_CLASSES: Record<FolderColor, { border: string; icon: string; swatch: string }> = {
-  neutral: { border: 'border-l-transparent', icon: 'text-muted-foreground', swatch: 'bg-muted-foreground/40' },
-  red: { border: 'border-l-red-500', icon: 'text-red-500', swatch: 'bg-red-500' },
-  orange: { border: 'border-l-orange-500', icon: 'text-orange-500', swatch: 'bg-orange-500' },
-  amber: { border: 'border-l-amber-500', icon: 'text-amber-500', swatch: 'bg-amber-500' },
-  green: { border: 'border-l-green-500', icon: 'text-green-500', swatch: 'bg-green-500' },
-  blue: { border: 'border-l-blue-500', icon: 'text-blue-500', swatch: 'bg-blue-500' },
-  violet: { border: 'border-l-violet-500', icon: 'text-violet-500', swatch: 'bg-violet-500' },
-  pink: { border: 'border-l-pink-500', icon: 'text-pink-500', swatch: 'bg-pink-500' },
-}
+// The folder palette classes live in @/lib/folderColors (shared with the chat-area
+// folder cue, PRP-0196 / UDR-0178 D3).
 
 function loadExpandedFolderIds(): Set<string> {
   try {
@@ -564,12 +569,7 @@ const SessionRow = memo(function SessionRow({
                         key={folder.id}
                         disabled={isMoving}
                         onClick={() => void onMoveToFolder(session.thread_id, folder.id)}>
-                        <Folder
-                          className={cn(
-                            'mr-2 h-3.5 w-3.5',
-                            (FOLDER_COLOR_CLASSES[folder.color] ?? FOLDER_COLOR_CLASSES[DEFAULT_FOLDER_COLOR]).icon,
-                          )}
-                        />
+                        <Folder className={cn('mr-2 h-3.5 w-3.5', folderColorClasses(folder.color).icon)} />
                         {redact(folder.name, `folder:${folder.id}`)}
                       </DropdownMenuItem>
                     ))
@@ -691,6 +691,9 @@ interface FolderGroupProps {
   onOpenRename: (folder: SessionFolder) => void
   onOpenColor: (folder: SessionFolder) => void
   onDeleteFolder: (folder: SessionFolder) => void
+  /** "New chat in folder" (PRP-0196); absent -> the item is not offered. */
+  onCreateInFolder?: (folderId: string) => void
+  temporaryActive: boolean
   renderSessionRow: (session: SessionSummary, nested?: boolean) => ReactNode
   /** Folder drag-reorder is offered (false on a narrow viewport, PRP-0171). */
   reorderable: boolean
@@ -711,11 +714,13 @@ function FolderGroup({
   onOpenRename,
   onOpenColor,
   onDeleteFolder,
+  onCreateInFolder,
+  temporaryActive,
   renderSessionRow,
   reorderable,
 }: FolderGroupProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: folder.id })
-  const colorClasses = FOLDER_COLOR_CLASSES[folder.color] ?? FOLDER_COLOR_CLASSES[DEFAULT_FOLDER_COLOR]
+  const colorClasses = folderColorClasses(folder.color)
   const style = { transform: CSS.Transform.toString(transform), transition }
   // A folder name is frequently a customer or project name (CTR-0190, PRP-0124).
   // The session COUNT stays visible -- it is not private content, and it holds the
@@ -726,6 +731,7 @@ function FolderGroup({
     <div
       ref={setNodeRef}
       style={style}
+      data-folder-id={folder.id}
       className={cn('border-t border-border/20 first:border-t-0', isDragging && 'z-10 opacity-80')}>
       {/* biome-ignore lint/a11y/noStaticElementInteractions: folder row is a drag target for native session DnD */}
       <div
@@ -793,7 +799,19 @@ function FolderGroup({
               )}
             </span>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-40">
+          <DropdownMenuContent align="end" className="w-44">
+            {onCreateInFolder && (
+              // PRP-0196 / UDR-0178 D8: disabled (not "exit and continue") in a Temporary
+              // Chat -- exiting would silently discard it. Privacy Screen does not disable
+              // it: starting a chat reveals nothing.
+              <DropdownMenuItem
+                disabled={temporaryActive}
+                title={temporaryActive ? 'Not available in a temporary chat' : undefined}
+                onClick={() => onCreateInFolder(folder.id)}>
+                <SquarePen className="mr-2 h-3.5 w-3.5" />
+                New chat in folder
+              </DropdownMenuItem>
+            )}
             {/*
               Disabled while Privacy Screen is on, for the same reason session rename
               is (CTR-0190 / UDR-0107 D6): the editor is seeded with the REAL folder
@@ -863,6 +881,10 @@ export function SessionSidebar({
   onArchive,
   onPin,
   onCreate,
+  onCreateInFolder,
+  temporaryActive = false,
+  revealFolderRequest,
+  onRevealHandled,
   onClose,
   hasMoreSessions,
   isLoadingMoreSessions,
@@ -1161,6 +1183,48 @@ export function SessionSidebar({
     })
   }, [])
 
+  /** Open a folder (and the Folders section) without toggling it closed. */
+  const expandFolder = useCallback((folderId: string) => {
+    setExpandedFolderIds((prev) => {
+      if (prev.has(folderId)) return prev
+      const next = new Set(prev)
+      next.add(folderId)
+      return next
+    })
+    setCollapsedSections((prev) => {
+      if (!prev.has('folders')) return prev
+      const next = new Set(prev)
+      next.delete('folders')
+      return next
+    })
+  }, [])
+
+  // "New chat in folder" (PRP-0196): the folder opens so the new chat shows up inside it.
+  const handleCreateInFolder = useMemo(
+    () =>
+      onCreateInFolder
+        ? (folderId: string) => {
+            expandFolder(folderId)
+            onCreateInFolder(folderId)
+          }
+        : undefined,
+    [onCreateInFolder, expandFolder],
+  )
+
+  // The chat-area folder badge asked to reveal its folder (PRP-0196, Q2).
+  useEffect(() => {
+    if (!revealFolderRequest) return
+    const { folderId } = revealFolderRequest
+    expandFolder(folderId)
+    onRevealHandled?.()
+    // After the expansion renders, bring the folder row into view. Deliberately not
+    // cleared on re-run: onRevealHandled() above re-runs this effect with null at once.
+    // (`window.CSS`: the module-level `CSS` is @dnd-kit's transform helper.)
+    window.setTimeout(() => {
+      document.querySelector(`[data-folder-id="${window.CSS.escape(folderId)}"]`)?.scrollIntoView({ block: 'nearest' })
+    }, 50)
+  }, [revealFolderRequest, expandFolder, onRevealHandled])
+
   const handleFolderDragEnd = useCallback(
     (event: DragEndEvent) => {
       const { active, over } = event
@@ -1397,6 +1461,8 @@ export function SessionSidebar({
                       onOpenRename={handleOpenRenameFolder}
                       onOpenColor={setColorTarget}
                       onDeleteFolder={setDeleteFolderTarget}
+                      onCreateInFolder={handleCreateInFolder}
+                      temporaryActive={temporaryActive}
                       renderSessionRow={renderSessionRow}
                       reorderable={reorderable}
                     />

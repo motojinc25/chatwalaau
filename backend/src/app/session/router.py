@@ -113,6 +113,39 @@ def _archived_dir() -> Path:
 
 class InitSessionRequest(BaseModel):
     title: str = ""
+    # PRP-0196 / UDR-0178 D6: the folder a "New chat in folder" starts in. Honoured
+    # only when this request CREATES the record; never moves an existing chat.
+    folder_id: str | None = None
+
+
+def _initial_folder_id(thread_id: str, folder_id: str | None) -> str | None:
+    """The folder a NEW session record starts in (PRP-0196, UDR-0178 D6).
+
+    Only an existing folder is accepted. An unknown id (the folder was deleted after
+    the user chose "New chat in folder") yields ``None`` -- the chat is created at the
+    root rather than failing the first message. A temporary chat never has a folder.
+    """
+    if not folder_id:
+        return None
+    from app.agent.temporary import is_temporary
+
+    if is_temporary(thread_id):
+        return None
+    if folder_id not in {folder["id"] for folder in _read_folder_records()}:
+        logger.info("Session %s: folder %s not found; created at the root", thread_id, folder_id)
+        return None
+    return folder_id
+
+
+def _touch_initial_folder(folder_id: str | None) -> None:
+    """Record the new chat's arrival on its folder, as PATCH /{id}/folder does."""
+    if not folder_id:
+        return
+    try:
+        touch_folder_record(folder_id)
+    except OSError:
+        # The chat itself is written; a stale folder timestamp is not worth a 500.
+        logger.warning("Failed to touch folder %s after creating a chat in it", folder_id)
 
 
 @router.post("/{thread_id}/init", dependencies=[Depends(verify_api_key)])
@@ -134,6 +167,7 @@ async def init_session(thread_id: str, body: InitSessionRequest) -> dict[str, An
         return {"status": "exists", "thread_id": thread_id}
 
     now = datetime.now(UTC).isoformat()
+    folder_id = _initial_folder_id(thread_id, body.folder_id)
     data = {
         "thread_id": thread_id,
         "title": body.title[:100],
@@ -141,7 +175,7 @@ async def init_session(thread_id: str, body: InitSessionRequest) -> dict[str, An
         "updated_at": now,
         "message_count": 0,
         "image_count": 0,
-        "folder_id": None,
+        "folder_id": folder_id,
         "messages": [],
     }
     # User Preference Memory (PRP-0075, CTR-0105, UDR-0051 D3): capture the
@@ -167,8 +201,11 @@ async def init_session(thread_id: str, body: InitSessionRequest) -> dict[str, An
         raise HTTPException(status_code=500, detail="Failed to write session") from e
     if not created:
         return {"status": "exists", "thread_id": thread_id}
+    _touch_initial_folder(folder_id)
     logger.info("Initialized session %s", thread_id)
-    return {"status": "created", "thread_id": thread_id}
+    # `folder_id` is the folder actually stored (PRP-0196): null when none was asked
+    # for, or when the asked-for folder no longer exists.
+    return {"status": "created", "thread_id": thread_id, "folder_id": folder_id}
 
 
 class CreateFolderRequest(BaseModel):
@@ -717,6 +754,9 @@ class SaveMessageItem(BaseModel):
 
 class SaveMessagesRequest(BaseModel):
     messages: list[SaveMessageItem]
+    # PRP-0196 / UDR-0178 D6: read ONLY when this save creates the record (the SPA's
+    # init call failed); an append to an existing record ignores it.
+    folder_id: str | None = None
 
 
 def _to_maf_message_dict(msg: SaveMessageItem) -> dict[str, Any]:
@@ -784,8 +824,14 @@ async def save_messages(thread_id: str, body: SaveMessagesRequest) -> dict[str, 
     """
     new_message_dicts = [_to_maf_message_dict(m) for m in body.messages]
     now = datetime.now(UTC).isoformat()
+    # PRP-0196 / UDR-0178 D6: the folder is resolved only if create() runs, i.e. only
+    # when this save writes a NEW record. An append never reads body.folder_id.
+    created_in_folder: list[str] = []
 
     def create() -> dict[str, Any]:
+        folder_id = _initial_folder_id(thread_id, body.folder_id)
+        if folder_id:
+            created_in_folder.append(folder_id)
         return {
             "thread_id": thread_id,
             "title": "",
@@ -793,7 +839,7 @@ async def save_messages(thread_id: str, body: SaveMessagesRequest) -> dict[str, 
             "updated_at": now,
             "message_count": 0,
             "image_count": 0,
-            "folder_id": None,
+            "folder_id": folder_id,
             "messages": [],
         }
 
@@ -825,6 +871,8 @@ async def save_messages(thread_id: str, body: SaveMessagesRequest) -> dict[str, 
     except OSError as e:
         raise HTTPException(status_code=500, detail="Failed to write session") from e
     assert data is not None  # create= guarantees a record
+    for folder_id in created_in_folder:
+        _touch_initial_folder(folder_id)
     logger.info("Saved %d messages to session %s via API", len(new_message_dicts), thread_id)
     return {"status": "saved", "thread_id": thread_id, "message_count": data["message_count"]}
 

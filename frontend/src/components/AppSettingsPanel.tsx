@@ -25,6 +25,7 @@ import { Loader2, RefreshCw, RotateCcw, TriangleAlert, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { APP_SETTINGS_CHANGED_EVENT } from '@/hooks/useFolderCueSettings'
 import { cn } from '@/lib/utils'
 
 export type SettingScope = 'runtime' | 'rebuild' | 'restart'
@@ -365,6 +366,9 @@ export function AppSettingsPanel({
       const next = (await res.json()) as AppSettingsStatus
       setRestartKeys(next.restart_required ? (next.restart_required_keys ?? []) : [])
       onSaved(next)
+      // Consumers outside this screen take the saved values from here instead of
+      // re-fetching (PRP-0196: the chat page's folder-cue switches, UDR-0178 D5).
+      window.dispatchEvent(new CustomEvent(APP_SETTINGS_CHANGED_EVENT, { detail: next }))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed')
     } finally {

@@ -50,7 +50,13 @@ interface ChatPanelProps {
   initialMessages?: ChatMessage[]
   onStreamComplete?: () => void
   /** New-session created (PRP-0077, CTR-0016): show it in the sidebar immediately. */
-  onSessionCreated?: (info: { threadId: string; title: string }) => void
+  onSessionCreated?: (info: { threadId: string; title: string; folderId: string | null }) => void
+  /**
+   * "New chat in folder" (PRP-0196, UDR-0178 D7): the folder the chat is created in on
+   * its first send. Only the full-page /chat surface passes it; /popup and /sidebar
+   * never do, so their requests are unchanged.
+   */
+  initFolderId?: string | null
   onBranchFromMessage?: (messageIndex: number) => void
   /** Slash command /cron (CTR-0135, PRP-0089): open the Cron scheduler portal. */
   onSlashCron?: () => void
@@ -106,6 +112,7 @@ export function ChatPanel({
   initialMessages,
   onStreamComplete,
   onSessionCreated,
+  initFolderId,
   onBranchFromMessage,
   onSlashCron,
   onSlashFiles,
@@ -243,6 +250,7 @@ export function ChatPanel({
     initialMessages,
     onStreamComplete,
     onSessionCreated,
+    initFolderId,
     temporary,
     selectedWorkflowId,
     selectedHarnessId,
@@ -360,7 +368,8 @@ export function ChatPanel({
     onStarted: useCallback(() => {
       // A Live-first chat now exists on the server: show it in the sidebar at once.
       if (!liveHadMessagesRef.current && !temporary && threadId) {
-        onSessionCreated?.({ threadId, title: 'Live conversation' })
+        // The Live lane creates the record at the root (PRP-0196 scope: init / save only).
+        onSessionCreated?.({ threadId, title: 'Live conversation', folderId: null })
       }
     }, [onSessionCreated, temporary, threadId]),
     // Refresh the sidebar (title, order) once the conversation is over.

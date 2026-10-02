@@ -195,6 +195,14 @@ class Settings(BaseSettings):
     # knob. <= 0 disables the sweep (entries kept indefinitely).
     temporary_chat_retention_days: int = 30
 
+    # Folder-aware chat (PRP-0196, UDR-0178 D5). Two independent switches for the
+    # /chat surface cue that shows which folder the open chat belongs to: an
+    # edge-only glow in the folder's color, and a badge with the folder's name.
+    # Store-owned App Settings (CTR-0198); the backend never reads them -- the SPA
+    # reads them from GET /api/app-settings and treats any failure as "on".
+    folder_glow_enabled: bool = True
+    folder_badge_enabled: bool = True
+
     # User Preference Memory (CTR-0105, CTR-0006, PRP-0075 / UDR-0051 D12).
     # Master toggle for the Memory Block (Prompt Assembly slot #2): the rendered
     # .agent/USER.md snapshot, the inline memory tool, and per-session snapshot

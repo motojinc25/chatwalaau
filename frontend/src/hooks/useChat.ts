@@ -115,7 +115,13 @@ interface UseChatOptions {
    * answer (PRP-0077, CTR-0016). Not fired for resumed / regenerate sends or
    * temporary chats.
    */
-  onSessionCreated?: (info: { threadId: string; title: string }) => void
+  onSessionCreated?: (info: { threadId: string; title: string; folderId: string | null }) => void
+  /**
+   * The folder a "New chat in folder" starts in (PRP-0196, UDR-0178 D6/D7). Sent on the
+   * init call and on the turn save; the server applies it only on the write that CREATES
+   * the record, so it never moves an existing chat. Only /chat passes it.
+   */
+  initFolderId?: string | null
   /*
    * PRP-0184 (UDR-0166 D1/D10): `selectedModel`, `selectedModelOptions`,
    * `selectedOutputFormat` and `selectedOutputSchema` are GONE. Generation options
@@ -227,6 +233,7 @@ export function useChat(options?: UseChatOptions) {
   const threadIdRef = useRef(options?.threadId ?? crypto.randomUUID())
   const onStreamCompleteRef = useRef(options?.onStreamComplete)
   const onSessionCreatedRef = useRef(options?.onSessionCreated)
+  const initFolderIdRef = useRef(options?.initFolderId ?? null)
 
   const temporaryRef = useRef(options?.temporary ?? false)
   const selectedWorkflowIdRef = useRef(options?.selectedWorkflowId ?? '')
@@ -264,6 +271,10 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     onSessionCreatedRef.current = options?.onSessionCreated
   }, [options?.onSessionCreated])
+
+  useEffect(() => {
+    initFolderIdRef.current = options?.initFolderId ?? null
+  }, [options?.initFolderId])
 
   useEffect(() => {
     temporaryRef.current = options?.temporary ?? false
@@ -313,7 +324,11 @@ export function useChat(options?: UseChatOptions) {
    * a 4xx is final. Always reports completion so the session list refreshes.
    */
   const persistTurn = useCallback(async (threadId: string, saveMessages: Record<string, unknown>[]) => {
-    const body = JSON.stringify({ messages: saveMessages })
+    // The pending folder rides along only while it is pending (PRP-0196): it matters
+    // when this save creates the record because the init call failed; an append to an
+    // existing record ignores it server-side (UDR-0178 D6).
+    const folderId = initFolderIdRef.current
+    const body = JSON.stringify(folderId ? { messages: saveMessages, folder_id: folderId } : { messages: saveMessages })
     let saved = false
     try {
       for (let attempt = 0; ; attempt++) {
@@ -480,17 +495,24 @@ export function useChat(options?: UseChatOptions) {
         // session is created lazily in the .temporary/ quarantine by save_messages.
         if (!options?.skipUserMessage && !temporaryRef.current) {
           const initTitle = userContent.slice(0, 100)
+          // "New chat in folder" (PRP-0196): the folder travels on the creating write.
+          const initFolderId = initFolderIdRef.current
           const initStatus = await fetch(`/api/sessions/${threadIdRef.current}/init`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: initTitle }),
+            body: JSON.stringify(initFolderId ? { title: initTitle, folder_id: initFolderId } : { title: initTitle }),
           })
-            .then((r) => (r.ok ? (r.json() as Promise<{ status?: string }>) : null))
+            .then((r) => (r.ok ? (r.json() as Promise<{ status?: string; folder_id?: string | null }>) : null))
             .catch(() => null)
           // Show the new chat in the sidebar immediately (PRP-0077, CTR-0016),
-          // without waiting for the AI answer. Only on first creation.
+          // without waiting for the AI answer. Only on first creation. `folderId` is the
+          // folder the server actually stored (null if the folder was deleted meanwhile).
           if (initStatus?.status === 'created') {
-            onSessionCreatedRef.current?.({ threadId: threadIdRef.current, title: initTitle })
+            onSessionCreatedRef.current?.({
+              threadId: threadIdRef.current,
+              title: initTitle,
+              folderId: initStatus.folder_id ?? null,
+            })
           }
         }
 

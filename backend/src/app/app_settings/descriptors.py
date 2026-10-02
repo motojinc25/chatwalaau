@@ -162,7 +162,7 @@ GROUPS: tuple[SettingGroup, ...] = (
     SettingGroup(
         "chat",
         "Chat & session",
-        "Titling, attachment handling, import limits, and history compaction.",
+        "Titling, attachment handling, import limits, history compaction, and folder cues.",
     ),
     SettingGroup(
         "memory",
@@ -353,6 +353,25 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         "int",
         SCOPE_RUNTIME,
         help="Quarantine retention for temporary chats. 0 or less disables the sweep.",
+    ),
+    # Folder-aware chat (PRP-0196, UDR-0178 D5). The first keys only the SPA reads:
+    # `runtime` because a save applies at once -- the App Settings screen dispatches
+    # APP_SETTINGS_CHANGED_EVENT and the chat page re-reads the two values.
+    SettingDescriptor(
+        "folder_glow_enabled",
+        "Folder color glow",
+        "chat",
+        "bool",
+        SCOPE_RUNTIME,
+        help="Glow the edges of the chat area in the folder's color when the open chat is in a folder.",
+    ),
+    SettingDescriptor(
+        "folder_badge_enabled",
+        "Folder name badge",
+        "chat",
+        "bool",
+        SCOPE_RUNTIME,
+        help="Show the folder's name at the top of the chat area when the open chat is in a folder.",
     ),
     # Compaction (PRP-0163 / UDR-0141). All four are `rebuild`, NOT `runtime`:
     # resolve_compaction_strategy() runs when the AgentRegistry is built

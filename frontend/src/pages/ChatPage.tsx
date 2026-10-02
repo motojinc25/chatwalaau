@@ -1,9 +1,10 @@
 import { AlertTriangle, Loader2, Menu } from 'lucide-react'
-import { Suspense, useCallback, useMemo, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
 import { CronManager } from '@/components/CronManager'
 import { DeclarativeAgentManager } from '@/components/DeclarativeAgentManager'
+import { FolderBadge, FolderGlow } from '@/components/FolderCue'
 import { PipelineManager } from '@/components/PipelineManager'
 import { PrivacyScreenToggle } from '@/components/PrivacyScreenToggle'
 import { RunTargetSheet } from '@/components/RunTargetSheet'
@@ -15,6 +16,7 @@ import { WebhookManager } from '@/components/WebhookManager'
 import { type WorkspaceLinkContextValue, WorkspaceLinkProvider } from '@/components/WorkspaceFileLink'
 import { useCronAvailable } from '@/hooks/useCronAvailable'
 import { useFileExplorerProbe } from '@/hooks/useFileExplorerAvailable'
+import { useFolderCueSettings } from '@/hooks/useFolderCueSettings'
 import { useOntologyAvailable } from '@/hooks/useOntologyAvailable'
 import { usePipelineAvailable } from '@/hooks/usePipelineAvailable'
 import { useSession } from '@/hooks/useSession'
@@ -90,6 +92,11 @@ export function ChatPage() {
     loadFolderSessions,
     isLoadingMoreSessions,
     hasMoreSessions,
+    // Folder-aware chat (PRP-0196, UDR-0178).
+    currentFolderId,
+    pendingFolderId,
+    confirmSessionFolder,
+    clearPendingFolder,
   } = useSession()
 
   // Temporary Chat (CTR-0107, PRP-0076). When active, the panel runs against a
@@ -172,10 +179,43 @@ export function ChatPage() {
   // (truncate title + pending flag), so a refresh surfaces it instantly without
   // waiting for the AI answer. The LLM title (when SESSION_TITLE_MODE=llm) then
   // arrives in real time via the CTR-0110 WebSocket push (handled in useSession).
-  const handleSessionCreated = useCallback(() => {
-    if (temp.isTemporary) return
-    refreshSessions()
-  }, [temp.isTemporary, refreshSessions])
+  const handleSessionCreated = useCallback(
+    (info: { threadId: string; folderId: string | null }) => {
+      if (temp.isTemporary) return
+      // "New chat in folder" (PRP-0196): adopt the folder the server actually stored
+      // and make it a loaded scope, so the refresh below shows the row inside it.
+      confirmSessionFolder(info.threadId, info.folderId)
+      refreshSessions()
+    },
+    [temp.isTemporary, refreshSessions, confirmSessionFolder],
+  )
+
+  // Folder-aware chat (PRP-0196, UDR-0178). The open chat's folder comes from its own
+  // record or the pending "New chat in folder" (D1), resolved in the live folder list so
+  // rename / recolor / delete apply at once. No cue in a Temporary Chat or on a chat that
+  // failed to load (D2).
+  const folderCue = useFolderCueSettings()
+  const cueFolder = useMemo(
+    () =>
+      temp.isTemporary || loadFailed || !currentFolderId
+        ? null
+        : (folders.find((folder) => folder.id === currentFolderId) ?? null),
+    [temp.isTemporary, loadFailed, currentFolderId, folders],
+  )
+  // A pending folder is dropped when a Temporary Chat starts (UDR-0178 D7).
+  useEffect(() => {
+    if (temp.isTemporary) clearPendingFolder()
+  }, [temp.isTemporary, clearPendingFolder])
+  // Badge click (operator answer Q2): open the sidebar and reveal the folder in it.
+  const [revealFolderRequest, setRevealFolderRequest] = useState<{ folderId: string; nonce: number } | null>(null)
+  const revealCueFolder = useCallback(() => {
+    if (!cueFolder) return
+    setSidebarOpen(true)
+    setRevealFolderRequest((prev) => ({ folderId: cueFolder.id, nonce: (prev?.nonce ?? 0) + 1 }))
+  }, [cueFolder, setSidebarOpen])
+  const clearRevealRequest = useCallback(() => setRevealFolderRequest(null), [])
+  const folderBadge =
+    folderCue.badge && cueFolder && !isSwitching ? <FolderBadge folder={cueFolder} onReveal={revealCueFolder} /> : null
 
   const handleBranch = useCallback(
     (messageIndex: number) => {
@@ -196,6 +236,16 @@ export function ChatPage() {
     temp.exit()
     createSession()
   }, [temp, createSession])
+
+  // "New chat in folder" (PRP-0196). The menu item is disabled during a Temporary Chat
+  // (UDR-0178 D8), so this never has to exit one.
+  const handleCreateInFolder = useCallback(
+    (folderId: string) => {
+      if (temp.isTemporary) return
+      createSession(folderId)
+    },
+    [temp.isTemporary, createSession],
+  )
 
   const sessionSidebar = (
     <SessionSidebar
@@ -222,6 +272,10 @@ export function ChatPage() {
       onArchive={archiveSession}
       onPin={pinSession}
       onCreate={handleCreate}
+      onCreateInFolder={handleCreateInFolder}
+      temporaryActive={temp.isTemporary}
+      revealFolderRequest={revealFolderRequest}
+      onRevealHandled={clearRevealRequest}
       onClose={() => setSidebarOpen(false)}
       hasMoreSessions={hasMoreSessions}
       isLoadingMoreSessions={isLoadingMoreSessions}
@@ -315,6 +369,8 @@ export function ChatPage() {
                   aria-label="Open sessions">
                   <Menu className="h-5 w-5" />
                 </Button>
+                {/* Folder badge (PRP-0196): between the sidebar button and the toggles. */}
+                <div className="flex min-w-0 flex-1 items-center">{folderBadge}</div>
                 <div className="flex items-center gap-1">{topRightToggles}</div>
               </div>
             ) : (
@@ -337,8 +393,18 @@ export function ChatPage() {
               distinct colors so they stay distinguishable -- UDR-0107 D11).
             */}
                 <div className="absolute right-3 top-3 z-20 flex items-center gap-1">{topRightToggles}</div>
+                {/* Folder badge (PRP-0196): top-left, on the toggles' row, right of the
+                    sidebar button when that is shown. */}
+                {folderBadge && (
+                  <div className={cn('absolute top-3 z-20 flex max-w-[40%]', sidebarOpen ? 'left-3' : 'left-14')}>
+                    {folderBadge}
+                  </div>
+                )}
               </>
             )}
+
+            {/* Folder glow (PRP-0196, UDR-0178 D3): edge-only, pointer-events-none. */}
+            {folderCue.glow && <FolderGlow folder={isSwitching ? null : cueFolder} />}
 
             {isSwitching ? (
               <div className="flex flex-1 items-center justify-center">
@@ -365,6 +431,7 @@ export function ChatPage() {
                 initialMessages={temp.isTemporary ? [] : initialMessages}
                 onStreamComplete={handleStreamComplete}
                 onSessionCreated={handleSessionCreated}
+                initFolderId={temp.isTemporary ? null : pendingFolderId}
                 onBranchFromMessage={temp.isTemporary ? undefined : handleBranch}
                 // Narrow viewport: /cron and /files are consumed and open nothing (UDR-0153 D4).
                 onSlashCron={isEntryVisible(surface, 'slash.cron') ? () => setCronOpen(true) : undefined}
