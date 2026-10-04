@@ -3,6 +3,8 @@ import {
   AudioLines,
   Bot,
   Check,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Copy,
   Download,
   FileText as FileTextIcon,
@@ -21,6 +23,8 @@ import { AuthedImage } from '@/components/AuthedImage'
 import { HarnessProgressPanel } from '@/components/HarnessProgressPanel'
 import { ImageGenerationResults } from '@/components/ImageGenerationResult'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
+import { HeadingFoldContext, useHeadingFold } from '@/components/markdown/HeadingFold'
+import { MIN_FOLD_HEADINGS } from '@/components/markdown/rehypeHeadingSections'
 import { McpAppView } from '@/components/mcp-apps/McpAppView'
 import { ReasoningIndicator, ThinkingBlock } from '@/components/ReasoningIndicator'
 import { TokenUsageDialog } from '@/components/TokenUsageDialog'
@@ -373,6 +377,12 @@ function ChatMessageItemImpl({
   // Assistant output stays legible on purpose -- redacting it would make the
   // product unshowable, which is the point of the demo (UDR-0107 D9).
   const { enabled: redacted, redact } = usePrivacyScreen()
+  // Collapsible heading sections (CTR-0012 v1.12 / CTR-0018 v1.5, PRP-0197,
+  // UDR-0179). A view state of this message only: never persisted, and Copy /
+  // TTS / Edit keep using `message.content`. Only a non-structured assistant body
+  // folds (D3); the state reaches the sections through context (D7).
+  const fold = useHeadingFold()
+  const foldHeadings = !isUser && !message.structured
   // Deleting a message does NOT delete its uploads -- the PNG and the editable
   // paint scene (CTR-0161) stay on disk. But the message is the ONLY route to
   // them: the re-edit affordance lives on it, so once it is gone the drawing is
@@ -693,7 +703,12 @@ function ChatMessageItemImpl({
               // JSON answer as a `json` code block (reuses CodeBlock copy/download)
               // instead of Markdown. Streaming partial JSON shows as it arrives.
               <div className={cn(message.live?.provisional && 'opacity-60')}>
-                <MarkdownRenderer content={message.structured ? toJsonCodeFence(message.content) : message.content} />
+                <HeadingFoldContext.Provider value={foldHeadings ? fold : null}>
+                  <MarkdownRenderer
+                    content={message.structured ? toJsonCodeFence(message.content) : message.content}
+                    foldHeadings={foldHeadings}
+                  />
+                </HeadingFoldContext.Provider>
               </div>
             ) : (
               !isWaiting && !workflowState && <span className="inline-block h-4 w-1 animate-pulse bg-current" />
@@ -728,6 +743,22 @@ function ChatMessageItemImpl({
               screen. Assistant messages are not redacted and copy unchanged.
             */}
             <CopyButton text={isUser ? redact(message.content, `msg:${message.id}`) : message.content} />
+            {/*
+              Collapse all / Expand all (CTR-0018 v1.5, PRP-0197, UDR-0179 D6). Shown
+              only when the answer has enough fold sections. Collapse all folds every
+              level, so expanding one section reveals its sub-headings as an outline.
+            */}
+            {foldHeadings && fold.sectionCount >= MIN_FOLD_HEADINGS && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                onClick={fold.allCollapsed ? fold.expandAll : fold.collapseAll}
+                title={fold.allCollapsed ? 'Expand all sections' : 'Collapse all sections'}
+                aria-label={fold.allCollapsed ? 'Expand all sections' : 'Collapse all sections'}>
+                {fold.allCollapsed ? <ChevronsUpDown className="h-3 w-3" /> : <ChevronsDownUp className="h-3 w-3" />}
+              </Button>
+            )}
             {onToggleMemoryLike && (
               <MemoryLikeButton messageIndex={messageIndex} status={memoryLikeStatus} onToggle={onToggleMemoryLike} />
             )}

@@ -2,13 +2,15 @@ import 'katex/dist/katex.min.css'
 
 import { Check, Copy } from 'lucide-react'
 import { memo, useCallback, useMemo, useRef, useState } from 'react'
-import type { Components } from 'react-markdown'
+import type { Components, Options as MarkdownOptions } from 'react-markdown'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import { CodeBlock } from '@/components/CodeBlock'
 import { MermaidBlock } from '@/components/MermaidBlock'
+import { FoldableHeading, FoldSection } from '@/components/markdown/HeadingFold'
+import rehypeHeadingSections from '@/components/markdown/rehypeHeadingSections'
 import { remarkCjkStrongEmphasisRescue } from '@/components/markdown/remarkCjkStrongEmphasisRescue'
 import { Button } from '@/components/ui/button'
 import { WorkspaceFileLink, WorkspaceImage } from '@/components/WorkspaceFileLink'
@@ -16,6 +18,12 @@ import { isWorkspaceRefUrl, makeWorkspaceUrlTransform, normalizeWorkspaceLinkTar
 
 interface MarkdownRendererProps {
   content: string
+  /**
+   * CTR-0012 v1.12 (PRP-0197, UDR-0179 D3): fold H1 to H3 sections. Opt-in;
+   * only the non-structured assistant message body passes it. Off, the
+   * pipeline and the DOM are exactly as before.
+   */
+  foldHeadings?: boolean
 }
 
 /**
@@ -197,28 +205,37 @@ const components: Components = {
     )
   },
 
+  // CTR-0012 v1.12 (PRP-0197, UDR-0179 D4): an H1 to H3 that opens a fold
+  // section renders its chevron toggle; any other heading renders exactly as
+  // before (FoldableHeading re-adds `first:mt-0` for it).
   h1({ children, node: _, ...props }) {
     return (
-      <h1 className="mt-4 mb-2 text-2xl font-bold first:mt-0" {...props}>
+      <FoldableHeading as="h1" className="mt-4 mb-2 text-2xl font-bold" {...props}>
         {children}
-      </h1>
+      </FoldableHeading>
     )
   },
 
   h2({ children, node: _, ...props }) {
     return (
-      <h2 className="mt-4 mb-2 text-xl font-bold first:mt-0" {...props}>
+      <FoldableHeading as="h2" className="mt-4 mb-2 text-xl font-bold" {...props}>
         {children}
-      </h2>
+      </FoldableHeading>
     )
   },
 
   h3({ children, node: _, ...props }) {
     return (
-      <h3 className="mt-3 mb-1.5 text-lg font-semibold first:mt-0" {...props}>
+      <FoldableHeading as="h3" className="mt-3 mb-1.5 text-lg font-semibold" {...props}>
         {children}
-      </h3>
+      </FoldableHeading>
     )
+  },
+
+  // CTR-0012 v1.12 (PRP-0197, UDR-0179 D2): only rehypeHeadingSections emits
+  // `section`, and only when `foldHeadings` is on.
+  section({ children, node: _, ...props }) {
+    return <FoldSection {...props}>{children}</FoldSection>
   },
 
   ul({ children, node: _, ...props }) {
@@ -291,7 +308,16 @@ function preprocessMath(text: string): string {
  */
 export const urlTransform = makeWorkspaceUrlTransform(defaultUrlTransform)
 
-function MarkdownRendererImpl({ content }: MarkdownRendererProps) {
+// `unified` is not a direct dependency, so the plugin-list type comes from react-markdown.
+type PluggableList = NonNullable<MarkdownOptions['rehypePlugins']>
+
+const remarkPlugins: PluggableList = [remarkGfm, remarkMath, remarkCjkStrongEmphasisRescue]
+const katexPlugin: PluggableList[number] = [rehypeKatex, { throwOnError: false, trust: true, strict: false }]
+const rehypePlugins: PluggableList = [katexPlugin]
+// PRP-0197 (UDR-0179 D2): the section step runs LAST, and only when folding is on.
+const rehypePluginsWithFold: PluggableList = [katexPlugin, rehypeHeadingSections]
+
+function MarkdownRendererImpl({ content, foldHeadings = false }: MarkdownRendererProps) {
   // CTR-0012 v1.6 (PRP-0055): compact body text size and leading for
   // higher information density on a single viewport.
   // PRP-0074 (UDR-0050, Tier 1): memoize the delimiter preprocessing so it is
@@ -300,8 +326,8 @@ function MarkdownRendererImpl({ content }: MarkdownRendererProps) {
   return (
     <div className="text-[15px] leading-[1.55] [&>*:last-child]:mb-0">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath, remarkCjkStrongEmphasisRescue]}
-        rehypePlugins={[[rehypeKatex, { throwOnError: false, trust: true, strict: false }]]}
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={foldHeadings ? rehypePluginsWithFold : rehypePlugins}
         remarkRehypeOptions={remarkRehypeOptions}
         urlTransform={urlTransform}
         components={components}>
@@ -313,4 +339,6 @@ function MarkdownRendererImpl({ content }: MarkdownRendererProps) {
 
 // PRP-0074 (UDR-0050, Tier 1): memoize on `content` so a static message never
 // re-runs the remark/rehype + KaTeX pipeline when an unrelated message streams.
+// PRP-0197 (UDR-0179 D7): fold state is NOT a prop -- it reaches the sections
+// through HeadingFoldContext, so a fold toggle never re-runs the pipeline.
 export const MarkdownRenderer = memo(MarkdownRendererImpl)
