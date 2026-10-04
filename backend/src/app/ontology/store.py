@@ -23,15 +23,19 @@ is ever resolved (the CTR-0022 confinement precedent).
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import uuid
 
 from app.core.config import settings
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +66,9 @@ def _atomic_write_text(path: Path, content: str) -> None:
     """Temp file + atomic ``os.replace`` (never ``open('w')`` in place)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
-    tmp.write_text(content, encoding="utf-8")
+    # Bytes, not write_text: no newline translation on Windows, so the stored
+    # file is exactly what was serialized (the CTR-0171 revision hashes these bytes).
+    tmp.write_bytes(content.encode("utf-8"))
     tmp.replace(path)
 
 
@@ -158,9 +164,15 @@ def _file_path(entry: dict[str, str]) -> Path:
     return ontology_dir() / entry["file"]
 
 
-def create_ontology(name: str, description: str, *, initial_turtle: str = "") -> dict[str, str]:
-    """Create a new catalog entry + its Turtle file (empty unless imported)."""
+def create_ontology(name: str, description: str, *, initial_turtle: str | Callable[[str], str] = "") -> dict[str, str]:
+    """Create a new catalog entry + its Turtle file.
+
+    ``initial_turtle`` is the file content, or a factory called with the new id
+    (a new ontology's header binds ``:`` to its own minting namespace).
+    """
     entry_id = f"ont_{uuid.uuid4().hex[:12]}"
+    if callable(initial_turtle):
+        initial_turtle = initial_turtle(entry_id)
     entry = {
         "id": entry_id,
         "name": (name or "").strip() or entry_id,
@@ -224,6 +236,11 @@ def read_ontology_bytes(ontology_id: str) -> bytes | None:
         return None
     path = _file_path(entry)
     return path.read_bytes() if path.is_file() else b""
+
+
+def revision_of(data: bytes) -> str:
+    """The optimistic-concurrency revision of a stored file (CTR-0171 v3, UDR-0180 D8)."""
+    return hashlib.sha256(data).hexdigest()
 
 
 def save_ontology_text(ontology_id: str, turtle: str) -> str | None:
@@ -342,6 +359,7 @@ __all__ = [
     "read_catalog",
     "read_ontology_bytes",
     "rename_ontology",
+    "revision_of",
     "save_ontology_text",
     "write_catalog",
 ]

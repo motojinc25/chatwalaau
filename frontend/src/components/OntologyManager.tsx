@@ -9,9 +9,14 @@
  * (monaco SPARQL editor + natural-language search via /nl-query; SELECT
  * results render as a table and drive the strong/dim canvas highlight).
  *
- * The frontend never parses RDF (UDR-0084 D6): it edits the CTR-0169 JSON
- * graph projection served by CTR-0171 and lets the backend own the Turtle
- * codec. Saving is backup-then-atomic server-side; closing (or switching
+ * The frontend never parses RDF (UDR-0084 D6): it edits the CTR-0169 v2
+ * statement-complete projection served by CTR-0171 -- every triple is a typed
+ * statement of its subject (PRP-0198, UDR-0180). `lib/ontologyModel.ts` maps
+ * statements to the canvas and canvas edits to statement edits; the inspector
+ * (`OntologyInspector.tsx`) shows and edits every statement, the resources the
+ * canvas does not draw (Resources tab) and the prefixes / base / VERSION
+ * (Document). Saving sends the full state with the loaded revision (409 when it
+ * went stale) and is backup-then-atomic server-side; closing (or switching
  * ontologies) with unsaved changes asks for confirmation first.
  */
 
@@ -32,6 +37,7 @@ import {
   useReactFlow,
 } from '@xyflow/react'
 import {
+  Braces,
   Download,
   ImageDown,
   KeyRound,
@@ -46,11 +52,23 @@ import {
   Trash2,
   TriangleAlert,
   Upload,
+  Users,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
+import {
+  AllStatements,
+  DocumentDialog,
+  fieldInput,
+  fieldLabel,
+  type InspectorContext,
+  NewResourceDialog,
+  ResourceDetail,
+  ResourcesPane,
+  TermView,
+} from '@/components/OntologyInspector'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -71,40 +89,54 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import {
+  applyStatementEdit,
+  CARDINALITIES,
+  CW_CARDINALITY,
+  CW_COLOR,
+  CW_EMOJI,
+  createDatatypeProperty,
+  createEntity,
+  createRelationship,
+  type Diagnostic,
+  deleteEntity as deleteEntityFromModel,
+  displayedLiteralEdit,
+  displayLiteral,
+  EMPTY_MODEL,
+  type EntityView,
+  entityViews,
+  externalReferenceCount,
+  findResource,
+  firstObjectEdit,
+  fromProjection,
+  iriObjects,
+  iri as iriTerm,
+  localName,
+  type OntologyDocument,
+  type OntologyModel,
+  otherLiterals,
+  RDF_TYPE,
+  RDFS_COMMENT,
+  RDFS_DOMAIN,
+  RDFS_LABEL,
+  RDFS_RANGE,
+  type RelationshipEdgeView,
+  reifiersOf,
+  relationshipEdges,
+  removePropertyFromEntity,
+  removeResource,
+  type Statement,
+  type StatementEdit,
+  setIsKey,
+  setPosition,
+  type Term,
+  termKey,
+  toPayload,
+  XSD,
+} from '@/lib/ontologyModel'
 import { cn } from '@/lib/utils'
 import '@/lib/monaco-setup'
 import '@xyflow/react/dist/style.css'
-
-// ---- Projection types (the CTR-0169 JSON graph projection) -----------------
-
-interface OntologyProperty {
-  iri: string
-  label: string
-  range: string
-  comment?: string
-  /** Key attribute of its entity (persisted as a cw:isKey annotation). */
-  is_key?: boolean
-}
-
-interface OntologyEntity {
-  iri: string
-  label: string
-  comment: string
-  emoji: string
-  color: string
-  x: number
-  y: number
-  properties: OntologyProperty[]
-}
-
-interface OntologyRelationship {
-  iri: string
-  label: string
-  comment: string
-  source: string
-  target: string
-  cardinality: string
-}
 
 interface CatalogEntry {
   id: string
@@ -126,12 +158,18 @@ type QueryResult =
   | { kind: 'ask'; value: boolean }
   | { kind: 'error'; error: string }
 
-interface Selection {
-  kind: 'entity' | 'relationship'
-  iri: string
-}
+/**
+ * What the Detail pane shows: an entity or a relationship drawn on the canvas
+ * (by IRI), or any resource by its term key (inspector, UDR-0180 D9).
+ */
+type Selection = { kind: 'entity' | 'relationship'; iri: string } | { kind: 'resource'; key: string }
 
-const CARDINALITIES = ['one-to-one', 'one-to-many', 'many-to-one', 'many-to-many'] as const
+/** An edit waiting for the "follow the reifiers?" answer (PRP-0198 Q4). */
+interface PendingReifiedEdit {
+  key: string
+  edits: StatementEdit[]
+  reifierCount: number
+}
 
 const CARDINALITY_SYMBOL: Record<string, string> = {
   'one-to-one': '1:1',
@@ -142,7 +180,6 @@ const CARDINALITY_SYMBOL: Record<string, string> = {
 
 const COLOR_PRESETS = ['', '#3b82f6', '#22c55e', '#eab308', '#f97316', '#ef4444', '#a855f7', '#14b8a6']
 
-const XSD = 'http://www.w3.org/2001/XMLSchema#'
 const XSD_RANGES = ['string', 'integer', 'decimal', 'boolean', 'date', 'dateTime'] as const
 
 const DEFAULT_SPARQL = [
@@ -169,10 +206,20 @@ function mintIri(baseIri: string, label: string, taken: Set<string>): string {
   return `${base}_${n}`
 }
 
-function localName(iri: string): string {
-  const hash = iri.split('#')
-  const tail = hash[hash.length - 1].split('/')
-  return tail[tail.length - 1] || iri
+/** Every IRI used as a subject (new terms must not collide with any of them). */
+function takenIris(model: OntologyModel): Set<string> {
+  return new Set(model.resources.filter((r) => r.term.type === 'iri').map((r) => (r.term as { value: string }).value))
+}
+
+/** True when the model uses RDF 1.2 features (triple terms, directional strings). */
+function usesRdf12(model: OntologyModel): boolean {
+  const visit = (term: Term): boolean => term.type === 'triple' || (term.type === 'literal' && Boolean(term.direction))
+  return model.resources.some((r) => r.statements.some((s) => visit(s.o)))
+}
+
+/** Grid placement for entities without a stored or computed position. */
+function gridPosition(index: number): { x: number; y: number } {
+  return { x: 40 + (index % 6) * 150, y: 40 + Math.floor(index / 6) * 140 }
 }
 
 // ---- Custom Entity node (circle, 360-degree connectable) ----------------------
@@ -263,6 +310,8 @@ interface RelEdgeData extends Record<string, unknown> {
   labelColor: string
   parallelIndex: number
   parallelCount: number
+  /** The object property this edge draws (one property may draw several edges, UDR-0180 D5). */
+  relationshipIri: string
 }
 
 const PARALLEL_SPREAD = 26 // px of perpendicular offset per fan-out step
@@ -436,11 +485,13 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // The loaded projection (the editing SSOT of this modal)
+  // The loaded statement-complete projection (the editing SSOT of this modal).
+  // `baseIri` is the catalog's minting namespace for NEW terms, not document.base.
   const [baseIri, setBaseIri] = useState('')
-  const [entities, setEntities] = useState<OntologyEntity[]>([])
-  const [relationships, setRelationships] = useState<OntologyRelationship[]>([])
-  const [extraTurtle, setExtraTurtle] = useState('')
+  const [model, setModel] = useState<OntologyModel>(EMPTY_MODEL)
+  const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([])
+  const [revision, setRevision] = useState<string | null>(null)
+  const [staleRevision, setStaleRevision] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -449,9 +500,24 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [highlight, setHighlight] = useState<Set<string> | null>(null)
   const [layouting, setLayouting] = useState(false)
   const canvasRef = useRef<HTMLDivElement | null>(null)
+  // Positions for entities WITHOUT cw:x / cw:y: a transient layout, never saved on
+  // its own (UDR-0180 D7). The first user layout action of a session writes the
+  // positions of every entity shown; later drags write only the moved ones.
+  const [autoPositions, setAutoPositions] = useState<Map<string, { x: number; y: number }>>(new Map())
+  const layoutCommittedRef = useRef(false)
+
+  // Inspector dialogs
+  const [documentOpen, setDocumentOpen] = useState(false)
+  const [newResourceOpen, setNewResourceOpen] = useState(false)
+  const [entityDeleteTarget, setEntityDeleteTarget] = useState<{ iri: string; label: string; refs: number } | null>(
+    null,
+  )
+  const [pendingReified, setPendingReified] = useState<PendingReifiedEdit | null>(null)
+  // The answer per edited statement (key|index), so typing does not re-ask per keystroke.
+  const reifierChoiceRef = useRef<Map<string, boolean>>(new Map())
 
   // Right pane
-  const [rightTab, setRightTab] = useState<'detail' | 'search'>('detail')
+  const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search'>('detail')
   const [sparql, setSparql] = useState(DEFAULT_SPARQL)
   const [nlQuestion, setNlQuestion] = useState('')
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null)
@@ -501,9 +567,13 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const data = await res.json()
       setSelectedId(id)
       setBaseIri((data.base_iri as string) ?? '')
-      setEntities((data.entities ?? []) as OntologyEntity[])
-      setRelationships((data.relationships ?? []) as OntologyRelationship[])
-      setExtraTurtle((data.extra_turtle as string) ?? '')
+      setModel(fromProjection(data))
+      setDiagnostics((data.diagnostics ?? []) as Diagnostic[])
+      setRevision((data.revision as string) ?? null)
+      setStaleRevision(false)
+      setAutoPositions(new Map())
+      layoutCommittedRef.current = false
+      reifierChoiceRef.current = new Map()
       setDirty(false)
       setSelection(null)
       setHighlight(null)
@@ -548,7 +618,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const res = await fetch(`/api/ontology/${selectedId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entities, relationships, extra_turtle: extraTurtle }),
+        body: JSON.stringify({ ...toPayload(model), revision }),
       })
       if (!res.ok) {
         const refused = await demoRefusal(res)
@@ -556,9 +626,20 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           setDemoBlocked(true)
           throw new Error(refused)
         }
-        const detail = await res.json().catch(() => null)
-        throw new Error(typeof detail?.detail === 'string' ? detail.detail : 'Failed to save the ontology')
+        const body = await res.json().catch(() => null)
+        const detail = body?.detail
+        if (res.status === 409 && detail?.error === 'stale_revision') {
+          // Someone saved this ontology after it was opened here (UDR-0180 D8).
+          setStaleRevision(true)
+          throw new Error(detail.message ?? 'The ontology was changed elsewhere.')
+        }
+        if (detail?.error === 'invalid_projection') {
+          throw new Error(`Cannot save: ${detail.pointer} -- ${detail.message}`)
+        }
+        throw new Error(typeof detail === 'string' ? detail : 'Failed to save the ontology')
       }
+      const body = await res.json().catch(() => null)
+      setRevision((body?.revision as string) ?? null)
       setDirty(false)
       await fetchCatalog()
     } catch (err) {
@@ -566,7 +647,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     } finally {
       setSaving(false)
     }
-  }, [selectedId, entities, relationships, extraTurtle, fetchCatalog])
+  }, [selectedId, model, revision, fetchCatalog])
 
   // ---- Catalog actions ----
 
@@ -634,9 +715,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       }
       if (selectedId === deleteTarget.id) {
         setSelectedId(null)
-        setEntities([])
-        setRelationships([])
-        setExtraTurtle('')
+        setModel(EMPTY_MODEL)
+        setDiagnostics([])
+        setRevision(null)
         setDirty(false)
         setSelection(null)
         setHighlight(null)
@@ -697,83 +778,153 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     }
   }, [])
 
-  // ---- Editing the projection ----
+  // ---- Editing the model (every edit is a statement edit; UDR-0180 D1 / D4) ----
 
   const markDirty = useCallback(() => setDirty(true), [])
 
-  const updateEntity = useCallback(
-    (iri: string, patch: Partial<OntologyEntity>) => {
-      setEntities((prev) => prev.map((e) => (e.iri === iri ? { ...e, ...patch } : e)))
+  const views = useMemo(() => entityViews(model), [model])
+  const relEdges = useMemo(() => relationshipEdges(model), [model])
+
+  /**
+   * Apply statement edits to one resource. When an edited statement is reified
+   * (a reifier's rdf:reifies points to it), ask once whether the reifiers follow
+   * the edit (PRP-0198 Q4; default: follow) and remember the answer for that
+   * statement so typing does not ask again.
+   */
+  const commitEdits = useCallback(
+    (key: string, edits: (StatementEdit | null)[]) => {
+      const real = edits.filter((e): e is StatementEdit => e !== null)
+      if (real.length === 0) return
+      let reifierCount = 0
+      let undecided = false
+      for (const edit of real) {
+        if (edit.index === null || edit.statement === null) continue
+        const count = reifiersOf(model, key, edit.index).length
+        if (count === 0) continue
+        reifierCount += count
+        if (!reifierChoiceRef.current.has(`${key}|${edit.index}`)) undecided = true
+      }
+      if (undecided) {
+        setPendingReified({ key, edits: real, reifierCount })
+        return
+      }
+      setModel((prev) => {
+        let next = prev
+        for (const edit of real) {
+          const follow = edit.index === null ? true : (reifierChoiceRef.current.get(`${key}|${edit.index}`) ?? true)
+          next = applyStatementEdit(next, key, edit, follow)
+        }
+        return next
+      })
+      markDirty()
+    },
+    [model, markDirty],
+  )
+
+  const resolvePendingReified = useCallback(
+    (follow: boolean) => {
+      const pending = pendingReified
+      setPendingReified(null)
+      if (!pending) return
+      for (const edit of pending.edits) {
+        if (edit.index !== null) reifierChoiceRef.current.set(`${pending.key}|${edit.index}`, follow)
+      }
+      setModel((prev) => {
+        let next = prev
+        for (const edit of pending.edits) next = applyStatementEdit(next, pending.key, edit, follow)
+        return next
+      })
+      markDirty()
+    },
+    [pendingReified, markDirty],
+  )
+
+  const updateModel = useCallback(
+    (update: (prev: OntologyModel) => OntologyModel) => {
+      setModel(update)
       markDirty()
     },
     [markDirty],
   )
 
-  const updateRelationship = useCallback(
-    (iri: string, patch: Partial<OntologyRelationship>) => {
-      setRelationships((prev) => prev.map((r) => (r.iri === iri ? { ...r, ...patch } : r)))
-      markDirty()
+  const keyOf = useCallback((value: string) => termKey(iriTerm(value)), [])
+
+  /** Set the displayed literal of `predicate` on the resource `value` (keeps language / datatype). */
+  const setDisplayed = useCallback(
+    (value: string, predicate: string, text: string) => {
+      const key = keyOf(value)
+      commitEdits(key, [displayedLiteralEdit(findResource(model, key), predicate, text)])
     },
-    [markDirty],
+    [model, keyOf, commitEdits],
+  )
+
+  /** Set the FIRST object of `predicate` (emoji, color, cardinality, a single range). */
+  const setFirst = useCallback(
+    (value: string, predicate: string, term: Term | null) => {
+      const key = keyOf(value)
+      commitEdits(key, [firstObjectEdit(findResource(model, key), predicate, term)])
+    },
+    [model, keyOf, commitEdits],
   )
 
   const addEntity = useCallback(() => {
-    const taken = new Set(entities.map((e) => e.iri))
-    const iri = mintIri(baseIri || 'https://chatwalaau.com/ontology/local#', 'Entity', taken)
-    const entity: OntologyEntity = {
-      iri,
-      label: 'New Entity',
-      comment: '',
-      emoji: '',
-      color: '',
-      x: 40 + (entities.length % 5) * 60,
-      y: 40 + (entities.length % 7) * 40,
-      properties: [],
-    }
-    setEntities((prev) => [...prev, entity])
-    setSelection({ kind: 'entity', iri })
+    const value = mintIri(baseIri || 'https://chatwalaau.com/ontology/local#', 'Entity', takenIris(model))
+    const count = views.length
+    updateModel((prev) => createEntity(prev, value, 'New Entity', 40 + (count % 5) * 60, 40 + (count % 7) * 40))
+    setSelection({ kind: 'entity', iri: value })
     setRightTab('detail')
-    markDirty()
-  }, [entities, baseIri, markDirty])
+  }, [model, views.length, baseIri, updateModel])
 
-  const deleteEntity = useCallback(
-    (iri: string) => {
-      setEntities((prev) => prev.filter((e) => e.iri !== iri))
-      setRelationships((prev) => prev.filter((r) => r.source !== iri && r.target !== iri))
-      setSelection(null)
-      markDirty()
+  const requestDeleteEntity = useCallback(
+    (value: string) => {
+      const view = views.find((v) => v.iri === value)
+      setEntityDeleteTarget({
+        iri: value,
+        label: view?.label ?? localName(value),
+        refs: externalReferenceCount(model, value),
+      })
     },
-    [markDirty],
+    [model, views],
   )
 
+  const confirmDeleteEntity = useCallback(() => {
+    const target = entityDeleteTarget
+    setEntityDeleteTarget(null)
+    if (!target) return
+    updateModel((prev) => deleteEntityFromModel(prev, target.iri))
+    setSelection(null)
+  }, [entityDeleteTarget, updateModel])
+
   const deleteRelationship = useCallback(
-    (iri: string) => {
-      setRelationships((prev) => prev.filter((r) => r.iri !== iri))
+    (value: string) => {
+      updateModel((prev) => removeResource(prev, keyOf(value)))
       setSelection(null)
-      markDirty()
     },
-    [markDirty],
+    [updateModel, keyOf],
   )
 
   const onConnect = useCallback(
     (connection: Connection) => {
       if (!connection.source || !connection.target) return
-      const taken = new Set(relationships.map((r) => r.iri))
-      const iri = mintIri(baseIri || 'https://chatwalaau.com/ontology/local#', 'relatesTo', taken)
-      const relationship: OntologyRelationship = {
-        iri,
-        label: 'relates to',
-        comment: '',
-        source: connection.source,
-        target: connection.target,
-        cardinality: 'one-to-many',
-      }
-      setRelationships((prev) => [...prev, relationship])
-      setSelection({ kind: 'relationship', iri })
+      const value = mintIri(baseIri || 'https://chatwalaau.com/ontology/local#', 'relatesTo', takenIris(model))
+      const { source, target } = connection
+      updateModel((prev) => createRelationship(prev, value, source, target))
+      setSelection({ kind: 'relationship', iri: value })
       setRightTab('detail')
-      markDirty()
     },
-    [relationships, baseIri, markDirty],
+    [model, baseIri, updateModel],
+  )
+
+  const selectResource = useCallback(
+    (key: string) => {
+      const resource = findResource(model, key)
+      const value = resource?.term.type === 'iri' ? resource.term.value : null
+      if (value && resource?.role === 'entity') setSelection({ kind: 'entity', iri: value })
+      else if (value && relEdges.some((e) => e.iri === value)) setSelection({ kind: 'relationship', iri: value })
+      else setSelection({ kind: 'resource', key })
+      setRightTab('detail')
+    },
+    [model, relEdges],
   )
 
   // ---- React Flow derivation ----
@@ -785,37 +936,44 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const related = useMemo(() => {
     const nodes = new Set<string>()
     const edges = new Set<string>()
-    if (!selection) return { nodes, edges }
+    if (!selection || selection.kind === 'resource') return { nodes, edges }
     if (selection.kind === 'entity') {
-      for (const rel of relationships) {
+      for (const rel of relEdges) {
         if (rel.source === selection.iri || rel.target === selection.iri) {
-          edges.add(rel.iri)
+          edges.add(rel.id)
           nodes.add(rel.source)
           nodes.add(rel.target)
         }
       }
       nodes.delete(selection.iri) // the primary node has its own stronger style
     } else {
-      const rel = relationships.find((r) => r.iri === selection.iri)
-      if (rel) {
+      const own = relEdges.filter((r) => r.iri === selection.iri)
+      for (const rel of own) {
         nodes.add(rel.source)
         nodes.add(rel.target)
-        for (const other of relationships) {
-          if (other.iri === rel.iri) continue
-          const endpoints = [other.source, other.target]
-          if (endpoints.includes(rel.source) || endpoints.includes(rel.target)) edges.add(other.iri)
-        }
+      }
+      for (const other of relEdges) {
+        if (other.iri === selection.iri) continue
+        if (nodes.has(other.source) || nodes.has(other.target)) edges.add(other.id)
       }
     }
     return { nodes, edges }
-  }, [selection, relationships])
+  }, [selection, relEdges])
+
+  const positionOf = useCallback(
+    (view: EntityView, index: number) => {
+      if (view.x !== null && view.y !== null) return { x: view.x, y: view.y }
+      return autoPositions.get(view.iri) ?? gridPosition(index)
+    },
+    [autoPositions],
+  )
 
   const buildNodes = useCallback(
     (): EntityFlowNode[] =>
-      entities.map((entity) => ({
+      views.map((entity, index) => ({
         id: entity.iri,
         type: 'entity' as const,
-        position: { x: entity.x, y: entity.y },
+        position: positionOf(entity, index),
         // Drag only from the inner disc; the outer ring is the connection zone (UDR-0098 D1).
         dragHandle: `.${ENTITY_DRAG_CLASS}`,
         data: {
@@ -823,25 +981,25 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           emoji: entity.emoji,
           color: entity.color,
           propertyCount: entity.properties.length,
-          keyCount: entity.properties.filter((p) => p.is_key).length,
+          keyCount: entity.properties.filter((p) => p.isKey).length,
           isSelected: selection?.kind === 'entity' && selection.iri === entity.iri,
           related: related.nodes.has(entity.iri),
           dimmed: highlight !== null && !highlight.has(entity.iri),
           matched: Boolean(highlight?.has(entity.iri)),
         },
       })),
-    [entities, selection, related, highlight],
+    [views, positionOf, selection, related, highlight],
   )
 
   // FLICKER FIX: node positions live in local React Flow state during a drag
   // (applyNodeChanges clones only the dragged node, so the memoized siblings do
-  // not re-render per pointer move) and are written back into the entities on
+  // not re-render per pointer move) and are written back into the model on
   // drag stop. The list is rebuilt synchronously (derived-state-during-render)
   // whenever the underlying data / selection / highlight actually changes, so
   // an ontology switch never shows a stale frame.
   const [nodes, setNodes] = useState<EntityFlowNode[]>([])
   const nodesDepsRef = useRef<readonly unknown[] | null>(null)
-  const nodesDeps = [entities, selection, related, highlight] as const
+  const nodesDeps = [views, autoPositions, selection, related, highlight] as const
   if (nodesDepsRef.current === null || nodesDeps.some((dep, index) => dep !== nodesDepsRef.current?.[index])) {
     nodesDepsRef.current = nodesDeps
     setNodes(buildNodes())
@@ -851,19 +1009,32 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     setNodes((current) => applyNodeChanges(changes, current))
   }, [])
 
+  /** Write positions for a user layout action (UDR-0180 D7). */
+  const commitPositions = useCallback(
+    (positions: Map<string, { x: number; y: number }>) => {
+      if (positions.size === 0) return
+      updateModel((prev) => {
+        let next = prev
+        for (const [value, position] of positions) next = setPosition(next, value, position.x, position.y)
+        return next
+      })
+      layoutCommittedRef.current = true
+    },
+    [updateModel],
+  )
+
   const onNodeDragStop = useCallback(
     (_event: MouseEvent | TouchEvent, _node: EntityFlowNode, draggedNodes: EntityFlowNode[]) => {
       const moved = new Map(draggedNodes.map((n) => [n.id, n.position]))
       if (moved.size === 0) return
-      setEntities((prev) =>
-        prev.map((entity) => {
-          const position = moved.get(entity.iri)
-          return position ? { ...entity, x: position.x, y: position.y } : entity
-        }),
-      )
-      markDirty()
+      // The FIRST layout action of the session saves the picture the user sees:
+      // every entity's current position, not only the dragged one.
+      const positions = layoutCommittedRef.current
+        ? moved
+        : new Map(nodes.map((n) => [n.id, moved.get(n.id) ?? n.position]))
+      commitPositions(positions)
     },
-    [markDirty],
+    [nodes, commitPositions],
   )
 
   const edges = useMemo<Edge[]>(() => {
@@ -871,23 +1042,23 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     // and this edge's index within that group (UDR-0098 D2).
     const pairKey = (s: string, t: string) => (s < t ? `${s}|${t}` : `${t}|${s}`)
     const pairTotal = new Map<string, number>()
-    for (const rel of relationships) {
+    for (const rel of relEdges) {
       const key = pairKey(rel.source, rel.target)
       pairTotal.set(key, (pairTotal.get(key) ?? 0) + 1)
     }
     const pairSeen = new Map<string, number>()
-    return relationships.map((rel) => {
+    return relEdges.map((rel) => {
       const key = pairKey(rel.source, rel.target)
       const parallelIndex = pairSeen.get(key) ?? 0
       pairSeen.set(key, parallelIndex + 1)
       const parallelCount = pairTotal.get(key) ?? 1
       const isSelected = selection?.kind === 'relationship' && selection.iri === rel.iri
-      const isRelated = !isSelected && related.edges.has(rel.iri)
+      const isRelated = !isSelected && related.edges.has(rel.id)
       const matched = highlight !== null && (highlight.has(rel.source) || highlight.has(rel.target))
       const dimmed = highlight !== null && !matched
       const stroke = isSelected ? '#2563eb' : isRelated ? '#93c5fd' : matched ? '#f59e0b' : '#94a3b8'
       return {
-        id: rel.iri,
+        id: rel.id,
         source: rel.source,
         target: rel.target,
         type: 'floating',
@@ -900,17 +1071,19 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           labelColor: isSelected ? '#2563eb' : '#52525b',
           parallelIndex,
           parallelCount,
+          relationshipIri: rel.iri,
         } satisfies RelEdgeData,
       }
     })
-  }, [relationships, selection, related, highlight])
+  }, [relEdges, selection, related, highlight])
 
-  const resetLayout = useCallback(async () => {
-    if (entities.length === 0) return
-    setLayouting(true)
-    try {
+  /** elkjs layered layout of the given entities (all when `only` is undefined). */
+  const computeLayout = useCallback(
+    async (only?: Set<string>) => {
       const { default: ELK } = await import('elkjs/lib/elk.bundled.js')
       const elk = new ELK()
+      const ids = views.map((v) => v.iri).filter((value) => !only || only.has(value))
+      const idSet = new Set(ids)
       const result = await elk.layout({
         id: 'root',
         layoutOptions: {
@@ -919,22 +1092,59 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           'elk.spacing.nodeNode': '60',
           'elk.layered.spacing.nodeNodeBetweenLayers': '140',
         },
-        children: entities.map((e) => ({ id: e.iri, width: 110, height: 105 })),
-        edges: relationships.map((r) => ({ id: r.iri, sources: [r.source], targets: [r.target] })),
+        children: ids.map((value) => ({ id: value, width: 110, height: 105 })),
+        edges: relEdges
+          .filter((r) => idSet.has(r.source) && idSet.has(r.target))
+          .map((r) => ({ id: r.id, sources: [r.source], targets: [r.target] })),
       })
-      setEntities((prev) =>
-        prev.map((entity) => {
-          const child = result.children?.find((c) => c.id === entity.iri)
-          return child ? { ...entity, x: child.x ?? entity.x, y: child.y ?? entity.y } : entity
-        }),
-      )
-      markDirty()
+      const positions = new Map<string, { x: number; y: number }>()
+      for (const child of result.children ?? []) positions.set(child.id, { x: child.x ?? 0, y: child.y ?? 0 })
+      return positions
+    },
+    [views, relEdges],
+  )
+
+  // Entities without a stored position get a TRANSIENT layout when an ontology
+  // opens (they used to pile up at 0,0). Nothing is written until the user acts.
+  const unpositioned = useMemo(() => views.filter((v) => v.x === null || v.y === null).map((v) => v.iri), [views])
+  const unpositionedKey = unpositioned.join('\n')
+  useEffect(() => {
+    if (!unpositionedKey) return
+    const missing = new Set(unpositionedKey.split('\n'))
+    if ([...missing].every((value) => autoPositions.has(value))) return
+    let cancelled = false
+    const positionedCount = views.length - missing.size
+    void computeLayout(missing)
+      .then((positions) => {
+        if (cancelled) return
+        // Next to the positioned ones, so a partly laid-out model is not overlapped.
+        const offsetX =
+          positionedCount > 0 ? Math.max(...views.filter((v) => v.x !== null).map((v) => v.x as number)) + 200 : 0
+        setAutoPositions((prev) => {
+          const next = new Map(prev)
+          for (const [value, p] of positions) if (!next.has(value)) next.set(value, { x: p.x + offsetX, y: p.y })
+          return next
+        })
+      })
+      .catch(() => {
+        // the grid fallback stays in place
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [unpositionedKey, views, autoPositions, computeLayout])
+
+  const resetLayout = useCallback(async () => {
+    if (views.length === 0) return
+    setLayouting(true)
+    try {
+      commitPositions(await computeLayout())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Auto-layout failed')
     } finally {
       setLayouting(false)
     }
-  }, [entities, relationships, markDirty])
+  }, [views.length, computeLayout, commitPositions])
 
   const downloadGraph = useCallback(async () => {
     const element = canvasRef.current?.querySelector<HTMLElement>('.react-flow')
@@ -960,13 +1170,13 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     (result: QueryResult) => {
       setQueryResult(result)
       if (result.kind === 'select') {
-        const iris = new Set(result.entity_iris.filter((iri) => entities.some((e) => e.iri === iri)))
+        const iris = new Set(result.entity_iris.filter((value) => views.some((e) => e.iri === value)))
         setHighlight(iris.size > 0 ? iris : null)
       } else {
         setHighlight(null)
       }
     },
-    [entities],
+    [views],
   )
 
   const runSparql = useCallback(async () => {
@@ -1023,16 +1233,33 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // ---- Derived detail-pane data ----
 
   const selectedEntity = useMemo(
-    () => (selection?.kind === 'entity' ? (entities.find((e) => e.iri === selection.iri) ?? null) : null),
-    [selection, entities],
+    () => (selection?.kind === 'entity' ? (views.find((e) => e.iri === selection.iri) ?? null) : null),
+    [selection, views],
   )
-  const selectedRelationship = useMemo(
-    () => (selection?.kind === 'relationship' ? (relationships.find((r) => r.iri === selection.iri) ?? null) : null),
-    [selection, relationships],
-  )
+  const selectedRelationshipIri = selection?.kind === 'relationship' ? selection.iri : null
   const entityLabel = useCallback(
-    (iri: string) => entities.find((e) => e.iri === iri)?.label ?? localName(iri),
-    [entities],
+    (value: string) => views.find((e) => e.iri === value)?.label ?? localName(value),
+    [views],
+  )
+
+  const inspector = useMemo<InspectorContext>(
+    () => ({
+      model,
+      prefixes: model.document.prefixes,
+      diagnostics,
+      readOnly: demoBlocked,
+      onSelectResource: selectResource,
+    }),
+    [model, diagnostics, demoBlocked, selectResource],
+  )
+
+  /** Statement list callbacks for one resource (all edits funnel through commitEdits). */
+  const statementHandlers = useCallback(
+    (key: string) => ({
+      onEdit: (index: number, statement: Statement | null) => commitEdits(key, [{ index, statement }]),
+      onAdd: (statement: Statement) => commitEdits(key, [{ index: null, statement }]),
+    }),
+    [commitEdits],
   )
 
   const busy = saving || importing || creating
@@ -1048,8 +1275,31 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
               language, and import or export RDF.
             </DialogDescription>
             <div className="mr-8 flex items-center gap-2">
-              {error && <span className="max-w-[480px] truncate text-xs text-red-600">{error}</span>}
+              {error && (
+                <span className="max-w-[480px] truncate text-xs text-red-600" title={error}>
+                  {error}
+                </span>
+              )}
+              {staleRevision && selectedId && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => guardDirty(() => void loadOntology(selectedId))}
+                  title="Load the version saved elsewhere (your unsaved changes are discarded)">
+                  <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reload
+                </Button>
+              )}
               {dirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => setDocumentOpen(true)}
+                disabled={!selectedId || loading}
+                title="Prefixes, base and VERSION of this ontology">
+                <Braces className="mr-1 h-3.5 w-3.5" /> Document
+              </Button>
               <Button
                 size="sm"
                 className="h-7"
@@ -1127,7 +1377,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                               setRightTab('detail')
                             }}
                             onEdgeClick={(_, edge) => {
-                              setSelection({ kind: 'relationship', iri: edge.id })
+                              const data = edge.data as RelEdgeData | undefined
+                              setSelection({ kind: 'relationship', iri: data?.relationshipIri ?? edge.id })
                               setRightTab('detail')
                             }}
                             onPaneClick={() => setSelection(null)}
@@ -1148,7 +1399,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                 right={
                   <div className="flex min-h-0 flex-1 flex-col">
                     <div className="flex shrink-0 border-b text-xs">
-                      {(['detail', 'search'] as const).map((tab) => (
+                      {(['detail', 'resources', 'search'] as const).map((tab) => (
                         <button
                           key={tab}
                           type="button"
@@ -1163,6 +1414,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                             <span className="inline-flex items-center gap-1">
                               <Search className="h-3 w-3" /> Search
                             </span>
+                          ) : tab === 'resources' ? (
+                            <span className="inline-flex items-center gap-1">
+                              <Users className="h-3 w-3" /> Resources
+                            </span>
                           ) : (
                             'Detail'
                           )}
@@ -1170,17 +1425,46 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                       ))}
                     </div>
                     {rightTab === 'detail' ? (
-                      <DetailPane
-                        entity={selectedEntity}
-                        relationship={selectedRelationship}
-                        relationships={relationships}
-                        entityLabel={entityLabel}
-                        onUpdateEntity={updateEntity}
-                        onUpdateRelationship={updateRelationship}
-                        onDeleteEntity={deleteEntity}
-                        onDeleteRelationship={deleteRelationship}
-                        onSelectRelationship={(iri) => setSelection({ kind: 'relationship', iri })}
-                        baseIri={baseIri}
+                      selection?.kind === 'resource' ? (
+                        <ResourceDetail
+                          resourceKey={selection.key}
+                          ctx={inspector}
+                          {...statementHandlers(selection.key)}
+                          onDelete={() => {
+                            updateModel((prev) => removeResource(prev, selection.key))
+                            setSelection(null)
+                          }}
+                        />
+                      ) : (
+                        <DetailPane
+                          model={model}
+                          entity={selectedEntity}
+                          relationshipIri={selectedRelationshipIri}
+                          relationships={relEdges}
+                          entityLabel={entityLabel}
+                          inspector={inspector}
+                          statementHandlers={statementHandlers}
+                          onSetDisplayed={setDisplayed}
+                          onSetFirst={setFirst}
+                          onToggleKey={(prop, on) => updateModel((prev) => setIsKey(prev, prop, on))}
+                          onAddProperty={(entity) => {
+                            const value = mintIri(baseIri || `${entity}_`, 'property', takenIris(model))
+                            updateModel((prev) => createDatatypeProperty(prev, value, entity))
+                          }}
+                          onRemoveProperty={(prop, entity) =>
+                            updateModel((prev) => removePropertyFromEntity(prev, prop, entity))
+                          }
+                          onDeleteEntity={requestDeleteEntity}
+                          onDeleteRelationship={deleteRelationship}
+                          onSelectRelationship={(value) => setSelection({ kind: 'relationship', iri: value })}
+                          onSelectResource={selectResource}
+                        />
+                      )
+                    ) : rightTab === 'resources' ? (
+                      <ResourcesPane
+                        ctx={inspector}
+                        selectedKey={selection?.kind === 'resource' ? selection.key : null}
+                        onCreate={() => setNewResourceOpen(true)}
                       />
                     ) : (
                       <SearchPane
@@ -1367,6 +1651,71 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Entity delete: references from other resources are KEPT and counted (PRP-0198 Q3). */}
+      <AlertDialog open={entityDeleteTarget !== null} onOpenChange={(o) => !o && setEntityDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete entity?</AlertDialogTitle>
+            <AlertDialogDescription>
+              &quot;{entityDeleteTarget?.label}&quot; and its own statements will be removed. Properties and
+              relationships that only belonged to it go with it; shared ones keep their other entities.
+              {entityDeleteTarget && entityDeleteTarget.refs > 0
+                ? ` ${entityDeleteTarget.refs} statement${entityDeleteTarget.refs === 1 ? '' : 's'} of other resources refer to it and will be kept (find them in the Resources tab).`
+                : ' No other resource refers to it.'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDeleteEntity}>Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Editing an annotated (reified) statement: reifiers follow by default (PRP-0198 Q4). */}
+      <AlertDialog open={pendingReified !== null} onOpenChange={(o) => !o && setPendingReified(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Update the annotations too?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This statement is annotated by {pendingReified?.reifierCount ?? 0} reifier
+              {pendingReified?.reifierCount === 1 ? '' : 's'} (rdf:reifies). Let them follow the edit, or keep them
+              pointing to the statement as it was?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel edit</AlertDialogCancel>
+            <Button variant="outline" onClick={() => resolvePendingReified(false)}>
+              Keep them on the old statement
+            </Button>
+            <AlertDialogAction onClick={() => resolvePendingReified(true)}>Follow the edit</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <DocumentDialog
+        open={documentOpen}
+        document={model.document}
+        readOnly={demoBlocked}
+        usesRdf12={usesRdf12(model)}
+        onCancel={() => setDocumentOpen(false)}
+        onApply={(document: OntologyDocument) => {
+          setDocumentOpen(false)
+          updateModel((prev) => ({ ...prev, document }))
+        }}
+      />
+
+      <NewResourceDialog
+        open={newResourceOpen}
+        model={model}
+        prefixes={model.document.prefixes}
+        onCancel={() => setNewResourceOpen(false)}
+        onCreate={(term, statement) => {
+          setNewResourceOpen(false)
+          commitEdits(termKey(term), [{ index: null, statement }])
+          selectResource(termKey(term))
+        }}
+      />
     </>
   )
 }
@@ -1508,25 +1857,67 @@ function CatalogPane(props: {
 
 // ---- Right pane: Detail --------------------------------------------------------
 
-const fieldLabel = 'mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500'
-const fieldInput = 'w-full rounded-md border bg-transparent px-2 py-1.5 text-xs'
+const ENTITY_FORM_PREDICATES = new Set([RDF_TYPE, RDFS_LABEL, RDFS_COMMENT, CW_EMOJI, CW_COLOR])
+const RELATIONSHIP_FORM_PREDICATES = new Set([
+  RDF_TYPE,
+  RDFS_LABEL,
+  RDFS_COMMENT,
+  RDFS_DOMAIN,
+  RDFS_RANGE,
+  CW_CARDINALITY,
+])
+
+/** The other values of a predicate (other languages, other datatypes) as read-only chips. */
+function OtherValues(props: { model: OntologyModel; value: string; predicate: string; inspector: InspectorContext }) {
+  const others = otherLiterals(findResource(props.model, termKey(iriTerm(props.value))), props.predicate)
+  if (others.length === 0) return null
+  return (
+    <div className="mt-1 flex flex-wrap gap-1 text-[10px]">
+      {others.map((term) => (
+        <span
+          key={termKey(term)}
+          className="rounded border px-1 py-0.5"
+          title="Another value (edit it in All statements)">
+          <TermView term={term} ctx={props.inspector} />
+        </span>
+      ))}
+    </div>
+  )
+}
 
 function DetailPane(props: {
-  entity: OntologyEntity | null
-  relationship: OntologyRelationship | null
-  relationships: OntologyRelationship[]
+  model: OntologyModel
+  entity: EntityView | null
+  relationshipIri: string | null
+  relationships: RelationshipEdgeView[]
   entityLabel: (iri: string) => string
-  onUpdateEntity: (iri: string, patch: Partial<OntologyEntity>) => void
-  onUpdateRelationship: (iri: string, patch: Partial<OntologyRelationship>) => void
+  inspector: InspectorContext
+  statementHandlers: (key: string) => {
+    onEdit: (index: number, statement: Statement | null) => void
+    onAdd: (statement: Statement) => void
+  }
+  onSetDisplayed: (iri: string, predicate: string, text: string) => void
+  onSetFirst: (iri: string, predicate: string, term: Term | null) => void
+  onToggleKey: (propertyIri: string, on: boolean) => void
+  onAddProperty: (entityIri: string) => void
+  onRemoveProperty: (propertyIri: string, entityIri: string) => void
   onDeleteEntity: (iri: string) => void
   onDeleteRelationship: (iri: string) => void
   onSelectRelationship: (iri: string) => void
-  baseIri: string
+  onSelectResource: (key: string) => void
 }) {
-  const { entity, relationship } = props
+  const { entity, model, inspector } = props
+  const readOnly = inspector.readOnly
 
   if (entity) {
-    const incident = props.relationships.filter((r) => r.source === entity.iri || r.target === entity.iri)
+    const key = termKey(iriTerm(entity.iri))
+    const seen = new Set<string>()
+    const incident = props.relationships.filter((r) => {
+      if (r.source !== entity.iri && r.target !== entity.iri) return false
+      if (seen.has(r.id)) return false
+      seen.add(r.id)
+      return true
+    })
     return (
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         <div>
@@ -1540,9 +1931,12 @@ function DetailPane(props: {
           <input
             id="entity-label"
             className={fieldInput}
-            value={entity.label}
-            onChange={(e) => props.onUpdateEntity(entity.iri, { label: e.target.value })}
+            value={displayLiteral(findResource(model, key), RDFS_LABEL)}
+            placeholder={localName(entity.iri)}
+            readOnly={readOnly}
+            onChange={(e) => props.onSetDisplayed(entity.iri, RDFS_LABEL, e.target.value)}
           />
+          <OtherValues model={model} value={entity.iri} predicate={RDFS_LABEL} inspector={inspector} />
         </div>
         <div>
           <label htmlFor="entity-emoji" className={fieldLabel}>
@@ -1554,7 +1948,8 @@ function DetailPane(props: {
             value={entity.emoji}
             maxLength={8}
             placeholder="e.g. 🏭"
-            onChange={(e) => props.onUpdateEntity(entity.iri, { emoji: e.target.value })}
+            readOnly={readOnly}
+            onChange={(e) => props.onSetDisplayed(entity.iri, CW_EMOJI, e.target.value)}
           />
         </div>
         <div>
@@ -1564,6 +1959,7 @@ function DetailPane(props: {
               <button
                 key={color || 'none'}
                 type="button"
+                disabled={readOnly}
                 className={cn(
                   'h-5 w-5 rounded-full border',
                   entity.color === color && 'ring-2 ring-blue-500 ring-offset-1',
@@ -1571,7 +1967,7 @@ function DetailPane(props: {
                 style={{ backgroundColor: color || '#ffffff' }}
                 title={color || 'Default'}
                 aria-label={color || 'Default color'}
-                onClick={() => props.onUpdateEntity(entity.iri, { color })}
+                onClick={() => props.onSetDisplayed(entity.iri, CW_COLOR, color)}
               />
             ))}
           </div>
@@ -1585,8 +1981,10 @@ function DetailPane(props: {
             className={fieldInput}
             rows={2}
             value={entity.comment}
-            onChange={(e) => props.onUpdateEntity(entity.iri, { comment: e.target.value })}
+            readOnly={readOnly}
+            onChange={(e) => props.onSetDisplayed(entity.iri, RDFS_COMMENT, e.target.value)}
           />
+          <OtherValues model={model} value={entity.iri} predicate={RDFS_COMMENT} inspector={inspector} />
         </div>
         <div>
           <span className={fieldLabel}>Properties</span>
@@ -1595,77 +1993,91 @@ function DetailPane(props: {
               <div key={prop.iri} className="flex items-center gap-1">
                 <input
                   className={cn(fieldInput, 'flex-1')}
-                  value={prop.label}
+                  value={displayLiteral(findResource(model, prop.key), RDFS_LABEL)}
+                  placeholder={localName(prop.iri)}
                   aria-label="Property name"
-                  onChange={(e) =>
-                    props.onUpdateEntity(entity.iri, {
-                      properties: entity.properties.map((p) =>
-                        p.iri === prop.iri ? { ...p, label: e.target.value } : p,
-                      ),
-                    })
-                  }
+                  readOnly={readOnly}
+                  onChange={(e) => props.onSetDisplayed(prop.iri, RDFS_LABEL, e.target.value)}
                 />
-                <select
-                  className="rounded-md border bg-transparent px-1 py-1.5 text-xs"
-                  value={prop.range.startsWith(XSD) ? prop.range.slice(XSD.length) : 'string'}
-                  aria-label="Property type"
-                  onChange={(e) =>
-                    props.onUpdateEntity(entity.iri, {
-                      properties: entity.properties.map((p) =>
-                        p.iri === prop.iri ? { ...p, range: `${XSD}${e.target.value}` } : p,
-                      ),
-                    })
-                  }>
-                  {XSD_RANGES.map((range) => (
-                    <option key={range} value={range}>
-                      {range}
-                    </option>
-                  ))}
-                </select>
+                {prop.rangeIri?.startsWith(XSD) ? (
+                  <select
+                    className="rounded-md border bg-transparent px-1 py-1.5 text-xs"
+                    value={(prop.rangeIri ?? '').slice(XSD.length)}
+                    aria-label="Property type"
+                    disabled={readOnly}
+                    onChange={(e) => props.onSetFirst(prop.iri, RDFS_RANGE, iriTerm(`${XSD}${e.target.value}`))}>
+                    {[...new Set([...XSD_RANGES, (prop.rangeIri ?? '').slice(XSD.length)])].map((range) => (
+                      <option key={range} value={range}>
+                        {range}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <button
+                    type="button"
+                    className="max-w-[90px] truncate rounded-md border border-dashed px-1 py-1.5 text-[10px] text-zinc-500 hover:bg-zinc-50"
+                    title={
+                      prop.rangeIsExpression
+                        ? 'The range is an expression or has several values: edit it in the statements list'
+                        : prop.rangeIri
+                          ? prop.rangeIri
+                          : 'No range: add one in the statements list'
+                    }
+                    onClick={() => props.onSelectResource(prop.key)}>
+                    {prop.rangeIsExpression ? 'expression' : prop.rangeIri ? localName(prop.rangeIri) : 'no range'}
+                  </button>
+                )}
+                {prop.shared && (
+                  <span
+                    className="shrink-0 rounded bg-violet-50 px-1 text-[9px] text-violet-700"
+                    title="This property has several domains (their intersection in OWL); it is listed under each of them">
+                    shared
+                  </span>
+                )}
                 <Button
                   variant="ghost"
                   size="icon"
                   className={cn(
                     'h-6 w-6 shrink-0',
-                    prop.is_key ? 'bg-amber-100 text-amber-700 hover:bg-amber-200' : 'text-zinc-400',
+                    prop.isKey ? 'bg-amber-100 text-amber-700 hover:bg-amber-200' : 'text-zinc-400',
                   )}
                   aria-label={`Toggle key attribute for ${prop.label}`}
-                  aria-pressed={Boolean(prop.is_key)}
-                  title={prop.is_key ? 'Key attribute (click to unset)' : 'Mark as key attribute'}
-                  onClick={() =>
-                    props.onUpdateEntity(entity.iri, {
-                      properties: entity.properties.map((p) => (p.iri === prop.iri ? { ...p, is_key: !p.is_key } : p)),
-                    })
-                  }>
+                  aria-pressed={prop.isKey}
+                  disabled={readOnly}
+                  title={prop.isKey ? 'Key attribute (click to unset)' : 'Mark as key attribute'}
+                  onClick={() => props.onToggleKey(prop.iri, !prop.isKey)}>
                   <KeyRound className="h-3 w-3" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 shrink-0 text-zinc-500"
+                  aria-label={`Statements of ${prop.label}`}
+                  title="All statements of this property"
+                  onClick={() => props.onSelectResource(prop.key)}>
+                  <Braces className="h-3 w-3" />
                 </Button>
                 <Button
                   variant="ghost"
                   size="icon"
                   className="h-6 w-6 shrink-0 text-zinc-500 hover:text-red-600"
                   aria-label={`Remove property ${prop.label}`}
-                  onClick={() =>
-                    props.onUpdateEntity(entity.iri, {
-                      properties: entity.properties.filter((p) => p.iri !== prop.iri),
-                    })
-                  }>
+                  disabled={readOnly}
+                  title={prop.shared ? 'Remove from this entity only' : 'Remove property'}
+                  onClick={() => props.onRemoveProperty(prop.iri, entity.iri)}>
                   <Trash2 className="h-3 w-3" />
                 </Button>
               </div>
             ))}
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-6 w-full text-xs"
-              onClick={() => {
-                const taken = new Set(entity.properties.map((p) => p.iri))
-                const iri = mintIri(props.baseIri || `${entity.iri}_`, 'property', taken)
-                props.onUpdateEntity(entity.iri, {
-                  properties: [...entity.properties, { iri, label: 'property', range: `${XSD}string` }],
-                })
-              }}>
-              <Plus className="mr-1 h-3 w-3" /> Add property
-            </Button>
+            {!readOnly && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 w-full text-xs"
+                onClick={() => props.onAddProperty(entity.iri)}>
+                <Plus className="mr-1 h-3 w-3" /> Add property
+              </Button>
+            )}
           </div>
         </div>
         {incident.length > 0 && (
@@ -1674,7 +2086,7 @@ function DetailPane(props: {
             <div className="space-y-1">
               {incident.map((rel) => (
                 <button
-                  key={rel.iri}
+                  key={rel.id}
                   type="button"
                   className="block w-full truncate rounded border px-2 py-1 text-left text-[11px] text-zinc-600 hover:bg-zinc-50"
                   onClick={() => props.onSelectRelationship(rel.iri)}>
@@ -1685,26 +2097,53 @@ function DetailPane(props: {
             </div>
           </div>
         )}
-        <Button
-          variant="destructive"
-          size="sm"
-          className="h-7 w-full text-xs"
-          onClick={() => props.onDeleteEntity(entity.iri)}>
-          <Trash2 className="mr-1 h-3 w-3" /> Delete entity
-        </Button>
+        <AllStatements
+          resourceKey={key}
+          ctx={inspector}
+          formPredicates={ENTITY_FORM_PREDICATES}
+          {...props.statementHandlers(key)}
+        />
+        {!readOnly && (
+          <Button
+            variant="destructive"
+            size="sm"
+            className="h-7 w-full text-xs"
+            onClick={() => props.onDeleteEntity(entity.iri)}>
+            <Trash2 className="mr-1 h-3 w-3" /> Delete entity
+          </Button>
+        )}
       </div>
     )
   }
 
-  if (relationship) {
+  if (props.relationshipIri) {
+    const value = props.relationshipIri
+    const key = termKey(iriTerm(value))
+    const resource = findResource(model, key)
+    if (!resource) return <p className="p-4 text-xs text-zinc-500">This relationship no longer exists.</p>
+    const pairs = props.relationships.filter((r) => r.iri === value)
+    const cardinality = displayLiteral(resource, CW_CARDINALITY)
+    const custom = cardinality !== '' && !(CARDINALITIES as readonly string[]).includes(cardinality)
+    const loose = [...iriObjects(resource, RDFS_DOMAIN), ...iriObjects(resource, RDFS_RANGE)].filter(
+      (v) => !props.relationships.some((r) => r.source === v || r.target === v),
+    )
     return (
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         <div>
           <span className={fieldLabel}>Relationship</span>
-          <div className="break-all text-[10px] text-zinc-400">{relationship.iri}</div>
+          <div className="break-all text-[10px] text-zinc-400">{value}</div>
         </div>
-        <div className="rounded border bg-zinc-50 px-2 py-1.5 text-xs text-zinc-700">
-          {props.entityLabel(relationship.source)} → {props.entityLabel(relationship.target)}
+        <div className="space-y-1">
+          {pairs.map((pair) => (
+            <div key={pair.id} className="rounded border bg-zinc-50 px-2 py-1.5 text-xs text-zinc-700">
+              {props.entityLabel(pair.source)} → {props.entityLabel(pair.target)}
+            </div>
+          ))}
+          {loose.length > 0 && (
+            <p className="text-[10px] text-zinc-500">
+              Also links non-entities ({loose.map((v) => localName(v)).join(', ')}); see All statements.
+            </p>
+          )}
         </div>
         <div>
           <label htmlFor="rel-label" className={fieldLabel}>
@@ -1713,9 +2152,12 @@ function DetailPane(props: {
           <input
             id="rel-label"
             className={fieldInput}
-            value={relationship.label}
-            onChange={(e) => props.onUpdateRelationship(relationship.iri, { label: e.target.value })}
+            value={displayLiteral(resource, RDFS_LABEL)}
+            placeholder={localName(value)}
+            readOnly={readOnly}
+            onChange={(e) => props.onSetDisplayed(value, RDFS_LABEL, e.target.value)}
           />
+          <OtherValues model={model} value={value} predicate={RDFS_LABEL} inspector={inspector} />
         </div>
         <div>
           <label htmlFor="rel-cardinality" className={fieldLabel}>
@@ -1724,11 +2166,13 @@ function DetailPane(props: {
           <select
             id="rel-cardinality"
             className={cn(fieldInput, 'appearance-auto')}
-            value={relationship.cardinality}
-            onChange={(e) => props.onUpdateRelationship(relationship.iri, { cardinality: e.target.value })}>
-            {CARDINALITIES.map((cardinality) => (
-              <option key={cardinality} value={cardinality}>
-                {cardinality} [{CARDINALITY_SYMBOL[cardinality]}]
+            value={cardinality || 'one-to-many'}
+            disabled={readOnly}
+            onChange={(e) => props.onSetDisplayed(value, CW_CARDINALITY, e.target.value)}>
+            {custom && <option value={cardinality}>{cardinality} (custom)</option>}
+            {CARDINALITIES.map((c) => (
+              <option key={c} value={c}>
+                {c} [{CARDINALITY_SYMBOL[c]}]
               </option>
             ))}
           </select>
@@ -1741,25 +2185,35 @@ function DetailPane(props: {
             id="rel-comment"
             className={fieldInput}
             rows={2}
-            value={relationship.comment}
-            onChange={(e) => props.onUpdateRelationship(relationship.iri, { comment: e.target.value })}
+            value={displayLiteral(resource, RDFS_COMMENT)}
+            readOnly={readOnly}
+            onChange={(e) => props.onSetDisplayed(value, RDFS_COMMENT, e.target.value)}
           />
+          <OtherValues model={model} value={value} predicate={RDFS_COMMENT} inspector={inspector} />
         </div>
-        <Button
-          variant="destructive"
-          size="sm"
-          className="h-7 w-full text-xs"
-          onClick={() => props.onDeleteRelationship(relationship.iri)}>
-          <Trash2 className="mr-1 h-3 w-3" /> Delete relationship
-        </Button>
+        <AllStatements
+          resourceKey={key}
+          ctx={inspector}
+          formPredicates={RELATIONSHIP_FORM_PREDICATES}
+          {...props.statementHandlers(key)}
+        />
+        {!readOnly && (
+          <Button
+            variant="destructive"
+            size="sm"
+            className="h-7 w-full text-xs"
+            onClick={() => props.onDeleteRelationship(value)}>
+            <Trash2 className="mr-1 h-3 w-3" /> Delete relationship
+          </Button>
+        )}
       </div>
     )
   }
 
   return (
     <p className="p-4 text-xs text-zinc-500">
-      Click an Entity or a Relationship on the canvas to see and edit its detail. Drag from a node&apos;s right handle
-      to another node to create a directional relationship.
+      Click an Entity or a Relationship on the canvas to see and edit its detail. Drag from a node&apos;s outer ring to
+      another node to create a directional relationship. Everything else in the ontology is listed in the Resources tab.
     </p>
   )
 }

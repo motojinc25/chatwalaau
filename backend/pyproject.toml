@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.174.0"
+version = "0.175.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -191,7 +191,9 @@ dependencies = [
     # (rdf-12 / sparql-12) enabled by default in the Python bindings; the former
     # RDF-star is subsumed as RDF 1.2 triple terms. Imported lazily inside
     # app.ontology so the feature gate (ONTOLOGY_ENABLED) bounds its blast radius.
-    "pyoxigraph>=0.5",
+    # PRP-0198 / UDR-0180 D11: floor 0.5.11, below 0.6 -- the lossless corpus
+    # (tests/fixtures/ontology_lossless) is the parity gate for any engine bump.
+    "pyoxigraph>=0.5.11,<0.6",
     # Computer Use desktop provider
     "chatwalaau-computer-use>=0.2,<0.3; sys_platform == 'win32' and platform_machine == 'AMD64'",
     "mcp>=1.26,<2",

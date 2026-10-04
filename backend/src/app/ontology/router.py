@@ -21,10 +21,13 @@ PUT /{id}) refuse with 409 ``demo_mode`` and the manager renders read-only
 (PRP-0139 / UDR-0122). Reads -- including the SPARQL query lanes, which cannot
 mutate -- are deliberately untouched.
 
-The frontend never parses RDF: GET/PUT carry the CTR-0169 JSON graph
+The frontend never parses RDF: GET/PUT carry the CTR-0169 v2 statement-complete
 projection and this module delegates the codec to ``app.ontology.vocabulary``
-(UDR-0084 D6). Import is validate-then-commit (full pyoxigraph parse + the
-ONTOLOGY_MAX_FILE_BYTES cap) and always stores canonical Turtle (UDR-0084 D10).
+(UDR-0084 D6, UDR-0180 D2). Import is validate-then-commit (full pyoxigraph parse +
+the ONTOLOGY_MAX_FILE_BYTES cap) and stores canonical Turtle WITH the source's
+prefixes / base / VERSION (UDR-0084 D10, UDR-0180 D6). GET returns a ``revision``
+(SHA-256 of the stored file); a PUT carrying a different one is refused with 409
+``stale_revision`` before anything is written (UDR-0180 D8).
 """
 
 from __future__ import annotations
@@ -33,16 +36,26 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import verify_api_key
 from app.core.config import settings
 from app.ontology import nl, store
-from app.ontology.vocabulary import base_iri_for, projection_to_turtle, turtle_to_projection
+from app.ontology.vocabulary import (
+    ProjectionError,
+    base_iri_for,
+    import_to_turtle,
+    new_document_turtle,
+    projection_to_turtle,
+    turtle_to_projection,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ontology", tags=["Ontology"])
+
+# CTR-0169 v1 body keys: refused by PUT (422 legacy_projection) rather than ignored.
+_LEGACY_PROJECTION_KEYS = frozenset({"entities", "relationships", "extra_turtle"})
 
 
 def _require_enabled() -> None:
@@ -98,9 +111,16 @@ class NlQueryRequest(BaseModel):
 
 
 class ProjectionSave(BaseModel):
-    entities: list[dict[str, Any]] = Field(default_factory=list)
-    relationships: list[dict[str, Any]] = Field(default_factory=list)
-    extra_turtle: str = ""
+    """The CTR-0169 v2 projection as saved by the editor (full state, UDR-0180 D8)."""
+
+    # Unknown keys are kept so a v1-shaped body (entities / relationships /
+    # extra_turtle) can be REFUSED instead of silently saving an empty ontology.
+    model_config = ConfigDict(extra="allow")
+
+    document: dict[str, Any] = Field(default_factory=dict)
+    resources: list[dict[str, Any]] = Field(default_factory=list)
+    # The revision the editor loaded; a mismatch refuses the save (409 stale_revision).
+    revision: str | None = None
 
 
 @router.get("/catalog", dependencies=[Depends(verify_api_key)])
@@ -119,7 +139,9 @@ async def create_ontology(body: OntologyCreate) -> dict:
     """Create a new, empty ontology (consumes CTR-0083)."""
     _require_enabled()
     _guard_demo()
-    entry = store.create_ontology(body.name, body.description)
+    entry = store.create_ontology(
+        body.name, body.description, initial_turtle=lambda entry_id: new_document_turtle(base_iri_for(entry_id))
+    )
     return {**entry, "base_iri": base_iri_for(entry["id"])}
 
 
@@ -161,7 +183,9 @@ async def import_ontology(
     """Import a Turtle (.ttl) or RDF/XML (.rdf/.owl) file (validate-then-commit).
 
     The upload is fully parsed with pyoxigraph BEFORE anything is written, then
-    stored as canonical Turtle under a NEW catalog id (UDR-0084 D10 / IMPORT-1).
+    stored as canonical Turtle under a NEW catalog id (UDR-0084 D10 / IMPORT-1),
+    keeping the source's prefixes / base / VERSION (UDR-0180 D6). Parsing goes
+    through ``pyoxigraph.parse`` (never a Store), so lexical forms stay exact.
     """
     import pyoxigraph as ox
 
@@ -180,28 +204,22 @@ async def import_ontology(
     else:
         formats = [ox.RdfFormat.TURTLE, ox.RdfFormat.RDF_XML]
 
-    parsed = None
+    converted: tuple[str, int] | None = None
     errors: list[str] = []
     for fmt in formats:
-        candidate = ox.Store()
         try:
-            candidate.load(data, format=fmt)
-            parsed = candidate
+            converted = import_to_turtle(data, fmt, rdfxml=fmt == ox.RdfFormat.RDF_XML)
             break
         except Exception as exc:  # syntax error for this format -- try the next
             errors.append(f"{fmt}: {exc}")
-    if parsed is None:
+    if converted is None:
         raise HTTPException(status_code=422, detail=f"Not a valid RDF document. {' / '.join(errors[:1])}")
 
-    from app.ontology.vocabulary import TURTLE_PREFIXES
-
-    turtle = parsed.dump(format=ox.RdfFormat.TURTLE, from_graph=ox.DefaultGraph(), prefixes=TURTLE_PREFIXES).decode(
-        "utf-8"
-    )
+    turtle, triple_count = converted
     display_name = name.strip() or (file.filename or "").rsplit(".", 1)[0] or "Imported ontology"
     entry = store.create_ontology(display_name, description, initial_turtle=turtle)
-    logger.info("ontology imported: %s (%d triples)", entry["id"], len(parsed))
-    return {**entry, "base_iri": base_iri_for(entry["id"]), "triple_count": len(parsed)}
+    logger.info("ontology imported: %s (%d triples)", entry["id"], triple_count)
+    return {**entry, "base_iri": base_iri_for(entry["id"]), "triple_count": triple_count}
 
 
 @router.get("/{ontology_id}/export", dependencies=[Depends(verify_api_key)])
@@ -259,7 +277,7 @@ async def run_nl_query(ontology_id: str, body: NlQueryRequest) -> dict:
 
 @router.get("/{ontology_id}", dependencies=[Depends(verify_api_key)])
 async def get_ontology(ontology_id: str) -> dict:
-    """The CTR-0169 JSON graph projection (the React Flow model; UDR-0084 D6)."""
+    """The CTR-0169 v2 statement-complete projection plus the file ``revision``."""
     _require_enabled()
     entry = _entry_or_404(ontology_id)
     data = store.read_ontology_bytes(ontology_id) or b""
@@ -267,25 +285,59 @@ async def get_ontology(ontology_id: str) -> dict:
         projection = turtle_to_projection(data)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {**entry, "base_iri": base_iri_for(ontology_id), **projection}
+    return {**entry, "base_iri": base_iri_for(ontology_id), "revision": store.revision_of(data), **projection}
 
 
 @router.put("/{ontology_id}", dependencies=[Depends(verify_api_key)])
 async def save_ontology(ontology_id: str, body: ProjectionSave) -> dict:
-    """Save the projection: validate -> canonical Turtle -> backup -> atomic replace."""
+    """Save the projection: revision check -> validate -> Turtle -> backup -> atomic replace.
+
+    The check and the write run without an ``await`` in between, so no other
+    request can interleave on the event loop.
+    """
     _require_enabled()
     _guard_demo()
     _entry_or_404(ontology_id)
+    legacy = sorted(set(body.model_extra or {}) & _LEGACY_PROJECTION_KEYS)
+    if legacy:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "legacy_projection",
+                "message": f"The v1 projection fields {', '.join(legacy)} are no longer accepted; "
+                "send {document, resources, revision} (CTR-0169 v2).",
+            },
+        )
+    if body.revision is not None:
+        current = store.revision_of(store.read_ontology_bytes(ontology_id) or b"")
+        if body.revision != current:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "stale_revision",
+                    "message": "The ontology was changed after you opened it. Reload it to see the latest version.",
+                },
+            )
     try:
-        turtle = projection_to_turtle(body.model_dump(), base_iri=base_iri_for(ontology_id))
+        turtle = projection_to_turtle({"document": body.document, "resources": body.resources})
         backup = store.save_ontology_text(ontology_id, turtle)
+    except ProjectionError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "invalid_projection", "pointer": exc.pointer, "message": exc.message},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OSError as exc:
         logger.warning("ontology save failed: %s", ontology_id, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Could not save the ontology: {exc}") from exc
     logger.info("ontology saved: %s (backup=%s)", ontology_id, backup)
-    return {"saved": True, "id": ontology_id, "backup": backup}
+    return {
+        "saved": True,
+        "id": ontology_id,
+        "backup": backup,
+        "revision": store.revision_of(turtle.encode("utf-8")),
+    }
 
 
 __all__ = ["router"]
