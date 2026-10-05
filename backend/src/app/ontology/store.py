@@ -4,7 +4,8 @@ File layout under ``ONTOLOGY_DIR`` (created on demand):
 
     catalog.json              -- the catalog SSOT: [{id, name, description, file,
                                  created_at, updated_at}]
-    <id>.ttl                  -- ONE self-contained Turtle file per ontology (SSOT)
+    <id>.ttl                  -- ONE self-contained file per ontology (SSOT): Turtle,
+    <id>.trig                    or TriG once it has a named graph (UDR-0182 D3)
     <id>.ttl.bak-<timestamp>  -- automatic backup on every save / pre-delete
 
 The catalog reader is tolerant and self-healing (per-entry normalization +
@@ -16,12 +17,19 @@ save writes a timestamped backup then a temp file + atomic ``os.replace``
 Query execution is READ-ONLY by construction: the ONE executor runs
 ``pyoxigraph.Store.query()`` (SELECT / CONSTRUCT / ASK / DESCRIBE), which is
 structurally incapable of mutating; SPARQL UPDATE strings fail its parser.
+Results are restored to the file's lexical forms and blank-node labels through
+``app.ontology.lexical`` (CTR-0170 v2, UDR-0181), with ``notices`` for what the
+Store's value encoding cannot give back. For a dataset the query Store's default
+graph is the set merge of the graphs in the requested scope, every named graph
+stays available to GRAPH patterns, and CONSTRUCT answers are TriG with each triple
+under the graphs that hold it (CTR-0170 v3, UDR-0182 D4 / D5).
 Filenames are catalog-derived single segments, so no path outside ONTOLOGY_DIR
 is ever resolved (the CTR-0022 confinement precedent).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -33,6 +41,15 @@ from typing import TYPE_CHECKING, Any
 import uuid
 
 from app.core.config import settings
+from app.ontology.lexical import (
+    LexicalIndex,
+    build_index,
+    computed_variables,
+    is_restorable,
+    restore_term,
+    restore_triples,
+)
+from app.ontology.lexical import notices as lexical_notices
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -41,6 +58,11 @@ logger = logging.getLogger(__name__)
 
 _CATALOG_NAME = "catalog.json"
 _ID_RE = re.compile(r"^ont_[0-9a-f]{12}$")
+
+# The stored file is Turtle, or TriG once the ontology has a named graph (UDR-0182 D3).
+TURTLE_SUFFIX = ".ttl"
+TRIG_SUFFIX = ".trig"
+FILE_SUFFIXES = (TURTLE_SUFFIX, TRIG_SUFFIX)
 
 # Result-shape caps for the read-only executor (payload bound, not a security
 # boundary -- CTR-0083 gates the callers).
@@ -98,7 +120,7 @@ def _normalize_entry(raw: Any) -> dict[str, str] | None:
         return None
     file_name = str(raw.get("file") or "").strip() or f"{entry_id}.ttl"
     # Single-segment confinement: a catalog-derived filename must never traverse.
-    if Path(file_name).name != file_name or not file_name.endswith(".ttl"):
+    if Path(file_name).name != file_name or not file_name.endswith(FILE_SUFFIXES):
         file_name = f"{entry_id}.ttl"
     return {
         "id": entry_id,
@@ -164,20 +186,28 @@ def _file_path(entry: dict[str, str]) -> Path:
     return ontology_dir() / entry["file"]
 
 
-def create_ontology(name: str, description: str, *, initial_turtle: str | Callable[[str], str] = "") -> dict[str, str]:
-    """Create a new catalog entry + its Turtle file.
+def create_ontology(
+    name: str,
+    description: str,
+    *,
+    initial_turtle: str | Callable[[str], str] = "",
+    dataset: bool | Callable[[], bool] = False,
+) -> dict[str, str]:
+    """Create a new catalog entry + its file.
 
     ``initial_turtle`` is the file content, or a factory called with the new id
-    (a new ontology's header binds ``:`` to its own minting namespace).
+    (a new ontology's header binds ``:`` to its own minting namespace). ``dataset``
+    (or a callable asked after the factory ran) stores the content as TriG.
     """
     entry_id = f"ont_{uuid.uuid4().hex[:12]}"
     if callable(initial_turtle):
         initial_turtle = initial_turtle(entry_id)
+    is_dataset = dataset() if callable(dataset) else dataset
     entry = {
         "id": entry_id,
         "name": (name or "").strip() or entry_id,
         "description": (description or "").strip(),
-        "file": f"{entry_id}.ttl",
+        "file": f"{entry_id}{TRIG_SUFFIX if is_dataset else TURTLE_SUFFIX}",
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -243,8 +273,19 @@ def revision_of(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def save_ontology_text(ontology_id: str, turtle: str) -> str | None:
-    """Guarded save: size cap -> backup -> temp + atomic replace. Returns backup name."""
+def is_dataset(entry: dict[str, str]) -> bool:
+    """True when the stored file is TriG (the ontology has a named graph; UDR-0182 D3)."""
+    return entry["file"].endswith(TRIG_SUFFIX)
+
+
+def save_ontology_text(ontology_id: str, turtle: str, *, dataset: bool | None = None) -> str | None:
+    """Guarded save: size cap -> backup -> temp + atomic replace. Returns backup name.
+
+    ``dataset`` switches the stored file between ``<id>.ttl`` (Turtle) and
+    ``<id>.trig`` (TriG) when it differs from the current one (UDR-0182 D3): the new
+    file is written first, then the catalog points at it, and the previous file is
+    kept only as its backup. ``None`` keeps the current file.
+    """
     entry = get_entry(ontology_id)
     if entry is None:
         raise KeyError(ontology_id)
@@ -253,113 +294,376 @@ def save_ontology_text(ontology_id: str, turtle: str) -> str | None:
         raise ValueError(f"Ontology is {len(encoded)} bytes but the limit is {settings.ontology_max_file_bytes} bytes")
     path = _file_path(entry)
     backup_name = _backup(path)
-    _atomic_write_text(path, turtle)
-    _touch_entry(ontology_id)
+    if dataset is None or dataset == is_dataset(entry):
+        _atomic_write_text(path, turtle)
+        _touch_entry(ontology_id)
+        return backup_name
+    target = ontology_dir() / f"{ontology_id}{TRIG_SUFFIX if dataset else TURTLE_SUFFIX}"
+    _backup(target)  # a stray file of the target name is kept, never overwritten silently
+    _atomic_write_text(target, turtle)
+    entries = read_catalog()
+    for item in entries:
+        if item["id"] == ontology_id:
+            item["file"] = target.name
+            item["updated_at"] = _now()
+    write_catalog(entries)
+    if path != target and path.is_file():
+        path.unlink()  # its content is in ``backup_name``
+    logger.info("ontology %s stored as %s", ontology_id, target.name)
     return backup_name
 
 
 # ---- pyoxigraph load + read-only query executor (UDR-0084 D3/D7) -------------
 
 
-def load_store(ontology_id: str) -> Any:
-    """Parse the ontology's Turtle file into an IN-MEMORY pyoxigraph Store."""
+@dataclass
+class QueryGraph:
+    """An ontology loaded for the read-only query lanes (CTR-0170 v3, UDR-0181, UDR-0182).
+
+    ``store`` is the in-memory pyoxigraph Store the SPARQL runs on: its DEFAULT graph
+    is the RDF merge (a set) of the graphs in scope, and every named graph of the file
+    is also kept under its name for ``GRAPH`` patterns (UDR-0182 D4). ``index`` maps
+    the Store's normalized terms back to the file's own (built from the same parse);
+    ``document`` holds the file's prefixes / base / VERSION; ``graphs`` the named
+    graphs in file order. ``provenance`` (datasets only) maps each in-scope triple to
+    the graphs that hold it, so CONSTRUCT answers keep where a triple came from (D5).
+    """
+
+    store: Any
+    index: LexicalIndex
+    document: dict[str, Any]
+    graphs: list[Any] = field(default_factory=list)
+    scope: Any = "all"
+    provenance: dict[Any, list[Any]] | None = None
+
+
+def parse_scope(value: Any) -> Any:
+    """A query scope: ``"all"`` (default), ``"default"``, or one graph as Term JSON / text.
+
+    Text accepts ``<iri>``, a bare absolute IRI or ``_:label`` (the agent tool's form).
+    Raises ``ValueError`` for anything else.
+    """
     import pyoxigraph as ox
 
+    from app.ontology.vocabulary import ProjectionError, graph_from_json
+
+    if isinstance(value, ox.NamedNode | ox.BlankNode):
+        return value  # already parsed
+    if value is None or value == "" or value == "all":
+        return "all"
+    if value == "default":
+        return "default"
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            if text.startswith("_:"):
+                return ox.BlankNode(text[2:])
+            return ox.NamedNode(text[1:-1] if text.startswith("<") and text.endswith(">") else text)
+        except ValueError as exc:
+            raise ValueError(f"Invalid graph {value!r}: {exc}") from exc
+    try:
+        graph = graph_from_json(value, "scope")
+    except ProjectionError as exc:
+        raise ValueError(f"Invalid scope: {exc}") from exc
+    if isinstance(graph, ox.DefaultGraph):
+        return "default"
+    return graph
+
+
+def scope_label(scope: Any) -> str:
+    """How a scope is named in answers and notices."""
+    if scope == "all":
+        return "all graphs"
+    if scope == "default":
+        return "the default graph"
+    return str(scope)
+
+
+def _in_scope(scope: Any, quad: Any) -> bool:
+    import pyoxigraph as ox
+
+    if scope == "all":
+        return True
+    if scope == "default":
+        return isinstance(quad.graph_name, ox.DefaultGraph)
+    return quad.graph_name == scope
+
+
+def _merge_into_default(store: Any, graphs: list[Any]) -> None:
+    """Copy the named ``graphs`` into the private Store's default graph (the scope's merge).
+
+    The copy is written as N-Triples and parsed back -- both inside the engine, with
+    blank-node labels kept (``parse``, never ``Store.load``) -- which is several times
+    faster than building a default-graph copy of every quad in Python, and needs no
+    SPARQL UPDATE (the query lane stays read-only by construction, UDR-0084 D7). The
+    Store is a set, so the default graph becomes the RDF merge (UDR-0182 D4).
+    """
+    import pyoxigraph as ox
+
+    for graph in graphs:
+        triples = (q.triple for q in store.quads_for_pattern(None, None, None, graph))
+        store.extend(ox.parse(ox.serialize(triples, format=ox.RdfFormat.N_TRIPLES), format=ox.RdfFormat.N_TRIPLES))
+
+
+def load_store(ontology_id: str, scope: Any = "all") -> QueryGraph:
+    """Parse the ontology's file ONCE into an in-memory Store plus a lexical index.
+
+    The parse streams straight into ``Store.extend`` rather than ``Store.load``,
+    which relabels blank nodes: result blank nodes then carry the labels the
+    projection shows (UDR-0181 D1). Only the triples whose object the engine may
+    re-encode (typed literals, triple terms) are kept aside for the index (D2).
+
+    The Store's default graph is the SET merge of the graphs in ``scope``; the
+    engine's ``use_default_graph_as_union`` is not used because it returns one row
+    per graph for a triple held in several graphs (UDR-0182 D4).
+    """
+    import pyoxigraph as ox
+
+    from app.ontology.vocabulary import document_of
+
+    entry = get_entry(ontology_id)
     data = read_ontology_bytes(ontology_id)
-    if data is None:
+    if entry is None or data is None:
         raise KeyError(ontology_id)
+    scope = parse_scope(scope)
+    dataset = is_dataset(entry)
     store = ox.Store()
+    kept: list[Any] = []
+    count = 0
+    named_quads = 0
+    graphs: dict[Any, None] = {}
+    # Datasets only: in-scope triple -> the graphs that hold it. Also the set the merge
+    # dedupes on (each triple is counted and indexed once).
+    provenance: dict[Any, list[Any]] | None = {} if dataset else None
+    document: dict[str, Any] = {"prefixes": [], "base": None, "version": None}
     if data.strip():
-        store.load(data, format=ox.RdfFormat.TURTLE)
-    return store
+        parser = ox.parse(data, format=ox.RdfFormat.TRIG)
+
+        def quads() -> Any:
+            nonlocal count, named_quads
+            for quad in parser:
+                if provenance is None:
+                    # A graph file (.ttl): every quad is in the default graph -- the
+                    # PRP-0199 hot path, no extra objects per quad.
+                    count += 1
+                    if is_restorable(quad.object):
+                        kept.append(quad.triple)
+                    yield quad
+                    continue
+                named = not isinstance(quad.graph_name, ox.DefaultGraph)
+                if named:
+                    graphs.setdefault(quad.graph_name, None)
+                    named_quads += 1
+                    yield quad  # every named graph stays available to GRAPH patterns
+                if not _in_scope(scope, quad):
+                    continue
+                triple = quad.triple
+                holders = provenance.get(triple)
+                if holders is not None:
+                    if quad.graph_name not in holders:
+                        holders.append(quad.graph_name)
+                    continue  # the merge is a set: count and index each triple once
+                provenance[triple] = [quad.graph_name]
+                count += 1
+                if is_restorable(quad.object):
+                    kept.append(triple)
+                if not named:
+                    yield quad  # a default-graph quad in scope is already where it belongs
+
+        try:
+            store.extend(quads())
+        except (SyntaxError, ValueError) as exc:
+            raise ValueError(f"RDF parse error: {exc}") from exc
+        document = document_of(parser, data)
+        if graphs and scope != "default":
+            _merge_into_default(store, list(graphs) if scope == "all" else [scope])
+    # The stored file is written by the codec, which never repeats a quad, so the named
+    # quads are stored as parsed and (merged triples) - (default graph size) is what the
+    # value encoding merged.
+    store_triples = len(store) - named_quads
+    index = build_index(kept, file_triples=count, store_triples=store_triples)
+    return QueryGraph(
+        store=store,
+        index=index,
+        document=document,
+        graphs=list(graphs),
+        scope=scope,
+        provenance=provenance if graphs else None,
+    )
 
 
 def _term_to_str(term: Any) -> str:
-    """A display string for a binding term (IRI value, literal value, or _:id)."""
+    """A display string for a binding term (IRI value, literal value, or bnode label)."""
     value = getattr(term, "value", None)
     if value is not None:
         return str(value)
     return str(term) if term is not None else ""
 
 
-def execute_query(store: Any, sparql: str, *, max_construct_triples: int = 0) -> dict[str, Any]:
-    """Run a READ-ONLY SPARQL query and shape the result for CTR-0171 / CTR-0172.
+def _construct_prefixes(document: dict[str, Any]) -> dict[str, str]:
+    """The document's prefixes first, then built-ins for unbound names (UDR-0181 D5)."""
+    from app.ontology.vocabulary import _with_builtin_prefixes
 
-    - SELECT   -> {kind, columns, rows, row_count, truncated, entity_iris}
-                  (entity_iris = the IRIs bound anywhere in the results, so the
-                  UI can drive the strong/dim canvas highlight -- RESULT-1)
-    - CONSTRUCT/DESCRIBE -> {kind, turtle, triple_count, truncated}
-    - ASK      -> {kind, value}
+    return {p["prefix"]: p["iri"] for p in _with_builtin_prefixes(list(document.get("prefixes") or []))}
 
-    ``Store.query()`` cannot mutate; a SPARQL UPDATE string fails its parser.
-    Raises ``ValueError`` with the parser message on an invalid query.
-    """
+
+def _serialize_answer(items: list[Any], fmt: Any, prefixes: dict[str, str]) -> str:
     import pyoxigraph as ox
 
     try:
-        result = store.query(sparql)
+        return ox.serialize(items, format=fmt, prefixes=prefixes).decode("utf-8")
+    except ValueError:  # an unusable document prefix -- fall back to the built-ins
+        from app.ontology.vocabulary import TURTLE_PREFIXES
+
+        return ox.serialize(items, format=fmt, prefixes=TURTLE_PREFIXES).decode("utf-8")
+
+
+def execute_query(graph: QueryGraph, sparql: str, *, max_construct_triples: int = 0) -> dict[str, Any]:
+    """Run a READ-ONLY SPARQL query and shape the result for CTR-0171 / CTR-0172.
+
+    - SELECT   -> {kind, columns, rows, cells, row_count, truncated, entity_iris, notices}
+                  (entity_iris = the IRIs bound anywhere in the results, so the
+                  UI can drive the strong/dim canvas highlight -- RESULT-1;
+                  cells = the same values as typed RDF 1.2 Term JSON)
+    - CONSTRUCT/DESCRIBE -> {kind, format, turtle, triple_count, truncated, notices}
+                  (``format`` is "trig" for an ontology with named graphs: each
+                  triple is written under every in-scope graph that holds it, and
+                  ``turtle`` then carries TriG text -- UDR-0182 D5)
+    - ASK      -> {kind, value, notices}
+
+    Every response also carries ``scope``. Results are restored to the file's
+    lexical forms and blank-node labels (UDR-0181 D2); ``notices`` state what
+    could not be (D3). ``Store.query()`` cannot mutate; a SPARQL UPDATE string
+    fails its parser. Raises ``ValueError`` with the parser message on an invalid query.
+    """
+    import pyoxigraph as ox
+
+    from app.ontology.vocabulary import term_to_json
+
+    index = graph.index
+    scope = graph.scope if isinstance(graph.scope, str) else term_to_json(graph.scope)
+    try:
+        result = graph.store.query(sparql)
     except Exception as exc:  # SyntaxError and friends from the SPARQL parser
         raise ValueError(f"SPARQL error: {exc}") from exc
 
     if isinstance(result, ox.QuerySolutions):
         columns = [str(v).lstrip("?") for v in result.variables]
         rows: list[list[str]] = []
+        cells: list[list[dict[str, Any] | None]] = []
         entity_iris: set[str] = set()
         truncated = False
+        ambiguous = 0
+        computed = computed_variables(sparql)
         for solution in result:
             if len(rows) >= SELECT_MAX_ROWS:
                 truncated = True
                 break
             row: list[str] = []
+            cell_row: list[dict[str, Any] | None] = []
             for variable in result.variables:
-                term = solution[variable]
+                term, forms = solution[variable], None
+                if variable.value not in computed:  # a computed value is not a file term
+                    term, forms = restore_term(index, term)
                 row.append(_term_to_str(term))
+                cell = term_to_json(term) if term is not None else None
+                if cell is not None and forms:
+                    cell["lexical_forms"] = forms
+                    ambiguous += 1
+                cell_row.append(cell)
                 if isinstance(term, ox.NamedNode):
                     entity_iris.add(term.value)
             rows.append(row)
+            cells.append(cell_row)
         return {
             "kind": "select",
             "columns": columns,
             "rows": rows,
+            "cells": cells,
             "row_count": len(rows),
             "truncated": truncated,
             "entity_iris": sorted(entity_iris),
+            "scope": scope,
+            "notices": lexical_notices(index, sparql, ambiguous),
         }
 
     if isinstance(result, ox.QueryBoolean):
-        return {"kind": "ask", "value": bool(result)}
+        return {"kind": "ask", "value": bool(result), "scope": scope, "notices": lexical_notices(index, sparql, 0)}
 
-    # Remaining result kind: triples from CONSTRUCT / DESCRIBE.
-    triples = list(result)
+    # Remaining result kind: triples from CONSTRUCT / DESCRIBE. The cap and the
+    # count apply AFTER restoration (merged triples come back).
+    triples, ambiguous = restore_triples(index, list(result))
     truncated = False
     if max_construct_triples and len(triples) > max_construct_triples:
         triples = triples[:max_construct_triples]
         truncated = True
-    turtle = ""
-    if triples:
-        from app.ontology.vocabulary import TURTLE_PREFIXES
-
-        turtle = ox.serialize(triples, format=ox.RdfFormat.TURTLE, prefixes=TURTLE_PREFIXES).decode("utf-8")
+    prefixes = _construct_prefixes(graph.document)
+    text = ""
+    fmt = "turtle"
+    if graph.provenance is not None:
+        # A dataset: keep where each triple came from (UDR-0182 D5). Template-built
+        # triples (not in the file) go to the default block.
+        fmt = "trig"
+        default_graph = ox.DefaultGraph()
+        quads = [
+            ox.Quad(t.subject, t.predicate, t.object, g)
+            for t in triples
+            for g in graph.provenance.get(t) or [default_graph]
+        ]
+        # One block per graph: the writer opens a new block whenever the graph changes.
+        order = {g: i for i, g in enumerate([default_graph, *graph.graphs])}
+        quads.sort(key=lambda q: order.get(q.graph_name, len(order)))
+        if quads:
+            text = _serialize_answer(quads, ox.RdfFormat.TRIG, prefixes)
+    elif triples:
+        text = _serialize_answer(triples, ox.RdfFormat.TURTLE, prefixes)
     return {
         "kind": "construct",
-        "turtle": turtle,
+        "format": fmt,
+        "turtle": text,
         "triple_count": len(triples),
         "truncated": truncated,
+        "scope": scope,
+        "notices": lexical_notices(index, sparql, ambiguous),
     }
 
 
+def graph_names(ontology_id: str) -> list[str]:
+    """The named graphs of a stored dataset (N-Triples-style text), in file order; [] for a graph."""
+    import pyoxigraph as ox
+
+    entry = get_entry(ontology_id)
+    if entry is None or not is_dataset(entry):
+        return []
+    names: dict[str, None] = {}
+    data = read_ontology_bytes(ontology_id) or b""
+    try:
+        for quad in ox.parse(data, format=ox.RdfFormat.TRIG):
+            if not isinstance(quad.graph_name, ox.DefaultGraph):
+                names.setdefault(str(quad.graph_name), None)
+    except (SyntaxError, ValueError):
+        return []
+    return list(names)
+
+
 __all__ = [
+    "FILE_SUFFIXES",
     "SELECT_MAX_ROWS",
+    "QueryGraph",
     "create_ontology",
     "delete_ontology",
     "execute_query",
     "get_entry",
+    "graph_names",
+    "is_dataset",
     "load_store",
     "ontology_dir",
+    "parse_scope",
     "read_catalog",
     "read_ontology_bytes",
     "rename_ontology",
     "revision_of",
     "save_ontology_text",
+    "scope_label",
     "write_catalog",
 ]

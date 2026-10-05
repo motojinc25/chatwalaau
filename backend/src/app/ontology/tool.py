@@ -11,7 +11,10 @@ LLM answer questions from the operator's concept models:
   CONSTRUCT-ONLY (RESULT-1: a CONSTRUCT result is a graph, so "answer in RDF"
   holds by construction), executes on the read-only lane, and returns the
   result graph as Turtle inside a fenced ```turtle code block, capped at
-  ONTOLOGY_TOOL_MAX_TRIPLES with an explicit truncation notice.
+  ONTOLOGY_TOOL_MAX_TRIPLES with an explicit truncation notice. For an ontology
+  with named graphs the answer is TriG (```trig), each triple under the graphs
+  that hold it, and ``graph`` narrows the question to one graph (CTR-0172 v3,
+  UDR-0182 D4 / D5).
 
 Errors (unknown ontology, un-convertible question, empty result) return short
 diagnostic text and never raise into the run.
@@ -36,13 +39,24 @@ ONTOLOGY_TOOL_INSTRUCTION = (
     "query_ontology tool. Use action='catalog' first to see which ontologies exist and "
     "what they describe, then action='query' with the ontology id (or exact name) and a "
     "natural-language question. The answer arrives as RDF Turtle in a ```turtle code "
-    "block -- treat it as authoritative structured knowledge about the domain's "
-    "entities and relationships."
+    "block (TriG in a ```trig block when the ontology has named graphs; pass graph to "
+    "ask about one of them) -- treat it as authoritative structured knowledge about the "
+    "domain's entities and relationships."
 )
 
 
-def _catalog_summary() -> list[dict[str, str]]:
-    return [{"id": e["id"], "name": e["name"], "description": e["description"]} for e in store.read_catalog()]
+# Named graphs listed per ontology in the catalog summary (UDR-0182 D5).
+_GRAPHS_PER_ONTOLOGY = 20
+
+
+def _catalog_summary() -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    for e in store.read_catalog():
+        item: dict[str, object] = {"id": e["id"], "name": e["name"], "description": e["description"]}
+        if store.is_dataset(e):
+            item["graphs"] = store.graph_names(e["id"])[:_GRAPHS_PER_ONTOLOGY]
+        out.append(item)
+    return out
 
 
 def _resolve_entry(selector: str) -> dict[str, str] | list[dict[str, str]] | None:
@@ -71,6 +85,13 @@ async def query_ontology(
     question: Annotated[
         str,
         Field(description="For query: the natural-language question to answer from the ontology."),
+    ] = "",
+    graph: Annotated[
+        str,
+        Field(
+            description="For query, optional: ask about ONE named graph (its IRI, or _:label), or "
+            "'default' for the default graph. Empty = all graphs."
+        ),
     ] = "",
 ) -> str:
     """Query the operator's RDF ontology concept models.
@@ -106,14 +127,18 @@ async def query_ontology(
         return "Error: 'question' is required for query."
 
     try:
-        graph = store.load_store(resolved["id"])
+        scope = store.parse_scope(graph.strip() or None)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    try:
+        loaded = store.load_store(resolved["id"], scope)
     except Exception as exc:
         logger.warning("query_ontology could not load %s", resolved["id"], exc_info=True)
         return f"Error: could not load ontology {resolved['id']}: {exc}"
 
     try:
         # CONSTRUCT-only lane (UDR-0084 D9): the answer is always a graph.
-        sparql = await nl.generate_sparql(question, graph, construct_only=True)
+        sparql = await nl.generate_sparql(question, loaded, construct_only=True)
     except ValueError as exc:
         return f"Error: could not translate the question into SPARQL: {exc}"
     except Exception as exc:
@@ -121,7 +146,7 @@ async def query_ontology(
         return f"Error: the SPARQL generation model call failed: {exc}"
 
     try:
-        result = store.execute_query(graph, sparql, max_construct_triples=settings.ontology_tool_max_triples)
+        result = store.execute_query(loaded, sparql, max_construct_triples=settings.ontology_tool_max_triples)
     except ValueError as exc:
         return f"Error: the generated SPARQL failed to execute: {exc}\nGenerated query:\n{sparql}"
 
@@ -136,6 +161,18 @@ async def query_ontology(
         notice = (
             f"\n(Note: the result was truncated to the first {settings.ontology_tool_max_triples} "
             "triples -- ask a narrower question for the rest.)"
+        )
+    # UDR-0181 D3: say what the query engine could not give back as written, so the
+    # model never reports a count the file contradicts.
+    for item in result.get("notices") or []:
+        notice += f"\n(Note: {item['message']})"
+    if result.get("format") == "trig":
+        # UDR-0182 D5: each triple is written under the named graph(s) that hold it.
+        return (
+            f"Ontology: {resolved['name']} ({resolved['id']}), {store.scope_label(loaded.scope)}\n"
+            f"Generated SPARQL:\n{sparql}\n\n"
+            "Result (RDF TriG; each triple is under the named graph(s) that hold it, the rest is "
+            f"in the default graph):\n```trig\n{turtle}\n```{notice}"
         )
     return (
         f"Ontology: {resolved['name']} ({resolved['id']})\n"

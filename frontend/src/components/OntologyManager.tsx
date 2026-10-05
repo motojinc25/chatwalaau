@@ -9,9 +9,13 @@
  * (monaco SPARQL editor + natural-language search via /nl-query; SELECT
  * results render as a table and drive the strong/dim canvas highlight).
  *
- * The frontend never parses RDF (UDR-0084 D6): it edits the CTR-0169 v2
- * statement-complete projection served by CTR-0171 -- every triple is a typed
- * statement of its subject (PRP-0198, UDR-0180). `lib/ontologyModel.ts` maps
+ * The frontend never parses RDF (UDR-0084 D6): it edits the CTR-0169 v3
+ * statement-complete projection served by CTR-0171 -- every quad is a typed
+ * statement of its subject, carrying its named graph as `g` (PRP-0198 / PRP-0200,
+ * UDR-0180 / UDR-0182). A graph selector scopes the canvas and the search and is
+ * the target graph of new statements; exports offer six formats and show why a
+ * format cannot carry the ontology; any statement can be annotated (a reifier
+ * with an IRI). `lib/ontologyModel.ts` maps
  * statements to the canvas and canvas edits to statement edits; the inspector
  * (`OntologyInspector.tsx`) shows and edits every statement, the resources the
  * canvas does not draw (Resources tab) and the prefixes / base / VERSION
@@ -40,7 +44,9 @@ import {
   Braces,
   Download,
   ImageDown,
+  Info,
   KeyRound,
+  Layers,
   LayoutGrid,
   Loader2,
   Maximize,
@@ -60,9 +66,11 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import {
   AllStatements,
+  AnnotateDialog,
   DocumentDialog,
   fieldInput,
   fieldLabel,
+  graphLabel,
   type InspectorContext,
   NewResourceDialog,
   ResourceDetail,
@@ -90,11 +98,14 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import {
+  annotateStatement,
   applyStatementEdit,
+  assertedElsewhere,
   CARDINALITIES,
   CW_CARDINALITY,
   CW_COLOR,
   CW_EMOJI,
+  compactIri,
   createDatatypeProperty,
   createEntity,
   createRelationship,
@@ -109,9 +120,13 @@ import {
   findResource,
   firstObjectEdit,
   fromProjection,
+  type GraphScope,
+  type GraphTerm,
+  graphsOf,
   iriObjects,
   iri as iriTerm,
   localName,
+  mintReifierIri,
   type OntologyDocument,
   type OntologyModel,
   otherLiterals,
@@ -125,8 +140,10 @@ import {
   relationshipEdges,
   removePropertyFromEntity,
   removeResource,
-  type Statement,
+  removeStatement,
   type StatementEdit,
+  type StatementInput,
+  scopeModel,
   setIsKey,
   setPosition,
   type Term,
@@ -145,17 +162,37 @@ interface CatalogEntry {
   updated_at?: string
 }
 
+/** A query notice: what the query engine could not give back as written (UDR-0181 D3). */
+interface QueryNotice {
+  code: string
+  message: string
+}
+
+/** A typed SELECT cell; `lexical_forms` lists the file's spellings when it is ambiguous. */
+type QueryCell = (Term & { lexical_forms?: string[] }) | null
+
 type QueryResult =
   | {
       kind: 'select'
       columns: string[]
       rows: string[][]
+      /** CTR-0171 v4: typed values parallel to `rows` (absent from older servers). */
+      cells?: QueryCell[][]
       row_count: number
       truncated: boolean
       entity_iris: string[]
+      notices?: QueryNotice[]
     }
-  | { kind: 'construct'; turtle: string; triple_count: number; truncated: boolean }
-  | { kind: 'ask'; value: boolean }
+  | {
+      kind: 'construct'
+      /** CTR-0171 v5: "trig" for an ontology with named graphs (each triple under its graphs). */
+      format?: 'turtle' | 'trig'
+      turtle: string
+      triple_count: number
+      truncated: boolean
+      notices?: QueryNotice[]
+    }
+  | { kind: 'ask'; value: boolean; notices?: QueryNotice[] }
   | { kind: 'error'; error: string }
 
 /**
@@ -170,6 +207,40 @@ interface PendingReifiedEdit {
   edits: StatementEdit[]
   reifierCount: number
 }
+
+/** A statement whose deletion waits for "delete its annotations too?" (PRP-0200 Q3). */
+interface PendingAnnotatedDelete {
+  key: string
+  index: number
+  reifierCount: number
+}
+
+/** The export formats the server offers (CTR-0171 v5, UDR-0182 D7). */
+const EXPORT_FORMATS = [
+  { name: 'turtle', label: 'Turtle', extension: '.ttl', graphs: false },
+  { name: 'trig', label: 'TriG', extension: '.trig', graphs: true },
+  { name: 'rdfxml', label: 'RDF/XML', extension: '.rdf', graphs: false },
+  { name: 'jsonld', label: 'JSON-LD', extension: '.jsonld', graphs: true },
+  { name: 'ntriples', label: 'N-Triples', extension: '.nt', graphs: false },
+  { name: 'nquads', label: 'N-Quads', extension: '.nq', graphs: true },
+] as const
+
+/** Why a format cannot carry the ontology (422 export_unsupported_content). */
+interface ExportReason {
+  code: string
+  count: number
+  examples: { s: Term; p: string; o: Term; g?: GraphTerm }[]
+}
+
+const EXPORT_REASON_TEXT: Record<string, string> = {
+  named_graphs: 'statements in named graphs (this format holds one graph)',
+  triple_terms: 'triple terms, such as annotations (this format cannot write them)',
+  rdfxml_name: 'predicates or classes RDF/XML cannot write as an XML element name (for example one ending in a digit)',
+  xml_characters: 'values with control characters XML cannot hold',
+}
+
+/** The file extensions the import accepts (UDR-0182 D6). */
+const IMPORT_ACCEPT = '.ttl,.turtle,.trig,.nt,.nq,.rdf,.owl,.xml,.jsonld,.json'
 
 const CARDINALITY_SYMBOL: Record<string, string> = {
   'one-to-one': '1:1',
@@ -215,6 +286,20 @@ function takenIris(model: OntologyModel): Set<string> {
 function usesRdf12(model: OntologyModel): boolean {
   const visit = (term: Term): boolean => term.type === 'triple' || (term.type === 'literal' && Boolean(term.direction))
   return model.resources.some((r) => r.statements.some((s) => visit(s.o)))
+}
+
+/** A short text form of a term for the export refusal list (prefixed names where possible). */
+function compactTerm(term: Term, model: OntologyModel): string {
+  switch (term.type) {
+    case 'iri':
+      return compactIri(term.value, model.document.prefixes)
+    case 'bnode':
+      return `_:${term.value}`
+    case 'literal':
+      return JSON.stringify(term.value)
+    case 'triple':
+      return `<<( ${compactTerm(term.s, model)} ${compactIri(term.p, model.document.prefixes)} ${compactTerm(term.o, model)} )>>`
+  }
 }
 
 /** Grid placement for entities without a stored or computed position. */
@@ -405,12 +490,24 @@ const edgeTypes = { floating: FloatingRelationshipEdge }
 
 // ---- Canvas toolbar (needs the ReactFlowProvider context) --------------------
 
+/** The graph selector's value for a scope ('*' all, '' default, else a term key). */
+function scopeKey(scope: GraphScope): string {
+  return scope === 'all' ? '*' : scope === 'default' ? '' : termKey(scope)
+}
+
 function CanvasToolbar(props: {
   onAddEntity: () => void
   onResetLayout: () => void
   onDownload: () => void
   layouting: boolean
   disabled: boolean
+  /** Named graphs; the selector shows only when there is one (or the user adds one). */
+  graphs: GraphTerm[]
+  graphName: (g: GraphTerm) => string
+  scope: GraphScope
+  onScopeChange: (scope: GraphScope) => void
+  onNewGraph: () => void
+  readOnly: boolean
 }) {
   const { zoomIn, zoomOut, fitView } = useReactFlow()
   const iconButton = 'h-7 w-7 text-zinc-600'
@@ -424,6 +521,48 @@ function CanvasToolbar(props: {
         disabled={props.disabled}>
         <Plus className="mr-1 h-3.5 w-3.5" /> Entity
       </Button>
+      <div className="mx-1 h-4 w-px bg-zinc-200" />
+      {props.graphs.length > 0 ? (
+        <select
+          className="h-7 max-w-[200px] rounded-md border bg-white px-1 text-xs"
+          aria-label="Graph"
+          title="Which graph the canvas and the search show; new statements go into the selected graph"
+          value={scopeKey(props.scope)}
+          disabled={props.disabled}
+          onChange={(e) => {
+            const value = e.target.value
+            if (value === '+') {
+              props.onNewGraph()
+              return
+            }
+            if (value === '*') props.onScopeChange('all')
+            else if (value === '') props.onScopeChange('default')
+            else {
+              const g = props.graphs.find((item) => termKey(item) === value)
+              if (g) props.onScopeChange(g)
+            }
+          }}>
+          <option value="*">All graphs</option>
+          <option value="">Default graph</option>
+          {props.graphs.map((g) => (
+            <option key={termKey(g)} value={termKey(g)}>
+              {props.graphName(g)}
+            </option>
+          ))}
+          {!props.readOnly && <option value="+">New graph...</option>}
+        </select>
+      ) : (
+        <Button
+          variant="ghost"
+          size="icon"
+          className={iconButton}
+          onClick={props.onNewGraph}
+          disabled={props.disabled || props.readOnly}
+          aria-label="Add a named graph"
+          title="Add a named graph (the ontology becomes a dataset, saved as TriG)">
+          <Layers className="h-4 w-4" />
+        </Button>
+      )}
       <div className="mx-1 h-4 w-px bg-zinc-200" />
       <Button
         variant="ghost"
@@ -515,6 +654,24 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [pendingReified, setPendingReified] = useState<PendingReifiedEdit | null>(null)
   // The answer per edited statement (key|index), so typing does not re-ask per keystroke.
   const reifierChoiceRef = useRef<Map<string, boolean>>(new Map())
+  const [pendingDelete, setPendingDelete] = useState<PendingAnnotatedDelete | null>(null)
+  const [annotateTarget, setAnnotateTarget] = useState<{ key: string; index: number; iri: string } | null>(null)
+
+  // Graphs (UDR-0182): the selector scopes the canvas and the search and is the
+  // target graph of new statements.
+  const [graphScope, setGraphScope] = useState<GraphScope>('all')
+  const [newGraphOpen, setNewGraphOpen] = useState(false)
+  const [newGraphIri, setNewGraphIri] = useState('')
+
+  // Export (UDR-0182 D7): the format menu and the reasons a format was refused.
+  const [exportTarget, setExportTarget] = useState<CatalogEntry | null>(null)
+  const [exporting, setExporting] = useState<string | null>(null)
+  const [exportRefusal, setExportRefusal] = useState<{
+    format: string
+    message: string
+    reasons: ExportReason[]
+  } | null>(null)
+  const [exportNotes, setExportNotes] = useState<string | null>(null)
 
   // Right pane
   const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search'>('detail')
@@ -574,6 +731,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       setAutoPositions(new Map())
       layoutCommittedRef.current = false
       reifierChoiceRef.current = new Map()
+      setGraphScope('all')
       setDirty(false)
       setSelection(null)
       setHighlight(null)
@@ -636,6 +794,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         if (detail?.error === 'invalid_projection') {
           throw new Error(`Cannot save: ${detail.pointer} -- ${detail.message}`)
         }
+        if (typeof detail?.message === 'string') throw new Error(detail.message)
         throw new Error(typeof detail === 'string' ? detail : 'Failed to save the ontology')
       }
       const body = await res.json().catch(() => null)
@@ -745,8 +904,16 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
             setDemoBlocked(true)
             throw new Error(refused)
           }
-          const detail = await res.json().catch(() => null)
-          throw new Error(typeof detail?.detail === 'string' ? detail.detail : 'Failed to import the file')
+          const body = await res.json().catch(() => null)
+          const detail = body?.detail
+          // A remote JSON-LD @context is refused, never fetched (UDR-0182 D6).
+          throw new Error(
+            typeof detail === 'string'
+              ? detail
+              : typeof detail?.message === 'string'
+                ? detail.message
+                : 'Failed to import the file',
+          )
         }
         const entry = (await res.json()) as CatalogEntry
         await fetchCatalog()
@@ -760,21 +927,47 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     [fetchCatalog, loadOntology],
   )
 
-  const exportOntology = useCallback(async (entry: CatalogEntry) => {
+  /**
+   * Download in one format (UDR-0182 D7). A format that cannot carry the ontology is
+   * refused by the server with the reasons and example statements; they are shown in
+   * the export dialog instead of a lossy file.
+   */
+  const exportOntology = useCallback(async (entry: CatalogEntry, format: (typeof EXPORT_FORMATS)[number]) => {
+    setExporting(format.name)
+    setExportRefusal(null)
+    setExportNotes(null)
     try {
-      const res = await fetch(`/api/ontology/${entry.id}/export`)
-      if (!res.ok) return
+      const res = await fetch(`/api/ontology/${entry.id}/export?format=${format.name}`)
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        const detail = body?.detail
+        setExportRefusal({
+          format: format.label,
+          message: typeof detail === 'string' ? detail : (detail?.message ?? `The ${format.label} export failed.`),
+          reasons: (detail?.reasons ?? []) as ExportReason[],
+        })
+        return
+      }
+      const notes = res.headers.get('X-Ontology-Export-Notes')
       const blob = await res.blob()
       const objectUrl = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = objectUrl
-      a.download = `${entry.name || entry.id}.ttl`
+      a.download = `${entry.name || entry.id}${format.extension}`
       document.body.appendChild(a)
       a.click()
       a.remove()
       URL.revokeObjectURL(objectUrl)
-    } catch {
-      // silent: download is best-effort
+      if (notes) setExportNotes(notes)
+      else setExportTarget(null)
+    } catch (err) {
+      setExportRefusal({
+        format: format.label,
+        message: err instanceof Error ? err.message : `The ${format.label} export failed.`,
+        reasons: [],
+      })
+    } finally {
+      setExporting(null)
     }
   }, [])
 
@@ -782,8 +975,36 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
 
   const markDirty = useCallback(() => setDirty(true), [])
 
-  const views = useMemo(() => entityViews(model), [model])
-  const relEdges = useMemo(() => relationshipEdges(model), [model])
+  // The canvas draws the selected graph(s) only; layout stays in the default graph
+  // and is always shown (UDR-0182 D3 / D4). Edits still go to the full model.
+  const graphs = useMemo(() => graphsOf(model), [model])
+  const viewModel = useMemo(() => scopeModel(model, graphScope), [model, graphScope])
+  const views = useMemo(() => entityViews(viewModel), [viewModel])
+  const relEdges = useMemo(() => relationshipEdges(viewModel), [viewModel])
+  const graphName = useCallback((g: GraphTerm) => graphLabel(g, model, model.document.prefixes), [model])
+
+  /** Select what the canvas and the search show; a named graph is also where new statements go. */
+  const changeScope = useCallback((scope: GraphScope) => {
+    setGraphScope(scope)
+    setModel((prev) => ({ ...prev, targetGraph: typeof scope === 'object' ? scope : null }))
+    setHighlight(null)
+    setQueryResult(null)
+  }, [])
+
+  /** Add a named graph to the selector and select it (saved once it holds a statement). */
+  const addGraph = useCallback(() => {
+    const value = newGraphIri.trim()
+    if (!value) return
+    const g: GraphTerm = { type: 'iri', value }
+    setModel((prev) =>
+      graphsOf(prev).some((item) => termKey(item) === termKey(g))
+        ? prev
+        : { ...prev, graphs: [...(prev.graphs ?? []), g] },
+    )
+    setNewGraphOpen(false)
+    setNewGraphIri('')
+    changeScope(g)
+  }, [newGraphIri, changeScope])
 
   /**
    * Apply statement edits to one resource. When an edited statement is reified
@@ -795,10 +1016,21 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     (key: string, edits: (StatementEdit | null)[]) => {
       const real = edits.filter((e): e is StatementEdit => e !== null)
       if (real.length === 0) return
+      // Deleting an annotated statement asks whether its annotations go too (PRP-0200 Q3).
+      const removal = real.length === 1 && real[0].index !== null && real[0].statement === null ? real[0] : null
+      if (removal?.index != null && !assertedElsewhere(model, key, removal.index)) {
+        const count = reifiersOf(model, key, removal.index).length
+        if (count > 0) {
+          setPendingDelete({ key, index: removal.index, reifierCount: count })
+          return
+        }
+      }
       let reifierCount = 0
       let undecided = false
       for (const edit of real) {
         if (edit.index === null || edit.statement === null) continue
+        // The old triple is still asserted in another graph: its reifiers stay (UDR-0182 D9).
+        if (assertedElsewhere(model, key, edit.index)) continue
         const count = reifiersOf(model, key, edit.index).length
         if (count === 0) continue
         reifierCount += count
@@ -845,6 +1077,24 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       markDirty()
     },
     [markDirty],
+  )
+
+  /** Answer "delete its annotations too?" for a pending statement deletion (default: keep). */
+  const resolvePendingDelete = useCallback(
+    (deleteAnnotations: boolean) => {
+      const pending = pendingDelete
+      setPendingDelete(null)
+      if (!pending) return
+      updateModel((prev) => removeStatement(prev, pending.key, pending.index, deleteAnnotations))
+    },
+    [pendingDelete, updateModel],
+  )
+
+  const requestAnnotate = useCallback(
+    (key: string, index: number) => {
+      setAnnotateTarget({ key, index, iri: mintReifierIri(model, baseIri || 'https://chatwalaau.com/ontology/local#') })
+    },
+    [model, baseIri],
   )
 
   const keyOf = useCallback((value: string) => termKey(iriTerm(value)), [])
@@ -1184,10 +1434,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     setQueryRunning(true)
     setError(null)
     try {
+      // The search scope follows the canvas graph selector (UDR-0182 D4, PRP-0200 C5).
       const res = await fetch(`/api/ontology/${selectedId}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sparql }),
+        body: JSON.stringify({ sparql, scope: graphScope }),
       })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
@@ -1200,7 +1451,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     } finally {
       setQueryRunning(false)
     }
-  }, [selectedId, sparql, applyResult])
+  }, [selectedId, sparql, graphScope, applyResult])
 
   const runNlQuery = useCallback(async () => {
     if (!selectedId || !nlQuestion.trim()) return
@@ -1210,7 +1461,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const res = await fetch(`/api/ontology/${selectedId}/nl-query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: nlQuestion }),
+        body: JSON.stringify({ question: nlQuestion, scope: graphScope }),
       })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
@@ -1228,7 +1479,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     } finally {
       setNlRunning(false)
     }
-  }, [selectedId, nlQuestion, applyResult])
+  }, [selectedId, nlQuestion, graphScope, applyResult])
 
   // ---- Derived detail-pane data ----
 
@@ -1249,15 +1500,18 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       diagnostics,
       readOnly: demoBlocked,
       onSelectResource: selectResource,
+      graphs,
+      targetGraph: model.targetGraph ?? null,
+      onAnnotate: demoBlocked ? undefined : requestAnnotate,
     }),
-    [model, diagnostics, demoBlocked, selectResource],
+    [model, diagnostics, demoBlocked, selectResource, graphs, requestAnnotate],
   )
 
   /** Statement list callbacks for one resource (all edits funnel through commitEdits). */
   const statementHandlers = useCallback(
     (key: string) => ({
-      onEdit: (index: number, statement: Statement | null) => commitEdits(key, [{ index, statement }]),
-      onAdd: (statement: Statement) => commitEdits(key, [{ index: null, statement }]),
+      onEdit: (index: number, statement: StatementInput | null) => commitEdits(key, [{ index, statement }]),
+      onAdd: (statement: StatementInput) => commitEdits(key, [{ index: null, statement }]),
     }),
     [commitEdits],
   )
@@ -1336,7 +1590,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                     onSelect={(id) => guardDirty(() => void loadOntology(id))}
                     onCreate={() => setCreateOpen(true)}
                     onImportClick={() => importInputRef.current?.click()}
-                    onExport={(entry) => void exportOntology(entry)}
+                    onExport={(entry) => {
+                      setExportRefusal(null)
+                      setExportNotes(null)
+                      setExportTarget(entry)
+                    }}
                     onRename={(entry) => {
                       setRenameName(entry.name)
                       setRenameDescription(entry.description ?? '')
@@ -1354,6 +1612,12 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                       onDownload={() => void downloadGraph()}
                       layouting={layouting}
                       disabled={!selectedId || loading}
+                      graphs={graphs}
+                      graphName={graphName}
+                      scope={graphScope}
+                      onScopeChange={changeScope}
+                      onNewGraph={() => setNewGraphOpen(true)}
+                      readOnly={demoBlocked}
                     />
                     <div className="min-h-0 flex-1">
                       {selectedId ? (
@@ -1478,6 +1742,16 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         onRunNl={() => void runNlQuery()}
                         nlRunning={nlRunning}
                         result={queryResult}
+                        scopeLabel={
+                          graphs.length === 0
+                            ? null
+                            : graphScope === 'all'
+                              ? 'all graphs'
+                              : graphScope === 'default'
+                                ? 'the default graph'
+                                : graphName(graphScope)
+                        }
+                        inspector={inspector}
                         highlightActive={highlight !== null}
                         onClearHighlight={() => setHighlight(null)}
                       />
@@ -1501,7 +1775,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           <input
             ref={importInputRef}
             type="file"
-            accept=".ttl,.turtle,.rdf,.owl,.xml"
+            accept={IMPORT_ACCEPT}
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0]
@@ -1693,6 +1967,164 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Deleting an annotated statement: the default is to KEEP the annotations (PRP-0200 Q3). */}
+      <AlertDialog open={pendingDelete !== null} onOpenChange={(o) => !o && setPendingDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete its annotations too?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This statement is annotated by {pendingDelete?.reifierCount ?? 0} reifier
+              {pendingDelete?.reifierCount === 1 ? '' : 's'} (rdf:reifies). Kept annotations stay valid RDF: they go on
+              describing the statement, which is no longer asserted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button variant="outline" onClick={() => resolvePendingDelete(true)}>
+              Delete the annotations too
+            </Button>
+            <AlertDialogAction onClick={() => resolvePendingDelete(false)}>Keep the annotations</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AnnotateDialog
+        open={annotateTarget !== null}
+        ctx={inspector}
+        subject={annotateTarget ? (findResource(model, annotateTarget.key)?.term ?? null) : null}
+        statement={
+          annotateTarget ? (findResource(model, annotateTarget.key)?.statements[annotateTarget.index] ?? null) : null
+        }
+        suggestedIri={annotateTarget?.iri ?? ''}
+        onCancel={() => setAnnotateTarget(null)}
+        onCreate={(reifierIri, annotation) => {
+          const target = annotateTarget
+          setAnnotateTarget(null)
+          if (!target) return
+          updateModel((prev) => annotateStatement(prev, target.key, target.index, reifierIri, annotation))
+          setSelection({ kind: 'resource', key: termKey(iriTerm(reifierIri)) })
+          setRightTab('detail')
+        }}
+      />
+
+      {/* New named graph (UDR-0182 D1): it exists in the file once a statement is in it. */}
+      <Dialog open={newGraphOpen} onOpenChange={(o) => !o && setNewGraphOpen(false)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>New named graph</DialogTitle>
+            <DialogDescription>
+              Statements you add while this graph is selected go into it. A graph with no statements is not saved, and
+              an ontology with a named graph is stored as TriG.
+            </DialogDescription>
+          </DialogHeader>
+          <div>
+            <label htmlFor="ontology-new-graph" className="mb-1 block text-xs font-medium text-muted-foreground">
+              Graph IRI
+            </label>
+            <Input
+              id="ontology-new-graph"
+              value={newGraphIri}
+              onChange={(e) => setNewGraphIri(e.target.value)}
+              placeholder={`${baseIri || 'https://example.org/'}graph1`}
+            />
+            {newGraphIri.trim() && !/^[A-Za-z][A-Za-z0-9+.-]*:\S+$/.test(newGraphIri.trim()) && (
+              <span className="text-[10px] text-red-600">Enter an absolute IRI.</span>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setNewGraphOpen(false)}>
+              Cancel
+            </Button>
+            <Button disabled={!/^[A-Za-z][A-Za-z0-9+.-]*:\S+$/.test(newGraphIri.trim())} onClick={addGraph}>
+              Add graph
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Export: six formats; a format that cannot carry the ontology says why (UDR-0182 D7). */}
+      <Dialog open={exportTarget !== null} onOpenChange={(o) => !o && exporting === null && setExportTarget(null)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Export {exportTarget?.name}</DialogTitle>
+            <DialogDescription>
+              Every export is read back and compared before you get it. A format that cannot hold everything in the
+              ontology is refused with the reason, never written with parts left out.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-3 gap-1.5">
+            {EXPORT_FORMATS.map((format) => (
+              <Button
+                key={format.name}
+                variant="outline"
+                size="sm"
+                className="h-auto flex-col items-start gap-0 py-1.5 text-left"
+                disabled={exporting !== null}
+                onClick={() => exportTarget && void exportOntology(exportTarget, format)}>
+                <span className="flex items-center gap-1 text-xs font-medium">
+                  {exporting === format.name ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                  {format.label}
+                </span>
+                <span className="text-[10px] font-normal text-zinc-500">
+                  {format.extension} {format.graphs ? '- named graphs' : '- one graph'}
+                </span>
+              </Button>
+            ))}
+          </div>
+          {exportNotes && (
+            <p className="flex items-start gap-1 text-[11px] text-zinc-600">
+              <Info className="mt-0.5 h-3 w-3 shrink-0" /> Downloaded. {exportNotes}
+            </p>
+          )}
+          {exportRefusal && (
+            <div className="space-y-1.5 rounded border border-amber-300 bg-amber-50 p-2 text-[11px] text-amber-800">
+              <p className="flex items-start gap-1 font-medium">
+                <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
+                {exportRefusal.message}
+              </p>
+              {exportRefusal.reasons.map((reason) => (
+                <div key={reason.code}>
+                  <p>
+                    {reason.count} {EXPORT_REASON_TEXT[reason.code] ?? reason.code}
+                    {reason.examples.length > 0 ? ', for example:' : '.'}
+                  </p>
+                  <ul className="ml-3 list-disc">
+                    {reason.examples.map((example) => (
+                      <li
+                        key={`${termKey(example.s)} ${example.p} ${termKey(example.o)} ${termKey(example.g ?? example.s)}`}>
+                        {exportTarget?.id === selectedId ? (
+                          <button
+                            type="button"
+                            className="text-left text-blue-700 hover:underline"
+                            onClick={() => {
+                              setExportTarget(null)
+                              selectResource(termKey(example.s))
+                            }}>
+                            {compactTerm(example.s, model)} {compactTerm(iriTerm(example.p), model)}{' '}
+                            {compactTerm(example.o, model)}
+                            {example.g ? ` (${graphName(example.g)})` : ''}
+                          </button>
+                        ) : (
+                          <span>
+                            {compactTerm(example.s, model)} {compactTerm(iriTerm(example.p), model)}{' '}
+                            {compactTerm(example.o, model)}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setExportTarget(null)} disabled={exporting !== null}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <DocumentDialog
         open={documentOpen}
         document={model.document}
@@ -1794,7 +2226,9 @@ function CatalogPane(props: {
             onClick={props.onImportClick}
             disabled={props.importing || props.readOnly}
             aria-label="Import RDF file"
-            title={props.readOnly ? 'Disabled in demo mode' : 'Import (.ttl / .rdf / .owl)'}>
+            title={
+              props.readOnly ? 'Disabled in demo mode' : 'Import (Turtle, TriG, N-Triples, N-Quads, RDF/XML, JSON-LD)'
+            }>
             {props.importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
           </Button>
         </div>
@@ -1833,7 +2267,7 @@ function CatalogPane(props: {
                   className="h-5 w-5 text-zinc-500"
                   onClick={() => props.onExport(entry)}
                   aria-label={`Export ${entry.name}`}
-                  title="Export (Turtle)">
+                  title="Export (choose a format)">
                   <Download className="h-3 w-3" />
                 </Button>
                 <Button
@@ -1893,8 +2327,8 @@ function DetailPane(props: {
   entityLabel: (iri: string) => string
   inspector: InspectorContext
   statementHandlers: (key: string) => {
-    onEdit: (index: number, statement: Statement | null) => void
-    onAdd: (statement: Statement) => void
+    onEdit: (index: number, statement: StatementInput | null) => void
+    onAdd: (statement: StatementInput) => void
   }
   onSetDisplayed: (iri: string, predicate: string, text: string) => void
   onSetFirst: (iri: string, predicate: string, term: Term | null) => void
@@ -2231,12 +2665,21 @@ function SearchPane(props: {
   onRunNl: () => void
   nlRunning: boolean
   result: QueryResult | null
+  /** What the search covers, from the canvas graph selector; null for a single-graph ontology. */
+  scopeLabel: string | null
+  inspector: InspectorContext
   highlightActive: boolean
   onClearHighlight: () => void
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 space-y-2 border-b p-2">
+        {props.scopeLabel && (
+          <p className="text-[10px] text-teal-700" data-search-scope>
+            Searching {props.scopeLabel} (change it with the graph selector above the canvas). GRAPH patterns can still
+            name any graph.
+          </p>
+        )}
         <div>
           <span className={fieldLabel}>Natural language</span>
           <div className="flex items-start gap-1">
@@ -2305,40 +2748,85 @@ function SearchPane(props: {
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-2">
-        <QueryResultView result={props.result} />
+        <QueryResultView result={props.result} inspector={props.inspector} />
       </div>
     </div>
   )
 }
 
 /** Content-derived row keys (duplicate rows get a stable occurrence suffix). */
-function keyRows(rows: string[][]): { key: string; row: string[] }[] {
+function keyRows(rows: string[][]): { key: string; row: string[]; index: number }[] {
   const seen = new Map<string, number>()
-  return rows.map((row) => {
+  return rows.map((row, index) => {
     const base = row.join('')
     const occurrence = seen.get(base) ?? 0
     seen.set(base, occurrence + 1)
-    return { key: occurrence === 0 ? base : `${base}#${occurrence}`, row }
+    return { key: occurrence === 0 ? base : `${base}#${occurrence}`, row, index }
   })
 }
 
-function QueryResultView({ result }: { result: QueryResult | null }) {
+/** One muted line per notice: what the query engine could not give back as written. */
+function QueryNotices({ notices }: { notices?: QueryNotice[] }) {
+  if (!notices?.length) return null
+  return (
+    <div className="mb-1 space-y-0.5">
+      {notices.map((notice) => (
+        <p key={notice.code} className="flex items-start gap-1 text-[10px] text-amber-700" data-notice={notice.code}>
+          <Info className="mt-px h-3 w-3 shrink-0" />
+          {notice.message}
+        </p>
+      ))}
+    </div>
+  )
+}
+
+/** A typed SELECT cell (CTR-0171 v4); falls back to the plain string from an older server. */
+function QueryCellView(props: { cell: QueryCell | undefined; text: string; inspector: InspectorContext }) {
+  if (props.cell === undefined) return <>{props.text}</>
+  if (props.cell === null) return null
+  const { lexical_forms: forms, ...term } = props.cell
+  return (
+    <span>
+      <TermView term={term as Term} ctx={props.inspector} />
+      {forms && (
+        <span
+          className="ml-1 rounded bg-amber-50 px-1 text-[10px] text-amber-700"
+          title={`Written in the file as: ${forms.join(', ')}`}>
+          ambiguous: {forms.join(' / ')}
+        </span>
+      )}
+    </span>
+  )
+}
+
+function QueryResultView({ result, inspector }: { result: QueryResult | null; inspector: InspectorContext }) {
   if (!result) return <p className="text-xs text-zinc-400">Run a query to see results here.</p>
   if (result.kind === 'error') return <p className="whitespace-pre-wrap text-xs text-red-600">{result.error}</p>
-  if (result.kind === 'ask') return <p className="text-sm font-medium">{result.value ? 'Yes' : 'No'}</p>
+  if (result.kind === 'ask') {
+    return (
+      <div>
+        <QueryNotices notices={result.notices} />
+        <p className="text-sm font-medium">{result.value ? 'Yes' : 'No'}</p>
+      </div>
+    )
+  }
   if (result.kind === 'construct') {
     return (
       <div>
+        <QueryNotices notices={result.notices} />
         <p className="mb-1 text-[10px] text-zinc-500">
           {result.triple_count} triple{result.triple_count === 1 ? '' : 's'}
           {result.truncated ? ' (truncated)' : ''}
+          {result.format === 'trig' ? ' -- TriG: each triple is shown under the graphs that hold it' : ''}
         </p>
         <pre className="overflow-x-auto rounded bg-zinc-50 p-2 text-[11px] leading-relaxed">{result.turtle}</pre>
       </div>
     )
   }
+  const cells = result.cells
   return (
     <div>
+      <QueryNotices notices={result.notices} />
       <p className="mb-1 text-[10px] text-zinc-500">
         {result.row_count} row{result.row_count === 1 ? '' : 's'}
         {result.truncated ? ' (truncated)' : ''} — matched entities are highlighted on the canvas
@@ -2355,11 +2843,15 @@ function QueryResultView({ result }: { result: QueryResult | null }) {
             </tr>
           </thead>
           <tbody>
-            {keyRows(result.rows).map(({ key, row }) => (
+            {keyRows(result.rows).map(({ key, row, index }) => (
               <tr key={key}>
                 {result.columns.map((column, columnIndex) => (
                   <td key={column} className="break-all border px-2 py-1 align-top">
-                    {row[columnIndex]}
+                    <QueryCellView
+                      cell={cells ? cells[index]?.[columnIndex] : undefined}
+                      text={row[columnIndex]}
+                      inspector={inspector}
+                    />
                   </td>
                 ))}
               </tr>

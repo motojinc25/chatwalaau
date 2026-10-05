@@ -1,5 +1,5 @@
 /**
- * Ontology inspector (CTR-0173 v3, PRP-0198, UDR-0180 D9).
+ * Ontology inspector (CTR-0173 v5, PRP-0198 / PRP-0200, UDR-0180 D9, UDR-0182).
  *
  * Every statement of the ontology is visible and editable here: the "All
  * statements" list of a selected resource, the Resources tab listing every
@@ -7,11 +7,15 @@
  * literal with datatype, language and direction / RDF 1.2 triple term), and the
  * Document dialog for the kept declarations (prefixes, base, VERSION).
  *
+ * In a dataset each statement shows its graph and the statement editor can move
+ * it to another graph (UDR-0182 D1). Every statement row offers "Add annotation",
+ * which creates a reifier with an IRI (UDR-0182 D8).
+ *
  * Long lists render in pages ("Show more") instead of all at once; there is no
  * virtualization dependency.
  */
 
-import { ChevronRight, Link2, Pencil, Plus, Trash2, TriangleAlert, X } from 'lucide-react'
+import { ChevronRight, Link2, MessageSquarePlus, Pencil, Plus, Trash2, TriangleAlert, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
@@ -31,20 +35,25 @@ import {
   type Direction,
   expandIri,
   findResource,
+  type GraphTerm,
+  graphKey,
   inspectorResources,
   listItems,
   literal,
   type OntologyDocument,
   type OntologyModel,
   type PrefixDecl,
+  pickLiteralIndex,
   RDF_DIR_LANG_STRING,
   RDF_LANG_STRING,
   RDF_REIFIES,
   RDF_TYPE,
+  RDFS_LABEL,
   type Resource,
   type Role,
   resourceKey,
   type Statement,
+  type StatementInput,
   type Term,
   termKey,
   XSD,
@@ -87,10 +96,52 @@ export interface InspectorContext {
   diagnostics: Diagnostic[]
   readOnly: boolean
   onSelectResource: (key: string) => void
+  /** The named graphs (empty for a single-graph ontology: no graph UI is shown). */
+  graphs?: GraphTerm[]
+  /** The graph new statements go into (null = the default graph). */
+  targetGraph?: GraphTerm | null
+  /** "Add annotation" on statement `index` of the resource `key` (UDR-0182 D8). */
+  onAnnotate?: (key: string, index: number) => void
 }
 
 function iriText(value: string, prefixes: PrefixDecl[]): string {
   return compactIri(value, prefixes)
+}
+
+/** How a graph is named in the UI: its rdfs:label in the default graph, else its prefixed name. */
+export function graphLabel(g: GraphTerm | null | undefined, model: OntologyModel, prefixes: PrefixDecl[]): string {
+  if (!g) return 'default graph'
+  if (g.type === 'bnode') return `_:${g.value}`
+  const resource = findResource(model, termKey(g))
+  if (resource) {
+    const defaultOnly = { ...resource, statements: resource.statements.filter((s) => !s.g) }
+    const index = pickLiteralIndex(defaultOnly, RDFS_LABEL)
+    if (index >= 0) return (defaultOnly.statements[index].o as { value: string }).value
+  }
+  return compactIri(g.value, prefixes)
+}
+
+/** A graph picker: the default graph plus every named graph. */
+function GraphSelect(props: {
+  value: GraphTerm | null
+  ctx: InspectorContext
+  onChange: (g: GraphTerm | null) => void
+}) {
+  const graphs = props.ctx.graphs ?? []
+  return (
+    <select
+      className="rounded-md border bg-transparent px-1 py-1 text-xs"
+      aria-label="Graph"
+      value={graphKey(props.value)}
+      onChange={(e) => props.onChange(graphs.find((g) => termKey(g) === e.target.value) ?? null)}>
+      <option value="">default graph</option>
+      {graphs.map((g) => (
+        <option key={termKey(g)} value={termKey(g)}>
+          {graphLabel(g, props.ctx.model, props.ctx.prefixes)}
+        </option>
+      ))}
+    </select>
+  )
 }
 
 // ---- Term view (read-only rendering) -----------------------------------------------------
@@ -405,24 +456,35 @@ function LiteralEditor(props: {
 
 function StatementEditor(props: {
   initial: Statement | null
-  model: OntologyModel
-  prefixes: PrefixDecl[]
-  onSave: (statement: Statement) => void
+  ctx: InspectorContext
+  onSave: (statement: StatementInput) => void
   onCancel: () => void
 }) {
+  const { ctx } = props
   const [predicate, setPredicate] = useState(props.initial?.p ?? '')
   const [object, setObject] = useState<Term>(props.initial?.o ?? literal(''))
+  // An existing statement starts in its own graph; a new one in the target graph.
+  const [graph, setGraph] = useState<GraphTerm | null>(
+    props.initial ? (props.initial.g ?? null) : (ctx.targetGraph ?? null),
+  )
   const valid = Boolean(predicate) && termComplete(object)
+  const showGraph = (ctx.graphs ?? []).length > 0
   return (
     <div className="space-y-1.5 rounded border bg-zinc-50 p-2">
       <IriInput
         value={predicate}
-        prefixes={props.prefixes}
+        prefixes={ctx.prefixes}
         ariaLabel="Predicate"
         placeholder="predicate (prefix:name or IRI)"
         onChange={setPredicate}
       />
-      <TermEditor value={object} model={props.model} prefixes={props.prefixes} onChange={setObject} />
+      <TermEditor value={object} model={ctx.model} prefixes={ctx.prefixes} onChange={setObject} />
+      {showGraph && (
+        <div className="flex items-center gap-1 text-[10px] text-zinc-500">
+          <span>Graph</span>
+          <GraphSelect value={graph} ctx={ctx} onChange={setGraph} />
+        </div>
+      )}
       <div className="flex justify-end gap-1">
         <Button variant="outline" size="sm" className="h-6 text-xs" onClick={props.onCancel}>
           Cancel
@@ -431,7 +493,7 @@ function StatementEditor(props: {
           size="sm"
           className="h-6 text-xs"
           disabled={!valid}
-          onClick={() => props.onSave({ p: predicate, o: object })}>
+          onClick={() => props.onSave({ p: predicate, o: object, g: showGraph ? graph : undefined })}>
           Apply
         </Button>
       </div>
@@ -452,11 +514,12 @@ export function StatementList(props: {
   ctx: InspectorContext
   /** Predicates the Detail form already shows (marked, not hidden). */
   formPredicates?: Set<string>
-  onEdit: (index: number, statement: Statement | null) => void
-  onAdd: (statement: Statement) => void
+  onEdit: (index: number, statement: StatementInput | null) => void
+  onAdd: (statement: StatementInput) => void
 }) {
   const { ctx } = props
   const resource = findResource(ctx.model, props.resourceKey)
+  const showGraph = (ctx.graphs ?? []).length > 0
   const [editing, setEditing] = useState<number | 'new' | null>(null)
   const [limit, setLimit] = useState(PAGE)
   const reifiedBy = useMemo(() => {
@@ -487,8 +550,7 @@ export function StatementList(props: {
             // biome-ignore lint/suspicious/noArrayIndexKey: the statement index is the edit target
             key={index}
             initial={statement}
-            model={ctx.model}
-            prefixes={ctx.prefixes}
+            ctx={ctx}
             onCancel={() => setEditing(null)}
             onSave={(next) => {
               setEditing(null)
@@ -508,6 +570,16 @@ export function StatementList(props: {
                 <span className="ml-1 rounded bg-zinc-100 px-1 text-[9px] text-zinc-500">in form</span>
               )}{' '}
               <TermView term={statement.o} ctx={ctx} />
+              {showGraph && (
+                <span
+                  className={cn(
+                    'ml-1 rounded px-1 text-[9px]',
+                    statement.g ? 'bg-teal-50 text-teal-700' : 'bg-zinc-100 text-zinc-500',
+                  )}
+                  title={statement.g ? `In the named graph ${termKey(statement.g)}` : 'In the default graph'}>
+                  {graphLabel(statement.g, ctx.model, ctx.prefixes)}
+                </span>
+              )}
               {warn && (
                 <span
                   className="ml-1 inline-flex items-center text-[10px] text-amber-600"
@@ -527,6 +599,17 @@ export function StatementList(props: {
             </div>
             {!ctx.readOnly && (
               <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100">
+                {ctx.onAnnotate && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-5 w-5 text-zinc-500"
+                    aria-label="Add annotation"
+                    title="Add annotation (a reifier: rdf:reifies this statement)"
+                    onClick={() => ctx.onAnnotate?.(props.resourceKey, index)}>
+                    <MessageSquarePlus className="h-3 w-3" />
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   size="icon"
@@ -557,8 +640,7 @@ export function StatementList(props: {
         (editing === 'new' ? (
           <StatementEditor
             initial={null}
-            model={ctx.model}
-            prefixes={ctx.prefixes}
+            ctx={ctx}
             onCancel={() => setEditing(null)}
             onSave={(statement) => {
               setEditing(null)
@@ -579,8 +661,8 @@ export function AllStatements(props: {
   resourceKey: string
   ctx: InspectorContext
   formPredicates: Set<string>
-  onEdit: (index: number, statement: Statement | null) => void
-  onAdd: (statement: Statement) => void
+  onEdit: (index: number, statement: StatementInput | null) => void
+  onAdd: (statement: StatementInput) => void
 }) {
   const [open, setOpen] = useState(false)
   const count = findResource(props.ctx.model, props.resourceKey)?.statements.length ?? 0
@@ -612,8 +694,8 @@ export function AllStatements(props: {
 export function ResourceDetail(props: {
   resourceKey: string
   ctx: InspectorContext
-  onEdit: (index: number, statement: Statement | null) => void
-  onAdd: (statement: Statement) => void
+  onEdit: (index: number, statement: StatementInput | null) => void
+  onAdd: (statement: StatementInput) => void
   onDelete: () => void
 }) {
   const resource = findResource(props.ctx.model, props.resourceKey)
@@ -661,16 +743,20 @@ export function ResourcesPane(props: { ctx: InspectorContext; selectedKey: strin
   const { ctx } = props
   const [query, setQuery] = useState('')
   const [role, setRole] = useState<Role | 'all'>('all')
+  // '*' = every graph, '' = the default graph, else a graph's term key (UDR-0182 D1).
+  const [graph, setGraph] = useState('*')
   const [limit, setLimit] = useState(PAGE)
+  const graphs = ctx.graphs ?? []
   const listed = useMemo(() => inspectorResources(ctx.model), [ctx.model])
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
     return listed.filter((r) => {
       if (role !== 'all' && r.role !== role) return false
+      if (graph !== '*' && !r.statements.some((s) => graphKey(s.g) === graph)) return false
       if (!needle) return true
       return resourceSearchText(r, ctx.prefixes).includes(needle)
     })
-  }, [listed, query, role, ctx.prefixes])
+  }, [listed, query, role, graph, ctx.prefixes])
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 space-y-1.5 border-b p-2">
@@ -705,6 +791,21 @@ export function ResourcesPane(props: { ctx: InspectorContext; selectedKey: strin
             <option value="datatype_property">Datatype properties</option>
             <option value="entity">Entities</option>
           </select>
+          {graphs.length > 0 && (
+            <select
+              className="min-w-0 rounded-md border bg-transparent px-1 py-1 text-xs"
+              aria-label="Filter by graph"
+              value={graph}
+              onChange={(e) => setGraph(e.target.value)}>
+              <option value="*">All graphs</option>
+              <option value="">default graph</option>
+              {graphs.map((g) => (
+                <option key={termKey(g)} value={termKey(g)}>
+                  {graphLabel(g, ctx.model, ctx.prefixes)}
+                </option>
+              ))}
+            </select>
+          )}
           {!ctx.readOnly && (
             <Button variant="outline" size="sm" className="h-6 text-xs" onClick={props.onCreate}>
               <Plus className="mr-1 h-3 w-3" /> Resource
@@ -821,6 +922,105 @@ export function NewResourceDialog(props: {
   )
 }
 
+// ---- Add annotation dialog (UDR-0182 D8) ------------------------------------------------
+
+/**
+ * Create a reifier for one statement: an IRI (minted as `<base>r-<8 hex>`, editable),
+ * `rdf:reifies <<( s p o )>>` in the statement's graph, and an optional first annotation.
+ */
+export function AnnotateDialog(props: {
+  open: boolean
+  ctx: InspectorContext
+  subject: Term | null
+  statement: Statement | null
+  suggestedIri: string
+  onCancel: () => void
+  onCreate: (reifierIri: string, annotation: { p: string; o: Term } | null) => void
+}) {
+  const { ctx } = props
+  const [reifier, setReifier] = useState(props.suggestedIri)
+  const [predicate, setPredicate] = useState('')
+  const [object, setObject] = useState<Term>(literal(''))
+  const [lastOpen, setLastOpen] = useState(false)
+  if (props.open !== lastOpen) {
+    // Re-seed each time the dialog opens (derived state during render).
+    setLastOpen(props.open)
+    if (props.open) {
+      setReifier(props.suggestedIri)
+      setPredicate('')
+      setObject(literal(''))
+    }
+  }
+  const taken = Boolean(reifier) && Boolean(findResource(ctx.model, termKey({ type: 'iri', value: reifier })))
+  const withAnnotation = Boolean(predicate)
+  const valid = Boolean(reifier) && !taken && (!withAnnotation || termComplete(object))
+  return (
+    <Dialog open={props.open} onOpenChange={(o) => !o && props.onCancel()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Add annotation</DialogTitle>
+          <DialogDescription>
+            A reifier names this statement (rdf:reifies) so you can say things about it, such as its source or validity.
+            It is added to the statement&apos;s graph.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          {props.subject && props.statement && (
+            <div className="rounded border bg-zinc-50 px-2 py-1 text-[11px]">
+              <TermView
+                term={{ type: 'triple', s: props.subject, p: props.statement.p, o: props.statement.o }}
+                ctx={ctx}
+              />
+              {(ctx.graphs ?? []).length > 0 && (
+                <span className="ml-1 rounded bg-teal-50 px-1 text-[9px] text-teal-700">
+                  {graphLabel(props.statement.g, ctx.model, ctx.prefixes)}
+                </span>
+              )}
+            </div>
+          )}
+          <div>
+            <label htmlFor="annotation-reifier" className={fieldLabel}>
+              Reifier IRI
+            </label>
+            <input
+              id="annotation-reifier"
+              className={cn(fieldInput, taken && 'border-red-400')}
+              value={reifier}
+              onChange={(e) => setReifier(expandIri(e.target.value, ctx.prefixes) ?? e.target.value.trim())}
+            />
+            {taken && <span className="text-[10px] text-red-600">This IRI is already used by a resource.</span>}
+          </div>
+          <div>
+            <span className={fieldLabel}>First annotation (optional)</span>
+            <IriInput
+              value={predicate}
+              prefixes={ctx.prefixes}
+              ariaLabel="Annotation predicate"
+              placeholder="predicate, e.g. dct:source"
+              onChange={setPredicate}
+            />
+            {withAnnotation && (
+              <div className="mt-1">
+                <TermEditor value={object} model={ctx.model} prefixes={ctx.prefixes} onChange={setObject} />
+              </div>
+            )}
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={props.onCancel}>
+            Cancel
+          </Button>
+          <Button
+            disabled={!valid}
+            onClick={() => props.onCreate(reifier, withAnnotation ? { p: predicate, o: object } : null)}>
+            Add annotation
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ---- Document dialog (prefixes / base / VERSION; UDR-0180 D6) -----------------------------
 
 export function DocumentDialog(props: {
@@ -849,8 +1049,8 @@ export function DocumentDialog(props: {
         <DialogHeader>
           <DialogTitle>Document declarations</DialogTitle>
           <DialogDescription>
-            Prefixes, base and VERSION are written at the top of the Turtle file. Comments and the original layout are
-            not kept.
+            Prefixes, base and VERSION are written at the top of the Turtle (or TriG) file. Comments and the original
+            layout are not kept.
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-[60vh] space-y-3 overflow-y-auto">

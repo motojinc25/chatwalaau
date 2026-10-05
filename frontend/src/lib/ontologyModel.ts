@@ -1,9 +1,11 @@
 /**
- * The ontology editing model (CTR-0169 v2 / CTR-0173 v3, PRP-0198, UDR-0180).
+ * The ontology editing model (CTR-0169 v3 / CTR-0173 v5, PRP-0198 / PRP-0200, UDR-0180 / UDR-0182).
  *
  * The backend serves a STATEMENT-COMPLETE, resource-centric projection: every
- * triple of the ontology is one statement `{p, o}` of the resource for its
- * subject, with every term typed (RDF 1.2 Term JSON). This module is the ONE
+ * quad of the ontology is one statement `{p, o, g?}` of the resource for its
+ * subject, with every term typed (RDF 1.2 Term JSON). `g` names the statement's
+ * named graph; absent = the default graph (UDR-0182 D1). One resource per subject
+ * across all graphs. This module is the ONE
  * place in the frontend that maps those statements to canvas views (entities,
  * datatype properties, relationship edges) and turns canvas / inspector edits
  * into statement edits (UDR-0180 D4). It never parses or serializes RDF text
@@ -61,10 +63,29 @@ export type Term =
   | { type: 'literal'; value: string; datatype: string; language?: string; direction?: Direction }
   | { type: 'triple'; s: Term; p: string; o: Term }
 
+/** A graph name: an IRI or a blank node (UDR-0182 D1). */
+export type GraphTerm = Extract<Term, { type: 'iri' | 'bnode' }>
+
 export interface Statement {
   p: string
   o: Term
+  /** The named graph; absent = the default graph. */
+  g?: GraphTerm
 }
+
+/**
+ * A statement as an edit carries it: `g` undefined = keep the edited statement's
+ * graph (or, for an added statement, the editor's target graph); `g: null` = the
+ * default graph.
+ */
+export interface StatementInput {
+  p: string
+  o: Term
+  g?: GraphTerm | null
+}
+
+/** What the canvas and the search show: every graph, the default graph, or one named graph. */
+export type GraphScope = 'all' | 'default' | GraphTerm
 
 export type Role = 'entity' | 'object_property' | 'datatype_property' | 'other'
 
@@ -88,6 +109,10 @@ export interface OntologyDocument {
 export interface OntologyModel {
   document: OntologyDocument
   resources: Resource[]
+  /** Named graphs known to the editor (from GET, plus graphs the user added). */
+  graphs?: GraphTerm[]
+  /** Editor state, never sent: the graph new statements go into (null = default). */
+  targetGraph?: GraphTerm | null
 }
 
 export interface Diagnostic {
@@ -95,11 +120,14 @@ export interface Diagnostic {
   s: Term
   p: string
   o: Term
+  g?: GraphTerm
 }
 
 export const EMPTY_MODEL: OntologyModel = {
   document: { prefixes: [], base: null, version: null },
   resources: [],
+  graphs: [],
+  targetGraph: null,
 }
 
 // ---- Term helpers ------------------------------------------------------------------
@@ -151,7 +179,17 @@ export function termEquals(a: Term, b: Term): boolean {
   return termKey(a) === termKey(b)
 }
 
+/** The key of a statement's graph ('' = the default graph). */
+export function graphKey(g: GraphTerm | null | undefined): string {
+  return g ? termKey(g) : ''
+}
+
 export function statementEquals(a: Statement, b: Statement): boolean {
+  return a.p === b.p && termEquals(a.o, b.o) && graphKey(a.g) === graphKey(b.g)
+}
+
+/** The same triple (predicate and object), whatever the graph. */
+export function sameTriple(a: Statement, b: Statement): boolean {
   return a.p === b.p && termEquals(a.o, b.o)
 }
 
@@ -445,6 +483,60 @@ export function inspectorResources(model: OntologyModel): Resource[] {
   })
 }
 
+// ---- Graphs (UDR-0182 D1 / D4) -------------------------------------------------------
+
+/** Every named graph: the known ones first, then any a statement uses (first-seen order). */
+export function graphsOf(model: OntologyModel): GraphTerm[] {
+  const out = new Map<string, GraphTerm>()
+  for (const g of model.graphs ?? []) out.set(termKey(g), g)
+  for (const resource of model.resources) {
+    for (const statement of resource.statements) {
+      if (statement.g && !out.has(termKey(statement.g))) out.set(termKey(statement.g), statement.g)
+    }
+  }
+  return [...out.values()]
+}
+
+export function inScope(statement: Statement, scope: GraphScope): boolean {
+  if (scope === 'all') return true
+  if (scope === 'default') return !statement.g
+  return graphKey(statement.g) === termKey(scope)
+}
+
+const LAYOUT_PREDICATES = new Set([CW_X, CW_Y])
+
+/**
+ * The model the canvas draws for a graph selection: only statements in `scope`,
+ * plus the layout statements (always in the default graph, UDR-0182 D3). Resources
+ * with nothing left are hidden, never removed from the real model.
+ */
+export function scopeModel(model: OntologyModel, scope: GraphScope): OntologyModel {
+  if (scope === 'all') return model
+  const resources: Resource[] = []
+  for (const resource of model.resources) {
+    const kept = resource.statements.filter((s) => inScope(s, scope))
+    if (kept.length === 0) continue
+    const layout = resource.statements.filter((s) => LAYOUT_PREDICATES.has(s.p) && !kept.includes(s))
+    const statements = [...kept, ...layout]
+    resources.push({ ...resource, role: roleOf(resource.term, statements), statements })
+  }
+  return { ...model, resources }
+}
+
+/** True when the triple of statement `index` of `key` is asserted again in another graph. */
+export function assertedElsewhere(model: OntologyModel, key: string, index: number): boolean {
+  const resource = findResource(model, key)
+  const statement = resource?.statements[index]
+  if (!resource || !statement) return false
+  return resource.statements.some((s, i) => i !== index && sameTriple(s, statement))
+}
+
+/** A statement with `g` resolved (undefined -> `fallback`, null -> the default graph). */
+function resolveGraph(input: StatementInput, fallback: GraphTerm | null | undefined): Statement {
+  const g = input.g === undefined ? fallback : input.g
+  return g ? { p: input.p, o: input.o, g } : { p: input.p, o: input.o }
+}
+
 // ---- Edits (all pure; each returns a new model) -----------------------------------
 
 function withResource(
@@ -477,7 +569,7 @@ function termFromKey(model: OntologyModel, key: string): Term | null {
 /** A statement edit: index null = add, statement null = remove. */
 export interface StatementEdit {
   index: number | null
-  statement: Statement | null
+  statement: StatementInput | null
 }
 
 /** Reifiers pointing at the statement `index` of `key` (resources with rdf:reifies <<( s p o )>>). */
@@ -494,7 +586,13 @@ export function reifiersOf(model: OntologyModel, key: string, index: number): st
 /**
  * Apply one statement edit. When `followReifiers` is true and the edited statement
  * is reified, every `rdf:reifies` triple term pointing at the old statement is
- * re-pointed at the new one (PRP-0198 Q4: the default).
+ * re-pointed at the new one (PRP-0198 Q4: the default) -- unless the old triple is
+ * still asserted in another graph, whose occurrence the reifiers may describe
+ * (UDR-0182 D9).
+ *
+ * Graphs: an edited statement keeps its graph unless the edit names one; an added
+ * statement goes into the editor's target graph, except layout (`cw:x` / `cw:y`),
+ * which always stays in the default graph (UDR-0182 D3).
  */
 export function applyStatementEdit(
   model: OntologyModel,
@@ -505,23 +603,26 @@ export function applyStatementEdit(
   const subject = termFromKey(model, key)
   if (!subject) return model
   const before = edit.index !== null ? findResource(model, key)?.statements[edit.index] : undefined
+  const fallback = before ? before.g : LAYOUT_PREDICATES.has(edit.statement?.p ?? '') ? null : model.targetGraph
+  const after = edit.statement ? resolveGraph(edit.statement, fallback) : null
   let next = withResource(model, key, (resource) => {
     const statements = [...(resource?.statements ?? [])]
     if (edit.index === null) {
-      if (edit.statement && !statements.some((s) => statementEquals(s, edit.statement as Statement))) {
-        statements.push(edit.statement)
-      }
-    } else if (edit.statement === null) {
+      if (after && !statements.some((s) => statementEquals(s, after))) statements.push(after)
+    } else if (after === null) {
       statements.splice(edit.index, 1)
     } else {
-      statements[edit.index] = edit.statement
+      statements[edit.index] = after
     }
     if (statements.length === 0) return null
     return { term: resource?.term ?? subject, role: resource?.role ?? 'other', statements }
   })
-  if (followReifiers && before && edit.statement) {
+  const stillAsserted = before
+    ? (findResource(next, key)?.statements.some((s) => sameTriple(s, before)) ?? false)
+    : false
+  if (followReifiers && before && after && !stillAsserted) {
     const oldKey = termKey(asTriple(subject, before))
-    const replacement = asTriple(subject, edit.statement)
+    const replacement = asTriple(subject, after)
     next = {
       ...next,
       resources: next.resources.map((r) =>
@@ -529,7 +630,7 @@ export function applyStatementEdit(
           ? {
               ...r,
               statements: r.statements.map((s) =>
-                s.p === RDF_REIFIES && termKey(s.o) === oldKey ? { p: s.p, o: replacement } : s,
+                s.p === RDF_REIFIES && termKey(s.o) === oldKey ? { ...s, o: replacement } : s,
               ),
             }
           : r,
@@ -585,12 +686,14 @@ export function setPosition(model: OntologyModel, entityIri: string, x: number, 
   return next
 }
 
-export function addResource(model: OntologyModel, term: Term, statements: Statement[]): OntologyModel {
-  return withResource(model, termKey(term), (resource) => ({
-    term,
-    role: 'other',
-    statements: [...(resource?.statements ?? []), ...statements],
-  }))
+/** Add statements to a resource; statements without a graph go into the target graph (layout: default). */
+export function addResource(model: OntologyModel, term: Term, statements: StatementInput[]): OntologyModel {
+  const resolved = statements.map((s) => resolveGraph(s, LAYOUT_PREDICATES.has(s.p) ? null : model.targetGraph))
+  return withResource(model, termKey(term), (resource) => {
+    const merged = [...(resource?.statements ?? [])]
+    for (const statement of resolved) if (!merged.some((s) => statementEquals(s, statement))) merged.push(statement)
+    return { term, role: 'other', statements: merged }
+  })
 }
 
 export function removeResource(model: OntologyModel, key: string): OntologyModel {
@@ -747,8 +850,12 @@ export function blankLabels(model: OntologyModel): Set<string> {
   }
   for (const resource of model.resources) {
     visit(resource.term)
-    for (const statement of resource.statements) visit(statement.o)
+    for (const statement of resource.statements) {
+      visit(statement.o)
+      if (statement.g) visit(statement.g)
+    }
   }
+  for (const g of model.graphs ?? []) visit(g)
   return labels
 }
 
@@ -781,19 +888,88 @@ export function listItems(model: OntologyModel, head: Term): Term[] | null {
   }
 }
 
-/** The model as the PUT body carries it (roles are derived and not sent). */
+// ---- Annotations (reifiers; UDR-0182 D8) ----------------------------------------------
+
+/** A fresh reifier IRI in the ontology's namespace: `<base>r-<8 hex>` (PRP-0200 Q5). */
+export function mintReifierIri(model: OntologyModel, base: string): string {
+  const taken = new Set(model.resources.map((r) => termKey(r.term)))
+  for (;;) {
+    let hex = ''
+    for (let i = 0; i < 8; i += 1) hex += Math.floor(Math.random() * 16).toString(16)
+    const candidate = `${base}r-${hex}`
+    if (!taken.has(termKey(iri(candidate)))) return candidate
+  }
+}
+
+/**
+ * Annotate statement `index` of `key`: the reifier gets `rdf:reifies <<( s p o )>>`
+ * in the statement's graph, plus an optional first annotation in the same graph.
+ */
+export function annotateStatement(
+  model: OntologyModel,
+  key: string,
+  index: number,
+  reifierIri: string,
+  annotation: { p: string; o: Term } | null,
+): OntologyModel {
+  const resource = findResource(model, key)
+  const statement = resource?.statements[index]
+  if (!resource || !statement) return model
+  const g = statement.g ?? null
+  const statements: StatementInput[] = [{ p: RDF_REIFIES, o: asTriple(resource.term, statement), g }]
+  if (annotation) statements.push({ ...annotation, g })
+  return addResource(model, iri(reifierIri), statements)
+}
+
+/**
+ * Remove statement `index` of `key`. With `deleteAnnotations`, the reifiers of its
+ * triple lose that `rdf:reifies` link and a reifier left without one loses all its
+ * statements -- unless the triple is still asserted in another graph (UDR-0182 D9).
+ */
+export function removeStatement(
+  model: OntologyModel,
+  key: string,
+  index: number,
+  deleteAnnotations: boolean,
+): OntologyModel {
+  const resource = findResource(model, key)
+  const statement = resource?.statements[index]
+  if (!resource || !statement) return model
+  let next = applyStatementEdit(model, key, { index, statement: null }, false)
+  if (!deleteAnnotations || assertedElsewhere(model, key, index)) return next
+  const target = termKey(asTriple(resource.term, statement))
+  for (const reifier of model.resources) {
+    const links = reifier.statements.filter((s) => s.p === RDF_REIFIES && termKey(s.o) === target)
+    if (links.length === 0) continue
+    const keepsAnother = reifier.statements.some((s) => s.p === RDF_REIFIES && !links.includes(s))
+    next = withResource(next, resourceKey(reifier), (r) =>
+      r && keepsAnother
+        ? { ...r, statements: r.statements.filter((s) => !links.some((link) => statementEquals(link, s))) }
+        : null,
+    )
+  }
+  return next
+}
+
+/** The model as the PUT body carries it (roles and editor state are not sent; CTR-0169 v3). */
 export function toPayload(model: OntologyModel): {
+  projection_version: 3
   document: OntologyDocument
   resources: { term: Term; statements: Statement[] }[]
 } {
   return {
+    projection_version: 3,
     document: model.document,
     resources: model.resources.map((r) => ({ term: r.term, statements: r.statements })),
   }
 }
 
 /** Read a GET body into a model (roles re-derived so client and server agree). */
-export function fromProjection(data: { document?: Partial<OntologyDocument>; resources?: Resource[] }): OntologyModel {
+export function fromProjection(data: {
+  document?: Partial<OntologyDocument>
+  resources?: Resource[]
+  graphs?: GraphTerm[]
+}): OntologyModel {
   return {
     document: {
       prefixes: data.document?.prefixes ?? [],
@@ -801,5 +977,7 @@ export function fromProjection(data: { document?: Partial<OntologyDocument>; res
       version: data.document?.version ?? null,
     },
     resources: (data.resources ?? []).map((r) => ({ ...r, role: roleOf(r.term, r.statements) })),
+    graphs: data.graphs ?? [],
+    targetGraph: null,
   }
 }

@@ -75,7 +75,7 @@ DEFAULT_CARDINALITY = "one-to-many"
 # so a user can remove one of these and it stays removed.
 TURTLE_PREFIXES = {"cw": CW, "owl": OWL, "rdf": RDF, "rdfs": RDFS, "xsd": XSD}
 
-PROJECTION_VERSION = 2
+PROJECTION_VERSION = 3
 
 # Role precedence when a subject carries several of the drawn types (punning).
 ROLES = ("entity", "object_property", "datatype_property", "other")
@@ -365,64 +365,95 @@ def _diagnose(term: dict[str, Any], subject: dict[str, Any], predicate: str, out
         _diagnose(term["o"], subject, predicate, out)
 
 
-# ---- Turtle -> projection (GET) ---------------------------------------------
+# ---- Dataset -> projection (GET) ---------------------------------------------
 
 
-def _parse(data: bytes, fmt: Any) -> tuple[list[Any], Any]:
-    """Parse into triples WITHOUT a Store (exact lexical forms); returns (triples, parser)."""
+def _parse(data: bytes, fmt: Any, base_iri: str | None = None) -> tuple[list[Any], Any]:
+    """Parse into quads WITHOUT a Store (exact lexical forms); returns (quads, parser).
+
+    ``base_iri`` resolves relative IRIs when the source declares no base of its own
+    (UDR-0181 D6); a base the source declares still wins.
+    """
     import pyoxigraph as ox
 
-    parser = ox.parse(data, format=fmt)
-    triples = [ox.Triple(q.subject, q.predicate, q.object) for q in parser]
-    return triples, parser
+    parser = ox.parse(data, format=fmt, base_iri=base_iri) if base_iri else ox.parse(data, format=fmt)
+    return list(parser), parser
 
 
-def read_turtle(data: bytes) -> tuple[list[Any], dict[str, Any]]:
-    """Parse Turtle into (triples, document). Raises ValueError on a syntax error."""
+def is_named(quad: Any) -> bool:
+    """True when the quad is in a named graph (not the default graph)."""
+    import pyoxigraph as ox
+
+    return not isinstance(quad.graph_name, ox.DefaultGraph)
+
+
+def read_dataset(data: bytes) -> tuple[list[Any], dict[str, Any]]:
+    """Parse a stored file (Turtle or TriG) into (quads, document); ValueError on a syntax error.
+
+    The TriG parser reads both: Turtle is a subset of TriG (UDR-0182 D3).
+    """
     import pyoxigraph as ox
 
     if not data.strip():
         return [], _empty_document()
     try:
-        triples, parser = _parse(data, ox.RdfFormat.TURTLE)
+        quads, parser = _parse(data, ox.RdfFormat.TRIG)
     except (SyntaxError, ValueError) as exc:
-        raise ValueError(f"Turtle parse error: {exc}") from exc
-    document = {
+        raise ValueError(f"RDF parse error: {exc}") from exc
+    return quads, document_of(parser, data)
+
+
+def document_of(parser: Any, data: bytes) -> dict[str, Any]:
+    """The declarations of a FULLY ITERATED Turtle / TriG parser (prefixes / base / VERSION)."""
+    return {
         "prefixes": [{"prefix": k, "iri": v} for k, v in (parser.prefixes or {}).items()],
         "base": parser.base_iri or None,
         "version": turtle_version(data.decode("utf-8", errors="replace")),
     }
-    return triples, document
 
 
 def _key(term: dict[str, Any]) -> tuple[str, str]:
     return (term["type"], term["value"])
 
 
-def triples_to_projection(triples: list[Any], document: dict[str, Any]) -> dict[str, Any]:
-    """Group triples by subject into the statement-complete projection (D2)."""
+def quads_to_projection(quads: list[Any], document: dict[str, Any]) -> dict[str, Any]:
+    """Group quads by subject into the statement-complete projection v3 (UDR-0182 D1).
+
+    One resource per subject across every graph; a statement in a named graph
+    carries ``g``; ``graphs`` lists the named graphs in file order.
+    """
     resources: dict[tuple[str, str], dict[str, Any]] = {}
     types: dict[tuple[str, str], set[str]] = {}
     diagnostics: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-    count = 0
-    for triple in triples:
-        identity = (str(triple.subject), str(triple.predicate), str(triple.object))
-        if identity in seen:  # an RDF graph is a set
+    graphs: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    triples: set[str] = set()
+    for quad in quads:
+        identity = str(quad)
+        if identity in seen:  # a dataset is a set of quads
             continue
         seen.add(identity)
-        count += 1
-        subject = term_to_json(triple.subject)
+        triples.add(str(quad.triple))
+        subject = term_to_json(quad.subject)
         key = _key(subject)
         resource = resources.get(key)
         if resource is None:
             resource = resources[key] = {"term": subject, "role": "other", "statements": []}
-        obj = term_to_json(triple.object)
-        predicate = triple.predicate.value
-        resource["statements"].append({"p": predicate, "o": obj})
+        obj = term_to_json(quad.object)
+        predicate = quad.predicate.value
+        statement: dict[str, Any] = {"p": predicate, "o": obj}
+        if is_named(quad):
+            graph = term_to_json(quad.graph_name)
+            graphs.setdefault(str(quad.graph_name), graph)
+            statement["g"] = graph
+        resource["statements"].append(statement)
         if predicate == RDF_TYPE and obj["type"] == "iri":
             types.setdefault(key, set()).add(obj["value"])
+        before = len(diagnostics)
         _diagnose(obj, subject, predicate, diagnostics)
+        if "g" in statement:
+            for item in diagnostics[before:]:
+                item["g"] = statement["g"]
 
     for key, resource in resources.items():
         if resource["term"]["type"] != "iri":
@@ -439,24 +470,33 @@ def triples_to_projection(triples: list[Any], document: dict[str, Any]) -> dict[
     return {
         "projection_version": PROJECTION_VERSION,
         "document": document,
+        "graphs": list(graphs.values()),
         "resources": ordered,
         "diagnostics": diagnostics,
-        "triple_count": count,
+        "triple_count": len(triples),
+        "quad_count": len(seen),
     }
 
 
 def turtle_to_projection(data: bytes) -> dict[str, Any]:
-    """Decode a stored Turtle document into the CTR-0169 v2 projection (GET).
+    """Decode a stored Turtle / TriG document into the CTR-0169 v3 projection (GET).
 
-    Lossless by construction: every triple becomes exactly one statement of its
+    Lossless by construction: every quad becomes exactly one statement of its
     subject; nothing is lifted, defaulted or coerced. Raises ``ValueError`` on a
     syntax error.
     """
-    triples, document = read_turtle(data)
-    return triples_to_projection(triples, document)
+    quads, document = read_dataset(data)
+    return quads_to_projection(quads, document)
 
 
-# ---- projection -> Turtle (PUT) ---------------------------------------------
+# ---- projection -> Turtle / TriG (PUT) ----------------------------------------
+
+
+# Turtle PN_PREFIX (RDF 1.1 / 1.2 grammar), so every prefix a valid file declares
+# is accepted back on save (found by the W3C gate, UDR-0181 D7).
+_PN_CHARS_BASE = "A-Za-zÀ-ÖØ-öø-˿Ͱ-ͽͿ-῿‌-‍⁰-↏Ⰰ-⿯、-퟿豈-﷏ﷰ-�\U00010000-\U000effff"
+_PN_CHARS = _PN_CHARS_BASE + "_\\-0-9·̀-ͯ‿-⁀"
+_PN_PREFIX_RE = re.compile(f"[{_PN_CHARS_BASE}](?:[{_PN_CHARS}.]*[{_PN_CHARS}])?")
 
 
 def _validate_document(document: Any) -> dict[str, Any]:
@@ -474,7 +514,7 @@ def _validate_document(document: Any) -> dict[str, Any]:
         if not isinstance(entry, dict):
             raise ProjectionError(pointer, "must be {prefix, iri}")
         name = entry.get("prefix")
-        if not isinstance(name, str) or (name and not re.match(r"^[^\W\d][\w.\-]*$", name)) or name.endswith("."):
+        if not isinstance(name, str) or (name and not _PN_PREFIX_RE.fullmatch(name)):
             raise ProjectionError(f"{pointer}.prefix", "must be a valid prefix name (may be empty)")
         if name in names:
             raise ProjectionError(f"{pointer}.prefix", f"duplicate prefix {name!r}")
@@ -490,17 +530,38 @@ def _validate_document(document: Any) -> dict[str, Any]:
     return {"prefixes": prefixes, "base": base, "version": version}
 
 
-def projection_to_triples(projection: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
-    """Validate a v2 projection and return (triples, document). Raises ProjectionError."""
+def graph_from_json(obj: Any, pointer: str) -> Any:
+    """The graph of a statement: absent / null = the default graph, else an IRI or blank node."""
     import pyoxigraph as ox
 
+    if obj is None:
+        return ox.DefaultGraph()
+    return term_from_json(obj, pointer, position="subject")
+
+
+def statement_quad(subject: Any, statement: Any, pointer: str) -> Any:
+    """One ``{p, o, g?}`` statement of ``subject`` as a quad (validated)."""
+    import pyoxigraph as ox
+
+    if not isinstance(statement, dict):
+        raise ProjectionError(pointer, "must be {p, o, g?}")
+    return ox.Quad(
+        subject,
+        _iri(statement.get("p"), f"{pointer}.p"),
+        term_from_json(statement.get("o"), f"{pointer}.o"),
+        graph_from_json(statement.get("g"), f"{pointer}.g"),
+    )
+
+
+def projection_to_quads(projection: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
+    """Validate a v2 / v3 projection and return (quads, document). Raises ProjectionError."""
     document = _validate_document(projection.get("document"))
     resources = projection.get("resources")
     if resources is None:
         resources = []
     if not isinstance(resources, list):
         raise ProjectionError("resources", "must be a list")
-    triples: list[Any] = []
+    quads: list[Any] = []
     seen: set[str] = set()
     for i, resource in enumerate(resources):
         pointer = f"resources[{i}]"
@@ -511,27 +572,40 @@ def projection_to_triples(projection: dict[str, Any]) -> tuple[list[Any], dict[s
         if not isinstance(statements, list):
             raise ProjectionError(f"{pointer}.statements", "must be a list")
         for j, statement in enumerate(statements):
-            sp = f"{pointer}.statements[{j}]"
-            if not isinstance(statement, dict):
-                raise ProjectionError(sp, "must be {p, o}")
-            triple = ox.Triple(
-                subject, _iri(statement.get("p"), f"{sp}.p"), term_from_json(statement.get("o"), f"{sp}.o")
-            )
-            identity = str(triple)
+            quad = statement_quad(subject, statement, f"{pointer}.statements[{j}]")
+            identity = str(quad)
             if identity not in seen:
                 seen.add(identity)
-                triples.append(triple)
-    return triples, document
+                quads.append(quad)
+    return quads, document
 
 
-def write_turtle(triples: list[Any], document: dict[str, Any]) -> str:
-    """Write triples with the document's declarations: VERSION, @base, @prefix, triples.
+def _grouped(quads: list[Any]) -> list[Any]:
+    """A stable order with one block per graph and per subject (first appearance wins).
 
-    Prefix IRIs stay absolute (the serializer is not given ``base_iri``, so it does
-    not relativize them); ``@base`` is emitted by hand before them.
+    The writers start a new graph block / subject paragraph whenever these change, so
+    interleaved quads (an edit appended at the end) would otherwise split a block.
+    """
+    graphs: dict[Any, int] = {}
+    subjects: dict[Any, int] = {}
+    for quad in quads:
+        graphs.setdefault(quad.graph_name, len(graphs))
+        subjects.setdefault(quad.subject, len(subjects))
+    return sorted(quads, key=lambda q: (graphs[q.graph_name], subjects[q.subject]))
+
+
+def write_document(quads: list[Any], document: dict[str, Any], *, trig: bool | None = None) -> str:
+    """Write quads with the document's declarations: VERSION, @base, @prefix, then the body.
+
+    Turtle when every quad is in the default graph, TriG otherwise (UDR-0182 D3);
+    ``trig=True`` forces TriG. Prefix IRIs stay absolute (the serializer is not given
+    ``base_iri``, so it does not relativize them); ``@base`` is emitted by hand.
     """
     import pyoxigraph as ox
 
+    if trig is None:
+        trig = any(is_named(q) for q in quads)
+    quads = _grouped(quads)
     header = ""
     if document.get("version"):
         header += f'VERSION "{document["version"]}"\n'
@@ -539,19 +613,29 @@ def write_turtle(triples: list[Any], document: dict[str, Any]) -> str:
         header += f"@base <{document['base']}> .\n"
     prefixes = {p["prefix"]: p["iri"] for p in document.get("prefixes") or []}
     try:
-        body = ox.serialize(triples, format=ox.RdfFormat.TURTLE, prefixes=prefixes).decode("utf-8")
+        if trig:
+            body = ox.serialize(quads, format=ox.RdfFormat.TRIG, prefixes=prefixes).decode("utf-8")
+        else:
+            triples = [q.triple for q in quads]
+            body = ox.serialize(triples, format=ox.RdfFormat.TURTLE, prefixes=prefixes).decode("utf-8")
     except ValueError as exc:
         raise ProjectionError("document.prefixes", f"cannot serialize: {exc}") from exc
-    if not triples and prefixes:
+    if not quads and prefixes:
         # pyoxigraph writes nothing for an empty graph; keep the declarations anyway.
         body = "".join(f"@prefix {name}: <{iri}> .\n" for name, iri in prefixes.items())
     return header + body
 
 
+def projection_to_text(projection: dict[str, Any]) -> tuple[str, bool]:
+    """Encode a projection: (Turtle or TriG text, True when it is a TriG dataset). ProjectionError -> 422."""
+    quads, document = projection_to_quads(projection)
+    dataset = any(is_named(q) for q in quads)
+    return write_document(quads, document, trig=dataset), dataset
+
+
 def projection_to_turtle(projection: dict[str, Any]) -> str:
-    """Encode a CTR-0169 v2 projection into Turtle (PUT). Raises ProjectionError (422)."""
-    triples, document = projection_to_triples(projection)
-    return write_turtle(triples, document)
+    """Encode a CTR-0169 projection (Turtle, or TriG for a dataset). Raises ProjectionError (422)."""
+    return projection_to_text(projection)[0]
 
 
 def new_document_turtle(ontology_base: str) -> str:
@@ -564,28 +648,95 @@ def new_document_turtle(ontology_base: str) -> str:
         "base": None,
         "version": None,
     }
-    return write_turtle([], document)
+    return write_document([], document)
 
 
-def import_to_turtle(data: bytes, fmt: Any, *, rdfxml: bool) -> tuple[str, int]:
-    """Parse an upload (Turtle or RDF/XML) and return (canonical Turtle, triple count).
+class RemoteContextError(ValueError):
+    """A JSON-LD document refers to a remote @context, which is never fetched (UDR-0182 D6)."""
 
-    The source's declarations are kept (UDR-0180 D6) and the built-in prefixes are
-    added for names it does not bind. Raises on a syntax error (the caller tries the
-    next format).
+    def __init__(self, url: str) -> None:
+        super().__init__(f"Remote JSON-LD contexts are not supported: {url}")
+        self.url = url
+
+
+def _remote_context(data: bytes) -> str | None:
+    """The first remote ``@context`` / ``@import`` URL in a JSON-LD document, if any."""
+    import json
+
+    try:
+        doc = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+    def contexts(node: Any) -> Any:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("@context", "@import"):
+                    yield value
+                yield from contexts(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from contexts(item)
+
+    for value in contexts(doc):
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, str):
+                return item
+            if isinstance(item, dict) and isinstance(item.get("@import"), str):
+                return item["@import"]
+    return None
+
+
+def import_to_turtle(
+    data: bytes, fmt: Any, *, rdfxml: bool | None = None, base_iri: str | None = None
+) -> tuple[str, int]:
+    """``import_document`` without the dataset flag: (Turtle / TriG text, quad count)."""
+    text, count, _ = import_document(data, fmt, rdfxml=rdfxml, base_iri=base_iri)
+    return text, count
+
+
+def import_document(
+    data: bytes, fmt: Any, *, rdfxml: bool | None = None, base_iri: str | None = None
+) -> tuple[str, int, bool]:
+    """Parse an upload in any supported format: (Turtle / TriG text, quad count, is a dataset).
+
+    The source's declarations are kept (UDR-0180 D6; JSON-LD keeps its top-level
+    ``@context`` prefixes and ``@base``) and the built-in prefixes are added for names
+    it does not bind. ``base_iri`` resolves the relative IRIs of a source that declares
+    no base (UDR-0181 D6); it is NOT recorded as the document's base. A dataset with a
+    named graph is written as TriG (UDR-0182 D3). Raises on a syntax error (the caller
+    tries the next format) and ``RemoteContextError`` for a remote JSON-LD context.
     """
-    triples, parser = _parse(data, fmt)
+    import pyoxigraph as ox
+
+    if rdfxml is None:
+        rdfxml = fmt == ox.RdfFormat.RDF_XML
+    jsonld = fmt in (ox.RdfFormat.JSON_LD, ox.RdfFormat.STREAMING_JSON_LD)
+    try:
+        quads, parser = _parse(data, fmt, base_iri)
+    except (SyntaxError, ValueError) as exc:
+        if jsonld:
+            url = _remote_context(data)
+            if url is not None and "LoadDocumentCallback" in str(exc):
+                raise RemoteContextError(url) from exc
+        raise
     if rdfxml:
         document = rdfxml_declarations(data)
     else:
+        declared = getattr(parser, "base_iri", None) or None
+        version = None
+        if fmt in (ox.RdfFormat.TURTLE, ox.RdfFormat.TRIG):
+            version = turtle_version(data.decode("utf-8", errors="replace"))
         document = {
-            "prefixes": [{"prefix": k, "iri": v} for k, v in (parser.prefixes or {}).items()],
-            "base": parser.base_iri or None,
-            "version": turtle_version(data.decode("utf-8", errors="replace")),
+            "prefixes": [{"prefix": k, "iri": v} for k, v in (getattr(parser, "prefixes", None) or {}).items()],
+            # The parser reports the supplied base when the source declares none.
+            "base": None if declared == base_iri else declared,
+            "version": version,
         }
     document["prefixes"] = _with_builtin_prefixes(document["prefixes"])
-    unique = list({str(t): t for t in triples}.values())
-    return write_turtle(unique, document), len(unique)
+    unique = list({str(q): q for q in quads}.values())
+    dataset = any(is_named(q) for q in unique)
+    return write_document(unique, document, trig=dataset), len(unique), dataset
 
 
 __all__ = [
@@ -598,19 +749,26 @@ __all__ = [
     "TURTLE_PREFIXES",
     "XSD",
     "ProjectionError",
+    "RemoteContextError",
     "base_iri_for",
+    "document_of",
+    "graph_from_json",
+    "import_document",
     "import_to_turtle",
+    "is_named",
     "literal_is_ill_typed",
     "local_name",
     "new_document_turtle",
-    "projection_to_triples",
+    "projection_to_quads",
+    "projection_to_text",
     "projection_to_turtle",
+    "quads_to_projection",
     "rdfxml_declarations",
-    "read_turtle",
+    "read_dataset",
+    "statement_quad",
     "term_from_json",
     "term_to_json",
-    "triples_to_projection",
     "turtle_to_projection",
     "turtle_version",
-    "write_turtle",
+    "write_document",
 ]

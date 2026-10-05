@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 # Bound the schema summary so a huge ontology cannot balloon the prompt.
 _SCHEMA_CHAR_CAP = 6000
 _QUESTION_CHAR_CAP = 2000
+# Labels listed per class / property in the schema summary (UDR-0181 D5).
+_LABELS_PER_TERM = 5
 
 _NL_SYSTEM_PROMPT = (
     "You translate a natural-language question about an RDF ontology into ONE SPARQL 1.1 "
@@ -56,43 +58,79 @@ _FORM_RE = re.compile(r"\b(SELECT|CONSTRUCT|ASK|DESCRIBE)\b", re.IGNORECASE)
 _UPDATE_RE = re.compile(r"\b(INSERT|DELETE|DROP|CLEAR|LOAD|CREATE|MOVE|COPY|ADD)\b", re.IGNORECASE)
 
 
-def schema_summary(store: Any) -> str:
-    """A compact, prompt-friendly text summary of the ontology's vocabulary."""
+def _label_order(literal: Any) -> tuple[int, str]:
+    """Untagged first, then English, then by tag (the editor's pickLiteralIndex order)."""
+    language = getattr(literal, "language", None) or ""
+    if not language:
+        return (0, "")
+    if language == "en" or language.startswith("en-"):
+        return (1, language)
+    return (2, language)
+
+
+def schema_summary(graph: Any) -> str:
+    """A compact, prompt-friendly text summary of the ontology's vocabulary.
+
+    EVERY label (with its language), every domain and every range is listed, not
+    the first one in store order (UDR-0181 D5); the character cap still bounds the
+    prompt. Labels (strings / language strings), IRIs and blank nodes are stored
+    verbatim by the engine, so reading them from the Store shows the file.
+
+    The Store's default graph is the merge of the graphs in scope (UDR-0182 D4); the
+    named graphs are listed so generated SPARQL may use ``GRAPH`` (D5).
+    """
     import pyoxigraph as ox
 
+    store = graph.store
     named = ox.NamedNode
 
-    def first_value(subject: Any, predicate: str) -> str:
-        for quad in store.quads_for_pattern(subject, named(predicate), None):
-            value = getattr(quad.object, "value", None)
-            if value is not None:
-                return str(value)
-        return ""
+    def of(node: Any, predicate: str) -> list[Any]:
+        return [q.object for q in store.quads_for_pattern(node, named(predicate), None)]
 
-    def typed_subjects(type_iri: str) -> list[Any]:
-        return sorted(
-            (q.subject for q in store.quads_for_pattern(None, named(RDF_TYPE), named(type_iri))),
-            key=str,
+    def subjects(type_iri: str) -> list[Any]:
+        found = store.quads_for_pattern(None, named(RDF_TYPE), named(type_iri))
+        return sorted({q.subject for q in found if isinstance(q.subject, ox.NamedNode)}, key=str)
+
+    def labels(node: Any) -> str:
+        found = sorted((o for o in of(node, RDFS_LABEL) if isinstance(o, ox.Literal)), key=_label_order)
+        if not found:
+            return local_name(node.value)
+        shown = [f'"{o.value}"@{o.language}' if o.language else f'"{o.value}"' for o in found[:_LABELS_PER_TERM]]
+        return ", ".join(shown)
+
+    def terms(node: Any, predicate: str) -> str:
+        out = []
+        for obj in sorted(of(node, predicate), key=str):  # stable prompt across loads
+            if isinstance(obj, ox.NamedNode):
+                out.append(f"<{obj.value}>")
+            elif isinstance(obj, ox.BlankNode):
+                out.append("(class expression)")
+            else:
+                out.append(str(getattr(obj, "value", obj)))
+        return ", ".join(out) or "(none)"
+
+    prefixes = {p["prefix"]: p["iri"] for p in (graph.document.get("prefixes") or [])}
+    prefixes.setdefault("cw", CW)
+    lines: list[str] = [f"PREFIX {name}: <{iri}>" for name, iri in prefixes.items()]
+    graphs = list(getattr(graph, "graphs", None) or [])
+    if graphs:
+        lines.append(
+            "Named graphs (the default graph below is the merge of the graphs in scope; "
+            "use GRAPH <name> { ... } to ask about one graph): " + ", ".join(str(g) for g in graphs)
         )
-
-    lines: list[str] = [f"PREFIX cw: <{CW}>"]
     lines.append("Classes:")
-    for node in typed_subjects(OWL_CLASS):
-        label = first_value(node, RDFS_LABEL) or local_name(str(getattr(node, "value", node)))
-        lines.append(f"- <{node.value}> label: {label}")
+    lines.extend(f"- <{node.value}> label: {labels(node)}" for node in subjects(OWL_CLASS))
     lines.append("Object properties (direction source -> target):")
-    for node in typed_subjects(OWL_OBJECT_PROPERTY):
-        domain = first_value(node, RDFS_DOMAIN)
-        range_ = first_value(node, RDFS_RANGE)
-        cardinality = first_value(node, CW_CARDINALITY)
-        label = first_value(node, RDFS_LABEL) or local_name(node.value)
-        lines.append(f"- <{node.value}> label: {label}; domain <{domain}>; range <{range_}>; cardinality {cardinality}")
+    lines.extend(
+        f"- <{node.value}> label: {labels(node)}; domain {terms(node, RDFS_DOMAIN)}; "
+        f"range {terms(node, RDFS_RANGE)}; cardinality {terms(node, CW_CARDINALITY)}"
+        for node in subjects(OWL_OBJECT_PROPERTY)
+    )
     lines.append("Datatype properties:")
-    for node in typed_subjects(OWL_DATATYPE_PROPERTY):
-        domain = first_value(node, RDFS_DOMAIN)
-        range_ = first_value(node, RDFS_RANGE)
-        label = first_value(node, RDFS_LABEL) or local_name(node.value)
-        lines.append(f"- <{node.value}> label: {label}; domain <{domain}>; range <{range_}>")
+    lines.extend(
+        f"- <{node.value}> label: {labels(node)}; domain {terms(node, RDFS_DOMAIN)}; range {terms(node, RDFS_RANGE)}"
+        for node in subjects(OWL_DATATYPE_PROPERTY)
+    )
     summary = "\n".join(lines)
     return summary[:_SCHEMA_CHAR_CAP]
 
@@ -128,7 +166,7 @@ def ensure_read_only(sparql: str, *, construct_only: bool = False) -> None:
         raise ValueError(f"Only CONSTRUCT queries are allowed on this lane (got {form})")
 
 
-async def generate_sparql(question: str, store: Any, *, construct_only: bool = False) -> str:
+async def generate_sparql(question: str, graph: Any, *, construct_only: bool = False) -> str:
     """NL -> SPARQL via one non-streaming completion through the chokepoint (D8)."""
     from agent_framework import Message
 
@@ -144,7 +182,7 @@ async def generate_sparql(question: str, store: Any, *, construct_only: bool = F
             role="user",
             contents=[
                 _NL_USER_TEMPLATE.format(
-                    schema=schema_summary(store),
+                    schema=schema_summary(graph),
                     question=question[:_QUESTION_CHAR_CAP],
                     form="CONSTRUCT" if construct_only else "",
                 )
