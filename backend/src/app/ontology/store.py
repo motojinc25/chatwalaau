@@ -25,10 +25,19 @@ stays available to GRAPH patterns, and CONSTRUCT answers are TriG with each trip
 under the graphs that hold it (CTR-0170 v3, UDR-0182 D4 / D5).
 Filenames are catalog-derived single segments, so no path outside ONTOLOGY_DIR
 is ever resolved (the CTR-0022 confinement precedent).
+
+Loaded query Stores are cached per (ontology, revision, scope) within the
+``ontology_query_cache_mb`` App Settings budget; the revision is the SHA-256 of
+the bytes on disk, so a cached entry can never answer for another file version
+(CTR-0170 v4, UDR-0183 D1-D3). The callers run this module's work in worker
+threads (D4): catalog read-modify-writes hold ``_CATALOG_LOCK`` and every
+"check revision -> read -> apply -> write" holds ``write_lock(id)``.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
@@ -37,6 +46,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import threading
 from typing import TYPE_CHECKING, Any
 import uuid
 
@@ -52,7 +62,7 @@ from app.ontology.lexical import (
 from app.ontology.lexical import notices as lexical_notices
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +77,23 @@ FILE_SUFFIXES = (TURTLE_SUFFIX, TRIG_SUFFIX)
 # Result-shape caps for the read-only executor (payload bound, not a security
 # boundary -- CTR-0083 gates the callers).
 SELECT_MAX_ROWS = 1000
+
+# Locks (UDR-0183 D4). Order: ``write_lock(id)`` before ``_CATALOG_LOCK``, never the
+# reverse. On Windows ``os.replace`` fails while another thread has the target open,
+# so reads of the catalog and of an ontology file take the same locks for the moment
+# they read bytes (never while parsing).
+_CATALOG_LOCK = threading.RLock()
+_WRITE_LOCKS: dict[str, threading.RLock] = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def write_lock(ontology_id: str) -> Iterator[None]:
+    """Serialize "check revision -> read -> apply -> write" for one ontology (UDR-0183 D4)."""
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.setdefault(ontology_id, threading.RLock())
+    with lock:
+        yield
 
 
 def _now() -> str:
@@ -134,6 +161,11 @@ def _normalize_entry(raw: Any) -> dict[str, str] | None:
 
 def read_catalog() -> list[dict[str, str]]:
     """Read the catalog, normalizing per entry and self-healing on corruption."""
+    with _CATALOG_LOCK:
+        return _read_catalog()
+
+
+def _read_catalog() -> list[dict[str, str]]:
     path = _catalog_path()
     if not path.is_file():
         return []
@@ -161,7 +193,8 @@ def read_catalog() -> list[dict[str, str]]:
 
 
 def write_catalog(entries: list[dict[str, str]]) -> None:
-    _atomic_write_text(_catalog_path(), json.dumps({"ontologies": entries}, ensure_ascii=False, indent=2))
+    with _CATALOG_LOCK:
+        _atomic_write_text(_catalog_path(), json.dumps({"ontologies": entries}, ensure_ascii=False, indent=2))
 
 
 def get_entry(ontology_id: str) -> dict[str, str] | None:
@@ -172,11 +205,12 @@ def get_entry(ontology_id: str) -> dict[str, str] | None:
 
 
 def _touch_entry(ontology_id: str) -> None:
-    entries = read_catalog()
-    for entry in entries:
-        if entry["id"] == ontology_id:
-            entry["updated_at"] = _now()
-    write_catalog(entries)
+    with _CATALOG_LOCK:
+        entries = read_catalog()
+        for entry in entries:
+            if entry["id"] == ontology_id:
+                entry["updated_at"] = _now()
+        write_catalog(entries)
 
 
 # ---- Ontology file lifecycle -------------------------------------------------
@@ -212,9 +246,10 @@ def create_ontology(
         "updated_at": _now(),
     }
     _atomic_write_text(_file_path(entry), initial_turtle)
-    entries = read_catalog()
-    entries.append(entry)
-    write_catalog(entries)
+    with _CATALOG_LOCK:
+        entries = read_catalog()
+        entries.append(entry)
+        write_catalog(entries)
     logger.info("ontology created: %s (%s)", entry_id, entry["name"])
     return entry
 
@@ -228,44 +263,59 @@ def rename_ontology(
     untouched -- only the catalog entry's name/description and updated_at change.
     Returns the updated entry, or None when the id is unknown.
     """
-    entries = read_catalog()
-    updated: dict[str, str] | None = None
-    for entry in entries:
-        if entry["id"] == ontology_id:
-            if name is not None:
-                entry["name"] = name.strip() or entry["id"]
-            if description is not None:
-                entry["description"] = description.strip()
-            entry["updated_at"] = _now()
-            updated = entry
-            break
-    if updated is None:
-        return None
-    write_catalog(entries)
+    with _CATALOG_LOCK:
+        entries = read_catalog()
+        updated: dict[str, str] | None = None
+        for entry in entries:
+            if entry["id"] == ontology_id:
+                if name is not None:
+                    entry["name"] = name.strip() or entry["id"]
+                if description is not None:
+                    entry["description"] = description.strip()
+                entry["updated_at"] = _now()
+                updated = entry
+                break
+        if updated is None:
+            return None
+        write_catalog(entries)
     logger.info("ontology renamed: %s (%s)", ontology_id, updated["name"])
     return updated
 
 
 def delete_ontology(ontology_id: str) -> bool:
     """Backup-then-remove the Turtle file and drop the catalog entry (UDR-0084 D10)."""
-    entry = get_entry(ontology_id)
-    if entry is None:
-        return False
-    path = _file_path(entry)
-    _backup(path)
-    if path.is_file():
-        path.unlink()
-    write_catalog([e for e in read_catalog() if e["id"] != ontology_id])
+    with write_lock(ontology_id):
+        entry = get_entry(ontology_id)
+        if entry is None:
+            return False
+        path = _file_path(entry)
+        _backup(path)
+        if path.is_file():
+            path.unlink()
+        with _CATALOG_LOCK:
+            write_catalog([e for e in read_catalog() if e["id"] != ontology_id])
+    invalidate_query_cache(ontology_id)
     logger.info("ontology deleted: %s (backup kept)", ontology_id)
     return True
 
 
 def read_ontology_bytes(ontology_id: str) -> bytes | None:
-    entry = get_entry(ontology_id)
-    if entry is None:
-        return None
-    path = _file_path(entry)
-    return path.read_bytes() if path.is_file() else b""
+    with write_lock(ontology_id):  # held only while reading (see the lock notes above)
+        entry = get_entry(ontology_id)
+        if entry is None:
+            return None
+        path = _file_path(entry)
+        return path.read_bytes() if path.is_file() else b""
+
+
+def read_entry_and_bytes(ontology_id: str) -> tuple[dict[str, str], bytes] | None:
+    """The catalog entry and the stored bytes as one consistent pair (None when unknown)."""
+    with write_lock(ontology_id):
+        entry = get_entry(ontology_id)
+        if entry is None:
+            return None
+        path = _file_path(entry)
+        return entry, (path.read_bytes() if path.is_file() else b"")
 
 
 def revision_of(data: bytes) -> str:
@@ -286,6 +336,13 @@ def save_ontology_text(ontology_id: str, turtle: str, *, dataset: bool | None = 
     file is written first, then the catalog points at it, and the previous file is
     kept only as its backup. ``None`` keeps the current file.
     """
+    with write_lock(ontology_id):
+        backup_name = _save_locked(ontology_id, turtle, dataset)
+    invalidate_query_cache(ontology_id)
+    return backup_name
+
+
+def _save_locked(ontology_id: str, turtle: str, dataset: bool | None) -> str | None:
     entry = get_entry(ontology_id)
     if entry is None:
         raise KeyError(ontology_id)
@@ -301,12 +358,13 @@ def save_ontology_text(ontology_id: str, turtle: str, *, dataset: bool | None = 
     target = ontology_dir() / f"{ontology_id}{TRIG_SUFFIX if dataset else TURTLE_SUFFIX}"
     _backup(target)  # a stray file of the target name is kept, never overwritten silently
     _atomic_write_text(target, turtle)
-    entries = read_catalog()
-    for item in entries:
-        if item["id"] == ontology_id:
-            item["file"] = target.name
-            item["updated_at"] = _now()
-    write_catalog(entries)
+    with _CATALOG_LOCK:
+        entries = read_catalog()
+        for item in entries:
+            if item["id"] == ontology_id:
+                item["file"] = target.name
+                item["updated_at"] = _now()
+        write_catalog(entries)
     if path != target and path.is_file():
         path.unlink()  # its content is in ``backup_name``
     logger.info("ontology %s stored as %s", ontology_id, target.name)
@@ -335,6 +393,9 @@ class QueryGraph:
     graphs: list[Any] = field(default_factory=list)
     scope: Any = "all"
     provenance: dict[Any, list[Any]] | None = None
+    # The NL schema summary, computed on first use and kept with a cached entry
+    # (UDR-0183 D2). It is derived from the fields above, which never change.
+    nl_summary: str | None = None
 
 
 def parse_scope(value: Any) -> Any:
@@ -405,8 +466,8 @@ def _merge_into_default(store: Any, graphs: list[Any]) -> None:
         store.extend(ox.parse(ox.serialize(triples, format=ox.RdfFormat.N_TRIPLES), format=ox.RdfFormat.N_TRIPLES))
 
 
-def load_store(ontology_id: str, scope: Any = "all") -> QueryGraph:
-    """Parse the ontology's file ONCE into an in-memory Store plus a lexical index.
+def _build_query_graph(entry: dict[str, str], data: bytes, scope: Any) -> QueryGraph:
+    """Parse one file version ONCE into an in-memory Store plus a lexical index.
 
     The parse streams straight into ``Store.extend`` rather than ``Store.load``,
     which relabels blank nodes: result blank nodes then carry the labels the
@@ -421,11 +482,6 @@ def load_store(ontology_id: str, scope: Any = "all") -> QueryGraph:
 
     from app.ontology.vocabulary import document_of
 
-    entry = get_entry(ontology_id)
-    data = read_ontology_bytes(ontology_id)
-    if entry is None or data is None:
-        raise KeyError(ontology_id)
-    scope = parse_scope(scope)
     dataset = is_dataset(entry)
     store = ox.Store()
     kept: list[Any] = []
@@ -490,6 +546,136 @@ def load_store(ontology_id: str, scope: Any = "all") -> QueryGraph:
         scope=scope,
         provenance=provenance if graphs else None,
     )
+
+
+# ---- Query cache (CTR-0170 v4, UDR-0183 D1-D3) ----------------------------------
+
+# Memory charged per byte of file, measured on v0.177.0 at the 10 MB cap (PRP-0201
+# 1.1: 25x graph file, 46x dataset all graphs, 27-30x dataset one graph) plus a margin.
+CACHE_FACTOR_GRAPH = 28
+CACHE_FACTOR_DATASET_ALL = 50
+CACHE_FACTOR_DATASET_SCOPED = 32
+
+
+@dataclass
+class _CacheEntry:
+    graph: QueryGraph
+    cost: int
+
+
+_cache: OrderedDict[tuple[Any, ...], _CacheEntry] = OrderedDict()
+_cache_lock = threading.Lock()
+_cache_total = 0
+# One load per key at a time (D3): later requests for the key wait on its lock.
+_loading: dict[tuple[Any, ...], threading.Lock] = {}
+cache_stats = {"hits": 0, "misses": 0, "evictions": 0}
+
+
+def cache_budget_bytes() -> int:
+    """The ``ontology_query_cache_mb`` App Settings budget in bytes (0 = cache off)."""
+    return max(0, int(settings.ontology_query_cache_mb)) * 2**20
+
+
+def cache_cost(size: int, dataset: bool, scope: Any) -> int:
+    """The memory an entry is charged: the file size times the factor of its kind."""
+    if not dataset:
+        factor = CACHE_FACTOR_GRAPH
+    elif scope == "all":
+        factor = CACHE_FACTOR_DATASET_ALL
+    else:
+        factor = CACHE_FACTOR_DATASET_SCOPED
+    return max(1, size) * factor
+
+
+def cache_key(ontology_id: str, revision: str, dataset: bool, scope: Any) -> tuple[Any, ...]:
+    """(id, revision, kind, scope); a graph file's "all" and "default" share one entry (D1)."""
+    if not dataset and scope == "default":
+        scope = "all"
+    return (ontology_id, revision, dataset, scope)
+
+
+def _evict_to(budget: int) -> None:
+    """Drop least-recently-used entries until the total fits ``budget`` (lock held)."""
+    global _cache_total
+    while _cache and _cache_total > budget:
+        _, dropped = _cache.popitem(last=False)
+        _cache_total -= dropped.cost
+        cache_stats["evictions"] += 1
+
+
+def invalidate_query_cache(ontology_id: str | None = None) -> None:
+    """Drop the cached entries of one ontology (all when None) to return memory early.
+
+    Correctness never depends on this: a changed file has a new revision, so its
+    old entries can no longer be looked up (D1).
+    """
+    global _cache_total
+    with _cache_lock:
+        for key in [k for k in _cache if ontology_id is None or k[0] == ontology_id]:
+            _cache_total -= _cache.pop(key).cost
+
+
+def cached_entries() -> list[tuple[Any, ...]]:
+    """The keys currently cached, least recently used first (tests and diagnostics)."""
+    with _cache_lock:
+        return list(_cache)
+
+
+def load_store(ontology_id: str, scope: Any = "all") -> QueryGraph:
+    """The ontology loaded for the query lanes, from the cache when its revision is cached.
+
+    The stored bytes are read and hashed on every call (about 20 ms at the 10 MB
+    cap); the key carries that revision, so an entry built from other bytes is never
+    returned (UDR-0183 D1). Within the ``ontology_query_cache_mb`` budget entries are
+    kept least-recently-used first; one larger than the budget is built, used and not
+    kept; a budget of 0 builds every time (D3). Concurrent requests for one key share
+    one load. A cached entry is never changed (D2): the Store only ever answers
+    ``query()`` and the lexical index fills its lookup tables under its own lock.
+    """
+    global _cache_total
+    pair = read_entry_and_bytes(ontology_id)
+    if pair is None:
+        raise KeyError(ontology_id)
+    entry, data = pair
+    scope = parse_scope(scope)
+    budget = cache_budget_bytes()
+    if budget <= 0:
+        if _cache:
+            invalidate_query_cache()
+        return _build_query_graph(entry, data, scope)
+    dataset = is_dataset(entry)
+    key = cache_key(ontology_id, revision_of(data), dataset, scope)
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is not None:
+            _cache.move_to_end(key)
+            cache_stats["hits"] += 1
+            return hit.graph
+        slot = _loading.setdefault(key, threading.Lock())
+    with slot:
+        with _cache_lock:
+            hit = _cache.get(key)
+            if hit is not None:  # another request loaded it while this one waited
+                _cache.move_to_end(key)
+                cache_stats["hits"] += 1
+                return hit.graph
+            cache_stats["misses"] += 1
+        try:
+            graph = _build_query_graph(entry, data, scope)
+        except BaseException:
+            with _cache_lock:
+                _loading.pop(key, None)
+            raise
+        cost = cache_cost(len(data), dataset, scope)
+        with _cache_lock:
+            # Insert and release the key in one step, so no request starts a second load.
+            _loading.pop(key, None)
+            budget = cache_budget_bytes()  # the setting may have changed during the load
+            if cost <= budget:
+                _cache[key] = _CacheEntry(graph, cost)
+                _cache_total += cost
+            _evict_to(budget)
+        return graph
 
 
 def _term_to_str(term: Any) -> str:
@@ -650,20 +836,25 @@ __all__ = [
     "FILE_SUFFIXES",
     "SELECT_MAX_ROWS",
     "QueryGraph",
+    "cache_stats",
+    "cached_entries",
     "create_ontology",
     "delete_ontology",
     "execute_query",
     "get_entry",
     "graph_names",
+    "invalidate_query_cache",
     "is_dataset",
     "load_store",
     "ontology_dir",
     "parse_scope",
     "read_catalog",
+    "read_entry_and_bytes",
     "read_ontology_bytes",
     "rename_ontology",
     "revision_of",
     "save_ontology_text",
     "scope_label",
     "write_catalog",
+    "write_lock",
 ]

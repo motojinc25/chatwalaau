@@ -30,20 +30,28 @@ the ONTOLOGY_MAX_FILE_BYTES cap) and stores canonical Turtle WITH the source's
 prefixes / base / VERSION (UDR-0084 D10, UDR-0180 D6). GET returns a ``revision``
 (SHA-256 of the stored file); a PUT carrying a different one is refused with 409
 ``stale_revision`` before anything is written (UDR-0180 D8).
+
+Parsing, loading, querying, serializing and writing run in worker threads, never on
+the event loop; every "check revision -> read -> apply -> write" holds the
+ontology's write lock (CTR-0170 v4 / CTR-0171 v6, UDR-0183 D4). ``POST /statements``
+with ``on_stale: "rebase"`` applies a request made against an older revision to the
+current file, refusing it with 409 ``stale_conflict`` when it touches statements
+that are gone (D5); fresh blank-node labels are renamed on every save (D6).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import verify_api_key
 from app.core.config import settings
 from app.ontology import formats, nl, store
-from app.ontology.operations import StatementNotFound, apply_operations
+from app.ontology.operations import StaleConflict, StatementNotFound, apply_operations
 from app.ontology.vocabulary import (
     PROJECTION_VERSION,
     ProjectionError,
@@ -131,6 +139,11 @@ class StatementOperations(BaseModel):
 
     revision: str = Field(min_length=1)
     operations: list[Any] = Field(default_factory=list)
+    # "rebase": a request made against an older revision is applied to the current
+    # file when it still fits (UDR-0183 D5); "refuse" (default) keeps 409 stale_revision.
+    on_stale: Literal["refuse", "rebase"] = "refuse"
+    # Blank-node labels this client created; renamed when the file uses them (D6).
+    fresh_blank_nodes: list[str] = Field(default_factory=list)
 
 
 class ProjectionSave(BaseModel):
@@ -148,19 +161,22 @@ class ProjectionSave(BaseModel):
     projection_version: int | None = None
 
 
+_STALE_REVISION = {
+    "error": "stale_revision",
+    "message": "The ontology was changed after you opened it. Reload it to see the latest version.",
+}
+
+
 def _check_revision(ontology_id: str, revision: str | None) -> None:
-    """409 ``stale_revision`` when ``revision`` is not the stored file's (UDR-0180 D8)."""
+    """409 ``stale_revision`` when ``revision`` is not the stored file's (UDR-0180 D8).
+
+    Callers hold ``store.write_lock(ontology_id)`` up to their write (UDR-0183 D4).
+    """
     if revision is None:
         return
     current = store.revision_of(store.read_ontology_bytes(ontology_id) or b"")
     if revision != current:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "stale_revision",
-                "message": "The ontology was changed after you opened it. Reload it to see the latest version.",
-            },
-        )
+        raise HTTPException(status_code=409, detail=_STALE_REVISION)
 
 
 def _scope_or_422(value: Any) -> Any:
@@ -228,7 +244,7 @@ async def delete_ontology(ontology_id: str) -> dict:
     _require_enabled()
     _guard_demo()
     _entry_or_404(ontology_id)
-    store.delete_ontology(ontology_id)
+    await run_in_threadpool(store.delete_ontology, ontology_id)
     return {"deleted": True, "id": ontology_id}
 
 
@@ -284,7 +300,9 @@ async def import_ontology(
 
     display_name = name.strip() or (file.filename or "").rsplit(".", 1)[0] or "Imported ontology"
     try:
-        entry = store.create_ontology(display_name, description, initial_turtle=convert, dataset=lambda: datasets[0])
+        entry = await run_in_threadpool(
+            store.create_ontology, display_name, description, initial_turtle=convert, dataset=lambda: datasets[0]
+        )
     except _ImportRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RemoteContextError as exc:
@@ -294,6 +312,12 @@ async def import_ontology(
         ) from exc
     logger.info("ontology imported: %s (%d statements)", entry["id"], counted[0])
     return {**entry, "base_iri": base_iri_for(entry["id"]), "triple_count": counted[0]}
+
+
+def _render_export(data: bytes, fmt: Any) -> tuple[bytes, dict[str, Any]]:
+    """Parse, check, write and verify one export (a worker thread; UDR-0183 D4)."""
+    quads, document = read_dataset(data)
+    return formats.serialize(quads, document, fmt), document
 
 
 @router.get("/{ontology_id}/export", dependencies=[Depends(verify_api_key)])
@@ -310,7 +334,7 @@ async def export_ontology(ontology_id: str, format: str | None = None) -> Respon
     """
     _require_enabled()
     entry = _entry_or_404(ontology_id)
-    data = store.read_ontology_bytes(ontology_id) or b""
+    data = await run_in_threadpool(store.read_ontology_bytes, ontology_id) or b""
     safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in entry["name"]).strip() or ontology_id
     if format is None:
         fmt = formats.EXPORT_FORMATS["trig" if store.is_dataset(entry) else "turtle"]
@@ -329,8 +353,7 @@ async def export_ontology(ontology_id: str, format: str | None = None) -> Respon
             },
         )
     try:
-        quads, document = read_dataset(data)
-        content = formats.serialize(quads, document, fmt)
+        content, document = await run_in_threadpool(_render_export, data, fmt)
     except formats.ExportRefused as exc:
         raise HTTPException(
             status_code=422,
@@ -356,6 +379,11 @@ async def export_ontology(ontology_id: str, format: str | None = None) -> Respon
     return Response(content=content, media_type=f"{fmt.media_type}; charset=utf-8", headers=headers)
 
 
+def _run_sparql(ontology_id: str, scope: Any, sparql: str) -> dict[str, Any]:
+    """Load (from the cache when possible) and query, in a worker thread (UDR-0183 D1 / D4)."""
+    return store.execute_query(store.load_store(ontology_id, scope), sparql)
+
+
 @router.post("/{ontology_id}/query", dependencies=[Depends(verify_api_key)])
 async def run_query(ontology_id: str, body: QueryRequest) -> dict:
     """Run a READ-ONLY SPARQL query (SELECT / CONSTRUCT / ASK / DESCRIBE)."""
@@ -364,7 +392,7 @@ async def run_query(ontology_id: str, body: QueryRequest) -> dict:
     scope = _scope_or_422(body.scope)
     try:
         nl.ensure_read_only(body.sparql)
-        result = store.execute_query(store.load_store(ontology_id, scope), body.sparql)
+        result = await run_in_threadpool(_run_sparql, ontology_id, scope, body.sparql)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return result
@@ -380,7 +408,7 @@ async def run_nl_query(ontology_id: str, body: NlQueryRequest) -> dict:
     """
     _require_enabled()
     _entry_or_404(ontology_id)
-    graph = store.load_store(ontology_id, _scope_or_422(body.scope))
+    graph = await run_in_threadpool(store.load_store, ontology_id, _scope_or_422(body.scope))
     try:
         sparql = await nl.generate_sparql(body.question, graph)
     except ValueError as exc:
@@ -389,7 +417,7 @@ async def run_nl_query(ontology_id: str, body: NlQueryRequest) -> dict:
         logger.warning("nl-query completion failed for %s", ontology_id, exc_info=True)
         raise HTTPException(status_code=502, detail="The SPARQL generation model call failed.") from exc
     try:
-        result = store.execute_query(graph, sparql)
+        result = await run_in_threadpool(store.execute_query, graph, sparql)
     except ValueError as exc:
         # Surface the generated (broken) query so the user can fix it in the editor.
         return {"sparql": sparql, "kind": "error", "error": str(exc)}
@@ -401,9 +429,9 @@ async def get_ontology(ontology_id: str) -> dict:
     """The CTR-0169 v3 statement-complete projection plus the file ``revision``."""
     _require_enabled()
     entry = _entry_or_404(ontology_id)
-    data = store.read_ontology_bytes(ontology_id) or b""
+    data = await run_in_threadpool(store.read_ontology_bytes, ontology_id) or b""
     try:
-        projection = turtle_to_projection(data)
+        projection = await run_in_threadpool(turtle_to_projection, data)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {**entry, "base_iri": base_iri_for(ontology_id), "revision": store.revision_of(data), **projection}
@@ -411,14 +439,14 @@ async def get_ontology(ontology_id: str) -> dict:
 
 @router.put("/{ontology_id}", dependencies=[Depends(verify_api_key)])
 async def save_ontology(ontology_id: str, body: ProjectionSave) -> dict:
-    """Save the projection: revision check -> validate -> Turtle -> backup -> atomic replace.
+    """Save the projection: validate -> Turtle -> revision check -> backup -> atomic replace.
 
-    The check and the write run without an ``await`` in between, so no other
-    request can interleave on the event loop.
+    The conversion runs in a worker thread; the revision check and the write run
+    under the ontology's write lock, so no other save can interleave (UDR-0183 D4).
     """
     _require_enabled()
     _guard_demo()
-    entry = _entry_or_404(ontology_id)
+    _entry_or_404(ontology_id)
     legacy = sorted(set(body.model_extra or {}) & _LEGACY_PROJECTION_KEYS)
     if legacy:
         raise HTTPException(
@@ -429,20 +457,10 @@ async def save_ontology(ontology_id: str, body: ProjectionSave) -> dict:
                 "send {document, resources, revision} (CTR-0169 v2 / v3).",
             },
         )
-    if store.is_dataset(entry) and body.projection_version != PROJECTION_VERSION:
-        # A client that does not know statement graphs would move every named-graph
-        # statement into the default graph (UDR-0182 D2).
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "graph_unaware_client",
-                "message": "This ontology has named graphs. Save with projection_version 3 "
-                "(statements carry their graph as g), or reload the editor.",
-            },
-        )
-    _check_revision(ontology_id, body.revision)
     try:
-        text, dataset = projection_to_text({"document": body.document, "resources": body.resources})
+        text, dataset = await run_in_threadpool(
+            projection_to_text, {"document": body.document, "resources": body.resources}
+        )
     except ProjectionError as exc:
         raise HTTPException(
             status_code=422,
@@ -450,7 +468,25 @@ async def save_ontology(ontology_id: str, body: ProjectionSave) -> dict:
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    backup = _save(ontology_id, text, dataset)
+
+    def write() -> str | None:
+        with store.write_lock(ontology_id):
+            entry = _entry_or_404(ontology_id)
+            if store.is_dataset(entry) and body.projection_version != PROJECTION_VERSION:
+                # A client that does not know statement graphs would move every
+                # named-graph statement into the default graph (UDR-0182 D2).
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "graph_unaware_client",
+                        "message": "This ontology has named graphs. Save with projection_version 3 "
+                        "(statements carry their graph as g), or reload the editor.",
+                    },
+                )
+            _check_revision(ontology_id, body.revision)
+            return _save(ontology_id, text, dataset)
+
+    backup = await run_in_threadpool(write)
     logger.info("ontology saved: %s (backup=%s)", ontology_id, backup)
     return {
         "saved": True,
@@ -458,6 +494,35 @@ async def save_ontology(ontology_id: str, body: ProjectionSave) -> dict:
         "backup": backup,
         "revision": store.revision_of(text.encode("utf-8")),
     }
+
+
+def _apply_and_save(ontology_id: str, body: StatementOperations) -> tuple[str, str | None, dict[str, Any]]:
+    """Read -> (rebase) apply -> write under the write lock, in a worker thread (UDR-0183 D4-D6)."""
+    with store.write_lock(ontology_id):
+        data = store.read_ontology_bytes(ontology_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail={"error": "ontology_not_found"})
+        current = store.revision_of(data)
+        stale = body.revision != current
+        if stale and body.on_stale != "rebase":
+            raise HTTPException(status_code=409, detail=_STALE_REVISION)
+        quads, document = read_dataset(data)
+        try:
+            quads, report = apply_operations(
+                quads,
+                body.operations,
+                ontology_base=base_iri_for(ontology_id),
+                rebase=stale,
+                fresh_blank_nodes=body.fresh_blank_nodes,
+            )
+        except StaleConflict as exc:
+            exc.revision = current
+            raise
+        dataset = any(is_named(q) for q in quads)
+        text = write_document(quads, document, trig=dataset)
+        backup = _save(ontology_id, text, dataset)
+    report["rebased"] = stale
+    return text, backup, report
 
 
 @router.post("/{ontology_id}/statements", dependencies=[Depends(verify_api_key)])
@@ -470,17 +535,33 @@ async def apply_statement_operations(ontology_id: str, body: StatementOperations
     ``stale_revision``), 422 with a pointer for a malformed operation, 422
     ``statement_not_found`` for a statement the file does not hold; nothing is
     written unless every operation applies.
+
+    ``on_stale: "rebase"`` (UDR-0183 D5) applies a request made against an older
+    revision to the current file: adding a present statement is skipped, touching a
+    statement that is gone is 409 ``stale_conflict`` (listed, nothing written), and
+    layout positions are last-writer-wins. ``fresh_blank_nodes`` are renamed when the
+    file uses them (D6). The whole read -> apply -> write runs in a worker thread
+    under the ontology's write lock (D4).
     """
     _require_enabled()
     _guard_demo()
     _entry_or_404(ontology_id)
-    _check_revision(ontology_id, body.revision)
-    data = store.read_ontology_bytes(ontology_id) or b""
     try:
-        quads, document = read_dataset(data)
-        quads, report = apply_operations(quads, body.operations, ontology_base=base_iri_for(ontology_id))
-        dataset = any(is_named(q) for q in quads)
-        text = write_document(quads, document, trig=dataset)
+        text, backup, report = await run_in_threadpool(_apply_and_save, ontology_id, body)
+    except StaleConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "stale_conflict",
+                "revision": exc.revision,
+                "conflicts": exc.conflicts,
+                "count": exc.count,
+                "message": (
+                    f"{exc.count} change(s) touch statements that were removed or changed "
+                    "after you opened the ontology. Nothing was saved."
+                ),
+            },
+        ) from exc
     except StatementNotFound as exc:
         raise HTTPException(
             status_code=422,
@@ -493,8 +574,14 @@ async def apply_statement_operations(ontology_id: str, body: StatementOperations
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    backup = _save(ontology_id, text, dataset)
-    logger.info("ontology statements applied: %s (%d ops, backup=%s)", ontology_id, report["applied"], backup)
+    logger.info(
+        "ontology statements applied: %s (%d ops, %d skipped, rebased=%s, backup=%s)",
+        ontology_id,
+        report["applied"],
+        report["skipped"],
+        report["rebased"],
+        backup,
+    )
     return {
         "saved": True,
         "id": ontology_id,

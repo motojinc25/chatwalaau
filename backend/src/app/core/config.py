@@ -703,6 +703,9 @@ class Settings(BaseSettings):
     # Cap on triples serialized into a query_ontology tool answer (UDR-0084 D9);
     # truncation is explicitly noticed in the tool result.
     ontology_tool_max_triples: int = 200
+    # Memory budget (MiB) for loaded query Stores kept between searches, keyed by
+    # (ontology, revision, scope); 0 disables the cache (PRP-0201 / UDR-0183 D3).
+    ontology_query_cache_mb: int = 512
     # The NL -> SPARQL completion model is the catalog `roles.ontology_nl` binding
     # (PRP-0115 / UDR-0096); the removed ONTOLOGY_NL_MODEL env var no longer applies.
 

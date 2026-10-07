@@ -26,6 +26,7 @@ What cannot be restored is stated in ``notices`` (UDR-0181 D3).
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any
 
 # String functions see the Store's normalized lexical form (UDR-0181 D3).
@@ -96,6 +97,9 @@ class LexicalIndex:
     Built on demand and only as far as a result needs it: CONSTRUCT restoration
     normalizes the file objects of the (subject, predicate) pairs in the result;
     SELECT restoration normalizes the file terms of the result's datatypes.
+
+    A cached index is shared by concurrent queries (UDR-0183 D2): the lookup tables
+    fill under ``_lock``, and what they describe -- the parsed file -- never changes.
     """
 
     def __init__(self, kept: list[Any], *, file_triples: int, store_triples: int) -> None:
@@ -108,33 +112,39 @@ class LexicalIndex:
         self._by_pair: dict[tuple[Any, Any], list[Any]] | None = None
         self._by_kind: dict[str, list[Any]] | None = None
         self._by_value: dict[str, dict[Any, list[Any]]] = {}
+        self._lock = threading.RLock()
 
     @property
     def merged(self) -> int:
         return max(0, self.file_triples - self.store_triples)
 
     def _normalized(self, terms: list[Any]) -> dict[Any, Any]:
-        missing = [t for t in dict.fromkeys(terms) if t not in self._norm]
-        if missing:
-            self._norm.update(normalize(missing))
-        return self._norm
+        with self._lock:
+            missing = [t for t in dict.fromkeys(terms) if t not in self._norm]
+            if missing:
+                self._norm.update(normalize(missing))
+            return self._norm
 
     def _pairs(self) -> dict[tuple[Any, Any], list[Any]]:
-        if self._by_pair is None:
-            self._by_pair = {}
-            for triple in self._kept:
-                self._by_pair.setdefault((triple.subject, triple.predicate), []).append(triple.object)
-        return self._by_pair
+        with self._lock:
+            if self._by_pair is None:
+                by_pair: dict[tuple[Any, Any], list[Any]] = {}
+                for triple in self._kept:
+                    by_pair.setdefault((triple.subject, triple.predicate), []).append(triple.object)
+                self._by_pair = by_pair
+            return self._by_pair
 
     def _kinds(self) -> dict[str, list[Any]]:
-        if self._by_kind is None:
-            terms: set[Any] = set()
-            for triple in self._kept:
-                _walk(triple.object, terms)
-            self._by_kind = {}
-            for term in terms:
-                self._by_kind.setdefault(_kind(term), []).append(term)
-        return self._by_kind
+        with self._lock:
+            if self._by_kind is None:
+                terms: set[Any] = set()
+                for triple in self._kept:
+                    _walk(triple.object, terms)
+                by_kind: dict[str, list[Any]] = {}
+                for term in terms:
+                    by_kind.setdefault(_kind(term), []).append(term)
+                self._by_kind = by_kind
+            return self._by_kind
 
     def prepare_statements(self, triples: list[Any]) -> None:
         """Normalize, in one batch, the file objects of every (s, p) in ``triples``."""
@@ -153,17 +163,18 @@ class LexicalIndex:
     def value_candidates(self, term: Any) -> list[Any]:
         """Every file term of the same kind the engine stores as ``term``."""
         kind = _kind(term)
-        if kind not in self._by_value:
-            terms = self._kinds().get(kind, [])
-            norm = self._normalized(terms)
-            index: dict[Any, list[Any]] = {}
-            for original in terms:
-                index.setdefault(norm.get(original, original), []).append(original)
-            for bucket in index.values():
-                if len(bucket) > 1:
-                    bucket.sort(key=str)
-            self._by_value[kind] = index
-        return self._by_value[kind].get(term, [])
+        with self._lock:
+            if kind not in self._by_value:
+                terms = self._kinds().get(kind, [])
+                norm = self._normalized(terms)
+                index: dict[Any, list[Any]] = {}
+                for original in terms:
+                    index.setdefault(norm.get(original, original), []).append(original)
+                for bucket in index.values():
+                    if len(bucket) > 1:
+                        bucket.sort(key=str)
+                self._by_value[kind] = index
+            return self._by_value[kind].get(term, [])
 
     def has_normalized_terms(self) -> bool:
         """Whether the engine changes the lexical form of any term of the file."""

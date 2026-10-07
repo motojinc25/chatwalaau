@@ -135,6 +135,16 @@ def schema_summary(graph: Any) -> str:
     return summary[:_SCHEMA_CHAR_CAP]
 
 
+def cached_schema_summary(graph: Any) -> str:
+    """``schema_summary`` computed once per loaded graph and kept with it (UDR-0183 D2)."""
+    summary = getattr(graph, "nl_summary", None)
+    if summary is None:
+        summary = schema_summary(graph)
+        if hasattr(graph, "nl_summary"):
+            graph.nl_summary = summary  # same value from any thread: a benign race
+    return summary
+
+
 def strip_code_fence(text: str) -> str:
     """Unwrap a ```sparql ... ``` fence the model may emit despite instructions."""
     stripped = text.strip()
@@ -169,6 +179,7 @@ def ensure_read_only(sparql: str, *, construct_only: bool = False) -> None:
 async def generate_sparql(question: str, graph: Any, *, construct_only: bool = False) -> str:
     """NL -> SPARQL via one non-streaming completion through the chokepoint (D8)."""
     from agent_framework import Message
+    from fastapi.concurrency import run_in_threadpool
 
     from app.agui.agent_registry import _build_chat_client
     from app.models_catalog import resolve_task_model
@@ -176,13 +187,15 @@ async def generate_sparql(question: str, graph: Any, *, construct_only: bool = F
     form = "CONSTRUCT" if construct_only else "SELECT, CONSTRUCT, ASK, or DESCRIBE"
     model = resolve_task_model("ontology_nl")
     client = _build_chat_client(model)
+    # The summary reads the Store: off the event loop (UDR-0183 D4), once per entry.
+    schema = await run_in_threadpool(cached_schema_summary, graph)
     messages = [
         Message(role="system", contents=[_NL_SYSTEM_PROMPT.format(form=form)]),
         Message(
             role="user",
             contents=[
                 _NL_USER_TEMPLATE.format(
-                    schema=schema_summary(graph),
+                    schema=schema,
                     question=question[:_QUESTION_CHAR_CAP],
                     form="CONSTRUCT" if construct_only else "",
                 )
@@ -203,4 +216,11 @@ async def generate_sparql(question: str, graph: Any, *, construct_only: bool = F
     return sparql
 
 
-__all__ = ["ensure_read_only", "generate_sparql", "query_form", "schema_summary", "strip_code_fence"]
+__all__ = [
+    "cached_schema_summary",
+    "ensure_read_only",
+    "generate_sparql",
+    "query_form",
+    "schema_summary",
+    "strip_code_fence",
+]

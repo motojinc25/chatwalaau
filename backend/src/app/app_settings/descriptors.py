@@ -892,6 +892,19 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         SCOPE_RUNTIME,
         help="CONSTRUCT results beyond this are truncated with a note to the model.",
     ),
+    SettingDescriptor(
+        "ontology_query_cache_mb",
+        "Ontology query cache (MiB)",
+        "limits",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "Memory kept for loaded ontologies so repeated searches answer at once. "
+            "Least recently used ontologies are dropped first. 0 turns the cache off."
+        ),
+        min=0,
+        max=16384,
+    ),
     # ---- Schedule (runtime) -----------------------------------------------
     SettingDescriptor(
         "cron_tick_seconds",

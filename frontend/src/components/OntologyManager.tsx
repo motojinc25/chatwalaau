@@ -111,8 +111,10 @@ import {
   createRelationship,
   type Diagnostic,
   deleteEntity as deleteEntityFromModel,
+  diffStatements,
   displayedLiteralEdit,
   displayLiteral,
+  documentKey,
   EMPTY_MODEL,
   type EntityView,
   entityViews,
@@ -130,6 +132,7 @@ import {
   type OntologyDocument,
   type OntologyModel,
   otherLiterals,
+  type QuadStatement,
   RDF_TYPE,
   RDFS_COMMENT,
   RDFS_DOMAIN,
@@ -141,8 +144,11 @@ import {
   removePropertyFromEntity,
   removeResource,
   removeStatement,
+  renameBlankNodes,
+  type SaveBase,
   type StatementEdit,
   type StatementInput,
+  saveBase,
   scopeModel,
   setIsKey,
   setPosition,
@@ -154,6 +160,12 @@ import {
 import { cn } from '@/lib/utils'
 import '@/lib/monaco-setup'
 import '@xyflow/react/dist/style.css'
+
+/** A statement a rebased save could not apply (409 stale_conflict; UDR-0183 D8). */
+interface SaveConflict {
+  op: string
+  statement: QuadStatement
+}
 
 interface CatalogEntry {
   id: string
@@ -631,6 +643,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([])
   const [revision, setRevision] = useState<string | null>(null)
   const [staleRevision, setStaleRevision] = useState(false)
+  // The statements and document the save diff is taken against (UDR-0183 D7), and the
+  // statements a rebased save could not apply (D8).
+  const saveBaseRef = useRef<SaveBase | null>(null)
+  const [saveConflicts, setSaveConflicts] = useState<{ count: number; items: SaveConflict[] } | null>(null)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -715,24 +731,33 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     }
   }, [])
 
-  const loadOntology = useCallback(async (id: string) => {
+  /**
+   * Load an ontology. `keepView` (after a rebased save, UDR-0183 D8) keeps the graph
+   * selector, the selection, the search result and the transient layout, so the
+   * canvas only gains what another tab saved.
+   */
+  const loadOntology = useCallback(async (id: string, options: { keepView?: boolean } = {}) => {
     setLoading(true)
     setError(null)
     try {
       const res = await fetch(`/api/ontology/${id}`)
       if (!res.ok) throw new Error('Failed to load the ontology')
       const data = await res.json()
+      const loaded = fromProjection(data)
       setSelectedId(id)
       setBaseIri((data.base_iri as string) ?? '')
-      setModel(fromProjection(data))
+      setModel(loaded)
+      saveBaseRef.current = saveBase(loaded)
       setDiagnostics((data.diagnostics ?? []) as Diagnostic[])
       setRevision((data.revision as string) ?? null)
       setStaleRevision(false)
+      setSaveConflicts(null)
+      setDirty(false)
+      if (options.keepView) return
       setAutoPositions(new Map())
       layoutCommittedRef.current = false
       reifierChoiceRef.current = new Map()
       setGraphScope('all')
-      setDirty(false)
       setSelection(null)
       setHighlight(null)
       setQueryResult(null)
@@ -768,11 +793,69 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     [guardDirty, onOpenChange],
   )
 
+  /**
+   * Save statement changes as operations against the loaded revision, rebased onto
+   * a newer file when they still fit (UDR-0183 D5 / D7). Returns false when the
+   * document changed, which only the full PUT carries (PRP-0201 C3).
+   */
+  const saveStatements = useCallback(async (): Promise<boolean> => {
+    const base = saveBaseRef.current
+    if (!selectedId || !base || documentKey(model.document) !== base.document) return false
+    const { operations, freshBlankNodes } = diffStatements(base.statements, model)
+    if (operations.length === 0) {
+      setDirty(false)
+      return true
+    }
+    const res = await fetch(`/api/ontology/${selectedId}/statements`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision, operations, fresh_blank_nodes: freshBlankNodes, on_stale: 'rebase' }),
+    })
+    if (!res.ok) {
+      const refused = await demoRefusal(res)
+      if (refused) {
+        setDemoBlocked(true)
+        throw new Error(refused)
+      }
+      const body = await res.json().catch(() => null)
+      const detail = body?.detail
+      if (res.status === 409 && detail?.error === 'stale_conflict') {
+        // Nothing was written; the user decides by reloading (no overwrite, D8).
+        setSaveConflicts({ count: detail.count ?? 0, items: (detail.conflicts ?? []) as SaveConflict[] })
+        setStaleRevision(true)
+        throw new Error(detail.message ?? 'Some changes conflict with a newer version.')
+      }
+      if (detail?.pointer && typeof detail?.message === 'string') {
+        throw new Error(`Cannot save: ${detail.pointer} -- ${detail.message}`)
+      }
+      if (typeof detail?.message === 'string') throw new Error(detail.message)
+      throw new Error(typeof detail === 'string' ? detail : 'Failed to save the ontology')
+    }
+    const body = await res.json().catch(() => null)
+    if (body?.rebased) {
+      // Another tab saved first and these changes were applied on top: show both.
+      await loadOntology(selectedId, { keepView: true })
+      return true
+    }
+    const renamed = (body?.blank_nodes ?? {}) as Record<string, string>
+    const saved = renameBlankNodes(model, renamed)
+    saveBaseRef.current = saveBase(saved)
+    if (Object.keys(renamed).length > 0) setModel((current) => renameBlankNodes(current, renamed))
+    setRevision((body?.revision as string) ?? null)
+    setDirty(false)
+    return true
+  }, [selectedId, model, revision, loadOntology])
+
   const save = useCallback(async () => {
     if (!selectedId) return
     setSaving(true)
     setError(null)
+    setSaveConflicts(null)
     try {
+      if (await saveStatements()) {
+        await fetchCatalog()
+        return
+      }
       const res = await fetch(`/api/ontology/${selectedId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -799,6 +882,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       }
       const body = await res.json().catch(() => null)
       setRevision((body?.revision as string) ?? null)
+      saveBaseRef.current = saveBase(model)
       setDirty(false)
       await fetchCatalog()
     } catch (err) {
@@ -806,7 +890,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     } finally {
       setSaving(false)
     }
-  }, [selectedId, model, revision, fetchCatalog])
+  }, [selectedId, model, revision, fetchCatalog, saveStatements])
 
   // ---- Catalog actions ----
 
@@ -1565,6 +1649,38 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
               </Button>
             </div>
           </DialogHeader>
+
+          {/* A rebased save that touched statements removed or changed elsewhere
+              (409 stale_conflict, UDR-0183 D8): nothing was written; Reload decides. */}
+          {saveConflicts && (
+            <div
+              className="flex max-h-40 shrink-0 items-start gap-2 overflow-y-auto border-b border-red-500/40 bg-red-500/10 px-4 py-2 text-[12px] text-red-700 dark:text-red-400"
+              role="alert">
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div>
+                  Not saved: {saveConflicts.count} change(s) touch statements that were removed or changed in another
+                  tab or by another user. Reload to see the latest version (your unsaved changes are discarded).
+                </div>
+                <ul className="mt-1 space-y-0.5 font-mono text-[11px]">
+                  {saveConflicts.items.map((item) => (
+                    <li
+                      key={`${item.op} ${termKey(item.statement.s)} ${item.statement.p} ${termKey(item.statement.o)} ${
+                        item.statement.g ? termKey(item.statement.g) : ''
+                      }`}
+                      className="truncate">
+                      {item.op}: {compactTerm(item.statement.s, model)} {compactTerm(iriTerm(item.statement.p), model)}{' '}
+                      {compactTerm(item.statement.o, model)}
+                      {item.statement.g ? ` (graph ${compactTerm(item.statement.g, model)})` : ''}
+                    </li>
+                  ))}
+                  {saveConflicts.count > saveConflicts.items.length && (
+                    <li>... and {saveConflicts.count - saveConflicts.items.length} more</li>
+                  )}
+                </ul>
+              </div>
+            </div>
+          )}
 
           {/* Demo-mode notice (PRP-0139 / UDR-0122 D2/D4). Reads stay available on
               purpose -- the feature is shown, not hidden. */}

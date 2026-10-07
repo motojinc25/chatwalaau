@@ -951,6 +951,120 @@ export function removeStatement(
   return next
 }
 
+// ---- Statement saves (CTR-0173 v6, UDR-0183 D6 / D7) ---------------------------------
+
+/** One statement as `POST /statements` carries it (`g` absent = the default graph). */
+export interface QuadStatement {
+  s: Term
+  p: string
+  o: Term
+  g?: GraphTerm
+}
+
+export interface StatementOperation extends QuadStatement {
+  op: 'add' | 'remove'
+}
+
+/** What the editor loaded (or last saved): the save diff is taken against it. */
+export interface SaveBase {
+  statements: Map<string, QuadStatement>
+  document: string
+}
+
+/** Every statement of the model by an exact (s, p, o, g) key. */
+export function statementSet(model: OntologyModel): Map<string, QuadStatement> {
+  const out = new Map<string, QuadStatement>()
+  for (const resource of model.resources) {
+    const s = termKey(resource.term)
+    for (const statement of resource.statements) {
+      const key = `${s} <${statement.p}> ${termKey(statement.o)} ${graphKey(statement.g)}`
+      out.set(
+        key,
+        statement.g
+          ? { s: resource.term, p: statement.p, o: statement.o, g: statement.g }
+          : { s: resource.term, p: statement.p, o: statement.o },
+      )
+    }
+  }
+  return out
+}
+
+/** The document (prefixes, base, VERSION) as a comparable string. */
+export function documentKey(document: OntologyDocument): string {
+  return JSON.stringify([document.prefixes, document.base, document.version])
+}
+
+export function saveBase(model: OntologyModel): SaveBase {
+  return { statements: statementSet(model), document: documentKey(model.document) }
+}
+
+function visitLabels(term: Term, out: Set<string>): void {
+  if (term.type === 'bnode') out.add(term.value)
+  else if (term.type === 'triple') {
+    visitLabels(term.s, out)
+    visitLabels(term.o, out)
+  }
+}
+
+function statementLabels(statement: QuadStatement, out: Set<string>): void {
+  visitLabels(statement.s, out)
+  visitLabels(statement.o, out)
+  if (statement.g) visitLabels(statement.g, out)
+}
+
+/**
+ * The changes since `base` as statement operations: every removed statement, then
+ * every added one, plus the blank-node labels this editor created (labels the base
+ * does not use), which the server renames when the file uses them (UDR-0183 D6).
+ * Reifier follow-ups are already statements of the model, so they travel as well.
+ */
+export function diffStatements(
+  base: Map<string, QuadStatement>,
+  model: OntologyModel,
+): { operations: StatementOperation[]; freshBlankNodes: string[] } {
+  const current = statementSet(model)
+  const operations: StatementOperation[] = []
+  for (const [key, statement] of base) {
+    if (!current.has(key)) operations.push({ op: 'remove', ...statement })
+  }
+  const added: QuadStatement[] = []
+  for (const [key, statement] of current) {
+    if (!base.has(key)) {
+      operations.push({ op: 'add', ...statement })
+      added.push(statement)
+    }
+  }
+  const known = new Set<string>()
+  for (const statement of base.values()) statementLabels(statement, known)
+  const fresh = new Set<string>()
+  for (const statement of added) statementLabels(statement, fresh)
+  return { operations, freshBlankNodes: [...fresh].filter((label) => !known.has(label)).sort() }
+}
+
+/** The model with blank-node labels renamed by the server (`{ old: new }`). */
+export function renameBlankNodes(model: OntologyModel, renamed: Record<string, string>): OntologyModel {
+  if (Object.keys(renamed).length === 0) return model
+  const rename = <T extends Term>(term: T): T => {
+    if (term.type === 'bnode' && term.value in renamed) return { ...term, value: renamed[term.value] }
+    if (term.type === 'triple') return { ...term, s: rename(term.s), o: rename(term.o) }
+    return term
+  }
+  return {
+    ...model,
+    resources: model.resources.map((resource) => ({
+      ...resource,
+      term: rename(resource.term),
+      statements: resource.statements.map((statement) =>
+        statement.g
+          ? { ...statement, o: rename(statement.o), g: rename(statement.g) }
+          : { ...statement, o: rename(statement.o) },
+      ),
+    })),
+    graphs: model.graphs?.map((g) => rename(g)),
+    targetGraph: model.targetGraph ? rename(model.targetGraph) : model.targetGraph,
+  }
+}
+
 /** The model as the PUT body carries it (roles and editor state are not sent; CTR-0169 v3). */
 export function toPayload(model: OntologyModel): {
   projection_version: 3

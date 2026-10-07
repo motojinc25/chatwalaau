@@ -26,6 +26,7 @@ import json
 import logging
 from typing import Annotated
 
+from fastapi.concurrency import run_in_threadpool
 from pydantic import Field
 
 from app.core.config import settings
@@ -104,7 +105,7 @@ async def query_ontology(
     act = (action or "").strip().lower()
 
     if act == "catalog":
-        return json.dumps({"ontologies": _catalog_summary()}, ensure_ascii=False)
+        return json.dumps({"ontologies": await run_in_threadpool(_catalog_summary)}, ensure_ascii=False)
 
     if act != "query":
         return "Error: 'action' must be one of catalog, query."
@@ -112,7 +113,7 @@ async def query_ontology(
     resolved = _resolve_entry(ontology)
     if resolved is None:
         return json.dumps(
-            {"error": f"No ontology matches {ontology!r}.", "ontologies": _catalog_summary()},
+            {"error": f"No ontology matches {ontology!r}.", "ontologies": await run_in_threadpool(_catalog_summary)},
             ensure_ascii=False,
         )
     if isinstance(resolved, list):
@@ -131,7 +132,8 @@ async def query_ontology(
     except ValueError as exc:
         return f"Error: {exc}"
     try:
-        loaded = store.load_store(resolved["id"], scope)
+        # Off the event loop, from the query cache when the revision is cached (UDR-0183 D1 / D4).
+        loaded = await run_in_threadpool(store.load_store, resolved["id"], scope)
     except Exception as exc:
         logger.warning("query_ontology could not load %s", resolved["id"], exc_info=True)
         return f"Error: could not load ontology {resolved['id']}: {exc}"
@@ -146,7 +148,9 @@ async def query_ontology(
         return f"Error: the SPARQL generation model call failed: {exc}"
 
     try:
-        result = store.execute_query(loaded, sparql, max_construct_triples=settings.ontology_tool_max_triples)
+        result = await run_in_threadpool(
+            store.execute_query, loaded, sparql, max_construct_triples=settings.ontology_tool_max_triples
+        )
     except ValueError as exc:
         return f"Error: the generated SPARQL failed to execute: {exc}\nGenerated query:\n{sparql}"
 
