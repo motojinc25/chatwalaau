@@ -706,6 +706,13 @@ class Settings(BaseSettings):
     # Memory budget (MiB) for loaded query Stores kept between searches, keyed by
     # (ontology, revision, scope); 0 disables the cache (PRP-0201 / UDR-0183 D3).
     ontology_query_cache_mb: int = 512
+    # History retention (PRP-0202 / UDR-0184 D3): after each write keep the newest N
+    # backups, plus the newest per UTC day for the last N days, then drop the oldest while
+    # over the size limit (0 = no size limit); the newest backup is always kept. Deleted
+    # ontologies stay in the trash for keep_days.
+    ontology_history_keep_recent: int = 20
+    ontology_history_keep_days: int = 30
+    ontology_history_max_mb: int = 200
     # The NL -> SPARQL completion model is the catalog `roles.ontology_nl` binding
     # (PRP-0115 / UDR-0096); the removed ONTOLOGY_NL_MODEL env var no longer applies.
 

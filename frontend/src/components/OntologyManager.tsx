@@ -41,8 +41,10 @@ import {
   useReactFlow,
 } from '@xyflow/react'
 import {
+  ArchiveRestore,
   Braces,
   Download,
+  History,
   ImageDown,
   Info,
   KeyRound,
@@ -64,6 +66,7 @@ import {
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
+import { DeletedOntologiesDialog, HistoryPanel } from '@/components/OntologyHistory'
 import {
   AllStatements,
   AnnotateDialog,
@@ -690,7 +693,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [exportNotes, setExportNotes] = useState<string | null>(null)
 
   // Right pane
-  const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search'>('detail')
+  const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search' | 'history'>('detail')
+  // Deleted ontologies (PRP-0202 / UDR-0184 D6).
+  const [trashOpen, setTrashOpen] = useState(false)
   const [sparql, setSparql] = useState(DEFAULT_SPARQL)
   const [nlQuestion, setNlQuestion] = useState('')
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null)
@@ -1706,6 +1711,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                     onSelect={(id) => guardDirty(() => void loadOntology(id))}
                     onCreate={() => setCreateOpen(true)}
                     onImportClick={() => importInputRef.current?.click()}
+                    onOpenTrash={() => setTrashOpen(true)}
                     onExport={(entry) => {
                       setExportRefusal(null)
                       setExportNotes(null)
@@ -1779,7 +1785,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                 right={
                   <div className="flex min-h-0 flex-1 flex-col">
                     <div className="flex shrink-0 border-b text-xs">
-                      {(['detail', 'resources', 'search'] as const).map((tab) => (
+                      {(['detail', 'resources', 'search', 'history'] as const).map((tab) => (
                         <button
                           key={tab}
                           type="button"
@@ -1797,6 +1803,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                           ) : tab === 'resources' ? (
                             <span className="inline-flex items-center gap-1">
                               <Users className="h-3 w-3" /> Resources
+                            </span>
+                          ) : tab === 'history' ? (
+                            <span className="inline-flex items-center gap-1">
+                              <History className="h-3 w-3" /> History
                             </span>
                           ) : (
                             'Detail'
@@ -1840,6 +1850,22 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                           onSelectResource={selectResource}
                         />
                       )
+                    ) : rightTab === 'history' ? (
+                      <HistoryPanel
+                        key={selectedId ?? 'none'}
+                        ontologyId={selectedId}
+                        revision={revision}
+                        readOnly={demoBlocked}
+                        formatTerm={(term) => compactTerm(term, model)}
+                        guardDirty={guardDirty}
+                        onRestored={() => {
+                          if (!selectedId) return
+                          void (async () => {
+                            await loadOntology(selectedId, { keepView: true })
+                            await fetchCatalog()
+                          })()
+                        }}
+                      />
                     ) : rightTab === 'resources' ? (
                       <ResourcesPane
                         ctx={inspector}
@@ -1901,6 +1927,16 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           />
         </DialogContent>
       </Dialog>
+
+      <DeletedOntologiesDialog
+        open={trashOpen}
+        onOpenChange={setTrashOpen}
+        readOnly={demoBlocked}
+        onRestored={(id) => {
+          void fetchCatalog()
+          guardDirty(() => void loadOntology(id))
+        }}
+      />
 
       {/* Create dialog */}
       <Dialog open={createOpen} onOpenChange={(o) => !creating && setCreateOpen(o)}>
@@ -2315,6 +2351,7 @@ function CatalogPane(props: {
   onSelect: (id: string) => void
   onCreate: () => void
   onImportClick: () => void
+  onOpenTrash: () => void
   onExport: (entry: CatalogEntry) => void
   onRename: (entry: CatalogEntry) => void
   onDelete: (entry: CatalogEntry) => void
@@ -2346,6 +2383,15 @@ function CatalogPane(props: {
               props.readOnly ? 'Disabled in demo mode' : 'Import (Turtle, TriG, N-Triples, N-Quads, RDF/XML, JSON-LD)'
             }>
             {props.importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 text-zinc-600"
+            onClick={props.onOpenTrash}
+            aria-label="Deleted ontologies"
+            title="Deleted ontologies (restore)">
+            <ArchiveRestore className="h-3.5 w-3.5" />
           </Button>
         </div>
       </div>

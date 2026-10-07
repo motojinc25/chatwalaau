@@ -12,14 +12,21 @@
     GET    /api/ontology/{id}/export        -- download (?format=; lossy formats refused, D7)
     POST   /api/ontology/{id}/query         -- read-only SPARQL (SELECT/CONSTRUCT/ASK), scoped
     POST   /api/ontology/{id}/nl-query      -- natural language -> SPARQL -> execute, scoped
+    GET    /api/ontology/{id}/history       -- versions, newest first (UDR-0184 D2)
+    GET    /api/ontology/{id}/history/{version}/diff     -- statement diff (D4)
+    GET    /api/ontology/{id}/history/{version}/file     -- download a version
+    POST   /api/ontology/{id}/history/{version}/restore  -- restore a version (D5)
+    GET    /api/ontology/trash              -- deleted ontologies (D6)
+    POST   /api/ontology/trash/{id}/restore -- restore a deleted ontology under its id
 
 Every endpoint depends on ``verify_api_key`` (CTR-0083; loopback bypass) --
 the mutations and the query POSTs are gated per invariant 7, the GETs follow
 the read convention. The whole surface returns 404 unless ONTOLOGY_ENABLED so
 the SPA can gate its launcher icon by probing the catalog (UDR-0084 D12).
 
-Under DEMO_MODE the six WRITE endpoints (POST/PATCH/DELETE /catalog, POST /import,
-PUT /{id}, POST /{id}/statements) refuse with 409 ``demo_mode`` and the manager renders read-only
+Under DEMO_MODE the eight WRITE endpoints (POST/PATCH/DELETE /catalog, POST /import,
+PUT /{id}, POST /{id}/statements, POST /{id}/history/{version}/restore, POST
+/trash/{id}/restore) refuse with 409 ``demo_mode`` and the manager renders read-only
 (PRP-0139 / UDR-0122). Reads -- including the SPARQL query lanes, which cannot
 mutate -- are deliberately untouched.
 
@@ -50,7 +57,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import verify_api_key
 from app.core.config import settings
-from app.ontology import formats, nl, store
+from app.ontology import formats, history, nl, store
 from app.ontology.operations import StaleConflict, StatementNotFound, apply_operations
 from app.ontology.vocabulary import (
     PROJECTION_VERSION,
@@ -186,10 +193,13 @@ def _scope_or_422(value: Any) -> Any:
         raise HTTPException(status_code=422, detail={"error": "invalid_scope", "message": str(exc)}) from exc
 
 
-def _save(ontology_id: str, text: str, dataset: bool) -> str | None:
-    """Write through the store (backup + atomic; ``.ttl`` / ``.trig`` switch, UDR-0182 D3)."""
+def _save(ontology_id: str, text: str, dataset: bool, entry: dict[str, Any] | None = None) -> str | None:
+    """Write through the store (backup + atomic; ``.ttl`` / ``.trig`` switch, UDR-0182 D3).
+
+    ``entry`` adds to the history log line (kind, counts; UDR-0184 D1).
+    """
     try:
-        return store.save_ontology_text(ontology_id, text, dataset=dataset)
+        return store.save_ontology_text(ontology_id, text, dataset=dataset, history=entry)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OSError as exc:
@@ -301,7 +311,12 @@ async def import_ontology(
     display_name = name.strip() or (file.filename or "").rsplit(".", 1)[0] or "Imported ontology"
     try:
         entry = await run_in_threadpool(
-            store.create_ontology, display_name, description, initial_turtle=convert, dataset=lambda: datasets[0]
+            store.create_ontology,
+            display_name,
+            description,
+            initial_turtle=convert,
+            dataset=lambda: datasets[0],
+            history_kind="import",
         )
     except _ImportRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -312,6 +327,147 @@ async def import_ontology(
         ) from exc
     logger.info("ontology imported: %s (%d statements)", entry["id"], counted[0])
     return {**entry, "base_iri": base_iri_for(entry["id"]), "triple_count": counted[0]}
+
+
+# ---- History and trash (CTR-0171 v7, UDR-0184) ---------------------------------
+
+
+class RestoreRequest(BaseModel):
+    # The revision the editor shows; a different current file refuses the restore (409).
+    revision: str = Field(min_length=1)
+
+
+def _version_or_404(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    try:
+        return fn(*args, **kwargs)
+    except history.VersionNotFound as exc:
+        raise HTTPException(status_code=404, detail={"error": "version_not_found"}) from exc
+
+
+def _parse_backup(data: bytes) -> tuple[str, bool]:
+    """A version's text and whether it is a dataset; 422 when it is not valid RDF."""
+    try:
+        quads, _ = read_dataset(data) if data.strip() else ([], {})
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail={"error": "invalid_version", "message": f"Not a valid RDF document: {exc}"}
+        ) from exc
+    return data.decode("utf-8"), any(is_named(q) for q in quads)
+
+
+@router.get("/trash", dependencies=[Depends(verify_api_key)])
+async def list_trash() -> dict:
+    """Deleted ontologies that can be restored (UDR-0184 D6); expired ones are removed."""
+    _require_enabled()
+    return {"deleted": await run_in_threadpool(history.trash)}
+
+
+@router.post("/trash/{ontology_id}/restore", dependencies=[Depends(verify_api_key)])
+async def restore_deleted(ontology_id: str) -> dict:
+    """Recreate a deleted ontology under its SAME id from its newest backup (D6)."""
+    _require_enabled()
+    _guard_demo()
+
+    def work() -> dict[str, Any]:
+        backups = history.list_backups(ontology_id)
+        if not backups or store.get_entry(ontology_id) is not None:
+            if store.get_entry(ontology_id) is not None:
+                raise HTTPException(status_code=409, detail={"error": "ontology_exists"})
+            raise HTTPException(status_code=404, detail={"error": "ontology_not_found"})
+        newest = backups[0]
+        text, dataset = _parse_backup(history.read_version(ontology_id, newest.name))
+        try:
+            return store.restore_deleted_ontology(ontology_id, text, dataset=dataset, restored_from=newest.name)
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail={"error": "ontology_exists"}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    entry = await run_in_threadpool(work)
+    return {**entry, "base_iri": base_iri_for(ontology_id)}
+
+
+@router.get("/{ontology_id}/history", dependencies=[Depends(verify_api_key)])
+async def list_history(ontology_id: str) -> dict:
+    """The versions of an ontology, newest first, labelled from the history log (D2)."""
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    rows = await run_in_threadpool(history.versions, ontology_id)
+    return {
+        "versions": rows,
+        "retention": {
+            "keep_recent": settings.ontology_history_keep_recent,
+            "keep_days": settings.ontology_history_keep_days,
+            "max_mb": settings.ontology_history_max_mb,
+        },
+    }
+
+
+@router.get("/{ontology_id}/history/{version}/diff", dependencies=[Depends(verify_api_key)])
+async def diff_version(
+    ontology_id: str,
+    version: str,
+    against: str = "previous",
+    offset: int = 0,
+    limit: int = history.DIFF_DEFAULT_LIMIT,
+) -> dict:
+    """``added`` / ``removed`` statements of ``version`` against previous / current / a version (D4)."""
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    try:
+        return await run_in_threadpool(
+            _version_or_404, history.version_diff, ontology_id, version, against, offset=offset, limit=limit
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"error": "invalid_version", "message": str(exc)}) from exc
+
+
+@router.get("/{ontology_id}/history/{version}/file", dependencies=[Depends(verify_api_key)])
+async def download_version(ontology_id: str, version: str) -> Response:
+    """One version as stored (Turtle or TriG)."""
+    _require_enabled()
+    entry = _entry_or_404(ontology_id)
+    data = await run_in_threadpool(_version_or_404, history.read_version, ontology_id, version)
+    is_trig = store.is_dataset(entry) if version == history.CURRENT else ".trig.bak-" in version
+    fmt = formats.EXPORT_FORMATS["trig" if is_trig else "turtle"]
+    safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in entry["name"]).strip() or ontology_id
+    stamp = version.rsplit("-", 1)[-1] if version != history.CURRENT else "current"
+    return Response(
+        content=data,
+        media_type=f"{fmt.media_type}; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}-{stamp}{fmt.extension}"'},
+    )
+
+
+@router.post("/{ontology_id}/history/{version}/restore", dependencies=[Depends(verify_api_key)])
+async def restore_version(ontology_id: str, version: str, body: RestoreRequest) -> dict:
+    """Restore a whole version through the normal save path (UDR-0184 D5).
+
+    Revision check (409 ``stale_revision``), parse check (422), backup of the current
+    file, size cap, ``.ttl`` / ``.trig`` by content, cache dropped, history ``restore``
+    line. The replaced state becomes the newest backup, so a restore can be undone.
+    """
+    _require_enabled()
+    _guard_demo()
+    _entry_or_404(ontology_id)
+    if version == history.CURRENT:
+        raise HTTPException(status_code=422, detail={"error": "invalid_version", "message": "Pick an earlier version."})
+
+    def work() -> tuple[str, str | None]:
+        with store.write_lock(ontology_id):
+            _check_revision(ontology_id, body.revision)
+            text, dataset = _parse_backup(_version_or_404(history.read_version, ontology_id, version))
+            backup = _save(ontology_id, text, dataset, {"kind": "restore", "restored_from": version})
+        return text, backup
+
+    text, backup = await run_in_threadpool(work)
+    logger.info("ontology restored: %s from %s (backup=%s)", ontology_id, version, backup)
+    return {
+        "saved": True,
+        "id": ontology_id,
+        "backup": backup,
+        "revision": store.revision_of(text.encode("utf-8")),
+    }
 
 
 def _render_export(data: bytes, fmt: Any) -> tuple[bytes, dict[str, Any]]:
@@ -507,6 +663,7 @@ def _apply_and_save(ontology_id: str, body: StatementOperations) -> tuple[str, s
         if stale and body.on_stale != "rebase":
             raise HTTPException(status_code=409, detail=_STALE_REVISION)
         quads, document = read_dataset(data)
+        before = set(quads)
         try:
             quads, report = apply_operations(
                 quads,
@@ -520,7 +677,13 @@ def _apply_and_save(ontology_id: str, body: StatementOperations) -> tuple[str, s
             raise
         dataset = any(is_named(q) for q in quads)
         text = write_document(quads, document, trig=dataset)
-        backup = _save(ontology_id, text, dataset)
+        after = set(quads)
+        backup = _save(
+            ontology_id,
+            text,
+            dataset,
+            {"kind": "statements", "added": len(after - before), "removed": len(before - after)},
+        )
     report["rebased"] = stale
     return text, backup, report
 

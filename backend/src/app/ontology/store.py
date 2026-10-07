@@ -7,6 +7,8 @@ File layout under ``ONTOLOGY_DIR`` (created on demand):
     <id>.ttl                  -- ONE self-contained file per ontology (SSOT): Turtle,
     <id>.trig                    or TriG once it has a named graph (UDR-0182 D3)
     <id>.ttl.bak-<timestamp>  -- automatic backup on every save / pre-delete
+    <id>.history.jsonl        -- one line per write (CTR-0170 v5, UDR-0184 D1);
+                                 backups are bounded by retention (D3)
 
 The catalog reader is tolerant and self-healing (per-entry normalization +
 write-back; an unparseable file is backed up to ``catalog.corrupt-<ts>.json``
@@ -226,12 +228,14 @@ def create_ontology(
     *,
     initial_turtle: str | Callable[[str], str] = "",
     dataset: bool | Callable[[], bool] = False,
+    history_kind: str = "create",
 ) -> dict[str, str]:
     """Create a new catalog entry + its file.
 
     ``initial_turtle`` is the file content, or a factory called with the new id
     (a new ontology's header binds ``:`` to its own minting namespace). ``dataset``
     (or a callable asked after the factory ran) stores the content as TriG.
+    ``history_kind`` ("create" / "import") is the first history log line (UDR-0184 D1).
     """
     entry_id = f"ont_{uuid.uuid4().hex[:12]}"
     if callable(initial_turtle):
@@ -250,6 +254,17 @@ def create_ontology(
         entries = read_catalog()
         entries.append(entry)
         write_catalog(entries)
+    from app.ontology import history
+
+    history.append_entry(
+        entry_id,
+        {
+            "kind": history_kind,
+            "backup": None,
+            "revision_before": None,
+            "revision_after": revision_of(initial_turtle.encode("utf-8")),
+        },
+    )
     logger.info("ontology created: %s (%s)", entry_id, entry["name"])
     return entry
 
@@ -283,18 +298,37 @@ def rename_ontology(
 
 
 def delete_ontology(ontology_id: str) -> bool:
-    """Backup-then-remove the Turtle file and drop the catalog entry (UDR-0084 D10)."""
+    """Backup-then-remove the file and drop the catalog entry (UDR-0084 D10).
+
+    The delete is logged with the name and description, so the trash can show and
+    restore it under the same id (UDR-0184 D1 / D6); expired trash entries go.
+    """
+    from app.ontology import history
+
     with write_lock(ontology_id):
         entry = get_entry(ontology_id)
         if entry is None:
             return False
         path = _file_path(entry)
-        _backup(path)
+        before = path.read_bytes() if path.is_file() else None
+        backup_name = _backup(path)
         if path.is_file():
             path.unlink()
         with _CATALOG_LOCK:
             write_catalog([e for e in read_catalog() if e["id"] != ontology_id])
+        history.append_entry(
+            ontology_id,
+            {
+                "kind": "delete",
+                "backup": backup_name,
+                "revision_before": revision_of(before) if before is not None else None,
+                "revision_after": None,
+                "name": entry["name"],
+                "description": entry["description"],
+            },
+        )
     invalidate_query_cache(ontology_id)
+    history.expire_trash()
     logger.info("ontology deleted: %s (backup kept)", ontology_id)
     return True
 
@@ -328,18 +362,94 @@ def is_dataset(entry: dict[str, str]) -> bool:
     return entry["file"].endswith(TRIG_SUFFIX)
 
 
-def save_ontology_text(ontology_id: str, turtle: str, *, dataset: bool | None = None) -> str | None:
+def save_ontology_text(
+    ontology_id: str,
+    turtle: str,
+    *,
+    dataset: bool | None = None,
+    history: dict[str, Any] | None = None,
+) -> str | None:
     """Guarded save: size cap -> backup -> temp + atomic replace. Returns backup name.
 
     ``dataset`` switches the stored file between ``<id>.ttl`` (Turtle) and
     ``<id>.trig`` (TriG) when it differs from the current one (UDR-0182 D3): the new
     file is written first, then the catalog points at it, and the previous file is
     kept only as its backup. ``None`` keeps the current file.
+
+    Every save is logged (``history`` adds ``kind`` -- default "save" -- and counts /
+    ``restored_from``), then the backups are pruned by the retention rules, all under
+    the write lock (UDR-0184 D1 / D3).
     """
+    from app.ontology import history as history_log
+
     with write_lock(ontology_id):
+        entry = get_entry(ontology_id)
+        current = _file_path(entry) if entry else None
+        before = current.read_bytes() if current is not None and current.is_file() else None
         backup_name = _save_locked(ontology_id, turtle, dataset)
+        history_log.append_entry(
+            ontology_id,
+            {
+                "kind": "save",
+                **(history or {}),
+                "backup": backup_name,
+                "revision_before": revision_of(before) if before is not None else None,
+                "revision_after": revision_of(turtle.encode("utf-8")),
+            },
+        )
+        history_log.prune(ontology_id)
     invalidate_query_cache(ontology_id)
     return backup_name
+
+
+def restore_deleted_ontology(ontology_id: str, text: str, *, dataset: bool, restored_from: str) -> dict[str, str]:
+    """Recreate a deleted ontology under the SAME id from one of its backups (UDR-0184 D6).
+
+    Raises ``FileExistsError`` when the id is in the catalog again (409).
+    """
+    from app.ontology import history
+
+    deleted = None
+    for item in reversed(history.read_entries(ontology_id)):
+        if item.get("kind") == "delete":
+            deleted = item
+            break
+    with write_lock(ontology_id):
+        if get_entry(ontology_id) is not None:
+            raise FileExistsError(ontology_id)
+        encoded = text.encode("utf-8")
+        if len(encoded) > settings.ontology_max_file_bytes:
+            raise ValueError(
+                f"Ontology is {len(encoded)} bytes but the limit is {settings.ontology_max_file_bytes} bytes"
+            )
+        entry = {
+            "id": ontology_id,
+            "name": str((deleted or {}).get("name") or ontology_id),
+            "description": str((deleted or {}).get("description") or ""),
+            "file": f"{ontology_id}{TRIG_SUFFIX if dataset else TURTLE_SUFFIX}",
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        target = _file_path(entry)
+        _backup(target)  # a stray file of the target name is kept, never overwritten silently
+        _atomic_write_text(target, text)
+        with _CATALOG_LOCK:
+            entries = read_catalog()
+            entries.append(entry)
+            write_catalog(entries)
+        history.append_entry(
+            ontology_id,
+            {
+                "kind": "restore",
+                "backup": None,
+                "revision_before": None,
+                "revision_after": revision_of(encoded),
+                "restored_from": restored_from,
+            },
+        )
+    invalidate_query_cache(ontology_id)
+    logger.info("deleted ontology restored: %s from %s", ontology_id, restored_from)
+    return entry
 
 
 def _save_locked(ontology_id: str, turtle: str, dataset: bool | None) -> str | None:
@@ -852,6 +962,7 @@ __all__ = [
     "read_entry_and_bytes",
     "read_ontology_bytes",
     "rename_ontology",
+    "restore_deleted_ontology",
     "revision_of",
     "save_ontology_text",
     "scope_label",

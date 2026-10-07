@@ -905,6 +905,39 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         min=0,
         max=16384,
     ),
+    SettingDescriptor(
+        "ontology_history_keep_recent",
+        "Ontology history: recent versions kept",
+        "limits",
+        "int",
+        SCOPE_RUNTIME,
+        help="How many of the newest backups of each ontology are always kept.",
+        min=1,
+        max=500,
+    ),
+    SettingDescriptor(
+        "ontology_history_keep_days",
+        "Ontology history: days kept",
+        "limits",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "One version per day is also kept for this many days. Deleted ontologies stay "
+            "restorable for this many days."
+        ),
+        min=0,
+        max=3650,
+    ),
+    SettingDescriptor(
+        "ontology_history_max_mb",
+        "Ontology history: size limit per ontology (MiB)",
+        "limits",
+        "int",
+        SCOPE_RUNTIME,
+        help="Oldest backups are removed while an ontology's history is larger. The newest is always kept. 0 = no limit.",
+        min=0,
+        max=65536,
+    ),
     # ---- Schedule (runtime) -----------------------------------------------
     SettingDescriptor(
         "cron_tick_seconds",
