@@ -24,11 +24,20 @@ from app.ontology.vocabulary import (
     OWL_CLASS,
     OWL_DATATYPE_PROPERTY,
     OWL_OBJECT_PROPERTY,
+    OWL_ON_DATATYPE,
+    RDF_PROPERTY,
     RDF_TYPE,
+    RDFS_CLASS,
+    RDFS_DATATYPE,
     RDFS_DOMAIN,
     RDFS_LABEL,
     RDFS_RANGE,
+    RDFS_SUB_CLASS_OF,
+    RDFS_SUB_PROPERTY_OF,
+    classify_role,
     local_name,
+    term_key,
+    term_to_json,
 )
 from app.usage.ledger import append_helper_usage
 
@@ -44,9 +53,12 @@ _NL_SYSTEM_PROMPT = (
     "You translate a natural-language question about an RDF ontology into ONE SPARQL 1.1 "
     "{form} query. Output ONLY the SPARQL query -- no prose, no markdown fence, no "
     "explanation. Ground every IRI in the provided schema; never invent terms. The data "
-    "is a CONCEPT model: classes (owl:Class), datatype properties, and object properties "
-    "with rdfs:domain/rdfs:range and a cw:cardinality annotation. Include the PREFIX "
-    "declarations your query uses."
+    "is a CONCEPT model: classes (owl:Class or rdfs:Class), datatype properties, and object "
+    "properties (OWL-typed or rdf:Property) with rdfs:domain/rdfs:range and a cw:cardinality "
+    "annotation, plus an rdfs:subClassOf class hierarchy. Queries see the asserted "
+    "statements only (no inference): to include instances of subclasses, match "
+    "rdf:type/rdfs:subClassOf* instead of rdf:type. Include the PREFIX declarations your "
+    "query uses."
 )
 
 _NL_USER_TEMPLATE = "Ontology schema:\n{schema}\n\nQuestion:\n{question}\n\nSPARQL {form} query:"
@@ -68,6 +80,42 @@ def _label_order(literal: Any) -> tuple[int, str]:
     return (2, language)
 
 
+_SCHEMA_TYPES = (OWL_CLASS, RDFS_CLASS, OWL_OBJECT_PROPERTY, OWL_DATATYPE_PROPERTY, RDF_PROPERTY)
+
+
+def _roles(store: Any) -> dict[Any, str]:
+    """Classes and properties in the Store, by the editor's rules (UDR-0185 D1 / D7).
+
+    ``property`` marks an rdf:Property without a range (the editor's ``other``).
+    """
+    import pyoxigraph as ox
+
+    named = ox.NamedNode
+    declared = [
+        *store.quads_for_pattern(None, named(OWL_ON_DATATYPE), None),
+        *store.quads_for_pattern(None, named(RDF_TYPE), named(RDFS_DATATYPE)),
+    ]
+    datatypes = {term_key(term_to_json(q.subject)) for q in declared}
+    subjects = {
+        q.subject
+        for type_iri in _SCHEMA_TYPES
+        for q in store.quads_for_pattern(None, named(RDF_TYPE), named(type_iri))
+        if isinstance(q.subject, ox.NamedNode)
+    }
+    roles: dict[Any, str] = {}
+    for node in subjects:
+        statements = [
+            {"p": predicate, "o": term_to_json(q.object)}
+            for predicate in (RDF_TYPE, RDFS_RANGE)
+            for q in store.quads_for_pattern(node, named(predicate), None)
+        ]
+        role = classify_role({"type": "iri", "value": node.value}, statements, datatypes)
+        if role == "other" and any(s["p"] == RDF_TYPE and s["o"].get("value") == RDF_PROPERTY for s in statements):
+            role = "property"
+        roles[node] = role
+    return roles
+
+
 def schema_summary(graph: Any) -> str:
     """A compact, prompt-friendly text summary of the ontology's vocabulary.
 
@@ -86,10 +134,6 @@ def schema_summary(graph: Any) -> str:
 
     def of(node: Any, predicate: str) -> list[Any]:
         return [q.object for q in store.quads_for_pattern(node, named(predicate), None)]
-
-    def subjects(type_iri: str) -> list[Any]:
-        found = store.quads_for_pattern(None, named(RDF_TYPE), named(type_iri))
-        return sorted({q.subject for q in found if isinstance(q.subject, ox.NamedNode)}, key=str)
 
     def labels(node: Any) -> str:
         found = sorted((o for o in of(node, RDFS_LABEL) if isinstance(o, ox.Literal)), key=_label_order)
@@ -118,19 +162,47 @@ def schema_summary(graph: Any) -> str:
             "Named graphs (the default graph below is the merge of the graphs in scope; "
             "use GRAPH <name> { ... } to ask about one graph): " + ", ".join(str(g) for g in graphs)
         )
+    roles = _roles(store)
+
+    def by_role(role: str) -> list[Any]:
+        return sorted((node for node, r in roles.items() if r == role), key=str)
+
+    def supers(node: Any) -> str:
+        found = sorted((o for o in of(node, RDFS_SUB_PROPERTY_OF) if isinstance(o, ox.NamedNode)), key=str)
+        return "; subPropertyOf " + ", ".join(f"<{o.value}>" for o in found) if found else ""
+
+    # Order under the cap (UDR-0185 D7): classes, properties, then the hierarchy.
     lines.append("Classes:")
-    lines.extend(f"- <{node.value}> label: {labels(node)}" for node in subjects(OWL_CLASS))
+    lines.extend(f"- <{node.value}> label: {labels(node)}" for node in by_role("entity"))
     lines.append("Object properties (direction source -> target):")
     lines.extend(
         f"- <{node.value}> label: {labels(node)}; domain {terms(node, RDFS_DOMAIN)}; "
-        f"range {terms(node, RDFS_RANGE)}; cardinality {terms(node, CW_CARDINALITY)}"
-        for node in subjects(OWL_OBJECT_PROPERTY)
+        f"range {terms(node, RDFS_RANGE)}; cardinality {terms(node, CW_CARDINALITY)}{supers(node)}"
+        for node in by_role("object_property")
     )
     lines.append("Datatype properties:")
     lines.extend(
-        f"- <{node.value}> label: {labels(node)}; domain {terms(node, RDFS_DOMAIN)}; range {terms(node, RDFS_RANGE)}"
-        for node in subjects(OWL_DATATYPE_PROPERTY)
+        f"- <{node.value}> label: {labels(node)}; domain {terms(node, RDFS_DOMAIN)}; "
+        f"range {terms(node, RDFS_RANGE)}{supers(node)}"
+        for node in by_role("datatype_property")
     )
+    others = by_role("property")
+    if others:
+        lines.append("Other properties (rdf:Property without a range):")
+        lines.extend(
+            f"- <{node.value}> label: {labels(node)}; domain {terms(node, RDFS_DOMAIN)}{supers(node)}"
+            for node in others
+        )
+    hierarchy = sorted(
+        {
+            (q.subject.value, q.object.value)
+            for q in store.quads_for_pattern(None, named(RDFS_SUB_CLASS_OF), None)
+            if isinstance(q.subject, ox.NamedNode) and isinstance(q.object, ox.NamedNode)
+        }
+    )
+    if hierarchy:
+        lines.append("Class hierarchy (subclass subClassOf superclass):")
+        lines.extend(f"- <{sub}> subClassOf <{sup}>" for sub, sup in hierarchy)
     summary = "\n".join(lines)
     return summary[:_SCHEMA_CHAR_CAP]
 

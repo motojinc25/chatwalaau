@@ -15,7 +15,7 @@
  * virtualization dependency.
  */
 
-import { ChevronRight, Link2, MessageSquarePlus, Pencil, Plus, Trash2, TriangleAlert, X } from 'lucide-react'
+import { ChevronRight, Info, Link2, MessageSquarePlus, Pencil, Plus, Trash2, TriangleAlert, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
@@ -49,6 +49,7 @@ import {
   RDF_REIFIES,
   RDF_TYPE,
   RDFS_LABEL,
+  RDFS_SUB_PROPERTY_OF,
   type Resource,
   type Role,
   resourceKey,
@@ -56,6 +57,7 @@ import {
   type StatementInput,
   type Term,
   termKey,
+  usesUndeclaredClass,
   XSD,
   XSD_STRING,
 } from '@/lib/ontologyModel'
@@ -102,6 +104,8 @@ export interface InspectorContext {
   targetGraph?: GraphTerm | null
   /** "Add annotation" on statement `index` of the resource `key` (UDR-0182 D8). */
   onAnnotate?: (key: string, index: number) => void
+  /** IRIs used as classes but not declared in this ontology (not drawn; UDR-0185 D5). */
+  undeclared?: Set<string>
 }
 
 function iriText(value: string, prefixes: PrefixDecl[]): string {
@@ -545,6 +549,7 @@ export function StatementList(props: {
       {statements.slice(0, limit).map((statement, index) => {
         const reifiers = reifiedBy.get(termKey(asTriple(resource.term, statement))) ?? []
         const warn = diagnosed.has(`${termKey(resource.term)} ${statement.p} ${termKey(statement.o)}`)
+        const undeclared = ctx.undeclared ? usesUndeclaredClass(ctx.undeclared, resource.term, statement) : false
         return editing === index ? (
           <StatementEditor
             // biome-ignore lint/suspicious/noArrayIndexKey: the statement index is the edit target
@@ -585,6 +590,13 @@ export function StatementList(props: {
                   className="ml-1 inline-flex items-center text-[10px] text-amber-600"
                   title="The value is not a valid lexical form of its datatype (kept as written)">
                   <TriangleAlert className="mr-0.5 h-3 w-3" /> ill-typed
+                </span>
+              )}
+              {undeclared && (
+                <span
+                  className="ml-1 inline-flex items-center rounded bg-sky-50 px-1 text-[10px] text-sky-700"
+                  title="Not declared as a class in this ontology (no rdf:type rdfs:Class or owl:Class), so the canvas does not draw it">
+                  <Info className="mr-0.5 h-3 w-3" /> not declared
                 </span>
               )}
               {reifiers.length > 0 && (
@@ -703,6 +715,14 @@ export function ResourceDetail(props: {
     return <p className="p-4 text-xs text-zinc-500">This resource no longer has any statements.</p>
   }
   const types = resource.statements.filter((s) => s.p === RDF_TYPE).map((s) => s.o)
+  // Super-properties (rdfs:subPropertyOf; shown, edited as statements -- UDR-0185 D6).
+  const supers = [
+    ...new Set(
+      resource.statements
+        .filter((s) => s.p === RDFS_SUB_PROPERTY_OF && s.o.type === 'iri')
+        .map((s) => (s.o as { value: string }).value),
+    ),
+  ].sort()
   return (
     <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
       <div>
@@ -724,6 +744,23 @@ export function ResourceDetail(props: {
           </div>
         )}
       </div>
+      {supers.length > 0 && (
+        <div>
+          <span className={fieldLabel}>Super-properties</span>
+          <div className="flex flex-wrap gap-1">
+            {supers.map((value) => (
+              <button
+                key={value}
+                type="button"
+                className="max-w-full truncate rounded border px-1.5 py-0.5 text-[11px] text-zinc-600 hover:bg-zinc-50"
+                title={value}
+                onClick={() => props.ctx.onSelectResource(termKey({ type: 'iri', value }))}>
+                {iriText(value, props.ctx.prefixes)}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       <div>
         <span className={fieldLabel}>Statements</span>
         <StatementList resourceKey={props.resourceKey} ctx={props.ctx} onEdit={props.onEdit} onAdd={props.onAdd} />
@@ -816,6 +853,16 @@ export function ResourcesPane(props: { ctx: InspectorContext; selectedKey: strin
           {filtered.length} of {listed.length} resources not drawn on the canvas (instances, other vocabularies,
           reifiers, shared blank nodes).
         </p>
+        {(ctx.undeclared?.size ?? 0) > 0 && (
+          <p
+            className="flex items-start gap-1 text-[10px] text-sky-700"
+            title={[...(ctx.undeclared ?? [])].slice(0, 20).join(', ')}>
+            <Info className="mt-px h-3 w-3 shrink-0" />
+            {ctx.undeclared?.size} class{ctx.undeclared?.size === 1 ? ' is' : 'es are'} used (subClassOf, domain or
+            range) but not declared in this ontology, so the canvas does not draw{' '}
+            {ctx.undeclared?.size === 1 ? 'it' : 'them'}. Their statements are marked "not declared".
+          </p>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {filtered.slice(0, limit).map((r) => {

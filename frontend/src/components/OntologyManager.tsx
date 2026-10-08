@@ -101,6 +101,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import {
+  addSubclassOf,
   annotateStatement,
   applyStatementEdit,
   assertedElsewhere,
@@ -108,6 +109,7 @@ import {
   CW_CARDINALITY,
   CW_COLOR,
   CW_EMOJI,
+  classHierarchy,
   compactIri,
   createDatatypeProperty,
   createEntity,
@@ -141,12 +143,14 @@ import {
   RDFS_DOMAIN,
   RDFS_LABEL,
   RDFS_RANGE,
+  RDFS_SUB_PROPERTY_OF,
   type RelationshipEdgeView,
   reifiersOf,
   relationshipEdges,
   removePropertyFromEntity,
   removeResource,
   removeStatement,
+  removeSubclassOf,
   renameBlankNodes,
   type SaveBase,
   type StatementEdit,
@@ -155,9 +159,14 @@ import {
   scopeModel,
   setIsKey,
   setPosition,
+  subclassEdges,
   type Term,
   termKey,
   toPayload,
+  undeclaredClasses,
+  type VocabularyStyle,
+  vocabularyStyle,
+  vocabularyStyleReason,
   XSD,
 } from '@/lib/ontologyModel'
 import { cn } from '@/lib/utils'
@@ -214,7 +223,31 @@ type QueryResult =
  * What the Detail pane shows: an entity or a relationship drawn on the canvas
  * (by IRI), or any resource by its term key (inspector, UDR-0180 D9).
  */
-type Selection = { kind: 'entity' | 'relationship'; iri: string } | { kind: 'resource'; key: string }
+type Selection =
+  | { kind: 'entity' | 'relationship'; iri: string }
+  | { kind: 'resource'; key: string }
+  | { kind: 'isa'; source: string; target: string }
+
+type LinkMode = 'relationship' | 'isa'
+
+// Per-browser view preference, never saved in the ontology (UDR-0185 D3).
+const SHOW_ISA_STORAGE_KEY = 'chatwalaau.ontology.showIsa'
+
+function readShowIsa(): boolean {
+  try {
+    return localStorage.getItem(SHOW_ISA_STORAGE_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+function writeShowIsa(show: boolean): void {
+  try {
+    localStorage.setItem(SHOW_ISA_STORAGE_KEY, String(show))
+  } catch {
+    // storage blocked: the choice lasts for this session only
+  }
+}
 
 /** An edit waiting for the "follow the reifiers?" answer (PRP-0198 Q4). */
 interface PendingReifiedEdit {
@@ -412,6 +445,8 @@ interface RelEdgeData extends Record<string, unknown> {
   parallelCount: number
   /** The object property this edge draws (one property may draw several edges, UDR-0180 D5). */
   relationshipIri: string
+  /** An "is a" edge (rdfs:subClassOf, UDR-0185 D3): dashed, open arrow to the superclass. */
+  isa?: boolean
 }
 
 const PARALLEL_SPREAD = 26 // px of perpendicular offset per fan-out step
@@ -441,7 +476,12 @@ const FloatingRelationshipEdge = memo(function FloatingRelationshipEdge({
   const idx = d.parallelIndex ?? 0
   const count = d.parallelCount ?? 1
   const factor = idx - (count - 1) / 2
-  const baseStyle = { stroke: d.stroke, strokeWidth: d.strokeWidth, opacity: d.opacity }
+  const baseStyle = {
+    stroke: d.stroke,
+    strokeWidth: d.strokeWidth,
+    opacity: d.opacity,
+    strokeDasharray: d.isa ? '6 4' : undefined,
+  }
 
   let path: string
   let lx: number
@@ -523,6 +563,14 @@ function CanvasToolbar(props: {
   onScopeChange: (scope: GraphScope) => void
   onNewGraph: () => void
   readOnly: boolean
+  /** What a drag between two entities creates (UDR-0185 D3). */
+  linkMode: LinkMode
+  onLinkModeChange: (mode: LinkMode) => void
+  showIsa: boolean
+  onShowIsaChange: (show: boolean) => void
+  /** The detected vocabulary style for new terms and why (UDR-0185 D4). */
+  style: VocabularyStyle
+  styleReason: string
 }) {
   const { zoomIn, zoomOut, fitView } = useReactFlow()
   const iconButton = 'h-7 w-7 text-zinc-600'
@@ -536,6 +584,33 @@ function CanvasToolbar(props: {
         disabled={props.disabled}>
         <Plus className="mr-1 h-3.5 w-3.5" /> Entity
       </Button>
+      <select
+        className="h-7 rounded-md border bg-white px-1 text-xs"
+        aria-label="Link"
+        title="What dragging from one entity to another creates: a relationship, or an 'is a' (rdfs:subClassOf) link from the subclass to the superclass"
+        value={props.linkMode}
+        disabled={props.disabled || props.readOnly}
+        onChange={(e) => props.onLinkModeChange(e.target.value as LinkMode)}>
+        <option value="relationship">Link: Relationship</option>
+        <option value="isa">Link: Is a</option>
+      </select>
+      <label
+        className="flex h-7 items-center gap-1 px-1 text-xs text-zinc-600"
+        title="Show the 'is a' (rdfs:subClassOf) edges; remembered in this browser">
+        <input
+          type="checkbox"
+          checked={props.showIsa}
+          disabled={props.disabled}
+          onChange={(e) => props.onShowIsaChange(e.target.checked)}
+        />
+        Show &quot;is a&quot;
+      </label>
+      <span
+        className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600"
+        title={props.styleReason}>
+        <span className="sr-only">Vocabulary style: </span>
+        {props.style.toUpperCase()}
+      </span>
       <div className="mx-1 h-4 w-px bg-zinc-200" />
       {props.graphs.length > 0 ? (
         <select
@@ -655,6 +730,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
 
   // Canvas interaction
   const [selection, setSelection] = useState<Selection | null>(null)
+  const [linkMode, setLinkMode] = useState<LinkMode>('relationship')
+  const [showIsa, setShowIsa] = useState(readShowIsa)
   const [highlight, setHighlight] = useState<Set<string> | null>(null)
   const [layouting, setLayouting] = useState(false)
   const canvasRef = useRef<HTMLDivElement | null>(null)
@@ -1070,6 +1147,13 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const viewModel = useMemo(() => scopeModel(model, graphScope), [model, graphScope])
   const views = useMemo(() => entityViews(viewModel), [viewModel])
   const relEdges = useMemo(() => relationshipEdges(viewModel), [viewModel])
+  const isaEdges = useMemo(() => subclassEdges(viewModel), [viewModel])
+  const vocabStyle = useMemo(() => vocabularyStyle(model), [model])
+  const undeclared = useMemo(() => undeclaredClasses(model), [model])
+  const changeShowIsa = useCallback((show: boolean) => {
+    setShowIsa(show)
+    writeShowIsa(show)
+  }, [])
   const graphName = useCallback((g: GraphTerm) => graphLabel(g, model, model.document.prefixes), [model])
 
   /** Select what the canvas and the search show; a named graph is also where new statements go. */
@@ -1209,10 +1293,12 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const addEntity = useCallback(() => {
     const value = mintIri(baseIri || 'https://chatwalaau.com/ontology/local#', 'Entity', takenIris(model))
     const count = views.length
-    updateModel((prev) => createEntity(prev, value, 'New Entity', 40 + (count % 5) * 60, 40 + (count % 7) * 40))
+    updateModel((prev) =>
+      createEntity(prev, value, 'New Entity', 40 + (count % 5) * 60, 40 + (count % 7) * 40, vocabStyle),
+    )
     setSelection({ kind: 'entity', iri: value })
     setRightTab('detail')
-  }, [model, views.length, baseIri, updateModel])
+  }, [model, views.length, baseIri, updateModel, vocabStyle])
 
   const requestDeleteEntity = useCallback(
     (value: string) => {
@@ -1242,16 +1328,32 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     [updateModel, keyOf],
   )
 
+  /** Remove the one rdfs:subClassOf statement an "is a" edge draws (UDR-0185 D3). */
+  const removeIsa = useCallback(
+    (source: string, target: string) => {
+      updateModel((prev) => removeSubclassOf(prev, source, target, graphScope))
+      setSelection(null)
+    },
+    [updateModel, graphScope],
+  )
+
   const onConnect = useCallback(
     (connection: Connection) => {
       if (!connection.source || !connection.target) return
-      const value = mintIri(baseIri || 'https://chatwalaau.com/ontology/local#', 'relatesTo', takenIris(model))
       const { source, target } = connection
-      updateModel((prev) => createRelationship(prev, value, source, target))
+      if (linkMode === 'isa') {
+        if (source === target) return // a class is trivially its own subclass: nothing to add
+        updateModel((prev) => addSubclassOf(prev, source, target))
+        setSelection({ kind: 'isa', source, target })
+        setRightTab('detail')
+        return
+      }
+      const value = mintIri(baseIri || 'https://chatwalaau.com/ontology/local#', 'relatesTo', takenIris(model))
+      updateModel((prev) => createRelationship(prev, value, source, target, vocabStyle))
       setSelection({ kind: 'relationship', iri: value })
       setRightTab('detail')
     },
-    [model, baseIri, updateModel],
+    [model, baseIri, updateModel, linkMode, vocabStyle],
   )
 
   const selectResource = useCallback(
@@ -1276,6 +1378,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     const nodes = new Set<string>()
     const edges = new Set<string>()
     if (!selection || selection.kind === 'resource') return { nodes, edges }
+    if (selection.kind === 'isa') {
+      nodes.add(selection.source)
+      nodes.add(selection.target)
+      return { nodes, edges }
+    }
     if (selection.kind === 'entity') {
       for (const rel of relEdges) {
         if (rel.source === selection.iri || rel.target === selection.iri) {
@@ -1380,13 +1487,45 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     // Fan-out bookkeeping: how many relationships share each unordered node pair,
     // and this edge's index within that group (UDR-0098 D2).
     const pairKey = (s: string, t: string) => (s < t ? `${s}|${t}` : `${t}|${s}`)
+    const shownIsa = showIsa ? isaEdges : []
     const pairTotal = new Map<string, number>()
-    for (const rel of relEdges) {
+    for (const rel of [...relEdges, ...shownIsa]) {
       const key = pairKey(rel.source, rel.target)
       pairTotal.set(key, (pairTotal.get(key) ?? 0) + 1)
     }
     const pairSeen = new Map<string, number>()
-    return relEdges.map((rel) => {
+    // "is a" edges (UDR-0185 D3): dashed, open arrow to the superclass, sharing the fan-out.
+    const isa = shownIsa.map((edge): Edge => {
+      const key = pairKey(edge.source, edge.target)
+      const parallelIndex = pairSeen.get(key) ?? 0
+      pairSeen.set(key, parallelIndex + 1)
+      const isSelected =
+        selection?.kind === 'isa' && selection.source === edge.source && selection.target === edge.target
+      const isRelated =
+        !isSelected && selection?.kind === 'entity' && (edge.source === selection.iri || edge.target === selection.iri)
+      const matched = highlight !== null && (highlight.has(edge.source) || highlight.has(edge.target))
+      const dimmed = highlight !== null && !matched
+      const stroke = isSelected ? '#2563eb' : isRelated ? '#93c5fd' : '#64748b'
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        type: 'floating',
+        markerEnd: { type: MarkerType.Arrow, color: stroke, width: 18, height: 18 },
+        data: {
+          label: 'is a',
+          stroke,
+          strokeWidth: isSelected || isRelated ? 2.5 : 1.5,
+          opacity: dimmed ? 0.2 : 1,
+          labelColor: isSelected ? '#2563eb' : '#64748b',
+          parallelIndex,
+          parallelCount: pairTotal.get(key) ?? 1,
+          relationshipIri: '',
+          isa: true,
+        } satisfies RelEdgeData,
+      }
+    })
+    const relationships = relEdges.map((rel) => {
       const key = pairKey(rel.source, rel.target)
       const parallelIndex = pairSeen.get(key) ?? 0
       pairSeen.set(key, parallelIndex + 1)
@@ -1414,7 +1553,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         } satisfies RelEdgeData,
       }
     })
-  }, [relEdges, selection, related, highlight])
+    return [...relationships, ...isa]
+  }, [relEdges, isaEdges, showIsa, selection, related, highlight])
 
   /** elkjs layered layout of the given entities (all when `only` is undefined). */
   const computeLayout = useCallback(
@@ -1432,7 +1572,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           'elk.layered.spacing.nodeNodeBetweenLayers': '140',
         },
         children: ids.map((value) => ({ id: value, width: 110, height: 105 })),
-        edges: relEdges
+        edges: [...relEdges, ...isaEdges]
           .filter((r) => idSet.has(r.source) && idSet.has(r.target))
           .map((r) => ({ id: r.id, sources: [r.source], targets: [r.target] })),
       })
@@ -1440,7 +1580,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       for (const child of result.children ?? []) positions.set(child.id, { x: child.x ?? 0, y: child.y ?? 0 })
       return positions
     },
-    [views, relEdges],
+    [views, relEdges, isaEdges],
   )
 
   // Entities without a stored position get a TRANSIENT layout when an ontology
@@ -1592,8 +1732,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       graphs,
       targetGraph: model.targetGraph ?? null,
       onAnnotate: demoBlocked ? undefined : requestAnnotate,
+      undeclared,
     }),
-    [model, diagnostics, demoBlocked, selectResource, graphs, requestAnnotate],
+    [model, diagnostics, demoBlocked, selectResource, graphs, requestAnnotate, undeclared],
   )
 
   /** Statement list callbacks for one resource (all edits funnel through commitEdits). */
@@ -1740,6 +1881,12 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                       onScopeChange={changeScope}
                       onNewGraph={() => setNewGraphOpen(true)}
                       readOnly={demoBlocked}
+                      linkMode={linkMode}
+                      onLinkModeChange={setLinkMode}
+                      showIsa={showIsa}
+                      onShowIsaChange={changeShowIsa}
+                      style={vocabStyle}
+                      styleReason={vocabularyStyleReason(vocabStyle, model)}
                     />
                     <div className="min-h-0 flex-1">
                       {selectedId ? (
@@ -1764,7 +1911,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                             }}
                             onEdgeClick={(_, edge) => {
                               const data = edge.data as RelEdgeData | undefined
-                              setSelection({ kind: 'relationship', iri: data?.relationshipIri ?? edge.id })
+                              if (data?.isa) setSelection({ kind: 'isa', source: edge.source, target: edge.target })
+                              else setSelection({ kind: 'relationship', iri: data?.relationshipIri ?? edge.id })
                               setRightTab('detail')
                             }}
                             onPaneClick={() => setSelection(null)}
@@ -1815,7 +1963,17 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                       ))}
                     </div>
                     {rightTab === 'detail' ? (
-                      selection?.kind === 'resource' ? (
+                      selection?.kind === 'isa' ? (
+                        <IsaDetail
+                          source={selection.source}
+                          target={selection.target}
+                          exists={isaEdges.some((e) => e.source === selection.source && e.target === selection.target)}
+                          entityLabel={entityLabel}
+                          readOnly={demoBlocked}
+                          onSelectEntity={(value) => setSelection({ kind: 'entity', iri: value })}
+                          onRemove={() => removeIsa(selection.source, selection.target)}
+                        />
+                      ) : selection?.kind === 'resource' ? (
                         <ResourceDetail
                           resourceKey={selection.key}
                           ctx={inspector}
@@ -1839,7 +1997,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                           onToggleKey={(prop, on) => updateModel((prev) => setIsKey(prev, prop, on))}
                           onAddProperty={(entity) => {
                             const value = mintIri(baseIri || `${entity}_`, 'property', takenIris(model))
-                            updateModel((prev) => createDatatypeProperty(prev, value, entity))
+                            updateModel((prev) => createDatatypeProperty(prev, value, entity, vocabStyle))
                           }}
                           onRemoveProperty={(prop, entity) =>
                             updateModel((prev) => removePropertyFromEntity(prev, prop, entity))
@@ -2481,6 +2639,70 @@ function OtherValues(props: { model: OntologyModel; value: string; predicate: st
   )
 }
 
+/** The Detail of a selected "is a" edge: one rdfs:subClassOf statement (UDR-0185 D3). */
+function IsaDetail(props: {
+  source: string
+  target: string
+  exists: boolean
+  entityLabel: (iri: string) => string
+  readOnly: boolean
+  onSelectEntity: (iri: string) => void
+  onRemove: () => void
+}) {
+  if (!props.exists) return <p className="p-4 text-xs text-zinc-500">This "is a" link no longer exists.</p>
+  const entity = (value: string) => (
+    <button
+      type="button"
+      className="font-medium text-blue-700 hover:underline"
+      title={value}
+      onClick={() => props.onSelectEntity(value)}>
+      {props.entityLabel(value)}
+    </button>
+  )
+  return (
+    <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+      <div>
+        <span className={fieldLabel}>Is a (rdfs:subClassOf)</span>
+        <div className="rounded border bg-zinc-50 px-2 py-1.5 text-xs text-zinc-700">
+          {entity(props.source)} is a {entity(props.target)}
+        </div>
+      </div>
+      {!props.readOnly && (
+        <Button variant="destructive" size="sm" className="h-7 w-full text-xs" onClick={props.onRemove}>
+          <Trash2 className="mr-1 h-3 w-3" /> Remove this "is a" link
+        </Button>
+      )}
+    </div>
+  )
+}
+
+/** Clickable IRIs (superclasses, subclasses, super-properties) for the Detail forms (UDR-0185 D6). */
+function HierarchyLinks(props: {
+  label: string
+  iris: string[]
+  entityLabel: (iri: string) => string
+  onSelect: (iri: string) => void
+}) {
+  if (props.iris.length === 0) return null
+  return (
+    <div>
+      <span className={fieldLabel}>{props.label}</span>
+      <div className="flex flex-wrap gap-1">
+        {props.iris.map((value) => (
+          <button
+            key={value}
+            type="button"
+            className="max-w-full truncate rounded border px-1.5 py-0.5 text-[11px] text-zinc-600 hover:bg-zinc-50"
+            title={value}
+            onClick={() => props.onSelect(value)}>
+            {props.entityLabel(value)}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function DetailPane(props: {
   model: OntologyModel
   entity: EntityView | null
@@ -2514,6 +2736,7 @@ function DetailPane(props: {
       seen.add(r.id)
       return true
     })
+    const hierarchy = classHierarchy(model, entity.iri)
     return (
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         <div>
@@ -2676,6 +2899,18 @@ function DetailPane(props: {
             )}
           </div>
         </div>
+        <HierarchyLinks
+          label="Is a (superclasses)"
+          iris={hierarchy.supers}
+          entityLabel={props.entityLabel}
+          onSelect={(value) => props.onSelectResource(termKey(iriTerm(value)))}
+        />
+        <HierarchyLinks
+          label="Subclasses"
+          iris={hierarchy.subs}
+          entityLabel={props.entityLabel}
+          onSelect={(value) => props.onSelectResource(termKey(iriTerm(value)))}
+        />
         {incident.length > 0 && (
           <div>
             <span className={fieldLabel}>Relationships</span>
@@ -2741,6 +2976,12 @@ function DetailPane(props: {
             </p>
           )}
         </div>
+        <HierarchyLinks
+          label="Super-properties"
+          iris={[...new Set(iriObjects(resource, RDFS_SUB_PROPERTY_OF))].sort()}
+          entityLabel={(v) => localName(v)}
+          onSelect={(v) => props.onSelectResource(termKey(iriTerm(v)))}
+        />
         <div>
           <label htmlFor="rel-label" className={fieldLabel}>
             Label
@@ -2809,7 +3050,8 @@ function DetailPane(props: {
   return (
     <p className="p-4 text-xs text-zinc-500">
       Click an Entity or a Relationship on the canvas to see and edit its detail. Drag from a node&apos;s outer ring to
-      another node to create a directional relationship. Everything else in the ontology is listed in the Resources tab.
+      another node to create a directional relationship (or, with Link: Is a, an &quot;is a&quot; link from the subclass
+      to the superclass). Everything else in the ontology is listed in the Resources tab.
     </p>
   )
 }

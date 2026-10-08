@@ -40,6 +40,12 @@ export const RDFS_RANGE = `${RDFS}range`
 export const OWL_CLASS = `${OWL}Class`
 export const OWL_OBJECT_PROPERTY = `${OWL}ObjectProperty`
 export const OWL_DATATYPE_PROPERTY = `${OWL}DatatypeProperty`
+export const OWL_ON_DATATYPE = `${OWL}onDatatype`
+export const RDFS_CLASS = `${RDFS}Class`
+export const RDFS_DATATYPE = `${RDFS}Datatype`
+export const RDFS_SUB_CLASS_OF = `${RDFS}subClassOf`
+export const RDFS_SUB_PROPERTY_OF = `${RDFS}subPropertyOf`
+export const RDF_PROPERTY = `${RDF}Property`
 export const XSD_STRING = `${XSD}string`
 export const XSD_DECIMAL = `${XSD}decimal`
 export const XSD_BOOLEAN = `${XSD}boolean`
@@ -240,20 +246,63 @@ export function resourceKey(resource: Resource): string {
   return termKey(resource.term)
 }
 
-const ROLE_BY_TYPE: [string, Role][] = [
-  [OWL_CLASS, 'entity'],
-  [OWL_OBJECT_PROPERTY, 'object_property'],
-  [OWL_DATATYPE_PROPERTY, 'datatype_property'],
-]
+/** Ranges that make an rdf:Property an attribute, besides xsd: and declared datatypes (UDR-0185 D1). */
+export const LITERAL_RANGES = new Set([
+  `${RDFS}Literal`,
+  RDF_LANG_STRING,
+  RDF_DIR_LANG_STRING,
+  `${RDF}JSON`,
+  `${RDF}HTML`,
+  `${RDF}XMLLiteral`,
+  `${RDF}PlainLiteral`,
+])
 
-/** The same classification the backend computes on GET (UDR-0180 D4), re-run after edits. */
-export function roleOf(term: Term, statements: Statement[]): Role {
+/** True for a term typed rdfs:Datatype or carrying owl:onDatatype (a datatype restriction). */
+export function declaresDatatype(statements: Statement[]): boolean {
+  return statements.some(
+    (s) => s.p === OWL_ON_DATATYPE || (s.p === RDF_TYPE && s.o.type === 'iri' && s.o.value === RDFS_DATATYPE),
+  )
+}
+
+/** Answers "does the model declare the term with this key as a datatype?". */
+export type DatatypeLookup = (key: string) => boolean
+
+const NO_DATATYPES: DatatypeLookup = () => false
+
+export function isLiteralRange(term: Term, isDatatype: DatatypeLookup = NO_DATATYPES): boolean {
+  if (term.type === 'iri' && (LITERAL_RANGES.has(term.value) || term.value.startsWith(XSD))) return true
+  return (term.type === 'iri' || term.type === 'bnode') && isDatatype(termKey(term))
+}
+
+/**
+ * The display role of a resource (UDR-0185 D1) -- the same rules table the backend
+ * runs on GET (`classify_role`); `tests/fixtures/ontology_roles/cases.json` pins
+ * both (D2). Never stored, never written.
+ */
+export function roleOf(term: Term, statements: Statement[], isDatatype: DatatypeLookup = NO_DATATYPES): Role {
   if (term.type !== 'iri') return 'other'
   const types = new Set(
     statements.filter((s) => s.p === RDF_TYPE && s.o.type === 'iri').map((s) => (s.o as { value: string }).value),
   )
-  for (const [typeIri, role] of ROLE_BY_TYPE) if (types.has(typeIri)) return role
+  if (types.has(OWL_CLASS) || (types.has(RDFS_CLASS) && !types.has(RDFS_DATATYPE))) return 'entity'
+  if (types.has(OWL_OBJECT_PROPERTY)) return 'object_property'
+  if (types.has(OWL_DATATYPE_PROPERTY)) return 'datatype_property'
+  if (types.has(RDF_PROPERTY)) {
+    const ranges = statements.filter((s) => s.p === RDFS_RANGE).map((s) => s.o)
+    if (ranges.length === 0) return 'other'
+    return ranges.every((r) => isLiteralRange(r, isDatatype)) ? 'datatype_property' : 'object_property'
+  }
   return 'other'
+}
+
+/** Every resource with its role, classified against the whole list (UDR-0185 D1 / D2). */
+export function classifyResources(resources: Resource[]): Resource[] {
+  const datatypes = new Set(resources.filter((r) => declaresDatatype(r.statements)).map(resourceKey))
+  const isDatatype: DatatypeLookup = (key) => datatypes.has(key)
+  return resources.map((r) => {
+    const role = roleOf(r.term, r.statements, isDatatype)
+    return role === r.role ? r : { ...r, role }
+  })
 }
 
 export function findResource(model: OntologyModel, key: string): Resource | undefined {
@@ -440,6 +489,131 @@ export function relationshipEdges(model: OntologyModel): RelationshipEdgeView[] 
   return edges
 }
 
+// ---- Class hierarchy (UDR-0185 D3 / D5 / D6) -----------------------------------------
+
+export interface SubclassEdgeView {
+  id: string
+  /** The subclass (edge source). */
+  source: string
+  /** The superclass (edge target, the arrow end). */
+  target: string
+}
+
+/** One "is a" edge per IRI `S rdfs:subClassOf O` where both are entities (blank-node superclasses are not drawn). */
+export function subclassEdges(model: OntologyModel): SubclassEdgeView[] {
+  const entities = entityIris(model)
+  const seen = new Set<string>()
+  const edges: SubclassEdgeView[] = []
+  for (const resource of model.resources) {
+    if (resource.role !== 'entity' || resource.term.type !== 'iri') continue
+    const source = resource.term.value
+    for (const target of iriObjects(resource, RDFS_SUB_CLASS_OF)) {
+      const id = `isa|${source}|${target}`
+      if (!entities.has(target) || seen.has(id)) continue
+      seen.add(id)
+      edges.push({ id, source, target })
+    }
+  }
+  return edges
+}
+
+/** Add `sub rdfs:subClassOf sup` (one statement; a self link is refused, an existing one is kept as is). */
+export function addSubclassOf(model: OntologyModel, sub: string, sup: string): OntologyModel {
+  if (sub === sup) return model
+  return applyStatementEdit(model, termKey(iri(sub)), {
+    index: null,
+    statement: { p: RDFS_SUB_CLASS_OF, o: iri(sup) },
+  })
+}
+
+/** Remove the `sub rdfs:subClassOf sup` statement(s) the canvas shows for `scope`. */
+export function removeSubclassOf(
+  model: OntologyModel,
+  sub: string,
+  sup: string,
+  scope: GraphScope = 'all',
+): OntologyModel {
+  const key = termKey(iri(sub))
+  return withResource(model, key, (r) => {
+    if (!r) return null
+    const statements = r.statements.filter(
+      (s) => !(s.p === RDFS_SUB_CLASS_OF && s.o.type === 'iri' && s.o.value === sup && inScope(s, scope)),
+    )
+    return statements.length === 0 ? null : { ...r, statements }
+  })
+}
+
+/** The IRI superclasses of an entity, and the entities naming it as theirs. */
+export function classHierarchy(model: OntologyModel, entityIri: string): { supers: string[]; subs: string[] } {
+  const supers = [...new Set(iriObjects(findResource(model, termKey(iri(entityIri))), RDFS_SUB_CLASS_OF))]
+  const subs = model.resources
+    .filter((r) => r.term.type === 'iri' && iriObjects(r, RDFS_SUB_CLASS_OF).includes(entityIri))
+    .map((r) => (r.term as { value: string }).value)
+  return { supers: supers.sort(), subs: [...new Set(subs)].sort() }
+}
+
+const RESERVED_NAMESPACES = [RDF, RDFS, OWL, XSD]
+const CLASS_USE_PREDICATES = new Set([RDFS_SUB_CLASS_OF, RDFS_DOMAIN, RDFS_RANGE])
+
+/**
+ * IRIs used as classes (either side of rdfs:subClassOf, an rdfs:domain / rdfs:range
+ * object) that the ontology does not declare: not drawn (UDR-0185 D5), marked in
+ * the inspector. Literal-like ranges and the rdf / rdfs / owl / xsd namespaces are
+ * never counted.
+ */
+export function undeclaredClasses(model: OntologyModel): Set<string> {
+  const entities = entityIris(model)
+  const datatypes = new Set(model.resources.filter((r) => declaresDatatype(r.statements)).map(resourceKey))
+  const isDatatype: DatatypeLookup = (key) => datatypes.has(key)
+  const out = new Set<string>()
+  const consider = (term: Term) => {
+    if (term.type !== 'iri' || entities.has(term.value) || isLiteralRange(term, isDatatype)) return
+    if (RESERVED_NAMESPACES.some((ns) => term.value.startsWith(ns))) return
+    out.add(term.value)
+  }
+  for (const resource of model.resources) {
+    for (const statement of resource.statements) {
+      if (!CLASS_USE_PREDICATES.has(statement.p)) continue
+      consider(statement.o)
+      if (statement.p === RDFS_SUB_CLASS_OF) consider(resource.term)
+    }
+  }
+  return out
+}
+
+/** True when this statement uses (or, for rdfs:subClassOf, is made by) an undeclared class. */
+export function usesUndeclaredClass(undeclared: Set<string>, subject: Term, statement: Statement): boolean {
+  if (!CLASS_USE_PREDICATES.has(statement.p)) return false
+  if (statement.o.type === 'iri' && undeclared.has(statement.o.value)) return true
+  return statement.p === RDFS_SUB_CLASS_OF && subject.type === 'iri' && undeclared.has(subject.value)
+}
+
+// ---- Vocabulary style for new terms (UDR-0185 D4) --------------------------------------
+
+export type VocabularyStyle = 'owl' | 'rdfs'
+
+/** OWL when anything uses the owl: namespace; else RDFS when rdfs:Class / rdf:Property is declared; else OWL. */
+export function vocabularyStyle(model: OntologyModel): VocabularyStyle {
+  let rdfs = false
+  for (const resource of model.resources) {
+    for (const s of resource.statements) {
+      if (s.p.startsWith(OWL)) return 'owl'
+      if (s.p !== RDF_TYPE || s.o.type !== 'iri') continue
+      if (s.o.value.startsWith(OWL)) return 'owl'
+      if (s.o.value === RDFS_CLASS || s.o.value === RDF_PROPERTY) rdfs = true
+    }
+  }
+  return rdfs ? 'rdfs' : 'owl'
+}
+
+/** How the toolbar explains the detected style. */
+export function vocabularyStyleReason(style: VocabularyStyle, model: OntologyModel): string {
+  if (style === 'rdfs') return 'This ontology uses RDFS only (rdfs:Class / rdf:Property), so new terms are RDFS too.'
+  return model.resources.length === 0
+    ? 'New terms use OWL (owl:Class, owl:ObjectProperty, owl:DatatypeProperty).'
+    : 'This ontology uses OWL terms, so new terms are OWL too.'
+}
+
 /** How many statements use each blank node as their object (nesting is for count 1). */
 export function blankReferenceCounts(model: OntologyModel): Map<string, number> {
   const counts = new Map<string, number>()
@@ -517,10 +691,9 @@ export function scopeModel(model: OntologyModel, scope: GraphScope): OntologyMod
     const kept = resource.statements.filter((s) => inScope(s, scope))
     if (kept.length === 0) continue
     const layout = resource.statements.filter((s) => LAYOUT_PREDICATES.has(s.p) && !kept.includes(s))
-    const statements = [...kept, ...layout]
-    resources.push({ ...resource, role: roleOf(resource.term, statements), statements })
+    resources.push({ ...resource, statements: [...kept, ...layout] })
   }
-  return { ...model, resources }
+  return { ...model, resources: classifyResources(resources) }
 }
 
 /** True when the triple of statement `index` of `key` is asserted again in another graph. */
@@ -551,10 +724,19 @@ function withResource(
   if (next === null) {
     if (index >= 0) resources.splice(index, 1)
   } else {
-    const normalized = { ...next, role: roleOf(next.term, next.statements) }
+    // Reclassify only the edited resource, looking its ranges up in the model (UDR-0185 D2).
+    const isDatatype: DatatypeLookup = (k) => {
+      const found = k === key ? next : resources.find((r) => resourceKey(r) === k)
+      return found ? declaresDatatype(found.statements) : false
+    }
+    const normalized = { ...next, role: roleOf(next.term, next.statements, isDatatype) }
     if (index >= 0) resources[index] = normalized
     else resources.push(normalized)
   }
+  // A datatype declaration changed: every rdf:Property may change kind (D2).
+  const datatypeBefore = current ? declaresDatatype(current.statements) : false
+  const datatypeAfter = next ? declaresDatatype(next.statements) : false
+  if (datatypeBefore !== datatypeAfter) return { ...model, resources: classifyResources(resources) }
   return { ...model, resources }
 }
 
@@ -706,9 +888,10 @@ export function createEntity(
   label: string,
   x: number,
   y: number,
+  style: VocabularyStyle = 'owl',
 ): OntologyModel {
   return addResource(model, iri(entityIri), [
-    { p: RDF_TYPE, o: iri(OWL_CLASS) },
+    { p: RDF_TYPE, o: iri(style === 'rdfs' ? RDFS_CLASS : OWL_CLASS) },
     { p: RDFS_LABEL, o: literal(label) },
     { p: CW_X, o: literal(formatDecimal(x), { datatype: XSD_DECIMAL }) },
     { p: CW_Y, o: literal(formatDecimal(y), { datatype: XSD_DECIMAL }) },
@@ -720,9 +903,10 @@ export function createRelationship(
   relIri: string,
   source: string,
   target: string,
+  style: VocabularyStyle = 'owl',
 ): OntologyModel {
   return addResource(model, iri(relIri), [
-    { p: RDF_TYPE, o: iri(OWL_OBJECT_PROPERTY) },
+    { p: RDF_TYPE, o: iri(style === 'rdfs' ? RDF_PROPERTY : OWL_OBJECT_PROPERTY) },
     { p: RDFS_LABEL, o: literal('relates to') },
     { p: RDFS_DOMAIN, o: iri(source) },
     { p: RDFS_RANGE, o: iri(target) },
@@ -730,9 +914,14 @@ export function createRelationship(
   ])
 }
 
-export function createDatatypeProperty(model: OntologyModel, propIri: string, domain: string): OntologyModel {
+export function createDatatypeProperty(
+  model: OntologyModel,
+  propIri: string,
+  domain: string,
+  style: VocabularyStyle = 'owl',
+): OntologyModel {
   return addResource(model, iri(propIri), [
-    { p: RDF_TYPE, o: iri(OWL_DATATYPE_PROPERTY) },
+    { p: RDF_TYPE, o: iri(style === 'rdfs' ? RDF_PROPERTY : OWL_DATATYPE_PROPERTY) },
     { p: RDFS_LABEL, o: literal('property') },
     { p: RDFS_DOMAIN, o: iri(domain) },
     { p: RDFS_RANGE, o: iri(XSD_STRING) },
@@ -1090,7 +1279,7 @@ export function fromProjection(data: {
       base: data.document?.base ?? null,
       version: data.document?.version ?? null,
     },
-    resources: (data.resources ?? []).map((r) => ({ ...r, role: roleOf(r.term, r.statements) })),
+    resources: classifyResources(data.resources ?? []),
     graphs: data.graphs ?? [],
     targetGraph: null,
   }

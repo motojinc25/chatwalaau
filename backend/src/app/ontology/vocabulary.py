@@ -1,7 +1,8 @@
 """Ontology meta-vocabulary and the lossless Turtle codec (CTR-0169 v2, PRP-0198, UDR-0180).
 
 The ``cw:`` application namespace (https://chatwalaau.com/ontology#) and the
-OWL-minimal meta-vocabulary the canvas draws (UDR-0084 D4):
+OWL-minimal meta-vocabulary the canvas draws (UDR-0084 D4); the RDFS forms
+``rdfs:Class`` / ``rdf:Property`` (kind by range) are drawn too (UDR-0185 D1):
 
 - Entity          -> ``owl:Class``            (+ rdfs:label, rdfs:comment,
                                                  cw:emoji, cw:x, cw:y, cw:color)
@@ -55,6 +56,12 @@ RDFS_LABEL = f"{RDFS}label"
 RDFS_COMMENT = f"{RDFS}comment"
 RDFS_DOMAIN = f"{RDFS}domain"
 RDFS_RANGE = f"{RDFS}range"
+RDFS_CLASS = f"{RDFS}Class"
+RDFS_DATATYPE = f"{RDFS}Datatype"
+RDFS_SUB_CLASS_OF = f"{RDFS}subClassOf"
+RDFS_SUB_PROPERTY_OF = f"{RDFS}subPropertyOf"
+RDF_PROPERTY = f"{RDF}Property"
+OWL_ON_DATATYPE = f"{OWL}onDatatype"
 CW_CARDINALITY = f"{CW}cardinality"
 CW_EMOJI = f"{CW}emoji"
 CW_X = f"{CW}x"
@@ -79,11 +86,77 @@ PROJECTION_VERSION = 3
 
 # Role precedence when a subject carries several of the drawn types (punning).
 ROLES = ("entity", "object_property", "datatype_property", "other")
-_ROLE_BY_TYPE = (
-    (OWL_CLASS, "entity"),
-    (OWL_OBJECT_PROPERTY, "object_property"),
-    (OWL_DATATYPE_PROPERTY, "datatype_property"),
+
+# Ranges that make an rdf:Property an attribute (UDR-0185 D1), besides the xsd:
+# namespace and terms the model declares as datatypes.
+LITERAL_RANGES = frozenset(
+    {
+        f"{RDFS}Literal",
+        RDF_LANG_STRING,
+        RDF_DIR_LANG_STRING,
+        f"{RDF}JSON",
+        f"{RDF}HTML",
+        f"{RDF}XMLLiteral",
+        f"{RDF}PlainLiteral",
+    }
 )
+
+
+def term_key(term: dict[str, Any]) -> str:
+    """The editor's term key (`<iri>` / `_:label`), as the shared roles fixture writes it."""
+    return f"<{term['value']}>" if term["type"] == "iri" else f"_:{term['value']}"
+
+
+def declares_datatype(statements: list[dict[str, Any]]) -> bool:
+    """True for a term typed rdfs:Datatype or carrying owl:onDatatype (a datatype restriction)."""
+    for statement in statements:
+        if statement["p"] == OWL_ON_DATATYPE:
+            return True
+        o = statement["o"]
+        if statement["p"] == RDF_TYPE and o["type"] == "iri" and o["value"] == RDFS_DATATYPE:
+            return True
+    return False
+
+
+def is_literal_range(term: dict[str, Any], datatypes: set[str]) -> bool:
+    if term["type"] == "iri":
+        value = term["value"]
+        if value in LITERAL_RANGES or value.startswith(XSD):
+            return True
+    return term["type"] in ("iri", "bnode") and term_key(term) in datatypes
+
+
+def classify_role(term: dict[str, Any], statements: list[dict[str, Any]], datatypes: set[str]) -> str:
+    """The display role of a resource (UDR-0185 D1). Never stored, never written.
+
+    ``datatypes`` holds the keys of the terms the model declares as datatypes
+    (``declares_datatype``); the frontend ``roleOf`` implements the same table and
+    ``tests/fixtures/ontology_roles/cases.json`` pins both (D2).
+    """
+    if term["type"] != "iri":
+        return "other"  # a blank-node owl:Class is a class expression: shown nested
+    types = {s["o"]["value"] for s in statements if s["p"] == RDF_TYPE and s["o"]["type"] == "iri"}
+    if OWL_CLASS in types or (RDFS_CLASS in types and RDFS_DATATYPE not in types):
+        return "entity"
+    if OWL_OBJECT_PROPERTY in types:
+        return "object_property"
+    if OWL_DATATYPE_PROPERTY in types:
+        return "datatype_property"
+    if RDF_PROPERTY in types:
+        ranges = [s["o"] for s in statements if s["p"] == RDFS_RANGE]
+        if not ranges:
+            return "other"
+        if all(is_literal_range(r, datatypes) for r in ranges):
+            return "datatype_property"
+        return "object_property"
+    return "other"
+
+
+def assign_roles(resources: list[dict[str, Any]]) -> None:
+    """Set ``role`` on every resource of a projection (in place)."""
+    datatypes = {term_key(r["term"]) for r in resources if declares_datatype(r["statements"])}
+    for resource in resources:
+        resource["role"] = classify_role(resource["term"], resource["statements"], datatypes)
 
 
 def base_iri_for(ontology_id: str) -> str:
@@ -423,7 +496,6 @@ def quads_to_projection(quads: list[Any], document: dict[str, Any]) -> dict[str,
     carries ``g``; ``graphs`` lists the named graphs in file order.
     """
     resources: dict[tuple[str, str], dict[str, Any]] = {}
-    types: dict[tuple[str, str], set[str]] = {}
     diagnostics: list[dict[str, Any]] = []
     graphs: dict[str, dict[str, Any]] = {}
     seen: set[str] = set()
@@ -447,21 +519,13 @@ def quads_to_projection(quads: list[Any], document: dict[str, Any]) -> dict[str,
             graphs.setdefault(str(quad.graph_name), graph)
             statement["g"] = graph
         resource["statements"].append(statement)
-        if predicate == RDF_TYPE and obj["type"] == "iri":
-            types.setdefault(key, set()).add(obj["value"])
         before = len(diagnostics)
         _diagnose(obj, subject, predicate, diagnostics)
         if "g" in statement:
             for item in diagnostics[before:]:
                 item["g"] = statement["g"]
 
-    for key, resource in resources.items():
-        if resource["term"]["type"] != "iri":
-            continue  # a blank-node owl:Class is a class expression: shown nested
-        for type_iri, role in _ROLE_BY_TYPE:
-            if type_iri in types.get(key, set()):
-                resource["role"] = role
-                break
+    assign_roles(list(resources.values()))
 
     ordered = sorted(
         resources.values(),
