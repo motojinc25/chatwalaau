@@ -945,6 +945,102 @@ export function setIsKey(model: OntologyModel, propIri: string, on: boolean): On
   )
 }
 
+// ---- Property characteristics (UDR-0186 D3 / D4) -------------------------------------
+
+/** The seven OWL property characteristics, each one `p rdf:type <iri>` statement. */
+export const CHARACTERISTICS = [
+  { key: 'functional', label: 'Functional', iri: `${OWL}FunctionalProperty` },
+  { key: 'inverseFunctional', label: 'Inverse functional', iri: `${OWL}InverseFunctionalProperty` },
+  { key: 'transitive', label: 'Transitive', iri: `${OWL}TransitiveProperty` },
+  { key: 'symmetric', label: 'Symmetric', iri: `${OWL}SymmetricProperty` },
+  { key: 'asymmetric', label: 'Asymmetric', iri: `${OWL}AsymmetricProperty` },
+  { key: 'reflexive', label: 'Reflexive', iri: `${OWL}ReflexiveProperty` },
+  { key: 'irreflexive', label: 'Irreflexive', iri: `${OWL}IrreflexiveProperty` },
+] as const
+
+export type Characteristic = (typeof CHARACTERISTICS)[number]['key']
+
+function characteristicIri(characteristic: Characteristic): string {
+  return (CHARACTERISTICS.find((c) => c.key === characteristic) as { iri: string }).iri
+}
+
+function isCharacteristicStatement(statement: Statement, typeIri: string): boolean {
+  return statement.p === RDF_TYPE && statement.o.type === 'iri' && statement.o.value === typeIri
+}
+
+/** The characteristics a property has: its rdf:type statement exists in any graph. */
+export function propertyCharacteristics(resource: Resource | undefined): Set<Characteristic> {
+  const out = new Set<Characteristic>()
+  if (!resource) return out
+  for (const c of CHARACTERISTICS) {
+    if (resource.statements.some((s) => isCharacteristicStatement(s, c.iri))) out.add(c.key)
+  }
+  return out
+}
+
+/** The graphs holding a characteristic's statements (null = the default graph), for the tooltip. */
+export function characteristicGraphs(
+  resource: Resource | undefined,
+  characteristic: Characteristic,
+): (GraphTerm | null)[] {
+  if (!resource) return []
+  const typeIri = characteristicIri(characteristic)
+  return resource.statements.filter((s) => isCharacteristicStatement(s, typeIri)).map((s) => s.g ?? null)
+}
+
+/**
+ * Turn a characteristic on (add ONE `rdf:type` statement in the target graph) or off
+ * (remove that characteristic's `rdf:type` statements in every graph). Nothing else
+ * changes; roles are unaffected (UDR-0186 D3).
+ */
+export function setCharacteristic(
+  model: OntologyModel,
+  propIri: string,
+  characteristic: Characteristic,
+  on: boolean,
+): OntologyModel {
+  const key = termKey(iri(propIri))
+  const resource = findResource(model, key)
+  if (!resource) return model
+  const typeIri = characteristicIri(characteristic)
+  const has = resource.statements.some((s) => isCharacteristicStatement(s, typeIri))
+  if (on) {
+    if (has) return model
+    return applyStatementEdit(model, key, { index: null, statement: { p: RDF_TYPE, o: iri(typeIri) } })
+  }
+  if (!has) return model
+  return withResource(model, key, (r) =>
+    r ? { ...r, statements: r.statements.filter((s) => !isCharacteristicStatement(s, typeIri)) } : null,
+  )
+}
+
+/** Notices for a set of characteristics: contradictions and OWL 2 DL limits; never a refusal (D4). */
+export function characteristicNotices(set: Set<Characteristic>): string[] {
+  const notices: string[] = []
+  if (set.has('symmetric') && set.has('asymmetric')) {
+    notices.push('Symmetric and Asymmetric contradict each other.')
+  }
+  if (set.has('reflexive') && set.has('irreflexive')) {
+    notices.push('Reflexive and Irreflexive contradict each other.')
+  }
+  if (set.has('transitive')) {
+    const limited = CHARACTERISTICS.filter(
+      (c) =>
+        (c.key === 'functional' ||
+          c.key === 'inverseFunctional' ||
+          c.key === 'asymmetric' ||
+          c.key === 'irreflexive') &&
+        set.has(c.key),
+    ).map((c) => c.label)
+    if (limited.length > 0) {
+      notices.push(
+        `OWL 2 DL does not allow a Transitive property to also be ${limited.join(', ')}: reasoners may reject this.`,
+      )
+    }
+  }
+  return notices
+}
+
 /** Remove a datatype property from ONE entity: drop that domain, or the property when it was the last one. */
 export function removePropertyFromEntity(model: OntologyModel, propIri: string, entityIri: string): OntologyModel {
   const key = termKey(iri(propIri))

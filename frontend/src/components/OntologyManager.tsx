@@ -106,9 +106,13 @@ import {
   applyStatementEdit,
   assertedElsewhere,
   CARDINALITIES,
+  CHARACTERISTICS,
+  type Characteristic,
   CW_CARDINALITY,
   CW_COLOR,
   CW_EMOJI,
+  characteristicGraphs,
+  characteristicNotices,
   classHierarchy,
   compactIri,
   createDatatypeProperty,
@@ -137,6 +141,7 @@ import {
   type OntologyDocument,
   type OntologyModel,
   otherLiterals,
+  propertyCharacteristics,
   type QuadStatement,
   RDF_TYPE,
   RDFS_COMMENT,
@@ -145,6 +150,7 @@ import {
   RDFS_RANGE,
   RDFS_SUB_PROPERTY_OF,
   type RelationshipEdgeView,
+  type Resource,
   reifiersOf,
   relationshipEdges,
   removePropertyFromEntity,
@@ -157,6 +163,7 @@ import {
   type StatementInput,
   saveBase,
   scopeModel,
+  setCharacteristic,
   setIsKey,
   setPosition,
   subclassEdges,
@@ -773,6 +780,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search' | 'history'>('detail')
   // Deleted ontologies (PRP-0202 / UDR-0184 D6).
   const [trashOpen, setTrashOpen] = useState(false)
+  // A characteristic turned on in an RDFS-only ontology waits for confirmation (PRP-0204 Q1).
+  const [owlConfirm, setOwlConfirm] = useState<{ iri: string; characteristic: Characteristic } | null>(null)
   const [sparql, setSparql] = useState(DEFAULT_SPARQL)
   const [nlQuestion, setNlQuestion] = useState('')
   const [queryResult, setQueryResult] = useState<QueryResult | null>(null)
@@ -1327,6 +1336,28 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     },
     [updateModel, keyOf],
   )
+
+  /**
+   * Toggle a property characteristic (UDR-0186 D3). Turning one on in an RDFS-only
+   * ontology adds OWL vocabulary, which makes later terms OWL (UDR-0185 D4): ask once
+   * first (PRP-0204 Q1). Once added, the ontology is OWL-styled and no longer asks.
+   */
+  const toggleCharacteristic = useCallback(
+    (value: string, characteristic: Characteristic, on: boolean) => {
+      if (on && vocabStyle === 'rdfs') {
+        setOwlConfirm({ iri: value, characteristic })
+        return
+      }
+      updateModel((prev) => setCharacteristic(prev, value, characteristic, on))
+    },
+    [updateModel, vocabStyle],
+  )
+
+  const confirmOwlCharacteristic = useCallback(() => {
+    const target = owlConfirm
+    setOwlConfirm(null)
+    if (target) updateModel((prev) => setCharacteristic(prev, target.iri, target.characteristic, true))
+  }, [owlConfirm, updateModel])
 
   /** Remove the one rdfs:subClassOf statement an "is a" edge draws (UDR-0185 D3). */
   const removeIsa = useCallback(
@@ -2006,6 +2037,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                           onDeleteRelationship={deleteRelationship}
                           onSelectRelationship={(value) => setSelection({ kind: 'relationship', iri: value })}
                           onSelectResource={selectResource}
+                          onToggleCharacteristic={toggleCharacteristic}
                         />
                       )
                     ) : rightTab === 'history' ? (
@@ -2252,6 +2284,26 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={confirmDeleteEntity}>Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* A characteristic in an RDFS-only ontology adds OWL vocabulary: ask once (PRP-0204 Q1). */}
+      <AlertDialog open={owlConfirm !== null} onOpenChange={(o) => !o && setOwlConfirm(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Add OWL vocabulary?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This ontology is written in RDFS only. Turning on{' '}
+              {CHARACTERISTICS.find((c) => c.key === owlConfirm?.characteristic)?.label ?? 'this characteristic'} adds
+              the statement rdf:type owl:
+              {CHARACTERISTICS.find((c) => c.key === owlConfirm?.characteristic)?.iri.split('#')[1] ?? ''}. After that,
+              new entities, relationships and attributes are created as OWL terms. Continue?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmOwlCharacteristic}>Add OWL vocabulary</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -2676,6 +2728,56 @@ function IsaDetail(props: {
   )
 }
 
+/**
+ * The OWL property characteristics of a relationship as toggles (UDR-0186 D3): each
+ * chip is one `rdf:type` statement. Contradictions and OWL 2 DL limits are notices,
+ * never refusals (D4).
+ */
+function CharacteristicsBlock(props: {
+  resource: Resource
+  readOnly: boolean
+  graphName: (g: GraphTerm) => string
+  showGraphs: boolean
+  onToggle: (characteristic: Characteristic, on: boolean) => void
+}) {
+  const set = propertyCharacteristics(props.resource)
+  const notices = characteristicNotices(set)
+  return (
+    <div>
+      <span className={fieldLabel}>Characteristics</span>
+      <div className="flex flex-wrap gap-1">
+        {CHARACTERISTICS.map((c) => {
+          const on = set.has(c.key)
+          const graphs = props.showGraphs
+            ? characteristicGraphs(props.resource, c.key).map((g) => (g ? props.graphName(g) : 'default graph'))
+            : []
+          return (
+            <button
+              key={c.key}
+              type="button"
+              aria-pressed={on}
+              disabled={props.readOnly}
+              className={cn(
+                'rounded-full border px-2 py-0.5 text-[11px]',
+                on ? 'border-blue-500 bg-blue-50 text-blue-700' : 'text-zinc-500 hover:bg-zinc-50',
+              )}
+              title={`owl:${c.iri.slice(c.iri.indexOf('#') + 1)}${graphs.length > 0 ? ` (in ${graphs.join(', ')})` : ''}`}
+              onClick={() => props.onToggle(c.key, !on)}>
+              {c.label}
+            </button>
+          )
+        })}
+      </div>
+      {notices.map((notice) => (
+        <p key={notice} className="mt-1 flex items-start gap-1 text-[10px] text-amber-700">
+          <TriangleAlert className="mt-px h-3 w-3 shrink-0" />
+          {notice}
+        </p>
+      ))}
+    </div>
+  )
+}
+
 /** Clickable IRIs (superclasses, subclasses, super-properties) for the Detail forms (UDR-0185 D6). */
 function HierarchyLinks(props: {
   label: string
@@ -2723,6 +2825,7 @@ function DetailPane(props: {
   onDeleteRelationship: (iri: string) => void
   onSelectRelationship: (iri: string) => void
   onSelectResource: (key: string) => void
+  onToggleCharacteristic: (propertyIri: string, characteristic: Characteristic, on: boolean) => void
 }) {
   const { entity, model, inspector } = props
   const readOnly = inspector.readOnly
@@ -3014,6 +3117,13 @@ function DetailPane(props: {
             ))}
           </select>
         </div>
+        <CharacteristicsBlock
+          resource={resource}
+          readOnly={readOnly}
+          graphName={(g) => graphLabel(g, model, model.document.prefixes)}
+          showGraphs={(inspector.graphs ?? []).length > 0}
+          onToggle={(characteristic, on) => props.onToggleCharacteristic(value, characteristic, on)}
+        />
         <div>
           <label htmlFor="rel-comment" className={fieldLabel}>
             Description
