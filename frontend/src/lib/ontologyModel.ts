@@ -645,14 +645,17 @@ export function canvasResourceKeys(model: OntologyModel): Set<string> {
 /**
  * The resources listed in the inspector's Resources tab (UDR-0180 D9): everything
  * the canvas does not draw, except blank nodes referenced exactly once, which are
- * shown nested where they are used.
+ * shown nested where they are used. The tab passes `individuals: false`: individuals
+ * live in the Data view (UDR-0187 D8, UDR-0180 amendment A4).
  */
-export function inspectorResources(model: OntologyModel): Resource[] {
+export function inspectorResources(model: OntologyModel, options: { individuals?: boolean } = {}): Resource[] {
   const drawn = canvasResourceKeys(model)
   const refs = blankReferenceCounts(model)
+  const withIndividuals = options.individuals ?? true
   return model.resources.filter((r) => {
     const key = resourceKey(r)
     if (drawn.has(key)) return false
+    if (!withIndividuals && isIndividual(r)) return false
     return !(r.term.type === 'bnode' && refs.get(key) === 1)
   })
 }
@@ -1379,4 +1382,383 @@ export function fromProjection(data: {
     graphs: data.graphs ?? [],
     targetGraph: null,
   }
+}
+
+// ---- Individuals: the Data view (UDR-0187) -------------------------------------------
+
+export const OWL_NAMED_INDIVIDUAL = `${OWL}NamedIndividual`
+const OWL_UNION_OF = `${OWL}unionOf`
+
+function reservedIri(value: string): boolean {
+  return RESERVED_NAMESPACES.some((ns) => value.startsWith(ns))
+}
+
+/**
+ * The classes an individual is asserted to belong to: its `rdf:type` IRIs outside the
+ * rdf / rdfs / owl / xsd namespaces (UDR-0187 D1). No inference.
+ */
+export function individualClasses(resource: Resource): string[] {
+  const out: string[] = []
+  for (const s of resource.statements) {
+    if (s.p !== RDF_TYPE || s.o.type !== 'iri') continue
+    const value = s.o.value
+    if (reservedIri(value) || out.includes(value)) continue
+    out.push(value)
+  }
+  return out
+}
+
+/** An individual: typed by a class outside the reserved namespaces, or by owl:NamedIndividual (D1). */
+export function isIndividual(resource: Resource): boolean {
+  return resource.statements.some(
+    (s) => s.p === RDF_TYPE && s.o.type === 'iri' && (s.o.value === OWL_NAMED_INDIVIDUAL || !reservedIri(s.o.value)),
+  )
+}
+
+export interface IndividualIndex {
+  /** Class IRI -> its individuals (direct `rdf:type` only), in model order. */
+  members: Map<string, Resource[]>
+  /** Classes used as a type that the ontology does not declare (the "Not declared" group), sorted. */
+  undeclared: string[]
+  /** Individuals typed only `owl:NamedIndividual` (the "No class" group). */
+  noClass: Resource[]
+  /** Every individual's key. */
+  keys: Set<string>
+}
+
+/** One pass over the model: who belongs to which class (memoize per model; UDR-0187 D9). */
+export function individualIndex(model: OntologyModel): IndividualIndex {
+  const entities = entityIris(model)
+  const members = new Map<string, Resource[]>()
+  const undeclared = new Set<string>()
+  const noClass: Resource[] = []
+  const keys = new Set<string>()
+  for (const resource of model.resources) {
+    if (!isIndividual(resource)) continue
+    keys.add(resourceKey(resource))
+    const classes = individualClasses(resource)
+    if (classes.length === 0) noClass.push(resource)
+    for (const cls of classes) {
+      const list = members.get(cls)
+      if (list) list.push(resource)
+      else members.set(cls, [resource])
+      if (!entities.has(cls)) undeclared.add(cls)
+    }
+  }
+  return { members, undeclared: [...undeclared].sort(), noClass, keys }
+}
+
+export interface ClassTree {
+  /** Entities with no entity superclass, plus one entry per otherwise unreachable cycle. */
+  roots: string[]
+  /** Entity -> its entity subclasses (asserted IRI rdfs:subClassOf), sorted. */
+  children: Map<string, string[]>
+}
+
+/**
+ * The Data view's class tree (UDR-0187 D2): asserted IRI `rdfs:subClassOf` between
+ * entities. A class with several superclasses appears under each; the renderer
+ * stops at a class already on the current path, so cycles are cut.
+ */
+export function classTree(model: OntologyModel): ClassTree {
+  const entities = entityIris(model)
+  const children = new Map<string, string[]>()
+  const hasSuper = new Set<string>()
+  for (const resource of model.resources) {
+    if (resource.role !== 'entity' || resource.term.type !== 'iri') continue
+    const sub = resource.term.value
+    for (const sup of new Set(iriObjects(resource, RDFS_SUB_CLASS_OF))) {
+      if (!entities.has(sup) || sup === sub) continue
+      hasSuper.add(sub)
+      const list = children.get(sup)
+      if (!list) children.set(sup, [sub])
+      else if (!list.includes(sub)) list.push(sub)
+    }
+  }
+  for (const list of children.values()) list.sort()
+  const sorted = [...entities].sort()
+  const roots = sorted.filter((e) => !hasSuper.has(e))
+  // A cycle with no way in from a root would vanish: its first class becomes a root.
+  const reached = new Set<string>()
+  const visit = (start: string) => {
+    const stack = [start]
+    while (stack.length > 0) {
+      const cls = stack.pop() as string
+      if (reached.has(cls)) continue
+      reached.add(cls)
+      for (const child of children.get(cls) ?? []) stack.push(child)
+    }
+  }
+  for (const root of roots) visit(root)
+  for (const cls of sorted) {
+    if (reached.has(cls)) continue
+    roots.push(cls)
+    visit(cls)
+  }
+  return { roots, children }
+}
+
+export interface MemberRow {
+  resource: Resource
+  /** The class the row is listed for (the selected class, or the subclass it came from). */
+  cls: string
+}
+
+/**
+ * The rows of a class's table: its individuals, plus (when `includeSubclasses`) those
+ * of every asserted subclass, each individual once. Display only: nothing is inferred
+ * or stored (UDR-0187 D2).
+ */
+export function classMembers(
+  index: IndividualIndex,
+  tree: ClassTree,
+  cls: string,
+  includeSubclasses: boolean,
+): MemberRow[] {
+  const rows: MemberRow[] = []
+  const seen = new Set<string>()
+  const visited = new Set<string>()
+  const queue = [cls]
+  while (queue.length > 0) {
+    const current = queue.shift() as string
+    if (visited.has(current)) continue
+    visited.add(current)
+    for (const resource of index.members.get(current) ?? []) {
+      const key = resourceKey(resource)
+      if (seen.has(key)) continue
+      seen.add(key)
+      rows.push({ resource, cls: current })
+    }
+    if (includeSubclasses) queue.push(...(tree.children.get(current) ?? []))
+  }
+  return rows
+}
+
+/** The classes and all their asserted IRI superclasses (cycle-safe). */
+export function superclassClosure(model: OntologyModel, classes: string[]): Set<string> {
+  const out = new Set<string>()
+  const stack = [...classes]
+  while (stack.length > 0) {
+    const cls = stack.pop() as string
+    if (out.has(cls)) continue
+    out.add(cls)
+    stack.push(...iriObjects(findResource(model, termKey(iri(cls))), RDFS_SUB_CLASS_OF))
+  }
+  return out
+}
+
+export interface DataColumn {
+  predicate: string
+  label: string
+  /** Declared by the schema (a domain covers the class); false = only used by the data. */
+  inSchema: boolean
+  /** The property's single IRI range, if any (drives the input). */
+  range: string | null
+  /** Values are resources (an object property, or a class range), not literals. */
+  objectValued: boolean
+  functional: boolean
+}
+
+const DATA_HIDDEN_PREDICATES = new Set([RDF_TYPE, RDFS_LABEL])
+
+function domainCovers(model: OntologyModel, domain: Term, classes: Set<string>): boolean {
+  if (domain.type === 'iri') return classes.has(domain.value)
+  if (domain.type !== 'bnode') return false
+  const union = findResource(model, termKey(domain))?.statements.find((s) => s.p === OWL_UNION_OF)
+  if (!union) return false
+  return (listItems(model, union.o) ?? []).some((t) => t.type === 'iri' && classes.has(t.value))
+}
+
+function columnFor(
+  resource: Resource | undefined,
+  predicate: string,
+  inSchema: boolean,
+  isDatatype: DatatypeLookup,
+): DataColumn {
+  const ranges = resource ? resource.statements.filter((s) => s.p === RDFS_RANGE).map((s) => s.o) : []
+  const range = ranges.length === 1 && ranges[0].type === 'iri' ? ranges[0].value : null
+  const objectValued =
+    resource?.role === 'object_property' ||
+    (resource?.role !== 'datatype_property' && range !== null && !isLiteralRange(iri(range), isDatatype))
+  return {
+    predicate,
+    label: displayLiteral(resource, RDFS_LABEL) || localName(predicate),
+    inSchema,
+    range,
+    objectValued,
+    functional: propertyCharacteristics(resource).has('functional'),
+  }
+}
+
+/**
+ * The table's columns after the IRI and label columns (UDR-0187 D3): first the
+ * properties whose rdfs:domain is one of `classes` or an asserted superclass (an
+ * owl:unionOf domain counts when it lists one), then every other predicate the rows
+ * use, marked not in schema. rdf:type, rdfs:label and the cw: layout terms are not columns.
+ */
+export function dataColumns(model: OntologyModel, classes: string[], rows: Resource[]): DataColumn[] {
+  const covered = superclassClosure(model, classes)
+  const datatypes = new Set(model.resources.filter((r) => declaresDatatype(r.statements)).map(resourceKey))
+  const isDatatype: DatatypeLookup = (k) => datatypes.has(k)
+  const schema: DataColumn[] = []
+  const inSchema = new Set<string>()
+  for (const resource of model.resources) {
+    if (resource.term.type !== 'iri') continue
+    const predicate = resource.term.value
+    if (DATA_HIDDEN_PREDICATES.has(predicate) || inSchema.has(predicate)) continue
+    const domains = resource.statements.filter((s) => s.p === RDFS_DOMAIN).map((s) => s.o)
+    if (!domains.some((d) => domainCovers(model, d, covered))) continue
+    inSchema.add(predicate)
+    schema.push(columnFor(resource, predicate, true, isDatatype))
+  }
+  const used: DataColumn[] = []
+  const seen = new Set<string>()
+  for (const row of rows) {
+    for (const s of row.statements) {
+      if (DATA_HIDDEN_PREDICATES.has(s.p) || s.p.startsWith(CW) || inSchema.has(s.p) || seen.has(s.p)) continue
+      seen.add(s.p)
+      used.push(columnFor(findResource(model, termKey(iri(s.p))), s.p, false, isDatatype))
+    }
+  }
+  const byLabel = (a: DataColumn, b: DataColumn) =>
+    a.label.localeCompare(b.label) || a.predicate.localeCompare(b.predicate)
+  return [...schema.sort(byLabel), ...used.sort(byLabel)]
+}
+
+export interface CellValue {
+  /** The statement's index in its resource (the edit address). */
+  index: number
+  term: Term
+  g: GraphTerm | null
+}
+
+/** Every value of `predicate` on the individual, one per statement (UDR-0187 D4). */
+export function cellValues(resource: Resource | undefined, predicate: string): CellValue[] {
+  if (!resource) return []
+  const out: CellValue[] = []
+  resource.statements.forEach((s, index) => {
+    if (s.p === predicate) out.push({ index, term: s.o, g: s.g ?? null })
+  })
+  return out
+}
+
+/** The same term with a new lexical form (a literal keeps datatype, language and direction) or a new IRI. */
+export function relexical(term: Term, text: string): Term {
+  if (term.type === 'literal') return { ...term, value: text }
+  if (term.type === 'iri') return iri(text)
+  return term
+}
+
+/** Add one value: one statement in the target graph (D4). */
+export function addValue(model: OntologyModel, key: string, predicate: string, term: Term): OntologyModel {
+  return applyStatementEdit(model, key, { index: null, statement: { p: predicate, o: term } })
+}
+
+/** Remove one value: that statement only (D4). */
+export function removeValue(model: OntologyModel, key: string, index: number): OntologyModel {
+  return applyStatementEdit(model, key, { index, statement: null })
+}
+
+/** Change one value: that statement, staying in its own graph (D4). */
+export function replaceValue(model: OntologyModel, key: string, index: number, term: Term): OntologyModel {
+  const statement = findResource(model, key)?.statements[index]
+  if (!statement || termEquals(statement.o, term)) return model
+  return applyStatementEdit(model, key, { index, statement: { p: statement.p, o: term } })
+}
+
+const DOUBLE_FORM = /^([+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?|[+-]?INF|NaN)$/
+const LEXICAL_FORMS: Record<string, RegExp> = {
+  [`${XSD}integer`]: /^[+-]?\d+$/,
+  [`${XSD}nonNegativeInteger`]: /^\+?\d+$/,
+  [`${XSD}decimal`]: /^[+-]?(\d+(\.\d*)?|\.\d+)$/,
+  [`${XSD}double`]: DOUBLE_FORM,
+  [`${XSD}float`]: DOUBLE_FORM,
+  [`${XSD}boolean`]: /^(true|false|1|0)$/,
+  [`${XSD}date`]: /^-?\d{4,}-\d{2}-\d{2}(Z|[+-]\d{2}:\d{2})?$/,
+  [`${XSD}dateTime`]: /^-?\d{4,}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/,
+}
+
+/** A notice when a literal's lexical form does not fit its datatype; never a refusal (UDR-0180 D8). */
+export function lexicalNotice(term: Term): string | null {
+  if (term.type !== 'literal') return null
+  const form = LEXICAL_FORMS[term.datatype]
+  if (!form || form.test(term.value)) return null
+  return `"${term.value}" is not a valid ${localName(term.datatype)}; it is kept as written.`
+}
+
+/** A notice when a Functional property holds more than one value (UDR-0187 D4). */
+export function functionalNotice(column: DataColumn, count: number): string | null {
+  if (!column.functional || count <= 1) return null
+  return `${column.label} is Functional but has ${count} values.`
+}
+
+/**
+ * Create an individual (UDR-0187 D6): exactly `<iri> rdf:type <class>` in the target
+ * graph, plus `rdfs:label` only when a label is given. Never owl:NamedIndividual.
+ */
+export function createIndividual(model: OntologyModel, individualIri: string, cls: string, label = ''): OntologyModel {
+  const statements: StatementInput[] = [{ p: RDF_TYPE, o: iri(cls) }]
+  if (label.trim()) statements.push({ p: RDFS_LABEL, o: literal(label.trim()) })
+  return addResource(model, iri(individualIri), statements)
+}
+
+function mentionsTerm(term: Term, target: Term): boolean {
+  if (term.type === 'triple') return mentionsTerm(term.s, target) || mentionsTerm(term.o, target)
+  return termEquals(term, target)
+}
+
+export interface IndividualReferences {
+  /** The individual's own statements (all graphs). */
+  own: number
+  /** Statements of other resources whose object is the individual or a triple term mentioning it. */
+  references: number
+  /** How many other resources hold those statements. */
+  resources: number
+  /** Reifiers that lose their rdf:reifies link but keep their other statements (annotations). */
+  keptAnnotations: number
+}
+
+/** What deleting an individual removes (UDR-0187 D7) -- the confirmation's counts. */
+export function individualReferences(model: OntologyModel, key: string): IndividualReferences {
+  const resource = findResource(model, key)
+  const result: IndividualReferences = {
+    own: resource?.statements.length ?? 0,
+    references: 0,
+    resources: 0,
+    keptAnnotations: 0,
+  }
+  if (!resource) return result
+  for (const other of model.resources) {
+    if (resourceKey(other) === key) continue
+    const hits = other.statements.filter((s) => mentionsTerm(s.o, resource.term))
+    if (hits.length === 0) continue
+    result.references += hits.length
+    result.resources += 1
+    if (hits.some((s) => s.p === RDF_REIFIES) && hits.length < other.statements.length) result.keptAnnotations += 1
+  }
+  return result
+}
+
+/**
+ * Delete an individual (UDR-0187 D7): its own statements and every statement of
+ * another resource whose object is it or a triple term mentioning it, in all graphs.
+ * A reifier keeps its other statements (its annotations); a resource left with no
+ * statement disappears.
+ */
+export function deleteIndividual(model: OntologyModel, key: string): OntologyModel {
+  const resource = findResource(model, key)
+  if (!resource) return model
+  let changed = false
+  const resources: Resource[] = []
+  for (const other of model.resources) {
+    if (resourceKey(other) === key) continue
+    const kept = other.statements.filter((s) => !mentionsTerm(s.o, resource.term))
+    if (kept.length === other.statements.length) {
+      resources.push(other)
+      continue
+    }
+    changed = true
+    if (kept.length > 0) resources.push({ ...other, statements: kept })
+  }
+  return { ...model, resources: changed ? classifyResources(resources) : resources }
 }

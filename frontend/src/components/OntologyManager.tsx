@@ -66,6 +66,7 @@ import {
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
+import { type DataGroup, IndividualDetail, IndividualsView, individualLabel } from '@/components/OntologyDataView'
 import { DeletedOntologiesDialog, HistoryPanel } from '@/components/OntologyHistory'
 import {
   AllStatements,
@@ -114,12 +115,15 @@ import {
   characteristicGraphs,
   characteristicNotices,
   classHierarchy,
+  classTree,
   compactIri,
   createDatatypeProperty,
   createEntity,
+  createIndividual,
   createRelationship,
   type Diagnostic,
   deleteEntity as deleteEntityFromModel,
+  deleteIndividual,
   diffStatements,
   displayedLiteralEdit,
   displayLiteral,
@@ -134,6 +138,9 @@ import {
   type GraphScope,
   type GraphTerm,
   graphsOf,
+  type IndividualReferences,
+  individualIndex,
+  individualReferences,
   iriObjects,
   iri as iriTerm,
   localName,
@@ -234,6 +241,7 @@ type Selection =
   | { kind: 'entity' | 'relationship'; iri: string }
   | { kind: 'resource'; key: string }
   | { kind: 'isa'; source: string; target: string }
+  | { kind: 'individual'; key: string }
 
 type LinkMode = 'relationship' | 'isa'
 
@@ -254,6 +262,56 @@ function writeShowIsa(show: boolean): void {
   } catch {
     // storage blocked: the choice lasts for this session only
   }
+}
+
+/** Schema = the canvas (TBox); Data = individuals per class (ABox, UDR-0187 D2). */
+type ManagerView = 'schema' | 'data'
+
+// Per-browser view preference, never saved in the ontology (UDR-0187 D2).
+const VIEW_STORAGE_KEY = 'chatwalaau.ontology.view'
+
+function readView(): ManagerView {
+  try {
+    return localStorage.getItem(VIEW_STORAGE_KEY) === 'data' ? 'data' : 'schema'
+  } catch {
+    return 'schema'
+  }
+}
+
+function writeView(view: ManagerView): void {
+  try {
+    localStorage.setItem(VIEW_STORAGE_KEY, view)
+  } catch {
+    // storage blocked: the choice lasts for this session only
+  }
+}
+
+/** The Schema | Data switch, shown in both views' toolbars. */
+function ViewSwitch(props: { view: ManagerView; onChange: (view: ManagerView) => void; disabled: boolean }) {
+  return (
+    <fieldset className="m-0 flex shrink-0 overflow-hidden rounded-md border p-0 text-xs">
+      <legend className="sr-only">View</legend>
+      {(['schema', 'data'] as const).map((value) => (
+        <button
+          key={value}
+          type="button"
+          aria-pressed={props.view === value}
+          disabled={props.disabled}
+          title={
+            value === 'schema'
+              ? 'Schema: classes, properties and "is a" on the canvas'
+              : 'Data: the individuals of each class, as a table'
+          }
+          className={cn(
+            'h-7 px-2 font-medium',
+            props.view === value ? 'bg-zinc-800 text-white' : 'bg-white text-zinc-600 hover:bg-zinc-100',
+          )}
+          onClick={() => props.onChange(value)}>
+          {value === 'schema' ? 'Schema' : 'Data'}
+        </button>
+      ))}
+    </fieldset>
+  )
 }
 
 /** An edit waiting for the "follow the reifiers?" answer (PRP-0198 Q4). */
@@ -374,6 +432,10 @@ interface EntityNodeData extends Record<string, unknown> {
   related: boolean
   dimmed: boolean
   matched: boolean
+  /** Direct individuals of this class (UDR-0187 D2); the badge opens the Data view. */
+  individualCount: number
+  onOpenData: (cls: string) => void
+  iri: string
 }
 
 type EntityFlowNode = Node<EntityNodeData, 'entity'>
@@ -426,6 +488,19 @@ const EntityNode = memo(function EntityNode({ data }: NodeProps<EntityFlowNode>)
           title={`${data.keyCount} key propert${data.keyCount === 1 ? 'y' : 'ies'}`}>
           <KeyRound className="h-3 w-3" />
         </span>
+      )}
+      {data.individualCount > 0 && (
+        <button
+          type="button"
+          className="nodrag nopan absolute -bottom-1.5 -left-2 flex h-5 min-w-5 items-center justify-center rounded-full border border-emerald-300 bg-emerald-50 px-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100"
+          title={`${data.individualCount} individual${data.individualCount === 1 ? '' : 's'}: open in the Data view`}
+          aria-label={`Open the ${data.individualCount} individuals of ${data.label} in the Data view`}
+          onClick={(e) => {
+            e.stopPropagation()
+            data.onOpenData(data.iri)
+          }}>
+          x{data.individualCount}
+        </button>
       )}
       {/* Label below the circle (kept outside the shape per the design spec). */}
       <span className="pointer-events-none absolute left-1/2 top-full mt-1.5 max-w-[130px] -translate-x-1/2 truncate text-center text-xs font-medium text-zinc-700">
@@ -557,6 +632,60 @@ function scopeKey(scope: GraphScope): string {
   return scope === 'all' ? '*' : scope === 'default' ? '' : termKey(scope)
 }
 
+/** The graph selector (or the "add a named graph" button) shared by both views' toolbars. */
+function GraphScopeControl(props: {
+  graphs: GraphTerm[]
+  graphName: (g: GraphTerm) => string
+  scope: GraphScope
+  onScopeChange: (scope: GraphScope) => void
+  onNewGraph: () => void
+  readOnly: boolean
+  disabled: boolean
+}) {
+  const iconButton = 'h-7 w-7 text-zinc-600'
+  return props.graphs.length > 0 ? (
+    <select
+      className="h-7 max-w-[200px] rounded-md border bg-white px-1 text-xs"
+      aria-label="Graph"
+      title="Which graph the canvas and the search show; new statements go into the selected graph"
+      value={scopeKey(props.scope)}
+      disabled={props.disabled}
+      onChange={(e) => {
+        const value = e.target.value
+        if (value === '+') {
+          props.onNewGraph()
+          return
+        }
+        if (value === '*') props.onScopeChange('all')
+        else if (value === '') props.onScopeChange('default')
+        else {
+          const g = props.graphs.find((item) => termKey(item) === value)
+          if (g) props.onScopeChange(g)
+        }
+      }}>
+      <option value="*">All graphs</option>
+      <option value="">Default graph</option>
+      {props.graphs.map((g) => (
+        <option key={termKey(g)} value={termKey(g)}>
+          {props.graphName(g)}
+        </option>
+      ))}
+      {!props.readOnly && <option value="+">New graph...</option>}
+    </select>
+  ) : (
+    <Button
+      variant="ghost"
+      size="icon"
+      className={iconButton}
+      onClick={props.onNewGraph}
+      disabled={props.disabled || props.readOnly}
+      aria-label="Add a named graph"
+      title="Add a named graph (the ontology becomes a dataset, saved as TriG)">
+      <Layers className="h-4 w-4" />
+    </Button>
+  )
+}
+
 function CanvasToolbar(props: {
   onAddEntity: () => void
   onResetLayout: () => void
@@ -578,11 +707,15 @@ function CanvasToolbar(props: {
   /** The detected vocabulary style for new terms and why (UDR-0185 D4). */
   style: VocabularyStyle
   styleReason: string
+  view: ManagerView
+  onViewChange: (view: ManagerView) => void
 }) {
   const { zoomIn, zoomOut, fitView } = useReactFlow()
   const iconButton = 'h-7 w-7 text-zinc-600'
   return (
     <div className="ontology-toolbar flex shrink-0 items-center gap-1 border-b bg-zinc-50 px-2 py-1">
+      <ViewSwitch view={props.view} onChange={props.onViewChange} disabled={props.disabled} />
+      <div className="mx-1 h-4 w-px bg-zinc-200" />
       <Button
         variant="ghost"
         size="sm"
@@ -619,47 +752,7 @@ function CanvasToolbar(props: {
         {props.style.toUpperCase()}
       </span>
       <div className="mx-1 h-4 w-px bg-zinc-200" />
-      {props.graphs.length > 0 ? (
-        <select
-          className="h-7 max-w-[200px] rounded-md border bg-white px-1 text-xs"
-          aria-label="Graph"
-          title="Which graph the canvas and the search show; new statements go into the selected graph"
-          value={scopeKey(props.scope)}
-          disabled={props.disabled}
-          onChange={(e) => {
-            const value = e.target.value
-            if (value === '+') {
-              props.onNewGraph()
-              return
-            }
-            if (value === '*') props.onScopeChange('all')
-            else if (value === '') props.onScopeChange('default')
-            else {
-              const g = props.graphs.find((item) => termKey(item) === value)
-              if (g) props.onScopeChange(g)
-            }
-          }}>
-          <option value="*">All graphs</option>
-          <option value="">Default graph</option>
-          {props.graphs.map((g) => (
-            <option key={termKey(g)} value={termKey(g)}>
-              {props.graphName(g)}
-            </option>
-          ))}
-          {!props.readOnly && <option value="+">New graph...</option>}
-        </select>
-      ) : (
-        <Button
-          variant="ghost"
-          size="icon"
-          className={iconButton}
-          onClick={props.onNewGraph}
-          disabled={props.disabled || props.readOnly}
-          aria-label="Add a named graph"
-          title="Add a named graph (the ontology becomes a dataset, saved as TriG)">
-          <Layers className="h-4 w-4" />
-        </Button>
-      )}
+      <GraphScopeControl {...props} />
       <div className="mx-1 h-4 w-px bg-zinc-200" />
       <Button
         variant="ghost"
@@ -739,6 +832,18 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [selection, setSelection] = useState<Selection | null>(null)
   const [linkMode, setLinkMode] = useState<LinkMode>('relationship')
   const [showIsa, setShowIsa] = useState(readShowIsa)
+  // Schema | Data view and the Data view's selection (PRP-0205 / UDR-0187 D2).
+  const [view, setView] = useState<ManagerView>(readView)
+  const [dataGroup, setDataGroup] = useState<DataGroup | null>(null)
+  const [includeSubclasses, setIncludeSubclasses] = useState(false)
+  const [newIndividualClass, setNewIndividualClass] = useState<string | null>(null)
+  const [newIndividualName, setNewIndividualName] = useState('')
+  const [newIndividualLabel, setNewIndividualLabel] = useState('')
+  const [individualDeleteTarget, setIndividualDeleteTarget] = useState<{
+    key: string
+    label: string
+    refs: IndividualReferences
+  } | null>(null)
   const [highlight, setHighlight] = useState<Set<string> | null>(null)
   const [layouting, setLayouting] = useState(false)
   const canvasRef = useRef<HTMLDivElement | null>(null)
@@ -850,6 +955,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       reifierChoiceRef.current = new Map()
       setGraphScope('all')
       setSelection(null)
+      setDataGroup(null)
       setHighlight(null)
       setQueryResult(null)
       setRightTab('detail')
@@ -1159,6 +1265,21 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const isaEdges = useMemo(() => subclassEdges(viewModel), [viewModel])
   const vocabStyle = useMemo(() => vocabularyStyle(model), [model])
   const undeclared = useMemo(() => undeclaredClasses(model), [model])
+  // Individuals of the graph-scoped model, computed once per change (UDR-0187 D9).
+  const dataIndex = useMemo(() => individualIndex(viewModel), [viewModel])
+  const dataTree = useMemo(() => classTree(viewModel), [viewModel])
+  const changeView = useCallback((next: ManagerView) => {
+    setView(next)
+    writeView(next)
+  }, [])
+  /** Open the Data view on one class (the canvas badge, a type chip). */
+  const openData = useCallback(
+    (cls: string) => {
+      setDataGroup({ kind: 'class', iri: cls })
+      changeView('data')
+    },
+    [changeView],
+  )
   const changeShowIsa = useCallback((show: boolean) => {
     setShowIsa(show)
     writeShowIsa(show)
@@ -1337,6 +1458,52 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     [updateModel, keyOf],
   )
 
+  /** "+ Individual": ask for a name and an optional label (UDR-0187 D6). */
+  const requestCreateIndividual = useCallback((cls: string) => {
+    setNewIndividualName('')
+    setNewIndividualLabel('')
+    setNewIndividualClass(cls)
+  }, [])
+
+  const confirmCreateIndividual = useCallback(() => {
+    const cls = newIndividualClass
+    if (!cls) return
+    const name = newIndividualName.trim() || newIndividualLabel.trim() || 'individual'
+    const value = mintIri(baseIri || 'https://chatwalaau.com/ontology/local#', name, takenIris(model))
+    setNewIndividualClass(null)
+    updateModel((prev) => createIndividual(prev, value, cls, newIndividualLabel))
+    setSelection({ kind: 'individual', key: termKey(iriTerm(value)) })
+    setRightTab('detail')
+  }, [newIndividualClass, newIndividualName, newIndividualLabel, baseIri, model, updateModel])
+
+  const requestDeleteIndividual = useCallback(
+    (key: string) => {
+      const resource = findResource(model, key)
+      if (!resource) return
+      setIndividualDeleteTarget({
+        key,
+        label: individualLabel(resource, model.document.prefixes),
+        refs: individualReferences(model, key),
+      })
+    },
+    [model],
+  )
+
+  /** Delete an individual and the statements referring to it, after confirmation (UDR-0187 D7). */
+  const confirmDeleteIndividual = useCallback(() => {
+    const target = individualDeleteTarget
+    setIndividualDeleteTarget(null)
+    if (!target) return
+    updateModel((prev) => deleteIndividual(prev, target.key))
+    setSelection(null)
+  }, [individualDeleteTarget, updateModel])
+
+  const entityOptions = useMemo(() => views.map((v) => v.iri), [views])
+  const classLabel = useCallback(
+    (value: string) => views.find((e) => e.iri === value)?.label ?? compactIri(value, model.document.prefixes),
+    [views, model.document.prefixes],
+  )
+
   /**
    * Toggle a property characteristic (UDR-0186 D3). Turning one on in an RDFS-only
    * ontology adds OWL vocabulary, which makes later terms OWL (UDR-0185 D4): ask once
@@ -1393,10 +1560,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const value = resource?.term.type === 'iri' ? resource.term.value : null
       if (value && resource?.role === 'entity') setSelection({ kind: 'entity', iri: value })
       else if (value && relEdges.some((e) => e.iri === value)) setSelection({ kind: 'relationship', iri: value })
+      else if (dataIndex.keys.has(key)) setSelection({ kind: 'individual', key })
       else setSelection({ kind: 'resource', key })
       setRightTab('detail')
     },
-    [model, relEdges],
+    [model, relEdges, dataIndex],
   )
 
   // ---- React Flow derivation ----
@@ -1408,7 +1576,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const related = useMemo(() => {
     const nodes = new Set<string>()
     const edges = new Set<string>()
-    if (!selection || selection.kind === 'resource') return { nodes, edges }
+    if (!selection || selection.kind === 'resource' || selection.kind === 'individual') return { nodes, edges }
     if (selection.kind === 'isa') {
       nodes.add(selection.source)
       nodes.add(selection.target)
@@ -1463,9 +1631,12 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           related: related.nodes.has(entity.iri),
           dimmed: highlight !== null && !highlight.has(entity.iri),
           matched: Boolean(highlight?.has(entity.iri)),
+          individualCount: dataIndex.members.get(entity.iri)?.length ?? 0,
+          onOpenData: openData,
+          iri: entity.iri,
         },
       })),
-    [views, positionOf, selection, related, highlight],
+    [views, positionOf, selection, related, highlight, dataIndex, openData],
   )
 
   // FLICKER FIX: node positions live in local React Flow state during a drag
@@ -1476,7 +1647,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // an ontology switch never shows a stale frame.
   const [nodes, setNodes] = useState<EntityFlowNode[]>([])
   const nodesDepsRef = useRef<readonly unknown[] | null>(null)
-  const nodesDeps = [views, autoPositions, selection, related, highlight] as const
+  const nodesDeps = [views, autoPositions, selection, related, highlight, dataIndex] as const
   if (nodesDepsRef.current === null || nodesDeps.some((dep, index) => dep !== nodesDepsRef.current?.[index])) {
     nodesDepsRef.current = nodesDeps
     setNodes(buildNodes())
@@ -1899,67 +2070,109 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                   />
                 }
                 center={
-                  <div ref={canvasRef} className="flex min-h-0 flex-1 flex-col">
-                    <CanvasToolbar
-                      onAddEntity={addEntity}
-                      onResetLayout={() => void resetLayout()}
-                      onDownload={() => void downloadGraph()}
-                      layouting={layouting}
-                      disabled={!selectedId || loading}
-                      graphs={graphs}
-                      graphName={graphName}
-                      scope={graphScope}
-                      onScopeChange={changeScope}
-                      onNewGraph={() => setNewGraphOpen(true)}
-                      readOnly={demoBlocked}
-                      linkMode={linkMode}
-                      onLinkModeChange={setLinkMode}
-                      showIsa={showIsa}
-                      onShowIsaChange={changeShowIsa}
-                      style={vocabStyle}
-                      styleReason={vocabularyStyleReason(vocabStyle, model)}
-                    />
-                    <div className="min-h-0 flex-1">
-                      {selectedId ? (
-                        loading ? (
-                          <div className="flex h-full items-center justify-center text-sm text-zinc-500">
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
-                          </div>
-                        ) : (
-                          <ReactFlow
-                            key={selectedId}
-                            nodes={nodes}
-                            edges={edges}
-                            nodeTypes={nodeTypes}
-                            edgeTypes={edgeTypes}
-                            onNodesChange={onNodesChange}
-                            onNodeDragStop={onNodeDragStop}
-                            onConnect={onConnect}
-                            connectionMode={ConnectionMode.Loose}
-                            onNodeClick={(_, node) => {
-                              setSelection({ kind: 'entity', iri: node.id })
-                              setRightTab('detail')
-                            }}
-                            onEdgeClick={(_, edge) => {
-                              const data = edge.data as RelEdgeData | undefined
-                              if (data?.isa) setSelection({ kind: 'isa', source: edge.source, target: edge.target })
-                              else setSelection({ kind: 'relationship', iri: data?.relationshipIri ?? edge.id })
-                              setRightTab('detail')
-                            }}
-                            onPaneClick={() => setSelection(null)}
-                            fitView
-                            minZoom={0.1}
-                            proOptions={{ hideAttribution: false }}>
-                            <Background gap={16} />
-                          </ReactFlow>
-                        )
-                      ) : (
-                        <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
-                          Select an ontology on the left, or create / import one to start designing.
-                        </div>
-                      )}
+                  view === 'data' && selectedId && !loading ? (
+                    <div className="flex min-h-0 flex-1 flex-col">
+                      <div className="flex shrink-0 items-center gap-1 border-b bg-zinc-50 px-2 py-1">
+                        <ViewSwitch view={view} onChange={changeView} disabled={false} />
+                        <div className="mx-1 h-4 w-px bg-zinc-200" />
+                        <GraphScopeControl
+                          graphs={graphs}
+                          graphName={graphName}
+                          scope={graphScope}
+                          onScopeChange={changeScope}
+                          onNewGraph={() => setNewGraphOpen(true)}
+                          readOnly={demoBlocked}
+                          disabled={false}
+                        />
+                        <span className="ml-2 text-[11px] text-zinc-500">
+                          {dataIndex.keys.size} individual{dataIndex.keys.size === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                      <IndividualsView
+                        model={model}
+                        index={dataIndex}
+                        tree={dataTree}
+                        scope={graphScope}
+                        ctx={inspector}
+                        classLabel={classLabel}
+                        group={dataGroup}
+                        onGroupChange={setDataGroup}
+                        includeSubclasses={includeSubclasses}
+                        onIncludeSubclassesChange={setIncludeSubclasses}
+                        selectedKey={selection?.kind === 'individual' ? selection.key : null}
+                        onSelectIndividual={(key) => {
+                          setSelection({ kind: 'individual', key })
+                          setRightTab('detail')
+                        }}
+                        onCommit={commitEdits}
+                        onCreate={requestCreateIndividual}
+                      />
                     </div>
-                  </div>
+                  ) : (
+                    <div ref={canvasRef} className="flex min-h-0 flex-1 flex-col">
+                      <CanvasToolbar
+                        onAddEntity={addEntity}
+                        onResetLayout={() => void resetLayout()}
+                        onDownload={() => void downloadGraph()}
+                        layouting={layouting}
+                        disabled={!selectedId || loading}
+                        graphs={graphs}
+                        graphName={graphName}
+                        scope={graphScope}
+                        onScopeChange={changeScope}
+                        onNewGraph={() => setNewGraphOpen(true)}
+                        readOnly={demoBlocked}
+                        linkMode={linkMode}
+                        onLinkModeChange={setLinkMode}
+                        showIsa={showIsa}
+                        onShowIsaChange={changeShowIsa}
+                        style={vocabStyle}
+                        styleReason={vocabularyStyleReason(vocabStyle, model)}
+                        view={view}
+                        onViewChange={changeView}
+                      />
+                      <div className="min-h-0 flex-1">
+                        {selectedId ? (
+                          loading ? (
+                            <div className="flex h-full items-center justify-center text-sm text-zinc-500">
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+                            </div>
+                          ) : (
+                            <ReactFlow
+                              key={selectedId}
+                              nodes={nodes}
+                              edges={edges}
+                              nodeTypes={nodeTypes}
+                              edgeTypes={edgeTypes}
+                              onNodesChange={onNodesChange}
+                              onNodeDragStop={onNodeDragStop}
+                              onConnect={onConnect}
+                              connectionMode={ConnectionMode.Loose}
+                              onNodeClick={(_, node) => {
+                                setSelection({ kind: 'entity', iri: node.id })
+                                setRightTab('detail')
+                              }}
+                              onEdgeClick={(_, edge) => {
+                                const data = edge.data as RelEdgeData | undefined
+                                if (data?.isa) setSelection({ kind: 'isa', source: edge.source, target: edge.target })
+                                else setSelection({ kind: 'relationship', iri: data?.relationshipIri ?? edge.id })
+                                setRightTab('detail')
+                              }}
+                              onPaneClick={() => setSelection(null)}
+                              fitView
+                              minZoom={0.1}
+                              proOptions={{ hideAttribution: false }}>
+                              <Background gap={16} />
+                            </ReactFlow>
+                          )
+                        ) : (
+                          <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
+                            Select an ontology on the left, or create / import one to start designing.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
                 }
                 right={
                   <div className="flex min-h-0 flex-1 flex-col">
@@ -2003,6 +2216,20 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                           readOnly={demoBlocked}
                           onSelectEntity={(value) => setSelection({ kind: 'entity', iri: value })}
                           onRemove={() => removeIsa(selection.source, selection.target)}
+                        />
+                      ) : selection?.kind === 'individual' ? (
+                        <IndividualDetail
+                          key={selection.key}
+                          resourceKey={selection.key}
+                          model={model}
+                          index={dataIndex}
+                          ctx={inspector}
+                          classLabel={classLabel}
+                          classOptions={entityOptions}
+                          onCommit={(edits) => commitEdits(selection.key, edits)}
+                          {...statementHandlers(selection.key)}
+                          onOpenClass={openData}
+                          onDelete={() => requestDeleteIndividual(selection.key)}
                         />
                       ) : selection?.kind === 'resource' ? (
                         <ResourceDetail
@@ -2061,6 +2288,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         ctx={inspector}
                         selectedKey={selection?.kind === 'resource' ? selection.key : null}
                         onCreate={() => setNewResourceOpen(true)}
+                        onOpenData={() => changeView('data')}
                       />
                     ) : (
                       <SearchPane
@@ -2269,6 +2497,86 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       </AlertDialog>
 
       {/* Entity delete: references from other resources are KEPT and counted (PRP-0198 Q3). */}
+      {/* + Individual (UDR-0187 D6): one rdf:type statement in the target graph, plus a label when given. */}
+      <Dialog open={newIndividualClass !== null} onOpenChange={(o) => !o && setNewIndividualClass(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm">
+              New individual of {newIndividualClass ? classLabel(newIndividualClass) : ''}
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Adds one statement, &quot;rdf:type {newIndividualClass ? classLabel(newIndividualClass) : ''}&quot;
+              {model.targetGraph ? ` in the graph ${graphName(model.targetGraph)}` : ''}, plus its label when you enter
+              one.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <div>
+              <span className={fieldLabel}>Name (used for the IRI)</span>
+              <input
+                className={fieldInput}
+                aria-label="Individual name"
+                value={newIndividualName}
+                placeholder="rex"
+                onChange={(e) => setNewIndividualName(e.target.value)}
+              />
+            </div>
+            <div>
+              <span className={fieldLabel}>Label (optional)</span>
+              <input
+                className={fieldInput}
+                aria-label="Individual label"
+                value={newIndividualLabel}
+                placeholder="Rex"
+                onChange={(e) => setNewIndividualLabel(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') confirmCreateIndividual()
+                }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setNewIndividualClass(null)}>
+              Cancel
+            </Button>
+            <Button size="sm" onClick={confirmCreateIndividual}>
+              Create
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete an individual with the statements referring to it (UDR-0187 D7). */}
+      <AlertDialog open={individualDeleteTarget !== null} onOpenChange={(o) => !o && setIndividualDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete individual?</AlertDialogTitle>
+            <AlertDialogDescription>
+              &quot;{individualDeleteTarget?.label}&quot; and its {individualDeleteTarget?.refs.own ?? 0} statement
+              {individualDeleteTarget?.refs.own === 1 ? '' : 's'} will be removed
+              {individualDeleteTarget && individualDeleteTarget.refs.references > 0
+                ? `, together with ${individualDeleteTarget.refs.references} statement${
+                    individualDeleteTarget.refs.references === 1 ? '' : 's'
+                  } of ${individualDeleteTarget.refs.resources} other resource${
+                    individualDeleteTarget.refs.resources === 1 ? '' : 's'
+                  } that refer to it`
+                : ''}{' '}
+              (in every graph).
+              {individualDeleteTarget && individualDeleteTarget.refs.keptAnnotations > 0
+                ? ` ${individualDeleteTarget.refs.keptAnnotations} annotation${
+                    individualDeleteTarget.refs.keptAnnotations === 1 ? '' : 's'
+                  } (reifiers) about these statements keep their other statements.`
+                : ''}{' '}
+              You can undo this from History after saving.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDeleteIndividual}>Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <AlertDialog open={entityDeleteTarget !== null} onOpenChange={(o) => !o && setEntityDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>

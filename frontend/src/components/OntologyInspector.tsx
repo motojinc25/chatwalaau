@@ -38,6 +38,7 @@ import {
   type GraphTerm,
   graphKey,
   inspectorResources,
+  isIndividual,
   listItems,
   literal,
   type OntologyDocument,
@@ -776,19 +777,31 @@ export function ResourceDetail(props: {
 
 // ---- Resources tab ------------------------------------------------------------------
 
-export function ResourcesPane(props: { ctx: InspectorContext; selectedKey: string | null; onCreate: () => void }) {
+export function ResourcesPane(props: {
+  ctx: InspectorContext
+  selectedKey: string | null
+  onCreate: () => void
+  /** Open the Data view, where individuals are listed (UDR-0187 D8). */
+  onOpenData?: () => void
+}) {
   const { ctx } = props
   const [query, setQuery] = useState('')
-  const [role, setRole] = useState<Role | 'all'>('all')
+  // 'individual' lists the individuals here too; every other choice leaves them to the Data view.
+  const [role, setRole] = useState<Role | 'all' | 'individual'>('all')
   // '*' = every graph, '' = the default graph, else a graph's term key (UDR-0182 D1).
   const [graph, setGraph] = useState('*')
   const [limit, setLimit] = useState(PAGE)
   const graphs = ctx.graphs ?? []
-  const listed = useMemo(() => inspectorResources(ctx.model), [ctx.model])
+  const everything = useMemo(() => inspectorResources(ctx.model), [ctx.model])
+  const individuals = useMemo(() => everything.filter(isIndividual), [everything])
+  const listed = useMemo(
+    () => (role === 'individual' ? individuals : everything.filter((r) => !isIndividual(r))),
+    [role, everything, individuals],
+  )
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
     return listed.filter((r) => {
-      if (role !== 'all' && r.role !== role) return false
+      if (role !== 'all' && role !== 'individual' && r.role !== role) return false
       if (graph !== '*' && !r.statements.some((s) => graphKey(s.g) === graph)) return false
       if (!needle) return true
       return resourceSearchText(r, ctx.prefixes).includes(needle)
@@ -821,9 +834,10 @@ export function ResourcesPane(props: { ctx: InspectorContext; selectedKey: strin
             className="rounded-md border bg-transparent px-1 py-1 text-xs"
             aria-label="Filter by role"
             value={role}
-            onChange={(e) => setRole(e.target.value as Role | 'all')}>
+            onChange={(e) => setRole(e.target.value as Role | 'all' | 'individual')}>
             <option value="all">All roles</option>
             <option value="other">Resources</option>
+            <option value="individual">Individuals</option>
             <option value="object_property">Object properties</option>
             <option value="datatype_property">Datatype properties</option>
             <option value="entity">Entities</option>
@@ -850,9 +864,21 @@ export function ResourcesPane(props: { ctx: InspectorContext; selectedKey: strin
           )}
         </div>
         <p className="text-[10px] text-zinc-500">
-          {filtered.length} of {listed.length} resources not drawn on the canvas (instances, other vocabularies,
-          reifiers, shared blank nodes).
+          {role === 'individual'
+            ? `${filtered.length} of ${listed.length} individuals (also listed per class in the Data view).`
+            : `${filtered.length} of ${listed.length} resources not drawn on the canvas and not individuals (untyped resources, other vocabularies, reifiers, shared blank nodes).`}
         </p>
+        {role !== 'individual' && individuals.length > 0 && (
+          <p className="flex items-center gap-1 text-[10px] text-emerald-700">
+            <Info className="h-3 w-3 shrink-0" />
+            {individuals.length} individual{individuals.length === 1 ? ' is' : 's are'} in the Data view.
+            {props.onOpenData && (
+              <button type="button" className="underline hover:text-emerald-900" onClick={props.onOpenData}>
+                Open
+              </button>
+            )}
+          </p>
+        )}
         {(ctx.undeclared?.size ?? 0) > 0 && (
           <p
             className="flex items-start gap-1 text-[10px] text-sky-700"
