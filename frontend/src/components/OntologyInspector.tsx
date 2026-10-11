@@ -783,6 +783,8 @@ export function ResourcesPane(props: {
   onCreate: () => void
   /** Open the Data view, where individuals are listed (UDR-0187 D8). */
   onOpenData?: () => void
+  /** Open the Checks tab (UDR-0188 D4). */
+  onOpenChecks?: () => void
 }) {
   const { ctx } = props
   const [query, setQuery] = useState('')
@@ -887,6 +889,11 @@ export function ResourcesPane(props: {
             {ctx.undeclared?.size} class{ctx.undeclared?.size === 1 ? ' is' : 'es are'} used (subClassOf, domain or
             range) but not declared in this ontology, so the canvas does not draw{' '}
             {ctx.undeclared?.size === 1 ? 'it' : 'them'}. Their statements are marked "not declared".
+            {props.onOpenChecks && (
+              <button type="button" className="ml-1 underline hover:text-sky-900" onClick={props.onOpenChecks}>
+                Checks
+              </button>
+            )}
           </p>
         )}
       </div>

@@ -1762,3 +1762,454 @@ export function deleteIndividual(model: OntologyModel, key: string): OntologyMod
   }
   return { ...model, resources: changed ? classifyResources(resources) : resources }
 }
+
+// ---- Schema checks (UDR-0188) ---------------------------------------------------------
+
+const OWL_ANNOTATION_PROPERTY = `${OWL}AnnotationProperty`
+const OWL_FUNCTIONAL_PROPERTY = `${OWL}FunctionalProperty`
+
+export type CheckCode =
+  | 'undeclared_class'
+  | 'subclass_cycle'
+  | 'subproperty_cycle'
+  | 'self_subclass'
+  | 'kind_conflict'
+  | 'ill_typed_literal'
+  | 'characteristic_notice'
+  | 'functional_values'
+  | 'missing_domain'
+  | 'missing_range'
+  | 'orphan_declaration'
+  | 'duplicate_label'
+
+export type CheckSeverity = 'warning' | 'info'
+
+/** The catalogue, in display order (UDR-0188 D2). */
+export const CHECKS: readonly { code: CheckCode; severity: CheckSeverity; title: string }[] = [
+  { code: 'undeclared_class', severity: 'warning', title: 'Undeclared classes' },
+  { code: 'subclass_cycle', severity: 'warning', title: 'Subclass cycles' },
+  { code: 'subproperty_cycle', severity: 'warning', title: 'Subproperty cycles' },
+  { code: 'kind_conflict', severity: 'warning', title: 'Kind conflicts' },
+  { code: 'ill_typed_literal', severity: 'warning', title: 'Values that do not fit their datatype' },
+  { code: 'characteristic_notice', severity: 'warning', title: 'Property characteristic notices' },
+  { code: 'functional_values', severity: 'warning', title: 'Functional properties with several values' },
+  { code: 'self_subclass', severity: 'info', title: 'Self "is a" links' },
+  { code: 'missing_domain', severity: 'info', title: 'Properties without a domain' },
+  { code: 'missing_range', severity: 'info', title: 'Properties without a range' },
+  { code: 'orphan_declaration', severity: 'info', title: 'Orphan declarations' },
+  { code: 'duplicate_label', severity: 'info', title: 'Duplicate labels' },
+]
+
+/** One removable statement a cycle or self-loop finding offers to delete. */
+export interface CheckEdge {
+  sub: string
+  sup: string
+  /** rdfs:subClassOf or rdfs:subPropertyOf. */
+  p: string
+}
+
+export interface Finding {
+  code: CheckCode
+  severity: CheckSeverity
+  /** Stable within the code (what "Ignore" remembers, UDR-0188 D5). */
+  key: string
+  /** What the finding is about; the first is the one to select. */
+  subjects: Term[]
+  message: string
+  /** undeclared_class: the IRI's namespace and whether it is one of the ontology's own. */
+  namespace?: string
+  own?: boolean
+  /** Cycles and self-loops: the statements that can be removed one at a time. */
+  edges?: CheckEdge[]
+  /** missing_domain / missing_range: the property is not drawn on the canvas. */
+  notDrawn?: boolean
+}
+
+export interface CheckContext {
+  /** The catalog's minting base and other bases that count as the ontology's own namespaces. */
+  bases?: string[]
+  /** Backend diagnostics of the loaded file (ill-typed literals, CTR-0169). */
+  diagnostics?: Diagnostic[]
+}
+
+/** An IRI's namespace: everything up to the last `#` or `/`. */
+export function namespaceOf(value: string): string {
+  const cut = Math.max(value.lastIndexOf('#'), value.lastIndexOf('/'))
+  return cut >= 0 ? value.slice(0, cut + 1) : value
+}
+
+/**
+ * The ontology's own namespaces (UDR-0188 D3): the given bases, the document base, the
+ * empty prefix `:` and the namespaces of the classes it declares.
+ */
+export function ownNamespaces(model: OntologyModel, bases: string[] = []): Set<string> {
+  const out = new Set<string>()
+  for (const base of [...bases, model.document.base ?? '']) if (base) out.add(namespaceOf(base))
+  const empty = model.document.prefixes.find((p) => p.prefix === '')
+  if (empty) out.add(namespaceOf(empty.iri))
+  for (const cls of entityIris(model)) out.add(namespaceOf(cls))
+  return out
+}
+
+/** Declare a class (UDR-0188 D3): exactly one `rdf:type` statement in the target graph. */
+export function declareClass(model: OntologyModel, classIri: string, style: VocabularyStyle = 'owl'): OntologyModel {
+  return applyStatementEdit(model, termKey(iri(classIri)), {
+    index: null,
+    statement: { p: RDF_TYPE, o: iri(style === 'rdfs' ? RDFS_CLASS : OWL_CLASS) },
+  })
+}
+
+/** Remove the `sub <p> sup` statement(s) a cycle or self-loop finding names (every graph). */
+export function removeCheckEdge(model: OntologyModel, edge: CheckEdge): OntologyModel {
+  return withResource(model, termKey(iri(edge.sub)), (r) => {
+    if (!r) return null
+    const statements = r.statements.filter((s) => !(s.p === edge.p && s.o.type === 'iri' && s.o.value === edge.sup))
+    return statements.length === 0 ? null : { ...r, statements }
+  })
+}
+
+/** Strongly connected components (Tarjan, iterative) of a directed graph. */
+function stronglyConnected(nodes: string[], next: Map<string, string[]>): string[][] {
+  const index = new Map<string, number>()
+  const low = new Map<string, number>()
+  const onStack = new Set<string>()
+  const stack: string[] = []
+  const out: string[][] = []
+  let counter = 0
+  for (const start of nodes) {
+    if (index.has(start)) continue
+    const work: { node: string; i: number }[] = [{ node: start, i: 0 }]
+    index.set(start, counter)
+    low.set(start, counter)
+    counter += 1
+    stack.push(start)
+    onStack.add(start)
+    while (work.length > 0) {
+      const frame = work[work.length - 1]
+      const targets = next.get(frame.node) ?? []
+      if (frame.i < targets.length) {
+        const target = targets[frame.i]
+        frame.i += 1
+        if (!index.has(target)) {
+          index.set(target, counter)
+          low.set(target, counter)
+          counter += 1
+          stack.push(target)
+          onStack.add(target)
+          work.push({ node: target, i: 0 })
+        } else if (onStack.has(target)) {
+          low.set(frame.node, Math.min(low.get(frame.node) as number, index.get(target) as number))
+        }
+        continue
+      }
+      work.pop()
+      if (work.length > 0) {
+        const parent = work[work.length - 1].node
+        low.set(parent, Math.min(low.get(parent) as number, low.get(frame.node) as number))
+      }
+      if (low.get(frame.node) === index.get(frame.node)) {
+        const component: string[] = []
+        let member = ''
+        do {
+          member = stack.pop() as string
+          onStack.delete(member)
+          component.push(member)
+        } while (member !== frame.node)
+        out.push(component)
+      }
+    }
+  }
+  return out
+}
+
+function cycleFindings(model: OntologyModel, predicate: string, code: CheckCode, noun: string): Finding[] {
+  const next = new Map<string, string[]>()
+  const findings: Finding[] = []
+  const selfSeen = new Set<string>()
+  for (const resource of model.resources) {
+    if (resource.term.type !== 'iri') continue
+    const sub = resource.term.value
+    for (const sup of iriObjects(resource, predicate)) {
+      if (sup === sub) {
+        if (selfSeen.has(sub)) continue
+        selfSeen.add(sub)
+        findings.push({
+          code: 'self_subclass',
+          severity: 'info',
+          key: `${predicate}|${sub}`,
+          subjects: [iri(sub)],
+          message: `${localName(sub)} is declared ${noun} of itself (always true; can be removed).`,
+          edges: [{ sub, sup, p: predicate }],
+        })
+        continue
+      }
+      const list = next.get(sub)
+      if (!list) next.set(sub, [sup])
+      else if (!list.includes(sup)) list.push(sup)
+    }
+  }
+  const nodes = [...new Set([...next.keys(), ...[...next.values()].flat()])].sort()
+  for (const component of stronglyConnected(nodes, next)) {
+    if (component.length < 2) continue
+    const members = new Set(component)
+    const sorted = [...component].sort()
+    const edges: CheckEdge[] = []
+    for (const sub of sorted) {
+      for (const sup of next.get(sub) ?? []) if (members.has(sup)) edges.push({ sub, sup, p: predicate })
+    }
+    findings.push({
+      code,
+      severity: 'warning',
+      key: sorted.join(' '),
+      subjects: sorted.map((v) => iri(v)),
+      message: `${sorted.map(localName).join(', ')} form a cycle, so they are all equivalent. Did you mean ${
+        predicate === RDFS_SUB_CLASS_OF ? 'owl:equivalentClass' : 'owl:equivalentProperty'
+      }?`,
+      edges,
+    })
+  }
+  return findings
+}
+
+const PROPERTY_TYPES = new Set([RDF_PROPERTY, OWL_OBJECT_PROPERTY, OWL_DATATYPE_PROPERTY])
+const DESCRIPTIVE_PREDICATES = new Set([RDF_TYPE, RDFS_LABEL, RDFS_COMMENT])
+
+function typeSet(resource: Resource): Set<string> {
+  return new Set(
+    resource.statements
+      .filter((s) => s.p === RDF_TYPE && s.o.type === 'iri')
+      .map((s) => (s.o as { value: string }).value),
+  )
+}
+
+function collectIris(term: Term, into: (value: string) => void): void {
+  if (term.type === 'iri') into(term.value)
+  else if (term.type === 'triple') {
+    collectIris(term.s, into)
+    into(term.p)
+    collectIris(term.o, into)
+  }
+}
+
+/**
+ * Every finding about the model (UDR-0188 D1 / D2): read-only, all graphs, warning or
+ * info. Patterns the catalogue does not name are never reported; legal RDFS / OWL
+ * patterns (cycles, missing domains) are notices, not errors.
+ */
+export function runChecks(model: OntologyModel, context: CheckContext = {}): Finding[] {
+  const findings: Finding[] = []
+  const entities = entityIris(model)
+  const datatypes = new Set(model.resources.filter((r) => declaresDatatype(r.statements)).map(resourceKey))
+  const isDatatype: DatatypeLookup = (k) => datatypes.has(k)
+
+  // One pass: who mentions whom, which predicates are used.
+  const mentionedByOther = new Set<string>()
+  const usedPredicates = new Set<string>()
+  for (const resource of model.resources) {
+    const self = resource.term.type === 'iri' ? resource.term.value : null
+    for (const s of resource.statements) {
+      usedPredicates.add(s.p)
+      collectIris(s.o, (value) => {
+        if (value !== self) mentionedByOther.add(value)
+      })
+    }
+  }
+
+  // undeclared_class
+  const own = ownNamespaces(model, context.bases ?? [])
+  const usage = new Map<string, { how: string; by: Term }>()
+  const consider = (value: Term, how: string, by: Term) => {
+    if (value.type !== 'iri' || entities.has(value.value) || usage.has(value.value)) return
+    if (reservedIri(value.value) || isLiteralRange(value, isDatatype)) return
+    usage.set(value.value, { how, by })
+  }
+  for (const resource of model.resources) {
+    for (const s of resource.statements) {
+      if (s.p === RDFS_SUB_CLASS_OF) {
+        consider(s.o, 'as a superclass', resource.term)
+        consider(resource.term, 'as a subclass', resource.term)
+      } else if (s.p === RDFS_DOMAIN) consider(s.o, 'as a domain', resource.term)
+      else if (s.p === RDFS_RANGE) consider(s.o, 'as a range', resource.term)
+      else if (s.p === RDF_TYPE && s.o.type === 'iri' && !reservedIri(s.o.value) && !datatypes.has(termKey(s.o))) {
+        consider(s.o, 'as a type', resource.term)
+      }
+    }
+  }
+  for (const [value, use] of [...usage].sort(([a], [b]) => a.localeCompare(b))) {
+    const namespace = namespaceOf(value)
+    findings.push({
+      code: 'undeclared_class',
+      severity: 'warning',
+      key: value,
+      subjects: termEquals(iri(value), use.by) ? [iri(value)] : [iri(value), use.by],
+      message: `${localName(value)} is used ${use.how} but not declared as a class, so it is not drawn.`,
+      namespace,
+      own: own.has(namespace),
+    })
+  }
+
+  // Cycles and self-loops
+  findings.push(...cycleFindings(model, RDFS_SUB_CLASS_OF, 'subclass_cycle', 'a subclass'))
+  findings.push(...cycleFindings(model, RDFS_SUB_PROPERTY_OF, 'subproperty_cycle', 'a subproperty'))
+
+  const drawn = canvasResourceKeys(model)
+  const functional = new Set<string>()
+  const labelGroups = new Map<string, Term[]>()
+  for (const resource of model.resources) {
+    if (resource.term.type !== 'iri') continue
+    const value = resource.term.value
+    const types = typeSet(resource)
+
+    // kind_conflict (class / individual punning is allowed and not reported)
+    const kinds = [OWL_OBJECT_PROPERTY, OWL_DATATYPE_PROPERTY, OWL_ANNOTATION_PROPERTY].filter((t) => types.has(t))
+    if (kinds.length >= 2) {
+      findings.push({
+        code: 'kind_conflict',
+        severity: 'warning',
+        key: `${value}|property`,
+        subjects: [resource.term],
+        message: `${localName(value)} is declared as ${kinds.map(localName).join(' and ')}; OWL 2 DL allows only one kind of property.`,
+      })
+    }
+    if ((types.has(OWL_CLASS) || types.has(RDFS_CLASS)) && types.has(RDFS_DATATYPE)) {
+      findings.push({
+        code: 'kind_conflict',
+        severity: 'warning',
+        key: `${value}|class`,
+        subjects: [resource.term],
+        message: `${localName(value)} is declared as both a class and a datatype.`,
+      })
+    }
+
+    if (types.has(OWL_FUNCTIONAL_PROPERTY)) functional.add(value)
+
+    // characteristic_notice
+    const characteristics = propertyCharacteristics(resource)
+    characteristicNotices(characteristics).forEach((notice, i) => {
+      findings.push({
+        code: 'characteristic_notice',
+        severity: 'warning',
+        key: `${value}|${i}`,
+        subjects: [resource.term],
+        message: `${localName(value)}: ${notice}`,
+      })
+    })
+
+    // missing_domain / missing_range (declared properties; not annotation properties)
+    const isProperty =
+      resource.role === 'object_property' ||
+      resource.role === 'datatype_property' ||
+      [...PROPERTY_TYPES].some((t) => types.has(t))
+    if (isProperty) {
+      const notDrawn = !drawn.has(resourceKey(resource))
+      if (!resource.statements.some((s) => s.p === RDFS_DOMAIN)) {
+        findings.push({
+          code: 'missing_domain',
+          severity: 'info',
+          key: value,
+          subjects: [resource.term],
+          message: `${localName(value)} has no rdfs:domain${notDrawn ? ' (not drawn on the canvas)' : ''}.`,
+          notDrawn,
+        })
+      }
+      if (!resource.statements.some((s) => s.p === RDFS_RANGE)) {
+        findings.push({
+          code: 'missing_range',
+          severity: 'info',
+          key: value,
+          subjects: [resource.term],
+          message: `${localName(value)} has no rdfs:range${notDrawn ? ' (not drawn on the canvas)' : ''}.`,
+          notDrawn,
+        })
+      }
+    }
+
+    // orphan_declaration: nothing else mentions it, it is no predicate, and its own
+    // statements only describe it (type, label, comment, layout, literal annotations).
+    const declared = resource.role === 'entity' || isProperty || types.has(OWL_ANNOTATION_PROPERTY)
+    if (declared && !reservedIri(value) && !mentionedByOther.has(value) && !usedPredicates.has(value)) {
+      const connected = resource.statements.some(
+        (s) => !DESCRIPTIVE_PREDICATES.has(s.p) && !s.p.startsWith(CW) && s.o.type !== 'literal',
+      )
+      if (!connected) {
+        findings.push({
+          code: 'orphan_declaration',
+          severity: 'info',
+          key: value,
+          subjects: [resource.term],
+          message: `${localName(value)} is declared but nothing in this ontology uses or refers to it.`,
+        })
+      }
+    }
+
+    // duplicate_label (classes and properties)
+    if (resource.role !== 'other' || isProperty) {
+      for (const s of resource.statements) {
+        if (s.p !== RDFS_LABEL || s.o.type !== 'literal') continue
+        const text = s.o.value.trim()
+        if (!text) continue
+        const group = `${text}@${(s.o.language ?? '').toLowerCase()}`
+        const list = labelGroups.get(group)
+        if (!list) labelGroups.set(group, [resource.term])
+        else if (!list.some((t) => termEquals(t, resource.term))) list.push(resource.term)
+      }
+    }
+  }
+  for (const [group, terms] of [...labelGroups].sort(([a], [b]) => a.localeCompare(b))) {
+    if (terms.length < 2) continue
+    findings.push({
+      code: 'duplicate_label',
+      severity: 'info',
+      key: group,
+      subjects: terms,
+      message: `${terms.length} terms share the label "${group.slice(0, group.lastIndexOf('@'))}".`,
+    })
+  }
+
+  // ill_typed_literal and functional_values (every subject)
+  const seenLiteral = new Set<string>()
+  const present = (subject: Term, predicate: string, object: Term) =>
+    findResource(model, termKey(subject))?.statements.some((s) => s.p === predicate && mentionsTerm(s.o, object)) ??
+    false
+  for (const resource of model.resources) {
+    const counts = new Map<string, number>()
+    for (const s of resource.statements) {
+      if (functional.has(s.p)) counts.set(s.p, (counts.get(s.p) ?? 0) + 1)
+      if (s.o.type !== 'literal') continue
+      const notice = lexicalNotice(s.o)
+      if (!notice) continue
+      const key = `${termKey(resource.term)} ${s.p} ${termKey(s.o)}`
+      if (seenLiteral.has(key)) continue
+      seenLiteral.add(key)
+      findings.push({ code: 'ill_typed_literal', severity: 'warning', key, subjects: [resource.term], message: notice })
+    }
+    for (const [p, count] of counts) {
+      if (count < 2) continue
+      findings.push({
+        code: 'functional_values',
+        severity: 'warning',
+        key: `${termKey(resource.term)} ${p}`,
+        subjects: [resource.term],
+        message: `${localName(p)} is Functional but ${termKey(resource.term)} has ${count} values.`,
+      })
+    }
+  }
+  for (const d of context.diagnostics ?? []) {
+    if (d.kind !== 'ill_typed_literal') continue
+    const key = `${termKey(d.s)} ${d.p} ${termKey(d.o)}`
+    if (seenLiteral.has(key) || !present(d.s, d.p, d.o)) continue
+    seenLiteral.add(key)
+    const lexical = d.o.type === 'literal' ? d.o.value : termKey(d.o)
+    const datatype = d.o.type === 'literal' ? localName(d.o.datatype) : 'its datatype'
+    findings.push({
+      code: 'ill_typed_literal',
+      severity: 'warning',
+      key,
+      subjects: [d.s],
+      message: `"${lexical}" is not a valid ${datatype}; it is kept as written.`,
+    })
+  }
+
+  const order = new Map(CHECKS.map((c, i) => [c.code, i]))
+  return findings.sort((a, b) => (order.get(a.code) as number) - (order.get(b.code) as number))
+}

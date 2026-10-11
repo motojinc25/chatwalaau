@@ -50,6 +50,7 @@ import {
   KeyRound,
   Layers,
   LayoutGrid,
+  ListChecks,
   Loader2,
   Maximize,
   Pencil,
@@ -66,6 +67,7 @@ import {
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
+import { findingId, OntologyChecksPane, useIgnoredChecks } from '@/components/OntologyChecks'
 import { type DataGroup, IndividualDetail, IndividualsView, individualLabel } from '@/components/OntologyDataView'
 import { DeletedOntologiesDialog, HistoryPanel } from '@/components/OntologyHistory'
 import {
@@ -109,6 +111,7 @@ import {
   CARDINALITIES,
   CHARACTERISTICS,
   type Characteristic,
+  type CheckEdge,
   CW_CARDINALITY,
   CW_COLOR,
   CW_EMOJI,
@@ -122,6 +125,7 @@ import {
   createIndividual,
   createRelationship,
   type Diagnostic,
+  declareClass,
   deleteEntity as deleteEntityFromModel,
   deleteIndividual,
   diffStatements,
@@ -132,6 +136,7 @@ import {
   type EntityView,
   entityViews,
   externalReferenceCount,
+  type Finding,
   findResource,
   firstObjectEdit,
   fromProjection,
@@ -160,11 +165,13 @@ import {
   type Resource,
   reifiersOf,
   relationshipEdges,
+  removeCheckEdge,
   removePropertyFromEntity,
   removeResource,
   removeStatement,
   removeSubclassOf,
   renameBlankNodes,
+  runChecks,
   type SaveBase,
   type StatementEdit,
   type StatementInput,
@@ -882,7 +889,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [exportNotes, setExportNotes] = useState<string | null>(null)
 
   // Right pane
-  const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search' | 'history'>('detail')
+  const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search' | 'history' | 'checks'>('detail')
   // Deleted ontologies (PRP-0202 / UDR-0184 D6).
   const [trashOpen, setTrashOpen] = useState(false)
   // A characteristic turned on in an RDFS-only ontology waits for confirmation (PRP-0204 Q1).
@@ -1499,6 +1506,43 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   }, [individualDeleteTarget, updateModel])
 
   const entityOptions = useMemo(() => views.map((v) => v.iri), [views])
+  // ---- Schema checks (PRP-0206 / UDR-0188) ----
+
+  // Every finding over the whole model (all graphs), once per change (D1 / D6).
+  const findings = useMemo(
+    () => runChecks(model, { bases: baseIri ? [baseIri] : [], diagnostics }),
+    [model, baseIri, diagnostics],
+  )
+  const ignoredChecks = useIgnoredChecks(selectedId)
+  const warningCount = useMemo(
+    () => findings.filter((f) => f.severity === 'warning' && !ignoredChecks.ignored.has(findingId(f))).length,
+    [findings, ignoredChecks.ignored],
+  )
+  const [externalDeclare, setExternalDeclare] = useState<Finding | null>(null)
+  const [declareAll, setDeclareAll] = useState<{ namespace: string; classes: string[] } | null>(null)
+
+  /** Declare a class: own namespace at once, another vocabulary after a confirmation (D3). */
+  const requestDeclare = useCallback(
+    (finding: Finding) => {
+      if (finding.own) updateModel((prev) => declareClass(prev, finding.key, vocabStyle))
+      else setExternalDeclare(finding)
+    },
+    [updateModel, vocabStyle],
+  )
+
+  const confirmExternalDeclare = useCallback(() => {
+    const target = externalDeclare
+    setExternalDeclare(null)
+    if (target) updateModel((prev) => declareClass(prev, target.key, vocabStyle))
+  }, [externalDeclare, updateModel, vocabStyle])
+
+  const confirmDeclareAll = useCallback(() => {
+    const target = declareAll
+    setDeclareAll(null)
+    if (!target) return
+    updateModel((prev) => target.classes.reduce((next, cls) => declareClass(next, cls, vocabStyle), prev))
+  }, [declareAll, updateModel, vocabStyle])
+
   const classLabel = useCallback(
     (value: string) => views.find((e) => e.iri === value)?.label ?? compactIri(value, model.document.prefixes),
     [views, model.document.prefixes],
@@ -1565,6 +1609,18 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       setRightTab('detail')
     },
     [model, relEdges, dataIndex],
+  )
+
+  /** Show a finding's subject where it lives: the canvas for schema terms, else its Detail. */
+  const selectFindingSubject = useCallback(
+    (term: Term) => {
+      const key = termKey(term)
+      const resource = findResource(model, key)
+      if (!resource) return
+      if (resource.role === 'entity' || relEdges.some((e) => termKey(iriTerm(e.iri)) === key)) changeView('schema')
+      selectResource(key)
+    },
+    [model, relEdges, changeView, selectResource],
   )
 
   // ---- React Flow derivation ----
@@ -2177,7 +2233,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                 right={
                   <div className="flex min-h-0 flex-1 flex-col">
                     <div className="flex shrink-0 border-b text-xs">
-                      {(['detail', 'resources', 'search', 'history'] as const).map((tab) => (
+                      {(['detail', 'resources', 'search', 'history', 'checks'] as const).map((tab) => (
                         <button
                           key={tab}
                           type="button"
@@ -2199,6 +2255,17 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                           ) : tab === 'history' ? (
                             <span className="inline-flex items-center gap-1">
                               <History className="h-3 w-3" /> History
+                            </span>
+                          ) : tab === 'checks' ? (
+                            <span className="inline-flex items-center gap-1">
+                              <ListChecks className="h-3 w-3" /> Checks
+                              {warningCount > 0 && (
+                                <span
+                                  className="rounded-full bg-amber-100 px-1 text-[10px] text-amber-800"
+                                  title={`${warningCount} warning${warningCount === 1 ? '' : 's'} (not ignored)`}>
+                                  {warningCount}
+                                </span>
+                              )}
                             </span>
                           ) : (
                             'Detail'
@@ -2289,6 +2356,20 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         selectedKey={selection?.kind === 'resource' ? selection.key : null}
                         onCreate={() => setNewResourceOpen(true)}
                         onOpenData={() => changeView('data')}
+                        onOpenChecks={() => setRightTab('checks')}
+                      />
+                    ) : rightTab === 'checks' ? (
+                      <OntologyChecksPane
+                        findings={findings}
+                        ignored={ignoredChecks.ignored}
+                        onIgnore={ignoredChecks.ignore}
+                        onUnignore={ignoredChecks.unignore}
+                        prefixes={model.document.prefixes}
+                        readOnly={demoBlocked || !selectedId}
+                        onSelect={selectFindingSubject}
+                        onDeclare={requestDeclare}
+                        onDeclareAll={(namespace, classes) => setDeclareAll({ namespace, classes })}
+                        onRemoveEdge={(edge: CheckEdge) => updateModel((prev) => removeCheckEdge(prev, edge))}
                       />
                     ) : (
                       <SearchPane
@@ -2547,6 +2628,42 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       </Dialog>
 
       {/* Delete an individual with the statements referring to it (UDR-0187 D7). */}
+      {/* Declaring a class from another vocabulary (PRP-0206 Q1, UDR-0188 D3). */}
+      <AlertDialog open={externalDeclare !== null} onOpenChange={(o) => !o && setExternalDeclare(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Declare a class from another vocabulary?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {externalDeclare ? compactIri(externalDeclare.key, model.document.prefixes) : ''} belongs to another
+              vocabulary ({externalDeclare?.namespace}). Declaring it here adds one statement and makes this ontology
+              define it; usually such classes are reused from their own vocabulary instead.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmExternalDeclare}>Declare anyway</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={declareAll !== null} onOpenChange={(o) => !o && setDeclareAll(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Declare {declareAll?.classes.length ?? 0} classes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Adds one {vocabStyle === 'rdfs' ? 'rdfs:Class' : 'owl:Class'} statement for each undeclared class of{' '}
+              {declareAll?.namespace}
+              {model.targetGraph ? ` in the graph ${graphName(model.targetGraph)}` : ''}. They will be drawn on the
+              canvas. You can undo this from History after saving.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDeclareAll}>Declare</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <AlertDialog open={individualDeleteTarget !== null} onOpenChange={(o) => !o && setIndividualDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
