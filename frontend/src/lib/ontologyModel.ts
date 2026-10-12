@@ -407,6 +407,11 @@ export interface RelationshipEdgeView {
   cardinality: string
 }
 
+function withExtra(entities: Set<string>, extra: Set<string> | undefined): Set<string> {
+  if (!extra || extra.size === 0) return entities
+  return new Set([...entities, ...extra])
+}
+
 export function entityIris(model: OntologyModel): Set<string> {
   return new Set(
     model.resources
@@ -461,9 +466,12 @@ export function entityViews(model: OntologyModel): EntityView[] {
     })
 }
 
-/** One edge per (domain entity, range entity) pair of every object property (UDR-0180 D5). */
-export function relationshipEdges(model: OntologyModel): RelationshipEdgeView[] {
-  const entities = entityIris(model)
+/**
+ * One edge per (domain entity, range entity) pair of every object property (UDR-0180 D5).
+ * `extra` adds the imported classes drawn as faded nodes (UDR-0189 D8).
+ */
+export function relationshipEdges(model: OntologyModel, extra?: Set<string>): RelationshipEdgeView[] {
+  const entities = withExtra(entityIris(model), extra)
   const edges: RelationshipEdgeView[] = []
   for (const resource of model.resources) {
     if (resource.role !== 'object_property') continue
@@ -499,9 +507,12 @@ export interface SubclassEdgeView {
   target: string
 }
 
-/** One "is a" edge per IRI `S rdfs:subClassOf O` where both are entities (blank-node superclasses are not drawn). */
-export function subclassEdges(model: OntologyModel): SubclassEdgeView[] {
-  const entities = entityIris(model)
+/**
+ * One "is a" edge per IRI `S rdfs:subClassOf O` where both are entities (blank-node
+ * superclasses are not drawn). `extra` adds the faded imported classes (UDR-0189 D8).
+ */
+export function subclassEdges(model: OntologyModel, extra?: Set<string>): SubclassEdgeView[] {
+  const entities = withExtra(entityIris(model), extra)
   const seen = new Set<string>()
   const edges: SubclassEdgeView[] = []
   for (const resource of model.resources) {
@@ -559,10 +570,11 @@ const CLASS_USE_PREDICATES = new Set([RDFS_SUB_CLASS_OF, RDFS_DOMAIN, RDFS_RANGE
  * IRIs used as classes (either side of rdfs:subClassOf, an rdfs:domain / rdfs:range
  * object) that the ontology does not declare: not drawn (UDR-0185 D5), marked in
  * the inspector. Literal-like ranges and the rdf / rdfs / owl / xsd namespaces are
- * never counted.
+ * never counted, nor terms the imported vocabulary declares (`declaredElsewhere`,
+ * UDR-0189 D7).
  */
-export function undeclaredClasses(model: OntologyModel): Set<string> {
-  const entities = entityIris(model)
+export function undeclaredClasses(model: OntologyModel, declaredElsewhere?: Set<string>): Set<string> {
+  const entities = withExtra(entityIris(model), declaredElsewhere)
   const datatypes = new Set(model.resources.filter((r) => declaresDatatype(r.statements)).map(resourceKey))
   const isDatatype: DatatypeLookup = (key) => datatypes.has(key)
   const out = new Set<string>()
@@ -628,9 +640,12 @@ export function blankReferenceCounts(model: OntologyModel): Map<string, number> 
   return counts
 }
 
-/** Keys of the resources the canvas draws (entities, their properties, drawable relationships). */
-export function canvasResourceKeys(model: OntologyModel): Set<string> {
-  const entities = entityIris(model)
+/**
+ * Keys of the resources the canvas draws (entities, their properties, drawable
+ * relationships). `extra` adds the faded imported classes (UDR-0189 D8).
+ */
+export function canvasResourceKeys(model: OntologyModel, extra?: Set<string>): Set<string> {
+  const entities = withExtra(entityIris(model), extra)
   const keys = new Set<string>()
   for (const resource of model.resources) {
     if (resource.role === 'entity') keys.add(resourceKey(resource))
@@ -638,7 +653,7 @@ export function canvasResourceKeys(model: OntologyModel): Set<string> {
       if (iriObjects(resource, RDFS_DOMAIN).some((d) => entities.has(d))) keys.add(resourceKey(resource))
     }
   }
-  for (const edge of relationshipEdges(model)) keys.add(edge.key)
+  for (const edge of relationshipEdges(model, extra)) keys.add(edge.key)
   return keys
 }
 
@@ -648,8 +663,11 @@ export function canvasResourceKeys(model: OntologyModel): Set<string> {
  * shown nested where they are used. The tab passes `individuals: false`: individuals
  * live in the Data view (UDR-0187 D8, UDR-0180 amendment A4).
  */
-export function inspectorResources(model: OntologyModel, options: { individuals?: boolean } = {}): Resource[] {
-  const drawn = canvasResourceKeys(model)
+export function inspectorResources(
+  model: OntologyModel,
+  options: { individuals?: boolean; extraEntities?: Set<string> } = {},
+): Resource[] {
+  const drawn = canvasResourceKeys(model, options.extraEntities)
   const refs = blankReferenceCounts(model)
   const withIndividuals = options.individuals ?? true
   return model.resources.filter((r) => {
@@ -1426,9 +1444,12 @@ export interface IndividualIndex {
   keys: Set<string>
 }
 
-/** One pass over the model: who belongs to which class (memoize per model; UDR-0187 D9). */
-export function individualIndex(model: OntologyModel): IndividualIndex {
-  const entities = entityIris(model)
+/**
+ * One pass over the model: who belongs to which class (memoize per model; UDR-0187 D9).
+ * A class the imported vocabulary declares is not "Not declared" (UDR-0189 D11).
+ */
+export function individualIndex(model: OntologyModel, imported?: ImportedIndex): IndividualIndex {
+  const entities = withExtra(entityIris(model), imported?.classes)
   const members = new Map<string, Resource[]>()
   const undeclared = new Set<string>()
   const noClass: Resource[] = []
@@ -1458,13 +1479,17 @@ export interface ClassTree {
 /**
  * The Data view's class tree (UDR-0187 D2): asserted IRI `rdfs:subClassOf` between
  * entities. A class with several superclasses appears under each; the renderer
- * stops at a class already on the current path, so cycles are cut.
+ * stops at a class already on the current path, so cycles are cut. With imports, the
+ * imported classes the ontology refers to and their imported superclasses join the
+ * tree, with their imported subClassOf (UDR-0189 D11).
  */
-export function classTree(model: OntologyModel): ClassTree {
-  const entities = entityIris(model)
+export function classTree(model: OntologyModel, imported?: ImportedIndex): ClassTree {
+  const relevant = imported ? relevantImportedClasses(model, imported) : new Set<string>()
+  const entities = withExtra(entityIris(model), relevant)
   const children = new Map<string, string[]>()
   const hasSuper = new Set<string>()
-  for (const resource of model.resources) {
+  const importedResources = [...relevant].map((v) => imported?.byIri.get(v)).filter((r) => r !== undefined)
+  for (const resource of [...model.resources, ...importedResources]) {
     if (resource.role !== 'entity' || resource.term.type !== 'iri') continue
     const sub = resource.term.value
     for (const sup of new Set(iriObjects(resource, RDFS_SUB_CLASS_OF))) {
@@ -1534,8 +1559,8 @@ export function classMembers(
   return rows
 }
 
-/** The classes and all their asserted IRI superclasses (cycle-safe). */
-export function superclassClosure(model: OntologyModel, classes: string[]): Set<string> {
+/** The classes and all their asserted IRI superclasses, own and imported (cycle-safe). */
+export function superclassClosure(model: OntologyModel, classes: string[], imported?: ImportedIndex): Set<string> {
   const out = new Set<string>()
   const stack = [...classes]
   while (stack.length > 0) {
@@ -1543,6 +1568,7 @@ export function superclassClosure(model: OntologyModel, classes: string[]): Set<
     if (out.has(cls)) continue
     out.add(cls)
     stack.push(...iriObjects(findResource(model, termKey(iri(cls))), RDFS_SUB_CLASS_OF))
+    stack.push(...iriObjects(imported?.byIri.get(cls), RDFS_SUB_CLASS_OF))
   }
   return out
 }
@@ -1595,14 +1621,20 @@ function columnFor(
  * properties whose rdfs:domain is one of `classes` or an asserted superclass (an
  * owl:unionOf domain counts when it lists one), then every other predicate the rows
  * use, marked not in schema. rdf:type, rdfs:label and the cw: layout terms are not columns.
+ * Imported properties whose domain covers the classes are schema columns too (UDR-0189 D11).
  */
-export function dataColumns(model: OntologyModel, classes: string[], rows: Resource[]): DataColumn[] {
-  const covered = superclassClosure(model, classes)
+export function dataColumns(
+  model: OntologyModel,
+  classes: string[],
+  rows: Resource[],
+  imported?: ImportedIndex,
+): DataColumn[] {
+  const covered = superclassClosure(model, classes, imported)
   const datatypes = new Set(model.resources.filter((r) => declaresDatatype(r.statements)).map(resourceKey))
   const isDatatype: DatatypeLookup = (k) => datatypes.has(k)
   const schema: DataColumn[] = []
   const inSchema = new Set<string>()
-  for (const resource of model.resources) {
+  for (const resource of [...model.resources, ...(imported?.properties ?? [])]) {
     if (resource.term.type !== 'iri') continue
     const predicate = resource.term.value
     if (DATA_HIDDEN_PREDICATES.has(predicate) || inSchema.has(predicate)) continue
@@ -1617,7 +1649,8 @@ export function dataColumns(model: OntologyModel, classes: string[], rows: Resou
     for (const s of row.statements) {
       if (DATA_HIDDEN_PREDICATES.has(s.p) || s.p.startsWith(CW) || inSchema.has(s.p) || seen.has(s.p)) continue
       seen.add(s.p)
-      used.push(columnFor(findResource(model, termKey(iri(s.p))), s.p, false, isDatatype))
+      const known = findResource(model, termKey(iri(s.p))) ?? imported?.byIri.get(s.p)
+      used.push(columnFor(known, s.p, false, isDatatype))
     }
   }
   const byLabel = (a: DataColumn, b: DataColumn) =>
@@ -1781,12 +1814,19 @@ export type CheckCode =
   | 'missing_range'
   | 'orphan_declaration'
   | 'duplicate_label'
+  | 'unresolved_import'
+  | 'ambiguous_import'
+  | 'import_over_limit'
+  | 'import_cycle'
 
 export type CheckSeverity = 'warning' | 'info'
 
 /** The catalogue, in display order (UDR-0188 D2). */
 export const CHECKS: readonly { code: CheckCode; severity: CheckSeverity; title: string }[] = [
   { code: 'undeclared_class', severity: 'warning', title: 'Undeclared classes' },
+  { code: 'unresolved_import', severity: 'warning', title: 'Imports not in the catalog' },
+  { code: 'ambiguous_import', severity: 'warning', title: 'Ambiguous imports' },
+  { code: 'import_over_limit', severity: 'warning', title: 'Imports over the limit' },
   { code: 'subclass_cycle', severity: 'warning', title: 'Subclass cycles' },
   { code: 'subproperty_cycle', severity: 'warning', title: 'Subproperty cycles' },
   { code: 'kind_conflict', severity: 'warning', title: 'Kind conflicts' },
@@ -1798,6 +1838,7 @@ export const CHECKS: readonly { code: CheckCode; severity: CheckSeverity; title:
   { code: 'missing_range', severity: 'info', title: 'Properties without a range' },
   { code: 'orphan_declaration', severity: 'info', title: 'Orphan declarations' },
   { code: 'duplicate_label', severity: 'info', title: 'Duplicate labels' },
+  { code: 'import_cycle', severity: 'info', title: 'Import cycles' },
 ]
 
 /** One removable statement a cycle or self-loop finding offers to delete. */
@@ -1823,6 +1864,8 @@ export interface Finding {
   edges?: CheckEdge[]
   /** missing_domain / missing_range: the property is not drawn on the canvas. */
   notDrawn?: boolean
+  /** Import findings: the import IRI (opens the Imports dialog, UDR-0189 D7). */
+  importIri?: string
 }
 
 export interface CheckContext {
@@ -1830,6 +1873,10 @@ export interface CheckContext {
   bases?: string[]
   /** Backend diagnostics of the loaded file (ill-typed literals, CTR-0169). */
   diagnostics?: Diagnostic[]
+  /** The imported vocabulary (its declarations count as declared, UDR-0189 D7). */
+  imported?: ImportedIndex
+  /** The import list of `GET /{id}/imports` (unresolved, ambiguous, over the limit, cycles). */
+  imports?: ImportItem[]
 }
 
 /** An IRI's namespace: everything up to the last `#` or `/`. */
@@ -1998,7 +2045,7 @@ function collectIris(term: Term, into: (value: string) => void): void {
  */
 export function runChecks(model: OntologyModel, context: CheckContext = {}): Finding[] {
   const findings: Finding[] = []
-  const entities = entityIris(model)
+  const entities = withExtra(entityIris(model), context.imported?.declared)
   const datatypes = new Set(model.resources.filter((r) => declaresDatatype(r.statements)).map(resourceKey))
   const isDatatype: DatatypeLookup = (k) => datatypes.has(k)
 
@@ -2052,7 +2099,10 @@ export function runChecks(model: OntologyModel, context: CheckContext = {}): Fin
   findings.push(...cycleFindings(model, RDFS_SUB_CLASS_OF, 'subclass_cycle', 'a subclass'))
   findings.push(...cycleFindings(model, RDFS_SUB_PROPERTY_OF, 'subproperty_cycle', 'a subproperty'))
 
-  const drawn = canvasResourceKeys(model)
+  const drawn = canvasResourceKeys(
+    model,
+    context.imported ? referencedImportedClasses(model, context.imported) : undefined,
+  )
   const functional = new Set<string>()
   const labelGroups = new Map<string, Term[]>()
   for (const resource of model.resources) {
@@ -2210,6 +2260,261 @@ export function runChecks(model: OntologyModel, context: CheckContext = {}): Fin
     })
   }
 
+  findings.push(...importFindings(context.imports ?? []))
+
   const order = new Map(CHECKS.map((c, i) => [c.code, i]))
   return findings.sort((a, b) => (order.get(a.code) as number) - (order.get(b.code) as number))
+}
+
+// ---- owl:imports (UDR-0189) --------------------------------------------------------------
+
+export const OWL_ONTOLOGY = `${OWL}Ontology`
+export const OWL_IMPORTS = `${OWL}imports`
+
+export type ImportStatus = 'resolved' | 'builtin' | 'missing' | 'ambiguous' | 'cycle' | 'self' | 'over_limit'
+
+/** One import of the closure as `GET /{id}/imports` returns it (CTR-0171 v8). */
+export interface ImportItem {
+  iri: string
+  subject: Term
+  graph: GraphTerm | null
+  /** The import IRI of the ontology that declares this import (null = this ontology). */
+  parent: string | null
+  parent_id: string
+  direct: boolean
+  status: ImportStatus
+  match: 'map' | 'builtin' | 'catalog' | 'ontology_iri' | 'version_iri' | null
+  ontology: { id: string; name: string } | null
+  candidates: { id: string; name: string }[]
+  statements: number | null
+}
+
+/** An imported class, property, datatype or annotation property (read-only, D6). */
+export interface ImportedResource extends Resource {
+  /** The catalog id of the ontology it comes from. */
+  source: string
+}
+
+export interface ImportsInfo {
+  ontology_iri: string | null
+  ontology_iris: string[]
+  catalog_iri: string
+  closure: { id: string; name: string | null; iri: string; revision: string }[]
+  imports: ImportItem[]
+  vocabulary: ImportedResource[]
+  notices: string[]
+  include_imports_default: boolean
+}
+
+/** The imported vocabulary, indexed. Kept beside the model, never inside it (D6). */
+export interface ImportedIndex {
+  byIri: Map<string, ImportedResource>
+  /** Every IRI the imported vocabulary declares (classes, properties, datatypes, ...). */
+  declared: Set<string>
+  /** The imported classes (role entity). */
+  classes: Set<string>
+  /** The imported object and datatype properties. */
+  properties: ImportedResource[]
+  /** Source catalog id -> ontology name. */
+  sources: Map<string, string>
+}
+
+export const EMPTY_IMPORTED: ImportedIndex = {
+  byIri: new Map(),
+  declared: new Set(),
+  classes: new Set(),
+  properties: [],
+  sources: new Map(),
+}
+
+/** Index `GET /{id}/imports` (first declaration wins when two imported files share an IRI). */
+export function importedIndex(info: ImportsInfo | null | undefined): ImportedIndex {
+  if (!info || info.vocabulary.length === 0) return EMPTY_IMPORTED
+  const byIri = new Map<string, ImportedResource>()
+  for (const resource of info.vocabulary) {
+    if (resource.term.type !== 'iri' || byIri.has(resource.term.value)) continue
+    byIri.set(resource.term.value, resource)
+  }
+  const classes = new Set<string>()
+  const properties: ImportedResource[] = []
+  for (const [value, resource] of byIri) {
+    if (resource.role === 'entity') classes.add(value)
+    else if (resource.role === 'object_property' || resource.role === 'datatype_property') properties.push(resource)
+  }
+  const sources = new Map<string, string>()
+  for (const item of info.closure) sources.set(item.id, item.name ?? item.id)
+  return { byIri, declared: new Set(byIri.keys()), classes, properties, sources }
+}
+
+/** The source ontology's name of an imported term (empty when it is not imported). */
+export function importedSourceName(imported: ImportedIndex, value: string): string {
+  const resource = imported.byIri.get(value)
+  return resource ? (imported.sources.get(resource.source) ?? resource.source) : ''
+}
+
+/**
+ * The imported classes the ontology refers to (UDR-0189 D8): an `rdfs:subClassOf`
+ * object, the `rdfs:domain` / `rdfs:range` of an own resource, or an own individual's
+ * type -- and not declared by the ontology itself. These are drawn as faded nodes.
+ */
+export function referencedImportedClasses(model: OntologyModel, imported: ImportedIndex): Set<string> {
+  const out = new Set<string>()
+  if (imported.classes.size === 0) return out
+  const own = entityIris(model)
+  const consider = (term: Term) => {
+    if (term.type === 'iri' && imported.classes.has(term.value) && !own.has(term.value)) out.add(term.value)
+  }
+  for (const resource of model.resources) {
+    for (const s of resource.statements) {
+      if (s.p === RDFS_SUB_CLASS_OF || s.p === RDFS_DOMAIN || s.p === RDFS_RANGE || s.p === RDF_TYPE) consider(s.o)
+    }
+  }
+  return out
+}
+
+/** The referenced imported classes plus their imported superclasses (the Data view tree, D11). */
+export function relevantImportedClasses(model: OntologyModel, imported: ImportedIndex): Set<string> {
+  const out = new Set<string>()
+  const own = entityIris(model)
+  const stack = [...referencedImportedClasses(model, imported)]
+  for (const cls of own) stack.push(...iriObjects(findResource(model, termKey(iri(cls))), RDFS_SUB_CLASS_OF))
+  while (stack.length > 0) {
+    const cls = stack.pop() as string
+    if (out.has(cls) || own.has(cls) || !imported.classes.has(cls)) continue
+    out.add(cls)
+    stack.push(...iriObjects(imported.byIri.get(cls), RDFS_SUB_CLASS_OF))
+  }
+  return out
+}
+
+export interface ImportedClassView extends EntityView {
+  /** The source ontology's name (shown under the label). */
+  sourceName: string
+}
+
+/**
+ * The faded nodes (D8): one per referenced imported class, labelled from the imported
+ * vocabulary, listing the OWN datatype properties whose domain it is. Never positioned
+ * by statements (x / y stay null: the automatic layout places them, nothing is written).
+ */
+export function importedClassViews(
+  model: OntologyModel,
+  imported: ImportedIndex,
+  refs: Set<string>,
+): ImportedClassView[] {
+  const entities = withExtra(entityIris(model), refs)
+  const views: ImportedClassView[] = []
+  for (const value of [...refs].sort()) {
+    const resource = imported.byIri.get(value)
+    if (!resource) continue
+    const properties = model.resources
+      .filter((r) => r.role === 'datatype_property' && iriObjects(r, RDFS_DOMAIN).includes(value))
+      .map((r) => datatypePropertyView(r, entities))
+      .sort((a, b) => a.iri.localeCompare(b.iri))
+    views.push({
+      iri: value,
+      key: termKey(iri(value)),
+      label: displayLiteral(resource, RDFS_LABEL) || localName(value),
+      comment: displayLiteral(resource, RDFS_COMMENT),
+      emoji: '',
+      color: '',
+      x: null,
+      y: null,
+      properties,
+      sourceName: importedSourceName(imported, value),
+    })
+  }
+  return views
+}
+
+/**
+ * The term pickers' imported options (D11): IRIs of imported classes (or properties)
+ * with their source, sorted, minus the ones the ontology itself declares.
+ */
+export function importedOptions(
+  model: OntologyModel,
+  imported: ImportedIndex,
+  kind: 'class' | 'property',
+): { iri: string; source: string }[] {
+  const own = new Set(
+    model.resources.filter((r) => r.term.type === 'iri').map((r) => (r.term as { value: string }).value),
+  )
+  const values =
+    kind === 'class' ? [...imported.classes] : imported.properties.map((r) => (r.term as { value: string }).value)
+  return values
+    .filter((v) => !own.has(v))
+    .sort()
+    .map((v) => ({ iri: v, source: importedSourceName(imported, v) }))
+}
+
+/** The Checks findings about imports (UDR-0189 D7): one per import IRI and status. */
+export function importFindings(items: ImportItem[]): Finding[] {
+  const findings: Finding[] = []
+  const seen = new Set<string>()
+  for (const item of items) {
+    const code: CheckCode | null =
+      item.status === 'missing'
+        ? 'unresolved_import'
+        : item.status === 'ambiguous'
+          ? 'ambiguous_import'
+          : item.status === 'over_limit'
+            ? 'import_over_limit'
+            : item.status === 'cycle'
+              ? 'import_cycle'
+              : null
+    if (!code || seen.has(`${code}|${item.iri}`)) continue
+    seen.add(`${code}|${item.iri}`)
+    const via = item.direct ? '' : ` (imported by <${item.parent ?? ''}>)`
+    const message =
+      code === 'unresolved_import'
+        ? `<${item.iri}>${via} is not in the catalog, so it is not included. Map it to a catalog ontology in Imports.`
+        : code === 'ambiguous_import'
+          ? `<${item.iri}>${via} matches ${item.candidates.map((c) => c.name).join(', ')}; nothing is included until you map it in Imports.`
+          : code === 'import_over_limit'
+            ? `<${item.iri}>${via} was not loaded: the import closure reached its limit (App Settings > Ontology).`
+            : `<${item.iri}>${via} leads back into the imports already followed; the cycle is cut.`
+    findings.push({
+      code,
+      severity: code === 'import_cycle' ? 'info' : 'warning',
+      key: item.iri,
+      subjects: [item.subject],
+      message,
+      importIri: item.iri,
+    })
+  }
+  return findings
+}
+
+/**
+ * Add an import (D9): `<self> owl:imports <target>` in the DEFAULT graph, preceded by
+ * `<self> a owl:Ontology` when the file has no ontology header. `self` is the file's
+ * ontology IRI, else its catalog IRI.
+ */
+export function addImport(model: OntologyModel, selfIri: string, target: string, hasHeader: boolean): OntologyModel {
+  const inDefault: OntologyModel = { ...model, targetGraph: null }
+  let next = inDefault
+  if (!hasHeader)
+    next = applyStatementEdit(next, termKey(iri(selfIri)), {
+      index: null,
+      statement: { p: RDF_TYPE, o: iri(OWL_ONTOLOGY) },
+    })
+  next = applyStatementEdit(next, termKey(iri(selfIri)), { index: null, statement: { p: OWL_IMPORTS, o: iri(target) } })
+  return { ...next, targetGraph: model.targetGraph }
+}
+
+/** Remove one import (D9): exactly that `owl:imports` statement, in its graph; the header stays. */
+export function removeImport(
+  model: OntologyModel,
+  subject: Term,
+  target: string,
+  graph: GraphTerm | null,
+): OntologyModel {
+  const key = termKey(subject)
+  const resource = findResource(model, key)
+  if (!resource) return model
+  const index = resource.statements.findIndex(
+    (s) => s.p === OWL_IMPORTS && s.o.type === 'iri' && s.o.value === target && graphKey(s.g) === graphKey(graph),
+  )
+  if (index < 0) return model
+  return applyStatementEdit(model, key, { index, statement: null })
 }

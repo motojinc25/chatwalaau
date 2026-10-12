@@ -88,6 +88,8 @@ export function OntologyChecksPane(props: {
   onDeclare: (finding: Finding) => void
   onDeclareAll: (namespace: string, classes: string[]) => void
   onRemoveEdge: (edge: CheckEdge) => void
+  /** Import findings: open the Imports dialog for this import IRI (PRP-0207 / UDR-0189 D7). */
+  onOpenImports?: (iri: string) => void
 }) {
   const [showIgnored, setShowIgnored] = useState(false)
   const visible = useMemo(
@@ -142,6 +144,8 @@ function CheckGroup(props: {
   onDeclare: (finding: Finding) => void
   onDeclareAll: (namespace: string, classes: string[]) => void
   onRemoveEdge: (edge: CheckEdge) => void
+  /** Import findings: open the Imports dialog for this import IRI (PRP-0207 / UDR-0189 D7). */
+  onOpenImports?: (iri: string) => void
 }) {
   const [open, setOpen] = useState(props.defaultOpen)
   // Declare all: per OWN namespace only; other vocabularies are declared one at a time (D3).
@@ -208,6 +212,8 @@ function FindingRow(props: {
   onSelect: (term: Term) => void
   onDeclare: (finding: Finding) => void
   onRemoveEdge: (edge: CheckEdge) => void
+  /** Import findings: open the Imports dialog for this import IRI (PRP-0207 / UDR-0189 D7). */
+  onOpenImports?: (iri: string) => void
 }) {
   const { finding: f } = props
   const id = findingId(f)
@@ -233,6 +239,15 @@ function FindingRow(props: {
           </span>
         )}
         <span className="flex-1" />
+        {f.importIri && props.onOpenImports && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 text-[10px]"
+            onClick={() => f.importIri && props.onOpenImports?.(f.importIri)}>
+            Open Imports
+          </Button>
+        )}
         {!props.readOnly && f.code === 'undeclared_class' && (
           <Button variant="outline" size="sm" className="h-6 text-[10px]" onClick={() => props.onDeclare(f)}>
             {f.own ? 'Declare as class' : 'Declare as class...'}

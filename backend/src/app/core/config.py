@@ -713,6 +713,11 @@ class Settings(BaseSettings):
     ontology_history_keep_recent: int = 20
     ontology_history_keep_days: int = 30
     ontology_history_max_mb: int = 200
+    # owl:imports resolved from the catalog (PRP-0207 / UDR-0189): the query lanes include
+    # the import closure by default; the closure is bounded by ontology count and total size.
+    ontology_query_include_imports: bool = True
+    ontology_imports_max_ontologies: int = 20
+    ontology_imports_max_mb: int = 50
     # The NL -> SPARQL completion model is the catalog `roles.ontology_nl` binding
     # (PRP-0115 / UDR-0096); the removed ONTOLOGY_NL_MODEL env var no longer applies.
 

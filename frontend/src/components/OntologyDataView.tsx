@@ -571,8 +571,9 @@ export function IndividualsView(props: {
         model,
         classes,
         rows.map((r) => r.resource),
+        props.ctx.imported,
       ),
-    [model, classes, rows],
+    [model, classes, rows, props.ctx.imported],
   )
   const shown = columns.filter((c) => !hidden.has(c.predicate))
 
@@ -838,8 +839,8 @@ export function IndividualDetail(props: {
   )
   const classes = useMemo(() => (resource ? individualClasses(resource) : []), [resource])
   const columns = useMemo(
-    () => (resource ? dataColumns(props.model, classes, [resource]) : []),
-    [props.model, classes, resource],
+    () => (resource ? dataColumns(props.model, classes, [resource], ctx.imported) : []),
+    [props.model, classes, resource, ctx.imported],
   )
   const allIndividuals = useMemo(
     () => props.model.resources.filter((r) => props.index.keys.has(resourceKey(r))),

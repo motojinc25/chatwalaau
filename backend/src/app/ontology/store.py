@@ -506,6 +506,10 @@ class QueryGraph:
     # The NL schema summary, computed on first use and kept with a cached entry
     # (UDR-0183 D2). It is derived from the fields above, which never change.
     nl_summary: str | None = None
+    # PRP-0207 / UDR-0189 D5: (id, revision) of the imported ontologies merged in
+    # (None = none), and the import notices this answer carries.
+    imports: tuple[tuple[str, str], ...] | None = None
+    import_notices: list[dict[str, Any]] = field(default_factory=list)
 
 
 def parse_scope(value: Any) -> Any:
@@ -576,7 +580,108 @@ def _merge_into_default(store: Any, graphs: list[Any]) -> None:
         store.extend(ox.parse(ox.serialize(triples, format=ox.RdfFormat.N_TRIPLES), format=ox.RdfFormat.N_TRIPLES))
 
 
-def _build_query_graph(entry: dict[str, str], data: bytes, scope: Any) -> QueryGraph:
+def _blank_prefix(data: bytes, imported: list[Any]) -> str:
+    """A blank-node label prefix no merged file uses, for standardizing apart (UDR-0189 D5).
+
+    Stored files write blank nodes as ``_:label`` and parser-made labels are hex, so a
+    prefix with a non-hex letter that no file contains after ``_:`` is unused.
+    """
+    blobs = [data, *(item.data for item in imported)]
+    for letter in "ijklmnopqrstuvwxyz":
+        prefix = f"cw{letter}"
+        if not any(f"_:{prefix}".encode() in blob for blob in blobs):
+            return prefix
+    return f"cwz{len(data)}"
+
+
+def _merge_imports(
+    store: Any,
+    imported: list[Any],
+    data: bytes,
+    own_graphs: dict[Any, None],
+    kept: list[Any],
+    own_named: int,
+) -> tuple[int, int, list[dict[str, Any]], list[dict[str, str]], list[Any]]:
+    """Add the imported files to the query Store, read-only and standardized apart (D5).
+
+    Each imported ontology is loaded as the named graph of its import IRI (unless the own
+    file already has a graph of that name: then straight into the default graph), its
+    blank nodes relabelled with a prefix no merged file uses; the named graphs are then
+    merged into the default graph inside the engine (the Store is a set, so triples the
+    own scope already has count once). Returns (default triples added, named quads
+    added, notices, extra prefixes, the import graphs).
+    """
+    import pyoxigraph as ox
+
+    prefix = _blank_prefix(data, imported)
+    default_graph = ox.DefaultGraph()
+    named_quads = 0
+    notices: list[dict[str, Any]] = []
+    prefixes: list[dict[str, str]] = []
+    import_graphs: list[Any] = []
+    default_before = len(store) - own_named
+    for k, item in enumerate(imported):
+        relabel: dict[str, Any] = {}
+
+        def term(t: Any, k: int = k, relabel: dict[str, Any] = relabel) -> Any:
+            if isinstance(t, ox.BlankNode):
+                node = relabel.get(t.value)
+                if node is None:
+                    node = relabel[t.value] = ox.BlankNode(f"{prefix}{k}x{t.value}")
+                return node
+            if isinstance(t, ox.Triple):
+                return ox.Triple(term(t.subject), t.predicate, term(t.object))
+            return t
+
+        graph_name = ox.NamedNode(item.iri)
+        named_ok = graph_name not in own_graphs and graph_name not in import_graphs
+        target = graph_name if named_ok else default_graph
+        parser = ox.parse(item.data, format=ox.RdfFormat.TRIG)
+
+        def quads(parser: Any = parser, target: Any = target, term: Any = term) -> Any:
+            for quad in parser:
+                subject, obj = quad.subject, quad.object
+                if not isinstance(subject, ox.NamedNode):
+                    subject = term(subject)
+                if isinstance(obj, ox.BlankNode | ox.Triple):
+                    obj = term(obj)
+                if is_restorable(obj):
+                    kept.append(ox.Triple(subject, quad.predicate, obj))
+                yield ox.Quad(subject, quad.predicate, obj, target)
+
+        before = len(store)
+        try:
+            store.extend(quads())
+            for name, iri in (parser.prefixes or {}).items():
+                prefixes.append({"prefix": name, "iri": iri})
+        except (SyntaxError, ValueError):
+            logger.warning("imported ontology %s could not be parsed", item.ontology_id, exc_info=True)
+            notices.append(
+                {
+                    "code": "import_unreadable",
+                    "message": f"The imported ontology <{item.iri}> could not be read; part of it may be missing.",
+                }
+            )
+        if named_ok:
+            named_quads += len(store) - before
+            import_graphs.append(graph_name)
+        else:
+            notices.append(
+                {
+                    "code": "import_graph_name_in_use",
+                    "message": (
+                        f"The imported ontology <{item.iri}> is included in the default graph only: "
+                        "this ontology already has a named graph of that name."
+                    ),
+                }
+            )
+    if import_graphs:
+        _merge_into_default(store, import_graphs)
+    added = len(store) - own_named - named_quads - default_before
+    return added, named_quads, notices, prefixes, import_graphs
+
+
+def _build_query_graph(entry: dict[str, str], data: bytes, scope: Any, imported: list[Any] | None = None) -> QueryGraph:
     """Parse one file version ONCE into an in-memory Store plus a lexical index.
 
     The parse streams straight into ``Store.extend`` rather than ``Store.load``,
@@ -643,6 +748,24 @@ def _build_query_graph(entry: dict[str, str], data: bytes, scope: Any) -> QueryG
         document = document_of(parser, data)
         if graphs and scope != "default":
             _merge_into_default(store, list(graphs) if scope == "all" else [scope])
+    import_notices: list[dict[str, Any]] = []
+    if imported:
+        # PRP-0207 / UDR-0189 D5: the import closure, read-only and standardized apart.
+        added, imported_named, import_notices, extra, import_graphs = _merge_imports(
+            store, imported, data, graphs, kept, named_quads
+        )
+        count += added
+        named_quads += imported_named
+        bound = {p["prefix"] for p in document["prefixes"]} | {p["iri"] for p in document["prefixes"]}
+        for item in extra:
+            if item["prefix"] not in bound and item["iri"] not in bound:
+                document = {**document, "prefixes": [*document["prefixes"], item]}
+                bound |= {item["prefix"], item["iri"]}
+        if provenance is not None:
+            # A dataset's CONSTRUCT answers name where a triple came from (UDR-0182 D5).
+            for graph_name in import_graphs:
+                for quad in store.quads_for_pattern(None, None, None, graph_name):
+                    provenance.setdefault(quad.triple, [graph_name])
     # The stored file is written by the codec, which never repeats a quad, so the named
     # quads are stored as parsed and (merged triples) - (default graph size) is what the
     # value encoding merged.
@@ -655,6 +778,8 @@ def _build_query_graph(entry: dict[str, str], data: bytes, scope: Any) -> QueryG
         graphs=list(graphs),
         scope=scope,
         provenance=provenance if graphs else None,
+        imports=tuple((item.ontology_id, item.revision) for item in imported) if imported else None,
+        import_notices=import_notices,
     )
 
 
@@ -697,10 +822,18 @@ def cache_cost(size: int, dataset: bool, scope: Any) -> int:
     return max(1, size) * factor
 
 
-def cache_key(ontology_id: str, revision: str, dataset: bool, scope: Any) -> tuple[Any, ...]:
-    """(id, revision, kind, scope); a graph file's "all" and "default" share one entry (D1)."""
+def cache_key(
+    ontology_id: str, revision: str, dataset: bool, scope: Any, imports: tuple[Any, ...] | None = None
+) -> tuple[Any, ...]:
+    """(id, revision, kind, scope[, imports]); a graph file's "all" and "default" share one entry (D1).
+
+    ``imports`` is the (id, revision) of every imported ontology merged in (UDR-0189 D5):
+    a save of any of them changes the key. Without imports the key keeps its shape.
+    """
     if not dataset and scope == "default":
         scope = "all"
+    if imports:
+        return (ontology_id, revision, dataset, scope, tuple(imports))
     return (ontology_id, revision, dataset, scope)
 
 
@@ -731,7 +864,14 @@ def cached_entries() -> list[tuple[Any, ...]]:
         return list(_cache)
 
 
-def load_store(ontology_id: str, scope: Any = "all") -> QueryGraph:
+def include_imports(value: bool | None) -> bool:
+    """The ``imports`` choice of a query lane: as given, else the App Settings default (D5)."""
+    if value is None:
+        return bool(settings.ontology_query_include_imports)
+    return bool(value)
+
+
+def load_store(ontology_id: str, scope: Any = "all", imports: bool | None = None) -> QueryGraph:
     """The ontology loaded for the query lanes, from the cache when its revision is cached.
 
     The stored bytes are read and hashed on every call (about 20 ms at the 10 MB
@@ -748,19 +888,29 @@ def load_store(ontology_id: str, scope: Any = "all") -> QueryGraph:
         raise KeyError(ontology_id)
     entry, data = pair
     scope = parse_scope(scope)
+    imported: list[Any] = []
+    closure_notices: list[dict[str, Any]] = []
+    if include_imports(imports):
+        # PRP-0207 / UDR-0189 D4 / D5: the import closure, resolved in the catalog only.
+        from app.ontology.imports import compute_closure
+
+        closure = compute_closure(ontology_id)
+        imported = closure.loaded
+        closure_notices = [{"code": "imports", "message": text} for text in closure.notices]
+    signature = tuple((item.ontology_id, item.revision) for item in imported) or None
     budget = cache_budget_bytes()
     if budget <= 0:
         if _cache:
             invalidate_query_cache()
-        return _build_query_graph(entry, data, scope)
+        return _with_notices(_build_query_graph(entry, data, scope, imported), closure_notices)
     dataset = is_dataset(entry)
-    key = cache_key(ontology_id, revision_of(data), dataset, scope)
+    key = cache_key(ontology_id, revision_of(data), dataset, scope, signature)
     with _cache_lock:
         hit = _cache.get(key)
         if hit is not None:
             _cache.move_to_end(key)
             cache_stats["hits"] += 1
-            return hit.graph
+            return _with_notices(hit.graph, closure_notices)
         slot = _loading.setdefault(key, threading.Lock())
     with slot:
         with _cache_lock:
@@ -768,15 +918,16 @@ def load_store(ontology_id: str, scope: Any = "all") -> QueryGraph:
             if hit is not None:  # another request loaded it while this one waited
                 _cache.move_to_end(key)
                 cache_stats["hits"] += 1
-                return hit.graph
+                return _with_notices(hit.graph, closure_notices)
             cache_stats["misses"] += 1
         try:
-            graph = _build_query_graph(entry, data, scope)
+            graph = _build_query_graph(entry, data, scope, imported)
         except BaseException:
             with _cache_lock:
                 _loading.pop(key, None)
             raise
-        cost = cache_cost(len(data), dataset, scope)
+        imported_cost = sum(len(item.data) for item in imported) * CACHE_FACTOR_GRAPH
+        cost = cache_cost(len(data), dataset, scope) + imported_cost
         with _cache_lock:
             # Insert and release the key in one step, so no request starts a second load.
             _loading.pop(key, None)
@@ -785,7 +936,16 @@ def load_store(ontology_id: str, scope: Any = "all") -> QueryGraph:
                 _cache[key] = _CacheEntry(graph, cost)
                 _cache_total += cost
             _evict_to(budget)
+        return _with_notices(graph, closure_notices)
+
+
+def _with_notices(graph: QueryGraph, notices: list[dict[str, Any]]) -> QueryGraph:
+    """The graph with this request's closure notices (a shallow copy; the cached entry is unchanged)."""
+    if not notices:
         return graph
+    from dataclasses import replace
+
+    return replace(graph, import_notices=[*notices, *graph.import_notices])
 
 
 def _term_to_str(term: Any) -> str:
@@ -880,11 +1040,12 @@ def execute_query(graph: QueryGraph, sparql: str, *, max_construct_triples: int 
             "truncated": truncated,
             "entity_iris": sorted(entity_iris),
             "scope": scope,
-            "notices": lexical_notices(index, sparql, ambiguous),
+            "notices": [*graph.import_notices, *lexical_notices(index, sparql, ambiguous)],
         }
 
     if isinstance(result, ox.QueryBoolean):
-        return {"kind": "ask", "value": bool(result), "scope": scope, "notices": lexical_notices(index, sparql, 0)}
+        notices = [*graph.import_notices, *lexical_notices(index, sparql, 0)]
+        return {"kind": "ask", "value": bool(result), "scope": scope, "notices": notices}
 
     # Remaining result kind: triples from CONSTRUCT / DESCRIBE. The cap and the
     # count apply AFTER restoration (merged triples come back).
@@ -920,7 +1081,7 @@ def execute_query(graph: QueryGraph, sparql: str, *, max_construct_triples: int 
         "triple_count": len(triples),
         "truncated": truncated,
         "scope": scope,
-        "notices": lexical_notices(index, sparql, ambiguous),
+        "notices": [*graph.import_notices, *lexical_notices(index, sparql, ambiguous)],
     }
 
 
@@ -953,6 +1114,7 @@ __all__ = [
     "execute_query",
     "get_entry",
     "graph_names",
+    "include_imports",
     "invalidate_query_cache",
     "is_dataset",
     "load_store",

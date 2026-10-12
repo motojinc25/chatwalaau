@@ -184,6 +184,12 @@ GROUPS: tuple[SettingGroup, ...] = (
         "Limits",
         "Upper bounds on coding tools, the file explorer, pipelines, and replies.",
     ),
+    # PRP-0207 (CTR-0198, UDR-0189): the ontology keys, moved out of `limits`.
+    SettingGroup(
+        "ontology",
+        "Ontology",
+        "Ontology search, imports, history and limits.",
+    ),
     SettingGroup(
         "schedule",
         "Schedule",
@@ -879,7 +885,7 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
     SettingDescriptor(
         "ontology_max_file_bytes",
         "Ontology file cap (bytes)",
-        "limits",
+        "ontology",
         "int",
         SCOPE_RUNTIME,
         help="Largest ontology document accepted.",
@@ -887,7 +893,7 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
     SettingDescriptor(
         "ontology_tool_max_triples",
         "Ontology query triple cap",
-        "limits",
+        "ontology",
         "int",
         SCOPE_RUNTIME,
         help="CONSTRUCT results beyond this are truncated with a note to the model.",
@@ -895,7 +901,7 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
     SettingDescriptor(
         "ontology_query_cache_mb",
         "Ontology query cache (MiB)",
-        "limits",
+        "ontology",
         "int",
         SCOPE_RUNTIME,
         help=(
@@ -908,7 +914,7 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
     SettingDescriptor(
         "ontology_history_keep_recent",
         "Ontology history: recent versions kept",
-        "limits",
+        "ontology",
         "int",
         SCOPE_RUNTIME,
         help="How many of the newest backups of each ontology are always kept.",
@@ -918,7 +924,7 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
     SettingDescriptor(
         "ontology_history_keep_days",
         "Ontology history: days kept",
-        "limits",
+        "ontology",
         "int",
         SCOPE_RUNTIME,
         help=(
@@ -931,12 +937,44 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
     SettingDescriptor(
         "ontology_history_max_mb",
         "Ontology history: size limit per ontology (MiB)",
-        "limits",
+        "ontology",
         "int",
         SCOPE_RUNTIME,
         help="Oldest backups are removed while an ontology's history is larger. The newest is always kept. 0 = no limit.",
         min=0,
         max=65536,
+    ),
+    SettingDescriptor(
+        "ontology_query_include_imports",
+        "Ontology search includes imports",
+        "ontology",
+        "bool",
+        SCOPE_RUNTIME,
+        help=(
+            "Searches, natural-language questions and the agent tool also answer from the "
+            "ontologies an ontology imports (owl:imports, resolved in the catalog). The Search "
+            "pane's Include imports switch starts with this value."
+        ),
+    ),
+    SettingDescriptor(
+        "ontology_imports_max_ontologies",
+        "Ontology imports: ontologies loaded",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help="Most imported ontologies followed for one ontology (the whole import closure).",
+        min=1,
+        max=200,
+    ),
+    SettingDescriptor(
+        "ontology_imports_max_mb",
+        "Ontology imports: total size (MiB)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help="Largest total size of the imported files followed for one ontology.",
+        min=1,
+        max=1024,
     ),
     # ---- Schedule (runtime) -----------------------------------------------
     SettingDescriptor(

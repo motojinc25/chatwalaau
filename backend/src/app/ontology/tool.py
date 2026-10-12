@@ -42,7 +42,8 @@ ONTOLOGY_TOOL_INSTRUCTION = (
     "natural-language question. The answer arrives as RDF Turtle in a ```turtle code "
     "block (TriG in a ```trig block when the ontology has named graphs; pass graph to "
     "ask about one of them) -- treat it as authoritative structured knowledge about the "
-    "domain's entities and relationships."
+    "domain's entities and relationships. An ontology's answer also covers the ontologies "
+    "it imports (listed as imports in the catalog) unless the operator turned that off."
 )
 
 
@@ -51,11 +52,18 @@ _GRAPHS_PER_ONTOLOGY = 20
 
 
 def _catalog_summary() -> list[dict[str, object]]:
+    from app.ontology.imports import Resolver, direct_import_names
+
+    resolver = Resolver()
     out: list[dict[str, object]] = []
     for e in store.read_catalog():
         item: dict[str, object] = {"id": e["id"], "name": e["name"], "description": e["description"]}
         if store.is_dataset(e):
             item["graphs"] = store.graph_names(e["id"])[:_GRAPHS_PER_ONTOLOGY]
+        # UDR-0189 D10: which ontologies this one extends (owl:imports resolved in the catalog).
+        imported = direct_import_names(e["id"], resolver)
+        if imported:
+            item["imports"] = imported
         out.append(item)
     return out
 

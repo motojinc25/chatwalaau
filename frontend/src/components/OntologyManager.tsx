@@ -46,6 +46,7 @@ import {
   Download,
   History,
   ImageDown,
+  Import,
   Info,
   KeyRound,
   Layers,
@@ -70,6 +71,13 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { findingId, OntologyChecksPane, useIgnoredChecks } from '@/components/OntologyChecks'
 import { type DataGroup, IndividualDetail, IndividualsView, individualLabel } from '@/components/OntologyDataView'
 import { DeletedOntologiesDialog, HistoryPanel } from '@/components/OntologyHistory'
+import {
+  ImportedDetail,
+  ImportsDialog,
+  type ImportsTab,
+  importWarningCount,
+  type ModelImport,
+} from '@/components/OntologyImports'
 import {
   AllStatements,
   AnnotateDialog,
@@ -104,6 +112,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import {
+  addImport,
   addSubclassOf,
   annotateStatement,
   applyStatementEdit,
@@ -143,7 +152,12 @@ import {
   type GraphScope,
   type GraphTerm,
   graphsOf,
+  type ImportedClassView,
+  type ImportsInfo,
   type IndividualReferences,
+  importedClassViews,
+  importedIndex,
+  importedOptions,
   individualIndex,
   individualReferences,
   iriObjects,
@@ -152,6 +166,8 @@ import {
   mintReifierIri,
   type OntologyDocument,
   type OntologyModel,
+  OWL_IMPORTS,
+  OWL_ONTOLOGY,
   otherLiterals,
   propertyCharacteristics,
   type QuadStatement,
@@ -163,9 +179,11 @@ import {
   RDFS_SUB_PROPERTY_OF,
   type RelationshipEdgeView,
   type Resource,
+  referencedImportedClasses,
   reifiersOf,
   relationshipEdges,
   removeCheckEdge,
+  removeImport,
   removePropertyFromEntity,
   removeResource,
   removeStatement,
@@ -249,6 +267,7 @@ type Selection =
   | { kind: 'resource'; key: string }
   | { kind: 'isa'; source: string; target: string }
   | { kind: 'individual'; key: string }
+  | { kind: 'imported'; iri: string }
 
 type LinkMode = 'relationship' | 'isa'
 
@@ -270,6 +289,27 @@ function writeShowIsa(show: boolean): void {
     // storage blocked: the choice lasts for this session only
   }
 }
+
+// Per-browser: draw the imported classes the ontology refers to (UDR-0189 D8).
+const SHOW_IMPORTED_STORAGE_KEY = 'chatwalaau.ontology.showImported'
+
+function readShowImported(): boolean {
+  try {
+    return localStorage.getItem(SHOW_IMPORTED_STORAGE_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+function writeShowImported(show: boolean): void {
+  try {
+    localStorage.setItem(SHOW_IMPORTED_STORAGE_KEY, String(show))
+  } catch {
+    // storage blocked: the choice lasts for this session only
+  }
+}
+
+const NO_IRIS: Set<string> = new Set()
 
 /** Schema = the canvas (TBox); Data = individuals per class (ABox, UDR-0187 D2). */
 type ManagerView = 'schema' | 'data'
@@ -443,6 +483,9 @@ interface EntityNodeData extends Record<string, unknown> {
   individualCount: number
   onOpenData: (cls: string) => void
   iri: string
+  /** A faded node: an imported class this ontology refers to (read-only, UDR-0189 D8). */
+  imported?: boolean
+  sourceName?: string
 }
 
 type EntityFlowNode = Node<EntityNodeData, 'entity'>
@@ -472,16 +515,25 @@ const EntityNode = memo(function EntityNode({ data }: NodeProps<EntityFlowNode>)
           !data.isSelected && data.related && 'ring-2 ring-blue-300 ring-offset-2',
           data.matched && 'ring-2 ring-amber-500 ring-offset-2',
         )}
-        style={{ borderColor: data.color || '#d4d4d8', opacity: data.dimmed ? 0.25 : 1 }}
+        style={{
+          borderColor: data.color || '#d4d4d8',
+          borderStyle: data.imported ? 'dashed' : 'solid',
+          opacity: data.dimmed ? 0.25 : data.imported ? 0.55 : 1,
+        }}
       />
       {/* Inner disc = the move/drag surface (dragHandle '.entity-drag'), on top. */}
       <div
         className={cn(
           ENTITY_DRAG_CLASS,
-          'absolute inset-[7px] flex cursor-move items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-900',
+          'absolute inset-[7px] flex items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-900',
+          data.imported ? 'cursor-pointer border-dashed text-zinc-500' : 'cursor-move',
         )}
-        style={{ opacity: data.dimmed ? 0.25 : 1 }}
-        title="Drag to move; drag from the outer ring to connect">
+        style={{ opacity: data.dimmed ? 0.25 : data.imported ? 0.6 : 1 }}
+        title={
+          data.imported
+            ? `Imported from ${data.sourceName} (read-only; placed automatically)`
+            : 'Drag to move; drag from the outer ring to connect'
+        }>
         <span className="text-2xl leading-none">{data.emoji || data.label.charAt(0).toUpperCase()}</span>
       </div>
       {data.propertyCount > 0 && (
@@ -513,6 +565,11 @@ const EntityNode = memo(function EntityNode({ data }: NodeProps<EntityFlowNode>)
       <span className="pointer-events-none absolute left-1/2 top-full mt-1.5 max-w-[130px] -translate-x-1/2 truncate text-center text-xs font-medium text-zinc-700">
         {data.label}
       </span>
+      {data.imported && (
+        <span className="pointer-events-none absolute left-1/2 top-full mt-5 max-w-[130px] -translate-x-1/2 truncate text-center text-[10px] text-zinc-400">
+          {data.sourceName}
+        </span>
+      )}
     </div>
   )
 })
@@ -711,6 +768,9 @@ function CanvasToolbar(props: {
   onLinkModeChange: (mode: LinkMode) => void
   showIsa: boolean
   onShowIsaChange: (show: boolean) => void
+  /** Draw the imported classes this ontology refers to (UDR-0189 D8); null = nothing imported. */
+  showImported: boolean | null
+  onShowImportedChange: (show: boolean) => void
   /** The detected vocabulary style for new terms and why (UDR-0185 D4). */
   style: VocabularyStyle
   styleReason: string
@@ -752,6 +812,19 @@ function CanvasToolbar(props: {
         />
         Show &quot;is a&quot;
       </label>
+      {props.showImported !== null && (
+        <label
+          className="flex h-7 items-center gap-1 px-1 text-xs text-zinc-600"
+          title="Show the imported classes this ontology refers to, faded (read-only); remembered in this browser">
+          <input
+            type="checkbox"
+            checked={props.showImported}
+            disabled={props.disabled}
+            onChange={(e) => props.onShowImportedChange(e.target.checked)}
+          />
+          Imported
+        </label>
+      )}
       <span
         className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600"
         title={props.styleReason}>
@@ -888,6 +961,17 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   } | null>(null)
   const [exportNotes, setExportNotes] = useState<string | null>(null)
 
+  // owl:imports (PRP-0207 / UDR-0189): resolution and the read-only imported vocabulary.
+  const [importsInfo, setImportsInfo] = useState<ImportsInfo | null>(null)
+  const [importsLoading, setImportsLoading] = useState(false)
+  const [importsOpen, setImportsOpen] = useState(false)
+  const [importsTab, setImportsTab] = useState<ImportsTab>('imports')
+  const [mapIri, setMapIri] = useState<string | null>(null)
+  const [showImported, setShowImported] = useState(readShowImported)
+  // The Search pane's "Include imports"; null = the App Settings default.
+  const [includeImports, setIncludeImports] = useState<boolean | null>(null)
+  const [deleteImporters, setDeleteImporters] = useState<{ id: string; name: string }[] | null>(null)
+
   // Right pane
   const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search' | 'history' | 'checks'>('detail')
   // Deleted ontologies (PRP-0202 / UDR-0184 D6).
@@ -934,44 +1018,63 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     }
   }, [])
 
+  /** Resolve the imports of an ontology and read the imported vocabulary (UDR-0189 D6). */
+  const fetchImports = useCallback(async (id: string) => {
+    setImportsLoading(true)
+    try {
+      const res = await fetch(`/api/ontology/${id}/imports`)
+      if (!res.ok) throw new Error('imports')
+      setImportsInfo((await res.json()) as ImportsInfo)
+    } catch {
+      setImportsInfo(null)
+    } finally {
+      setImportsLoading(false)
+    }
+  }, [])
+
   /**
    * Load an ontology. `keepView` (after a rebased save, UDR-0183 D8) keeps the graph
    * selector, the selection, the search result and the transient layout, so the
    * canvas only gains what another tab saved.
    */
-  const loadOntology = useCallback(async (id: string, options: { keepView?: boolean } = {}) => {
-    setLoading(true)
-    setError(null)
-    try {
-      const res = await fetch(`/api/ontology/${id}`)
-      if (!res.ok) throw new Error('Failed to load the ontology')
-      const data = await res.json()
-      const loaded = fromProjection(data)
-      setSelectedId(id)
-      setBaseIri((data.base_iri as string) ?? '')
-      setModel(loaded)
-      saveBaseRef.current = saveBase(loaded)
-      setDiagnostics((data.diagnostics ?? []) as Diagnostic[])
-      setRevision((data.revision as string) ?? null)
-      setStaleRevision(false)
-      setSaveConflicts(null)
-      setDirty(false)
-      if (options.keepView) return
-      setAutoPositions(new Map())
-      layoutCommittedRef.current = false
-      reifierChoiceRef.current = new Map()
-      setGraphScope('all')
-      setSelection(null)
-      setDataGroup(null)
-      setHighlight(null)
-      setQueryResult(null)
-      setRightTab('detail')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load the ontology')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  const loadOntology = useCallback(
+    async (id: string, options: { keepView?: boolean } = {}) => {
+      setLoading(true)
+      setError(null)
+      try {
+        const res = await fetch(`/api/ontology/${id}`)
+        if (!res.ok) throw new Error('Failed to load the ontology')
+        const data = await res.json()
+        const loaded = fromProjection(data)
+        setSelectedId(id)
+        setBaseIri((data.base_iri as string) ?? '')
+        setModel(loaded)
+        saveBaseRef.current = saveBase(loaded)
+        setDiagnostics((data.diagnostics ?? []) as Diagnostic[])
+        setRevision((data.revision as string) ?? null)
+        setStaleRevision(false)
+        setSaveConflicts(null)
+        setDirty(false)
+        void fetchImports(id)
+        if (options.keepView) return
+        setIncludeImports(null)
+        setAutoPositions(new Map())
+        layoutCommittedRef.current = false
+        reifierChoiceRef.current = new Map()
+        setGraphScope('all')
+        setSelection(null)
+        setDataGroup(null)
+        setHighlight(null)
+        setQueryResult(null)
+        setRightTab('detail')
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load the ontology')
+      } finally {
+        setLoading(false)
+      }
+    },
+    [fetchImports],
+  )
 
   useEffect(() => {
     if (open) void fetchCatalog()
@@ -1058,6 +1161,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     try {
       if (await saveStatements()) {
         await fetchCatalog()
+        void fetchImports(selectedId)
         return
       }
       const res = await fetch(`/api/ontology/${selectedId}`, {
@@ -1089,12 +1193,13 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       saveBaseRef.current = saveBase(model)
       setDirty(false)
       await fetchCatalog()
+      void fetchImports(selectedId)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save the ontology')
     } finally {
       setSaving(false)
     }
-  }, [selectedId, model, revision, fetchCatalog, saveStatements])
+  }, [selectedId, model, revision, fetchCatalog, saveStatements, fetchImports])
 
   // ---- Catalog actions ----
 
@@ -1168,6 +1273,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         setDirty(false)
         setSelection(null)
         setHighlight(null)
+        setImportsInfo(null)
       }
       await fetchCatalog()
       setDeleteTarget(null)
@@ -1267,14 +1373,25 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // and is always shown (UDR-0182 D3 / D4). Edits still go to the full model.
   const graphs = useMemo(() => graphsOf(model), [model])
   const viewModel = useMemo(() => scopeModel(model, graphScope), [model, graphScope])
+  // The imported vocabulary, kept beside the model and never written (UDR-0189 D6).
+  const imported = useMemo(() => importedIndex(importsInfo), [importsInfo])
+  // Faded nodes: the imported classes this ontology refers to (D8).
+  const ghostRefs = useMemo(
+    () => (showImported ? referencedImportedClasses(viewModel, imported) : NO_IRIS),
+    [showImported, viewModel, imported],
+  )
+  const ghostViews = useMemo<ImportedClassView[]>(
+    () => (ghostRefs.size > 0 ? importedClassViews(viewModel, imported, ghostRefs) : []),
+    [viewModel, imported, ghostRefs],
+  )
   const views = useMemo(() => entityViews(viewModel), [viewModel])
-  const relEdges = useMemo(() => relationshipEdges(viewModel), [viewModel])
-  const isaEdges = useMemo(() => subclassEdges(viewModel), [viewModel])
+  const relEdges = useMemo(() => relationshipEdges(viewModel, ghostRefs), [viewModel, ghostRefs])
+  const isaEdges = useMemo(() => subclassEdges(viewModel, ghostRefs), [viewModel, ghostRefs])
   const vocabStyle = useMemo(() => vocabularyStyle(model), [model])
-  const undeclared = useMemo(() => undeclaredClasses(model), [model])
+  const undeclared = useMemo(() => undeclaredClasses(model, imported.declared), [model, imported])
   // Individuals of the graph-scoped model, computed once per change (UDR-0187 D9).
-  const dataIndex = useMemo(() => individualIndex(viewModel), [viewModel])
-  const dataTree = useMemo(() => classTree(viewModel), [viewModel])
+  const dataIndex = useMemo(() => individualIndex(viewModel, imported), [viewModel, imported])
+  const dataTree = useMemo(() => classTree(viewModel, imported), [viewModel, imported])
   const changeView = useCallback((next: ManagerView) => {
     setView(next)
     writeView(next)
@@ -1505,13 +1622,22 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     setSelection(null)
   }, [individualDeleteTarget, updateModel])
 
-  const entityOptions = useMemo(() => views.map((v) => v.iri), [views])
+  const entityOptions = useMemo(
+    () => [...views.map((v) => v.iri), ...importedOptions(model, imported, 'class').map((o) => o.iri)],
+    [views, model, imported],
+  )
   // ---- Schema checks (PRP-0206 / UDR-0188) ----
 
   // Every finding over the whole model (all graphs), once per change (D1 / D6).
   const findings = useMemo(
-    () => runChecks(model, { bases: baseIri ? [baseIri] : [], diagnostics }),
-    [model, baseIri, diagnostics],
+    () =>
+      runChecks(model, {
+        bases: baseIri ? [baseIri] : [],
+        diagnostics,
+        imported,
+        imports: importsInfo?.imports ?? [],
+      }),
+    [model, baseIri, diagnostics, imported, importsInfo],
   )
   const ignoredChecks = useIgnoredChecks(selectedId)
   const warningCount = useMemo(
@@ -1544,8 +1670,15 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   }, [declareAll, updateModel, vocabStyle])
 
   const classLabel = useCallback(
-    (value: string) => views.find((e) => e.iri === value)?.label ?? compactIri(value, model.document.prefixes),
-    [views, model.document.prefixes],
+    (value: string) => {
+      const own = views.find((e) => e.iri === value)?.label
+      if (own) return own
+      const external = imported.byIri.get(value)
+      return external
+        ? displayLiteral(external, RDFS_LABEL) || localName(value)
+        : compactIri(value, model.document.prefixes)
+    },
+    [views, imported, model.document.prefixes],
   )
 
   /**
@@ -1602,13 +1735,15 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     (key: string) => {
       const resource = findResource(model, key)
       const value = resource?.term.type === 'iri' ? resource.term.value : null
-      if (value && resource?.role === 'entity') setSelection({ kind: 'entity', iri: value })
+      const external = !resource && key.startsWith('<') ? key.slice(1, -1) : null
+      if (external && imported.byIri.has(external)) setSelection({ kind: 'imported', iri: external })
+      else if (value && resource?.role === 'entity') setSelection({ kind: 'entity', iri: value })
       else if (value && relEdges.some((e) => e.iri === value)) setSelection({ kind: 'relationship', iri: value })
       else if (dataIndex.keys.has(key)) setSelection({ kind: 'individual', key })
       else setSelection({ kind: 'resource', key })
       setRightTab('detail')
     },
-    [model, relEdges, dataIndex],
+    [model, relEdges, dataIndex, imported],
   )
 
   /** Show a finding's subject where it lives: the canvas for schema terms, else its Detail. */
@@ -1632,7 +1767,14 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const related = useMemo(() => {
     const nodes = new Set<string>()
     const edges = new Set<string>()
-    if (!selection || selection.kind === 'resource' || selection.kind === 'individual') return { nodes, edges }
+    if (
+      !selection ||
+      selection.kind === 'resource' ||
+      selection.kind === 'individual' ||
+      selection.kind === 'imported'
+    ) {
+      return { nodes, edges }
+    }
     if (selection.kind === 'isa') {
       nodes.add(selection.source)
       nodes.add(selection.target)
@@ -1671,28 +1813,59 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
 
   const buildNodes = useCallback(
     (): EntityFlowNode[] =>
-      views.map((entity, index) => ({
-        id: entity.iri,
-        type: 'entity' as const,
-        position: positionOf(entity, index),
-        // Drag only from the inner disc; the outer ring is the connection zone (UDR-0098 D1).
-        dragHandle: `.${ENTITY_DRAG_CLASS}`,
-        data: {
-          label: entity.label,
-          emoji: entity.emoji,
-          color: entity.color,
-          propertyCount: entity.properties.length,
-          keyCount: entity.properties.filter((p) => p.isKey).length,
-          isSelected: selection?.kind === 'entity' && selection.iri === entity.iri,
-          related: related.nodes.has(entity.iri),
-          dimmed: highlight !== null && !highlight.has(entity.iri),
-          matched: Boolean(highlight?.has(entity.iri)),
-          individualCount: dataIndex.members.get(entity.iri)?.length ?? 0,
-          onOpenData: openData,
-          iri: entity.iri,
-        },
-      })),
-    [views, positionOf, selection, related, highlight, dataIndex, openData],
+      views
+        .map(
+          (entity, index): EntityFlowNode => ({
+            id: entity.iri,
+            type: 'entity' as const,
+            position: positionOf(entity, index),
+            // Drag only from the inner disc; the outer ring is the connection zone (UDR-0098 D1).
+            dragHandle: `.${ENTITY_DRAG_CLASS}`,
+            data: {
+              label: entity.label,
+              emoji: entity.emoji,
+              color: entity.color,
+              propertyCount: entity.properties.length,
+              keyCount: entity.properties.filter((p) => p.isKey).length,
+              isSelected: selection?.kind === 'entity' && selection.iri === entity.iri,
+              related: related.nodes.has(entity.iri),
+              dimmed: highlight !== null && !highlight.has(entity.iri),
+              matched: Boolean(highlight?.has(entity.iri)),
+              individualCount: dataIndex.members.get(entity.iri)?.length ?? 0,
+              onOpenData: openData,
+              iri: entity.iri,
+            },
+          }),
+        )
+        .concat(
+          // Faded imported classes (UDR-0189 D8): placed automatically, never dragged,
+          // nothing is written for them.
+          ghostViews.map(
+            (ghost, index): EntityFlowNode => ({
+              id: ghost.iri,
+              type: 'entity' as const,
+              position: positionOf(ghost, views.length + index),
+              draggable: false,
+              data: {
+                label: ghost.label,
+                emoji: '',
+                color: '',
+                propertyCount: ghost.properties.length,
+                keyCount: ghost.properties.filter((p) => p.isKey).length,
+                isSelected: selection?.kind === 'imported' && selection.iri === ghost.iri,
+                related: related.nodes.has(ghost.iri),
+                dimmed: highlight !== null && !highlight.has(ghost.iri),
+                matched: Boolean(highlight?.has(ghost.iri)),
+                individualCount: dataIndex.members.get(ghost.iri)?.length ?? 0,
+                onOpenData: openData,
+                iri: ghost.iri,
+                imported: true,
+                sourceName: ghost.sourceName,
+              },
+            }),
+          ),
+        ),
+    [views, ghostViews, positionOf, selection, related, highlight, dataIndex, openData],
   )
 
   // FLICKER FIX: node positions live in local React Flow state during a drag
@@ -1703,7 +1876,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // an ontology switch never shows a stale frame.
   const [nodes, setNodes] = useState<EntityFlowNode[]>([])
   const nodesDepsRef = useRef<readonly unknown[] | null>(null)
-  const nodesDeps = [views, autoPositions, selection, related, highlight, dataIndex] as const
+  const nodesDeps = [views, ghostViews, autoPositions, selection, related, highlight, dataIndex] as const
   if (nodesDepsRef.current === null || nodesDeps.some((dep, index) => dep !== nodesDepsRef.current?.[index])) {
     nodesDepsRef.current = nodesDeps
     setNodes(buildNodes())
@@ -1729,13 +1902,14 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
 
   const onNodeDragStop = useCallback(
     (_event: MouseEvent | TouchEvent, _node: EntityFlowNode, draggedNodes: EntityFlowNode[]) => {
-      const moved = new Map(draggedNodes.map((n) => [n.id, n.position]))
+      const moved = new Map(draggedNodes.filter((n) => !n.data.imported).map((n) => [n.id, n.position]))
       if (moved.size === 0) return
       // The FIRST layout action of the session saves the picture the user sees:
-      // every entity's current position, not only the dragged one.
+      // every entity's current position, not only the dragged one. Faded imported
+      // classes are never written (UDR-0189 D8).
       const positions = layoutCommittedRef.current
         ? moved
-        : new Map(nodes.map((n) => [n.id, moved.get(n.id) ?? n.position]))
+        : new Map(nodes.filter((n) => !n.data.imported).map((n) => [n.id, moved.get(n.id) ?? n.position]))
       commitPositions(positions)
     },
     [nodes, commitPositions],
@@ -1819,7 +1993,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     async (only?: Set<string>) => {
       const { default: ELK } = await import('elkjs/lib/elk.bundled.js')
       const elk = new ELK()
-      const ids = views.map((v) => v.iri).filter((value) => !only || only.has(value))
+      const ids = [...views, ...ghostViews].map((v) => v.iri).filter((value) => !only || only.has(value))
       const idSet = new Set(ids)
       const result = await elk.layout({
         id: 'root',
@@ -1838,19 +2012,22 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       for (const child of result.children ?? []) positions.set(child.id, { x: child.x ?? 0, y: child.y ?? 0 })
       return positions
     },
-    [views, relEdges, isaEdges],
+    [views, ghostViews, relEdges, isaEdges],
   )
 
   // Entities without a stored position get a TRANSIENT layout when an ontology
   // opens (they used to pile up at 0,0). Nothing is written until the user acts.
-  const unpositioned = useMemo(() => views.filter((v) => v.x === null || v.y === null).map((v) => v.iri), [views])
+  const unpositioned = useMemo(
+    () => [...views.filter((v) => v.x === null || v.y === null).map((v) => v.iri), ...ghostViews.map((g) => g.iri)],
+    [views, ghostViews],
+  )
   const unpositionedKey = unpositioned.join('\n')
   useEffect(() => {
     if (!unpositionedKey) return
     const missing = new Set(unpositionedKey.split('\n'))
     if ([...missing].every((value) => autoPositions.has(value))) return
     let cancelled = false
-    const positionedCount = views.length - missing.size
+    const positionedCount = views.length + ghostViews.length - missing.size
     void computeLayout(missing)
       .then((positions) => {
         if (cancelled) return
@@ -1869,19 +2046,23 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     return () => {
       cancelled = true
     }
-  }, [unpositionedKey, views, autoPositions, computeLayout])
+  }, [unpositionedKey, views, ghostViews, autoPositions, computeLayout])
 
   const resetLayout = useCallback(async () => {
     if (views.length === 0) return
     setLayouting(true)
     try {
-      commitPositions(await computeLayout())
+      const positions = await computeLayout()
+      // Faded imported classes move with the layout but are never written (UDR-0189 D8).
+      const ghosts = new Map([...positions].filter(([value]) => ghostRefs.has(value)))
+      if (ghosts.size > 0) setAutoPositions((prev) => new Map([...prev, ...ghosts]))
+      commitPositions(new Map([...positions].filter(([value]) => !ghostRefs.has(value))))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Auto-layout failed')
     } finally {
       setLayouting(false)
     }
-  }, [views.length, computeLayout, commitPositions])
+  }, [views.length, computeLayout, commitPositions, ghostRefs])
 
   const downloadGraph = useCallback(async () => {
     const element = canvasRef.current?.querySelector<HTMLElement>('.react-flow')
@@ -1907,14 +2088,19 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     (result: QueryResult) => {
       setQueryResult(result)
       if (result.kind === 'select') {
-        const iris = new Set(result.entity_iris.filter((value) => views.some((e) => e.iri === value)))
+        const iris = new Set(
+          result.entity_iris.filter((value) => views.some((e) => e.iri === value) || ghostRefs.has(value)),
+        )
         setHighlight(iris.size > 0 ? iris : null)
       } else {
         setHighlight(null)
       }
     },
-    [views],
+    [views, ghostRefs],
   )
+
+  // "Include imports" (UDR-0189 D5): the switch, else the App Settings default.
+  const effectiveIncludeImports = includeImports ?? importsInfo?.include_imports_default ?? true
 
   const runSparql = useCallback(async () => {
     if (!selectedId || !sparql.trim()) return
@@ -1925,7 +2111,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const res = await fetch(`/api/ontology/${selectedId}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sparql, scope: graphScope }),
+        body: JSON.stringify({ sparql, scope: graphScope, imports: effectiveIncludeImports }),
       })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
@@ -1938,7 +2124,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     } finally {
       setQueryRunning(false)
     }
-  }, [selectedId, sparql, graphScope, applyResult])
+  }, [selectedId, sparql, graphScope, applyResult, effectiveIncludeImports])
 
   const runNlQuery = useCallback(async () => {
     if (!selectedId || !nlQuestion.trim()) return
@@ -1948,7 +2134,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const res = await fetch(`/api/ontology/${selectedId}/nl-query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: nlQuestion, scope: graphScope }),
+        body: JSON.stringify({ question: nlQuestion, scope: graphScope, imports: effectiveIncludeImports }),
       })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
@@ -1966,7 +2152,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     } finally {
       setNlRunning(false)
     }
-  }, [selectedId, nlQuestion, graphScope, applyResult])
+  }, [selectedId, nlQuestion, graphScope, applyResult, effectiveIncludeImports])
 
   // ---- Derived detail-pane data ----
 
@@ -1976,9 +2162,63 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   )
   const selectedRelationshipIri = selection?.kind === 'relationship' ? selection.iri : null
   const entityLabel = useCallback(
-    (value: string) => views.find((e) => e.iri === value)?.label ?? localName(value),
-    [views],
+    (value: string) =>
+      views.find((e) => e.iri === value)?.label ?? ghostViews.find((e) => e.iri === value)?.label ?? localName(value),
+    [views, ghostViews],
   )
+
+  // ---- Imports dialog (UDR-0189 D9) ----
+
+  /** The owl:imports statements of the open model, saved or not. */
+  const modelImports = useMemo<ModelImport[]>(() => {
+    const out: ModelImport[] = []
+    for (const resource of model.resources) {
+      for (const s of resource.statements) {
+        if (s.p === OWL_IMPORTS && s.o.type === 'iri')
+          out.push({ iri: s.o.value, subject: resource.term, graph: s.g ?? null })
+      }
+    }
+    return out
+  }, [model])
+  /** The ontology header in the model: its IRI, else the catalog IRI (D9). */
+  const header = useMemo(() => {
+    const own = model.resources.find(
+      (r) =>
+        r.term.type === 'iri' &&
+        r.statements.some((s) => s.p === RDF_TYPE && s.o.type === 'iri' && s.o.value === OWL_ONTOLOGY),
+    )
+    if (own && own.term.type === 'iri') return { iri: own.term.value, exists: true }
+    return {
+      iri: importsInfo?.catalog_iri ?? (selectedId ? `https://chatwalaau.com/ontology/${selectedId}` : ''),
+      exists: false,
+    }
+  }, [model, importsInfo, selectedId])
+  const importWarnings = useMemo(() => importWarningCount(importsInfo), [importsInfo])
+  const openImports = useCallback((iri?: string) => {
+    setMapIri(iri ?? null)
+    setImportsTab('imports')
+    setImportsOpen(true)
+  }, [])
+  const changeShowImported = useCallback((show: boolean) => {
+    setShowImported(show)
+    writeShowImported(show)
+  }, [])
+
+  // The confirmation before deleting an ontology names the ones that import it (D9).
+  useEffect(() => {
+    setDeleteImporters(null)
+    if (!deleteTarget) return
+    let cancelled = false
+    void fetch(`/api/ontology/${deleteTarget.id}/importers`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body) => {
+        if (!cancelled && body) setDeleteImporters((body.importers ?? []) as { id: string; name: string }[])
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [deleteTarget])
 
   const inspector = useMemo<InspectorContext>(
     () => ({
@@ -1991,8 +2231,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       targetGraph: model.targetGraph ?? null,
       onAnnotate: demoBlocked ? undefined : requestAnnotate,
       undeclared,
+      imported,
     }),
-    [model, diagnostics, demoBlocked, selectResource, graphs, requestAnnotate, undeclared],
+    [model, diagnostics, demoBlocked, selectResource, graphs, requestAnnotate, undeclared, imported],
   )
 
   /** Statement list callbacks for one resource (all edits funnel through commitEdits). */
@@ -2033,6 +2274,22 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                 </Button>
               )}
               {dirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => openImports()}
+                disabled={!selectedId || loading}
+                title="The ontologies this one imports (owl:imports), resolved from the catalog">
+                <Import className="mr-1 h-3.5 w-3.5" /> Imports
+                {importWarnings > 0 && (
+                  <span
+                    className="ml-1 rounded-full bg-amber-100 px-1 text-[10px] text-amber-800"
+                    title={`${importWarnings} import(s) not resolved`}>
+                    {importWarnings}
+                  </span>
+                )}
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -2182,6 +2439,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         onLinkModeChange={setLinkMode}
                         showIsa={showIsa}
                         onShowIsaChange={changeShowIsa}
+                        showImported={imported.classes.size > 0 ? showImported : null}
+                        onShowImportedChange={changeShowImported}
                         style={vocabStyle}
                         styleReason={vocabularyStyleReason(vocabStyle, model)}
                         view={view}
@@ -2205,7 +2464,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                               onConnect={onConnect}
                               connectionMode={ConnectionMode.Loose}
                               onNodeClick={(_, node) => {
-                                setSelection({ kind: 'entity', iri: node.id })
+                                setSelection(
+                                  node.data.imported
+                                    ? { kind: 'imported', iri: node.id }
+                                    : { kind: 'entity', iri: node.id },
+                                )
                                 setRightTab('detail')
                               }}
                               onEdgeClick={(_, edge) => {
@@ -2283,6 +2546,14 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                           readOnly={demoBlocked}
                           onSelectEntity={(value) => setSelection({ kind: 'entity', iri: value })}
                           onRemove={() => removeIsa(selection.source, selection.target)}
+                        />
+                      ) : selection?.kind === 'imported' ? (
+                        <ImportedDetail
+                          iri={selection.iri}
+                          imported={imported}
+                          prefixes={model.document.prefixes}
+                          formatTerm={(term) => compactTerm(term, model)}
+                          onOpenSource={(id) => guardDirty(() => void loadOntology(id))}
                         />
                       ) : selection?.kind === 'individual' ? (
                         <IndividualDetail
@@ -2370,6 +2641,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         onDeclare={requestDeclare}
                         onDeclareAll={(namespace, classes) => setDeclareAll({ namespace, classes })}
                         onRemoveEdge={(edge: CheckEdge) => updateModel((prev) => removeCheckEdge(prev, edge))}
+                        onOpenImports={(iri) => openImports(iri)}
                       />
                     ) : (
                       <SearchPane
@@ -2395,6 +2667,12 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         inspector={inspector}
                         highlightActive={highlight !== null}
                         onClearHighlight={() => setHighlight(null)}
+                        imports={
+                          (importsInfo?.closure.length ?? 0) > 0
+                            ? { include: effectiveIncludeImports, count: importsInfo?.closure.length ?? 0 }
+                            : null
+                        }
+                        onIncludeImportsChange={setIncludeImports}
                       />
                     )}
                   </div>
@@ -2530,12 +2808,49 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       </Dialog>
 
       {/* Delete confirmation + blocking indicator (operator requirement). */}
+      <ImportsDialog
+        open={importsOpen}
+        onOpenChange={setImportsOpen}
+        ontologyId={selectedId}
+        info={importsInfo}
+        loading={importsLoading}
+        modelImports={modelImports}
+        selfIri={header.iri}
+        catalog={catalog}
+        readOnly={demoBlocked}
+        prefixes={model.document.prefixes}
+        tab={importsTab}
+        onTabChange={setImportsTab}
+        mapIri={mapIri}
+        onAdd={(target) => updateModel((prev) => addImport(prev, header.iri, target, header.exists))}
+        onRemove={(m) => updateModel((prev) => removeImport(prev, m.subject, m.iri, m.graph))}
+        onMap={(iri) => {
+          setMapIri(iri)
+          setImportsTab('mapping')
+        }}
+        onMapSaved={() => {
+          if (selectedId) void fetchImports(selectedId)
+        }}
+        onOpenOntology={(id) =>
+          guardDirty(() => {
+            setImportsOpen(false)
+            void loadOntology(id)
+          })
+        }
+      />
+
       <AlertDialog open={deleteTarget !== null} onOpenChange={(o) => !o && !deleting && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete ontology?</AlertDialogTitle>
             <AlertDialogDescription>
               &quot;{deleteTarget?.name}&quot; will be removed from the catalog (a backup of its file is kept on disk).
+              {deleteImporters && deleteImporters.length > 0 && (
+                <span className="mt-2 block text-amber-700" data-delete-importers>
+                  Imported by {deleteImporters.map((i) => i.name).join(', ')}: their imports of it will no longer
+                  resolve.
+                </span>
+              )}
               This action cannot be undone from the app.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -3609,10 +3924,26 @@ function SearchPane(props: {
   inspector: InspectorContext
   highlightActive: boolean
   onClearHighlight: () => void
+  /** The imported ontologies the search can include (UDR-0189 D5); null = none. */
+  imports: { include: boolean; count: number } | null
+  onIncludeImportsChange: (include: boolean) => void
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 space-y-2 border-b p-2">
+        {props.imports && (
+          <label
+            className="flex items-center gap-1 text-[11px] text-zinc-600"
+            title="Also answer from the ontologies this one imports (read-only). The starting value is the App Settings default.">
+            <input
+              type="checkbox"
+              checked={props.imports.include}
+              disabled={props.disabled}
+              onChange={(e) => props.onIncludeImportsChange(e.target.checked)}
+            />
+            Include imports ({props.imports.count} ontolog{props.imports.count === 1 ? 'y' : 'ies'})
+          </label>
+        )}
         {props.scopeLabel && (
           <p className="text-[10px] text-teal-700" data-search-scope>
             Searching {props.scopeLabel} (change it with the graph selector above the canvas). GRAPH patterns can still

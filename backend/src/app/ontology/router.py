@@ -18,15 +18,19 @@
     POST   /api/ontology/{id}/history/{version}/restore  -- restore a version (D5)
     GET    /api/ontology/trash              -- deleted ontologies (D6)
     POST   /api/ontology/trash/{id}/restore -- restore a deleted ontology under its id
+    GET    /api/ontology/import-map         -- the owl:imports mapping table (UDR-0189 D3)
+    PUT    /api/ontology/import-map         -- replace the mapping table
+    GET    /api/ontology/{id}/imports       -- imports, their resolution, imported vocabulary (D6)
+    GET    /api/ontology/{id}/importers     -- the ontologies that import this one (D9)
 
 Every endpoint depends on ``verify_api_key`` (CTR-0083; loopback bypass) --
 the mutations and the query POSTs are gated per invariant 7, the GETs follow
 the read convention. The whole surface returns 404 unless ONTOLOGY_ENABLED so
 the SPA can gate its launcher icon by probing the catalog (UDR-0084 D12).
 
-Under DEMO_MODE the eight WRITE endpoints (POST/PATCH/DELETE /catalog, POST /import,
+Under DEMO_MODE the nine WRITE endpoints (POST/PATCH/DELETE /catalog, POST /import,
 PUT /{id}, POST /{id}/statements, POST /{id}/history/{version}/restore, POST
-/trash/{id}/restore) refuse with 409 ``demo_mode`` and the manager renders read-only
+/trash/{id}/restore, PUT /import-map) refuse with 409 ``demo_mode`` and the manager renders read-only
 (PRP-0139 / UDR-0122). Reads -- including the SPARQL query lanes, which cannot
 mutate -- are deliberately untouched.
 
@@ -57,7 +61,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import verify_api_key
 from app.core.config import settings
-from app.ontology import formats, history, nl, store
+from app.ontology import formats, history, imports, nl, store
 from app.ontology.operations import StaleConflict, StatementNotFound, apply_operations
 from app.ontology.vocabulary import (
     PROJECTION_VERSION,
@@ -134,11 +138,23 @@ class QueryRequest(BaseModel):
     # "all" (default: the canvas default, PRP-0200 Q4), "default", or one graph as
     # Term JSON (iri / bnode) -- UDR-0182 D4.
     scope: Any = None
+    # Include the owl:imports closure (UDR-0189 D5); omitted = the App Settings default.
+    imports: bool | None = None
 
 
 class NlQueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     scope: Any = None
+    imports: bool | None = None
+
+
+class ImportMapEntry(BaseModel):
+    iri: str = Field(min_length=1, max_length=4000)
+    ontology_id: str = Field(min_length=1, max_length=64)
+
+
+class ImportMapSave(BaseModel):
+    entries: list[ImportMapEntry] = Field(default_factory=list, max_length=1000)
 
 
 class StatementOperations(BaseModel):
@@ -387,6 +403,113 @@ async def restore_deleted(ontology_id: str) -> dict:
     return {**entry, "base_iri": base_iri_for(ontology_id)}
 
 
+def _import_map_payload() -> dict[str, Any]:
+    names = {e["id"]: e["name"] for e in store.read_catalog()}
+    return {
+        "entries": [
+            {"iri": iri, "ontology_id": oid, "ontology_name": names.get(oid)}
+            for iri, oid in imports.read_import_map().items()
+        ]
+    }
+
+
+# Declared before /{ontology_id} so "import-map" is never read as an id.
+@router.get("/import-map", dependencies=[Depends(verify_api_key)])
+async def get_import_map() -> dict:
+    """The owl:imports mapping table: import IRI -> catalog ontology (UDR-0189 D3)."""
+    _require_enabled()
+    return await run_in_threadpool(_import_map_payload)
+
+
+@router.put("/import-map", dependencies=[Depends(verify_api_key)])
+async def save_import_map(body: ImportMapSave) -> dict:
+    """Replace the mapping table: absolute IRIs, each once, mapped to existing ontologies."""
+    import pyoxigraph as ox
+
+    _require_enabled()
+    _guard_demo()
+    known = {e["id"] for e in await run_in_threadpool(store.read_catalog)}
+    seen: set[str] = set()
+    entries: list[dict[str, str]] = []
+    for position, item in enumerate(body.entries):
+        iri = item.iri.strip()
+        try:
+            ox.NamedNode(iri)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail={"error": "invalid_iri", "message": f"entries/{position}: {exc}"}
+            ) from exc
+        if ":" not in iri:
+            raise HTTPException(
+                status_code=422, detail={"error": "invalid_iri", "message": f"entries/{position}: not absolute"}
+            )
+        if iri in seen:
+            raise HTTPException(
+                status_code=422, detail={"error": "duplicate_iri", "message": f"entries/{position}: {iri}"}
+            )
+        if item.ontology_id not in known:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "ontology_not_found", "message": f"entries/{position}: {item.ontology_id}"},
+            )
+        seen.add(iri)
+        entries.append({"iri": iri, "ontology_id": item.ontology_id})
+    try:
+        await run_in_threadpool(imports.write_import_map, entries)
+    except OSError as exc:
+        logger.warning("import map save failed", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not save the mapping table: {exc}") from exc
+    return await run_in_threadpool(_import_map_payload)
+
+
+def _imports_payload(ontology_id: str) -> dict[str, Any]:
+    resolver = imports.Resolver()
+    header = resolver.header(ontology_id)
+    closure = imports.compute_closure(ontology_id, resolver=resolver)
+    vocabulary, counts = imports.vocabulary_of(closure)
+    items = []
+    for item in closure.items:
+        target = (item.get("ontology") or {}).get("id")
+        if item["status"] == "resolved" and target:
+            item = {**item, "statements": counts.get(target)}
+        items.append(item)
+    names = {oid: entry["name"] for oid, entry in resolver.entries.items()}
+    return {
+        "ontology_iri": header.ontology_iris[0] if header.ontology_iris else None,
+        "ontology_iris": list(header.ontology_iris),
+        "version_iris": list(header.version_iris),
+        "catalog_iri": imports.catalog_iri(ontology_id),
+        "closure": [
+            {"id": x.ontology_id, "name": names.get(x.ontology_id), "iri": x.iri, "revision": x.revision}
+            for x in closure.loaded
+        ],
+        "imports": items,
+        "vocabulary": vocabulary,
+        "notices": closure.notices,
+        "include_imports_default": store.include_imports(None),
+    }
+
+
+@router.get("/{ontology_id}/imports", dependencies=[Depends(verify_api_key)])
+async def get_imports(ontology_id: str) -> dict:
+    """The imports of an ontology, how each resolved, and the imported vocabulary (UDR-0189).
+
+    Read-only: nothing here is ever written into the ontology (D6), and no import IRI is
+    fetched (D1).
+    """
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    return await run_in_threadpool(_imports_payload, ontology_id)
+
+
+@router.get("/{ontology_id}/importers", dependencies=[Depends(verify_api_key)])
+async def get_importers(ontology_id: str) -> dict:
+    """The catalog ontologies that import this one directly (shown before a delete, D9)."""
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    return {"importers": await run_in_threadpool(imports.importers_of, ontology_id)}
+
+
 @router.get("/{ontology_id}/history", dependencies=[Depends(verify_api_key)])
 async def list_history(ontology_id: str) -> dict:
     """The versions of an ontology, newest first, labelled from the history log (D2)."""
@@ -535,9 +658,9 @@ async def export_ontology(ontology_id: str, format: str | None = None) -> Respon
     return Response(content=content, media_type=f"{fmt.media_type}; charset=utf-8", headers=headers)
 
 
-def _run_sparql(ontology_id: str, scope: Any, sparql: str) -> dict[str, Any]:
+def _run_sparql(ontology_id: str, scope: Any, sparql: str, include: bool | None = None) -> dict[str, Any]:
     """Load (from the cache when possible) and query, in a worker thread (UDR-0183 D1 / D4)."""
-    return store.execute_query(store.load_store(ontology_id, scope), sparql)
+    return store.execute_query(store.load_store(ontology_id, scope, include), sparql)
 
 
 @router.post("/{ontology_id}/query", dependencies=[Depends(verify_api_key)])
@@ -548,7 +671,7 @@ async def run_query(ontology_id: str, body: QueryRequest) -> dict:
     scope = _scope_or_422(body.scope)
     try:
         nl.ensure_read_only(body.sparql)
-        result = await run_in_threadpool(_run_sparql, ontology_id, scope, body.sparql)
+        result = await run_in_threadpool(_run_sparql, ontology_id, scope, body.sparql, body.imports)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return result
@@ -564,7 +687,7 @@ async def run_nl_query(ontology_id: str, body: NlQueryRequest) -> dict:
     """
     _require_enabled()
     _entry_or_404(ontology_id)
-    graph = await run_in_threadpool(store.load_store, ontology_id, _scope_or_422(body.scope))
+    graph = await run_in_threadpool(store.load_store, ontology_id, _scope_or_422(body.scope), body.imports)
     try:
         sparql = await nl.generate_sparql(body.question, graph)
     except ValueError as exc:

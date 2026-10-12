@@ -37,6 +37,9 @@ import {
   findResource,
   type GraphTerm,
   graphKey,
+  type ImportedIndex,
+  importedOptions,
+  importedSourceName,
   inspectorResources,
   isIndividual,
   listItems,
@@ -53,6 +56,7 @@ import {
   RDFS_SUB_PROPERTY_OF,
   type Resource,
   type Role,
+  referencedImportedClasses,
   resourceKey,
   type Statement,
   type StatementInput,
@@ -107,6 +111,8 @@ export interface InspectorContext {
   onAnnotate?: (key: string, index: number) => void
   /** IRIs used as classes but not declared in this ontology (not drawn; UDR-0185 D5). */
   undeclared?: Set<string>
+  /** The imported vocabulary (read-only; PRP-0207 / UDR-0189 D6). */
+  imported?: ImportedIndex
 }
 
 function iriText(value: string, prefixes: PrefixDecl[]): string {
@@ -156,6 +162,19 @@ export function TermView({ term, ctx, depth = 0 }: { term: Term; ctx: InspectorC
   if (term.type === 'iri') {
     const target = findResource(ctx.model, termKey(term))
     const text = iriText(term.value, ctx.prefixes)
+    const source = !target && ctx.imported ? importedSourceName(ctx.imported, term.value) : ''
+    if (source) {
+      return (
+        <button
+          type="button"
+          className="break-all text-left text-blue-700 hover:underline"
+          title={`${term.value} (imported from ${source}, read-only)`}
+          onClick={() => ctx.onSelectResource(termKey(term))}>
+          {text}
+          <span className="ml-1 rounded bg-zinc-100 px-1 text-[9px] text-zinc-500">imported</span>
+        </button>
+      )
+    }
     return target ? (
       <button
         type="button"
@@ -267,6 +286,8 @@ function IriInput(props: {
   onChange: (value: string) => void
   placeholder?: string
   ariaLabel: string
+  /** A datalist of suggested IRIs (own and imported terms, UDR-0189 D11). */
+  list?: string
 }) {
   const [text, setText] = useState(props.value ? compactIri(props.value, props.prefixes) : '')
   const resolved = expandIri(text, props.prefixes)
@@ -275,6 +296,7 @@ function IriInput(props: {
       <input
         className={cn(fieldInput, text && !resolved && 'border-red-400')}
         value={text}
+        list={props.list}
         aria-label={props.ariaLabel}
         placeholder={props.placeholder ?? 'prefix:name or full IRI'}
         onChange={(e) => {
@@ -294,6 +316,8 @@ export function TermEditor(props: {
   prefixes: PrefixDecl[]
   subjectOnly?: boolean
   depth?: number
+  /** A datalist of suggested IRIs for the IRI input. */
+  list?: string
 }) {
   const { value } = props
   const depth = props.depth ?? 0
@@ -321,6 +345,7 @@ export function TermEditor(props: {
           value={value.value}
           prefixes={props.prefixes}
           ariaLabel="IRI"
+          list={props.list}
           onChange={(v) => props.onChange({ type: 'iri', value: v })}
         />
       )}
@@ -474,16 +499,42 @@ function StatementEditor(props: {
   )
   const valid = Boolean(predicate) && termComplete(object)
   const showGraph = (ctx.graphs ?? []).length > 0
+  // Suggested IRIs: the ontology's own classes and properties, then the imported ones
+  // marked with their source (PRP-0207 / UDR-0189 D11). Choosing one writes the same
+  // single statement as typing it.
+  const suggestions = useMemo(() => {
+    const own = ctx.model.resources
+      .filter((r) => r.term.type === 'iri' && r.role !== 'other')
+      .map((r) => ({ iri: (r.term as { value: string }).value, source: '' }))
+    const imported = ctx.imported
+      ? [...importedOptions(ctx.model, ctx.imported, 'class'), ...importedOptions(ctx.model, ctx.imported, 'property')]
+      : []
+    return [...own, ...imported]
+  }, [ctx.model, ctx.imported])
   return (
     <div className="space-y-1.5 rounded border bg-zinc-50 p-2">
+      <datalist id="ontology-term-iris">
+        {suggestions.map((o) => (
+          <option key={o.iri} value={compactIri(o.iri, ctx.prefixes)}>
+            {o.source ? `imported from ${o.source}` : ''}
+          </option>
+        ))}
+      </datalist>
       <IriInput
         value={predicate}
         prefixes={ctx.prefixes}
         ariaLabel="Predicate"
         placeholder="predicate (prefix:name or IRI)"
+        list="ontology-term-iris"
         onChange={setPredicate}
       />
-      <TermEditor value={object} model={ctx.model} prefixes={ctx.prefixes} onChange={setObject} />
+      <TermEditor
+        value={object}
+        model={ctx.model}
+        prefixes={ctx.prefixes}
+        list="ontology-term-iris"
+        onChange={setObject}
+      />
       {showGraph && (
         <div className="flex items-center gap-1 text-[10px] text-zinc-500">
           <span>Graph</span>
@@ -794,7 +845,14 @@ export function ResourcesPane(props: {
   const [graph, setGraph] = useState('*')
   const [limit, setLimit] = useState(PAGE)
   const graphs = ctx.graphs ?? []
-  const everything = useMemo(() => inspectorResources(ctx.model), [ctx.model])
+  // A property drawn against a faded imported class is on the canvas, not listed (UDR-0189 D8).
+  const everything = useMemo(
+    () =>
+      inspectorResources(ctx.model, {
+        extraEntities: ctx.imported ? referencedImportedClasses(ctx.model, ctx.imported) : undefined,
+      }),
+    [ctx.model, ctx.imported],
+  )
   const individuals = useMemo(() => everything.filter(isIndividual), [everything])
   const listed = useMemo(
     () => (role === 'individual' ? individuals : everything.filter((r) => !isIndividual(r))),
