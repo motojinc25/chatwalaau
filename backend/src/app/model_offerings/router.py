@@ -95,6 +95,11 @@ def register_model_offerings(app: FastAPI, *, agent_registry) -> None:
 
         models_catalog.reset_active()
         await rebuild_agent_registry(agent_registry)
+        # Harness conversations cache agents built from the previous catalog; a
+        # withheld capability (e.g. mcp: false) must reach them too.
+        from app.agent.harness.runtime import clear_cache
+
+        await clear_cache(reason="catalog_reload")
 
     @router.get("", dependencies=[Depends(verify_api_key)])
     async def get_model_offerings() -> dict:

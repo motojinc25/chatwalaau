@@ -99,6 +99,10 @@ def register_mcp_management(app: FastAPI, *, agent_registry) -> None:
                 detail={"error": "agent_rebuild_failed"},
             ) from None
 
+        # Harness conversations hold the MCP tools they were built with (CTR-0193).
+        from app.agent.harness.runtime import clear_cache
+
+        await clear_cache(reason="mcp_selection")
         logger.info(
             "MCP tool selection applied: %d disabled server(s), %d server(s) with disabled tools",
             len(disabled_servers),
@@ -129,6 +133,10 @@ def register_mcp_management(app: FastAPI, *, agent_registry) -> None:
             raise HTTPException(status_code=500, detail={"error": "mcp_reload_failed"}) from None
 
         _prune_mcp_overrides()
+        # The reconnected servers replace the MCPTool instances cached harness agents hold.
+        from app.agent.harness.runtime import clear_cache
+
+        await clear_cache(reason="mcp_reload")
         logger.info("MCP reloaded from config: %d server(s) in inventory", len(get_mcp_tool_inventory()))
         return {"servers": get_mcp_tool_inventory(), "config_path": get_mcp_config_path()}
 

@@ -1873,13 +1873,23 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // not re-render per pointer move) and are written back into the model on
   // drag stop. The list is rebuilt synchronously (derived-state-during-render)
   // whenever the underlying data / selection / highlight actually changes, so
-  // an ontology switch never shows a stale frame.
+  // an ontology switch never shows a stale frame. A rebuild keeps each node's
+  // `measured` size: React Flow hides a node without one until it is measured
+  // again, and a rebuild that lands between two measurements left the whole
+  // canvas hidden (found by the browser suite, PRP-0208).
   const [nodes, setNodes] = useState<EntityFlowNode[]>([])
   const nodesDepsRef = useRef<readonly unknown[] | null>(null)
   const nodesDeps = [views, ghostViews, autoPositions, selection, related, highlight, dataIndex] as const
   if (nodesDepsRef.current === null || nodesDeps.some((dep, index) => dep !== nodesDepsRef.current?.[index])) {
     nodesDepsRef.current = nodesDeps
-    setNodes(buildNodes())
+    const built = buildNodes()
+    setNodes((current) => {
+      const measured = new Map(current.map((node) => [node.id, node.measured]))
+      return built.map((node) => {
+        const size = measured.get(node.id)
+        return size ? { ...node, measured: size } : node
+      })
+    })
   }
 
   const onNodesChange = useCallback((changes: NodeChange<EntityFlowNode>[]) => {

@@ -142,12 +142,19 @@ async def drop_thread(thread_id: str, *, reason: str) -> int:
     return len(dropped)
 
 
-async def clear_cache() -> None:
-    """Drop every cached harness session (authoring write / reload path)."""
+async def clear_cache(reason: str = "authoring_reload") -> None:
+    """Drop every cached harness session.
+
+    Called on an authoring write, and whenever what a harness agent was BUILT from
+    changes outside its YAML: the Model Offering Catalog (an offering's capabilities,
+    e.g. ``mcp: false``) and the MCP override store / MCP reload. A cached runtime keeps
+    the tools it was built with, so without this an already-open harness conversation
+    went on calling MCP tools its offering now withholds.
+    """
     async with _lock:
         entries = list(_cache.values())
         for key, entry in _cache.items():
-            _log_drop(key, entry, reason="authoring_reload")
+            _log_drop(key, entry, reason=reason)
         _cache.clear()
     for entry in entries:
         await entry.runtime.aclose()
