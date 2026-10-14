@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.185.0"
+version = "0.186.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -194,6 +194,11 @@ dependencies = [
     # PRP-0198 / UDR-0180 D11: floor 0.5.11, below 0.6 -- the lossless corpus
     # (tests/fixtures/ontology_lossless) is the parity gate for any engine bump.
     "pyoxigraph>=0.5.11,<0.6",
+    # PRP-0209 / UDR-0191 D2: RDFS entailment at query time. owlrl through its oxigraph
+    # extra (brings rdflib), pinned EXACTLY -- a version move runs the W3C entailment
+    # gate (tests/invariants/test_prp0209_entailment_w3c.py). Imported lazily by
+    # app.ontology.entailment on the first rdfs query only.
+    "owlrl[oxigraph]==7.6.2",
     # Computer Use desktop provider
     "chatwalaau-computer-use>=0.2,<0.3; sys_platform == 'win32' and platform_machine == 'AMD64'",
     "mcp>=1.26,<2",

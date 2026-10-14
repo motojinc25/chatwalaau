@@ -234,6 +234,21 @@ interface QueryNotice {
 /** A typed SELECT cell; `lexical_forms` lists the file's spellings when it is ambiguous. */
 type QueryCell = (Term & { lexical_forms?: string[] }) | null
 
+/**
+ * The search entailment modes (PRP-0209 / UDR-0191 D1). `simple` answers from the stated
+ * statements only; OWL 2 RL joins this list with its own proposal.
+ */
+type Entailment = 'simple' | 'rdfs'
+const ENTAILMENT_OPTIONS: { value: Entailment; label: string; title: string }[] = [
+  { value: 'simple', label: 'None', title: 'Only the statements written in the ontology files.' },
+  {
+    value: 'rdfs',
+    label: 'RDFS',
+    title:
+      'Also what RDFS entails: subclass and subproperty hierarchies, domains and ranges. Inferred results are marked and never written to the file.',
+  },
+]
+
 type QueryResult =
   | {
       kind: 'select'
@@ -245,18 +260,40 @@ type QueryResult =
       truncated: boolean
       entity_iris: string[]
       notices?: QueryNotice[]
+      entailment?: Entailment
+      /** CTR-0171 v9: one flag per row, true when the row exists only through inference. */
+      row_inferred?: boolean[]
+      inferred_count?: number
     }
   | {
       kind: 'construct'
       /** CTR-0171 v5: "trig" for an ontology with named graphs (each triple under its graphs). */
       format?: 'turtle' | 'trig'
+      /** With an entailment mode: the stated part only (CTR-0171 v9). */
       turtle: string
       triple_count: number
       truncated: boolean
       notices?: QueryNotice[]
+      entailment?: Entailment
+      /** CTR-0171 v9: the inferred triples (Turtle, or TriG for a dataset). */
+      inferred_turtle?: string
+      inferred_count?: number
+      /** CTR-0171 v9: the same triples as table rows (graph null = the default graph). */
+      triples?: { s: Term; p: Term; o: Term; graph: Term | null; inferred: boolean }[]
+      triples_truncated?: boolean
     }
-  | { kind: 'ask'; value: boolean; notices?: QueryNotice[] }
+  | { kind: 'ask'; value: boolean; notices?: QueryNotice[]; entailment?: Entailment; inferred?: boolean }
   | { kind: 'error'; error: string }
+
+/** The message of an error response: a string `detail`, or `detail.message` (CTR-0171 v9 422). */
+function errorDetail(body: unknown, fallback: string): string {
+  const detail = (body as { detail?: unknown } | null)?.detail
+  if (typeof detail === 'string') return detail
+  if (detail && typeof detail === 'object' && typeof (detail as { message?: unknown }).message === 'string') {
+    return (detail as { message: string }).message
+  }
+  return fallback
+}
 
 /**
  * What the Detail pane shows: an entity or a relationship drawn on the canvas
@@ -970,6 +1007,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [showImported, setShowImported] = useState(readShowImported)
   // The Search pane's "Include imports"; null = the App Settings default.
   const [includeImports, setIncludeImports] = useState<boolean | null>(null)
+  // The Search pane's entailment mode (UDR-0191 D10): None every time the dialog opens.
+  const [entailment, setEntailment] = useState<Entailment>('simple')
+  useEffect(() => {
+    if (open) setEntailment('simple')
+  }, [open])
   const [deleteImporters, setDeleteImporters] = useState<{ id: string; name: string }[] | null>(null)
 
   // Right pane
@@ -2121,11 +2163,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const res = await fetch(`/api/ontology/${selectedId}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sparql, scope: graphScope, imports: effectiveIncludeImports }),
+        body: JSON.stringify({ sparql, scope: graphScope, imports: effectiveIncludeImports, entailment }),
       })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
-        applyResult({ kind: 'error', error: typeof body?.detail === 'string' ? body.detail : 'Query failed' })
+        applyResult({ kind: 'error', error: errorDetail(body, 'Query failed') })
         return
       }
       applyResult(body as QueryResult)
@@ -2134,7 +2176,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     } finally {
       setQueryRunning(false)
     }
-  }, [selectedId, sparql, graphScope, applyResult, effectiveIncludeImports])
+  }, [selectedId, sparql, graphScope, applyResult, effectiveIncludeImports, entailment])
 
   const runNlQuery = useCallback(async () => {
     if (!selectedId || !nlQuestion.trim()) return
@@ -2144,14 +2186,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const res = await fetch(`/api/ontology/${selectedId}/nl-query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: nlQuestion, scope: graphScope, imports: effectiveIncludeImports }),
+        body: JSON.stringify({ question: nlQuestion, scope: graphScope, imports: effectiveIncludeImports, entailment }),
       })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
-        applyResult({
-          kind: 'error',
-          error: typeof body?.detail === 'string' ? body.detail : 'Natural-language search failed',
-        })
+        applyResult({ kind: 'error', error: errorDetail(body, 'Natural-language search failed') })
         return
       }
       // The generated SPARQL lands in the editor for refinement (IMPL-6).
@@ -2162,7 +2201,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     } finally {
       setNlRunning(false)
     }
-  }, [selectedId, nlQuestion, graphScope, applyResult, effectiveIncludeImports])
+  }, [selectedId, nlQuestion, graphScope, applyResult, effectiveIncludeImports, entailment])
 
   // ---- Derived detail-pane data ----
 
@@ -2683,6 +2722,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                             : null
                         }
                         onIncludeImportsChange={setIncludeImports}
+                        entailment={entailment}
+                        onEntailmentChange={setEntailment}
                       />
                     )}
                   </div>
@@ -3937,23 +3978,44 @@ function SearchPane(props: {
   /** The imported ontologies the search can include (UDR-0189 D5); null = none. */
   imports: { include: boolean; count: number } | null
   onIncludeImportsChange: (include: boolean) => void
+  /** The entailment mode of the next search (UDR-0191 D10). */
+  entailment: Entailment
+  onEntailmentChange: (mode: Entailment) => void
 }) {
+  const current = ENTAILMENT_OPTIONS.find((option) => option.value === props.entailment)
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 space-y-2 border-b p-2">
-        {props.imports && (
-          <label
-            className="flex items-center gap-1 text-[11px] text-zinc-600"
-            title="Also answer from the ontologies this one imports (read-only). The starting value is the App Settings default.">
-            <input
-              type="checkbox"
-              checked={props.imports.include}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          {props.imports && (
+            <label
+              className="flex items-center gap-1 text-[11px] text-zinc-600"
+              title="Also answer from the ontologies this one imports (read-only). The starting value is the App Settings default.">
+              <input
+                type="checkbox"
+                checked={props.imports.include}
+                disabled={props.disabled}
+                onChange={(e) => props.onIncludeImportsChange(e.target.checked)}
+              />
+              Include imports ({props.imports.count} ontolog{props.imports.count === 1 ? 'y' : 'ies'})
+            </label>
+          )}
+          <label className="flex items-center gap-1 text-[11px] text-zinc-600" title={current?.title}>
+            Entailment
+            <select
+              aria-label="Entailment"
+              className="h-6 rounded border bg-white px-1 text-[11px]"
+              value={props.entailment}
               disabled={props.disabled}
-              onChange={(e) => props.onIncludeImportsChange(e.target.checked)}
-            />
-            Include imports ({props.imports.count} ontolog{props.imports.count === 1 ? 'y' : 'ies'})
+              onChange={(e) => props.onEntailmentChange(e.target.value as Entailment)}>
+              {ENTAILMENT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value} title={option.title}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
           </label>
-        )}
+        </div>
         {props.scopeLabel && (
           <p className="text-[10px] text-teal-700" data-search-scope>
             Searching {props.scopeLabel} (change it with the graph selector above the canvas). GRAPH patterns can still
@@ -4045,6 +4107,44 @@ function keyRows(rows: string[][]): { key: string; row: string[]; index: number 
   })
 }
 
+/**
+ * A CONSTRUCT / DESCRIBE answer: the triples first, the prefix lines folded below them
+ * (eight `@prefix` lines at the top looked like the query echoed back).
+ */
+function TurtleAnswer({ text, className, empty }: { text: string; className: string; empty: string }) {
+  const lines = text.split('\n')
+  const isPrefix = (line: string) => /^\s*(@prefix|@base|PREFIX|BASE)\b/i.test(line)
+  const prefixes = lines.filter(isPrefix)
+  const body = lines
+    .filter((line) => !isPrefix(line))
+    .join('\n')
+    .trim()
+  return (
+    <div className={cn('rounded', className)}>
+      <pre className="overflow-x-auto p-2 text-[11px] leading-relaxed" data-answer-body>
+        {body || empty}
+      </pre>
+      {prefixes.length > 0 && (
+        <details className="px-2 pb-1 text-[10px] text-zinc-500">
+          <summary className="cursor-pointer">Prefixes ({prefixes.length})</summary>
+          <pre className="overflow-x-auto pt-1 text-[10px] leading-relaxed">{prefixes.join('\n')}</pre>
+        </details>
+      )}
+    </div>
+  )
+}
+
+/** The mark of an answer that exists only through inference (UDR-0191 D6 / D10). */
+function InferredBadge() {
+  return (
+    <span
+      className="ml-1 rounded bg-violet-100 px-1 text-[10px] font-medium text-violet-700"
+      title="Inferred by entailment; not written in any ontology file">
+      Inferred
+    </span>
+  )
+}
+
 /** One muted line per notice: what the query engine could not give back as written. */
 function QueryNotices({ notices }: { notices?: QueryNotice[] }) {
   if (!notices?.length) return null
@@ -4086,29 +4186,93 @@ function QueryResultView({ result, inspector }: { result: QueryResult | null; in
     return (
       <div>
         <QueryNotices notices={result.notices} />
-        <p className="text-sm font-medium">{result.value ? 'Yes' : 'No'}</p>
+        <p className="text-sm font-medium">
+          {result.value ? 'Yes' : 'No'}
+          {result.inferred && <InferredBadge />}
+        </p>
       </div>
     )
   }
   if (result.kind === 'construct') {
+    const inferredCount = result.inferred_count ?? 0
+    const entailed = result.inferred_turtle !== undefined
+    const dataset = result.format === 'trig'
+    const triples = result.triples
     return (
       <div>
         <QueryNotices notices={result.notices} />
         <p className="mb-1 text-[10px] text-zinc-500">
           {result.triple_count} triple{result.triple_count === 1 ? '' : 's'}
-          {result.truncated ? ' (truncated)' : ''}
-          {result.format === 'trig' ? ' -- TriG: each triple is shown under the graphs that hold it' : ''}
+          {entailed ? `, ${inferredCount} inferred` : ''}
+          {result.truncated || result.triples_truncated ? ' (truncated)' : ''}
         </p>
-        <pre className="overflow-x-auto rounded bg-zinc-50 p-2 text-[11px] leading-relaxed">{result.turtle}</pre>
+        {triples ? (
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-[11px]" aria-label="Triples">
+              <thead>
+                <tr>
+                  {['subject', 'predicate', 'object', ...(dataset ? ['graph'] : [])].map((column) => (
+                    <th key={column} className="border bg-zinc-50 px-2 py-1 text-left font-medium">
+                      {column}
+                    </th>
+                  ))}
+                  {entailed && <th className="border bg-zinc-50 px-2 py-1" aria-label="Inferred" />}
+                </tr>
+              </thead>
+              <tbody>
+                {triples.map((row, index) => (
+                  <tr
+                    // Rows have no natural key: a triple may repeat once per graph.
+                    // biome-ignore lint/suspicious/noArrayIndexKey: the answer is replaced as a whole
+                    key={index}
+                    data-inferred={row.inferred ? 'true' : undefined}>
+                    {[row.s, row.p, row.o, ...(dataset ? [row.graph] : [])].map((term, column) => (
+                      // biome-ignore lint/suspicious/noArrayIndexKey: fixed column order
+                      <td key={column} className="break-all border px-2 py-1 align-top">
+                        {term ? (
+                          <TermView term={term} ctx={inspector} />
+                        ) : (
+                          <span className="text-zinc-400">default</span>
+                        )}
+                      </td>
+                    ))}
+                    {entailed && <td className="border px-1 py-1 align-top">{row.inferred && <InferredBadge />}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+        <details className="mt-2 text-[10px] text-zinc-500" open={!triples}>
+          <summary className="cursor-pointer">{dataset ? 'TriG' : 'Turtle'}</summary>
+          <div className="mt-1 space-y-2">
+            <TurtleAnswer text={result.turtle} className="bg-zinc-50" empty="(no stated triples)" />
+            {entailed && (
+              <section aria-label="Inferred triples">
+                <p className="mb-1 flex items-center">
+                  <InferredBadge />
+                  <span className="ml-1">RDFS entailment, not written in any ontology file</span>
+                </p>
+                <TurtleAnswer
+                  text={result.inferred_turtle ?? ''}
+                  className="bg-violet-50"
+                  empty="(no further triples)"
+                />
+              </section>
+            )}
+          </div>
+        </details>
       </div>
     )
   }
   const cells = result.cells
+  const inferredRows = result.row_inferred
   return (
     <div>
       <QueryNotices notices={result.notices} />
       <p className="mb-1 text-[10px] text-zinc-500">
         {result.row_count} row{result.row_count === 1 ? '' : 's'}
+        {inferredRows ? `, ${result.inferred_count ?? 0} inferred` : ''}
         {result.truncated ? ' (truncated)' : ''} — matched entities are highlighted on the canvas
       </p>
       <div className="overflow-x-auto">
@@ -4120,11 +4284,12 @@ function QueryResultView({ result, inspector }: { result: QueryResult | null; in
                   {column}
                 </th>
               ))}
+              {inferredRows && <th className="border bg-zinc-50 px-2 py-1" aria-label="Inferred" />}
             </tr>
           </thead>
           <tbody>
             {keyRows(result.rows).map(({ key, row, index }) => (
-              <tr key={key}>
+              <tr key={key} data-inferred={inferredRows?.[index] ? 'true' : undefined}>
                 {result.columns.map((column, columnIndex) => (
                   <td key={column} className="break-all border px-2 py-1 align-top">
                     <QueryCellView
@@ -4134,6 +4299,9 @@ function QueryResultView({ result, inspector }: { result: QueryResult | null; in
                     />
                   </td>
                 ))}
+                {inferredRows && (
+                  <td className="border px-1 py-1 align-top">{inferredRows[index] && <InferredBadge />}</td>
+                )}
               </tr>
             ))}
           </tbody>

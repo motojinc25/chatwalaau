@@ -73,6 +73,15 @@ def _suppress_experimental_warnings_unless_opted_in() -> None:
         message=r".*is experimental and may change or be removed.*",
         category=FutureWarning,
     )
+    # The same staged-feature notice, worded for a released API's experimental parameter
+    # (MAF >= 1.16: "create_harness_agent parameter(s) 'loop_should_continue' enable
+    # experimental harness features that may change or be removed ..."), raised when a
+    # harness agent with a loop policy is built.
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*enable experimental .* that may change or be removed.*",
+        category=FutureWarning,
+    )
 
 
 _suppress_experimental_warnings_unless_opted_in()

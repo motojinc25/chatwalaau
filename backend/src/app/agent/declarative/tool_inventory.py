@@ -101,7 +101,7 @@ BUILTIN_FUNCTION_TOOLS: tuple[BuiltinFunctionTool, ...] = (
         "manage_webhook", "automation", "Manage webhook subscriptions and runs.", lambda: settings.webhook_enabled
     ),
     BuiltinFunctionTool(
-        "query_ontology", "knowledge", "Query the RDF concept models.", lambda: settings.ontology_enabled
+        "ontology_query", "knowledge", "Query the RDF concept models.", lambda: settings.ontology_enabled
     ),
     # Computer Use (PRP-0189, UDR-0171 D1): available only where the backend owns the
     # user's screen (H1-H6). Not mountable into a harness (Q4) -- see

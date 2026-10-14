@@ -249,10 +249,10 @@ def _import_function_tool(name: str) -> Any | None:
             from app.webhook.tool import manage_webhook
 
             return manage_webhook
-        if name == "query_ontology":
-            from app.ontology.tool import query_ontology
+        if name == "ontology_query":
+            from app.ontology.tool import ontology_query
 
-            return query_ontology
+            return ontology_query
         if name.startswith("computer_"):
             # PRP-0189 amendment A7: Computer Use is mountable into a harness run.
             from app.computer_use import tools as computer_tools

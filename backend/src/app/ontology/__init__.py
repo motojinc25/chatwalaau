@@ -13,7 +13,7 @@ runtime/instance data is out of scope):
   chokepoint (CTR-0102; DEMO_MODE honored).
 - ``router``: the CTR-0171 REST management API (inert 404 unless
   ONTOLOGY_ENABLED; mutations and query POSTs consume CTR-0083).
-- ``tool``: the CTR-0172 session-common ``query_ontology`` agent tool
+- ``tool``: the CTR-0172 session-common ``ontology_query`` agent tool
   (catalog + CONSTRUCT-only query answering fenced Turtle).
 
 pyoxigraph is imported lazily inside the submodules so the ONTOLOGY_ENABLED

@@ -28,6 +28,12 @@ under the graphs that hold it (CTR-0170 v3, UDR-0182 D4 / D5).
 Filenames are catalog-derived single segments, so no path outside ONTOLOGY_DIR
 is ever resolved (the CTR-0022 confinement precedent).
 
+A search may ask for an entailment mode (CTR-0170 v7, UDR-0191): once per cached
+Store, ``app.ontology.entailment`` computes the inferred statements -- of the merge,
+and of each named graph with the dataset's schema -- into an ENTAILED copy of the
+Store that answers that mode's queries; the stated Store is never changed and
+nothing is written to a file.
+
 Loaded query Stores are cached per (ontology, revision, scope) within the
 ``ontology_query_cache_mb`` App Settings budget; the revision is the SHA-256 of
 the bytes on disk, so a cached entry can never answer for another file version
@@ -38,7 +44,7 @@ threads (D4): catalog read-modify-writes hold ``_CATALOG_LOCK`` and every
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -510,6 +516,16 @@ class QueryGraph:
     # (None = none), and the import notices this answer carries.
     imports: tuple[tuple[str, str], ...] | None = None
     import_notices: list[dict[str, Any]] = field(default_factory=list)
+    # PRP-0209 / UDR-0191 D3 / D7: per entailment mode, the ENTAILED copy of ``store``
+    # (every stated quad, plus the inferred statements in the default graph and in each
+    # of the file's named graphs), the number of inferred statements, and the named
+    # graphs each inferred statement was inferred in. Filled at most once per mode under
+    # ``entailment_lock`` (UDR-0183 D2 amended); shared with the shallow copies
+    # ``_with_notices`` makes. ``store`` itself never changes.
+    entailed: dict[str, Any] = field(default_factory=dict)
+    entailments: dict[str, int] = field(default_factory=dict)
+    inferred_graphs: dict[str, dict[Any, list[Any]]] = field(default_factory=dict)
+    entailment_lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
 def parse_scope(value: Any) -> Any:
@@ -749,6 +765,7 @@ def _build_query_graph(entry: dict[str, str], data: bytes, scope: Any, imported:
         if graphs and scope != "default":
             _merge_into_default(store, list(graphs) if scope == "all" else [scope])
     import_notices: list[dict[str, Any]] = []
+    import_graphs: list[Any] = []
     if imported:
         # PRP-0207 / UDR-0189 D5: the import closure, read-only and standardized apart.
         added, imported_named, import_notices, extra, import_graphs = _merge_imports(
@@ -974,7 +991,88 @@ def _serialize_answer(items: list[Any], fmt: Any, prefixes: dict[str, str]) -> s
         return ox.serialize(items, format=fmt, prefixes=TURTLE_PREFIXES).decode("utf-8")
 
 
-def execute_query(graph: QueryGraph, sparql: str, *, max_construct_triples: int = 0) -> dict[str, Any]:
+# ---- Entailment (CTR-0170 v7, PRP-0209, UDR-0191) --------------------------------
+
+# Memory charged per inferred statement held in a cached Store (UDR-0191 D8): measured
+# on v0.186.0 at about 310 bytes per quad in the in-memory Store, charged twice that.
+CACHE_COST_PER_INFERRED = 600
+
+
+def _charge_cache(graph: QueryGraph, extra: int) -> None:
+    """Add ``extra`` bytes to the cached entry holding ``graph``'s Store, then evict (D8)."""
+    global _cache_total
+    with _cache_lock:
+        for entry in _cache.values():
+            if entry.graph.store is graph.store:
+                entry.cost += extra
+                _cache_total += extra
+                break
+        _evict_to(cache_budget_bytes())
+
+
+def ensure_entailment(graph: QueryGraph, mode: str) -> int:
+    """Build ``mode``'s entailed copy of the query Store, once (D3, D7, D8).
+
+    The copy holds every quad of ``graph.store`` plus the inferred statements: those of
+    the merge (the default graph -- the scope merge, imports included when loaded with
+    them) in the default graph, and those of each of the file's named graphs in that
+    graph (``entailment.scoped_closure``). ``graph.store`` is never changed, so
+    ``simple`` answers are exactly the stated ones. Returns the number of inferred
+    statements. ``simple`` needs nothing.
+    """
+    from app.ontology import entailment
+
+    if mode == entailment.SIMPLE:
+        return 0
+    with graph.entailment_lock:
+        held = graph.entailments.get(mode)
+        if held is not None:
+            return held
+        import pyoxigraph as ox
+
+        default_graph = ox.DefaultGraph()
+        merged = [quad.triple for quad in graph.store.quads_for_pattern(None, None, None, default_graph)]
+        named = {
+            name: [quad.triple for quad in graph.store.quads_for_pattern(None, None, None, name)]
+            for name in graph.graphs
+        }
+        merge_inferred, per_graph = entailment.scoped_closure(merged, named, mode=mode)
+        entailed = ox.Store()
+        entailed.extend(graph.store)
+        entailed.extend(ox.Quad(t.subject, t.predicate, t.object, default_graph) for t in merge_inferred)
+        where: dict[Any, list[Any]] = {}
+        for name, inferred in per_graph.items():
+            entailed.extend(ox.Quad(t.subject, t.predicate, t.object, name) for t in inferred)
+            for t in inferred:
+                where.setdefault(t, []).append(name)
+        count = len(merge_inferred) + sum(len(inferred) for inferred in per_graph.values())
+        graph.entailed[mode] = entailed
+        graph.inferred_graphs[mode] = where
+        graph.entailments[mode] = count
+        quads = len(entailed)
+    _charge_cache(graph, quads * CACHE_COST_PER_INFERRED)
+    return count
+
+
+def _run(store: Any, sparql: str) -> Any:
+    try:
+        return store.query(sparql)
+    except Exception as exc:  # SyntaxError and friends from the SPARQL parser
+        raise ValueError(f"SPARQL error: {exc}") from exc
+
+
+def _row_key(solution: Any, variables: list[Any]) -> tuple[str | None, ...]:
+    """A Store-level identity of one solution (restoration is a function of it)."""
+    out: list[str | None] = []
+    for variable in variables:
+        term = solution[variable]
+        out.append(None if term is None else str(term))
+    return tuple(out)
+
+
+def execute_query(
+    graph: QueryGraph, sparql: str, *, max_construct_triples: int = 0, entailment: str = "simple"
+) -> dict[str, Any]:
     """Run a READ-ONLY SPARQL query and shape the result for CTR-0171 / CTR-0172.
 
     - SELECT   -> {kind, columns, rows, cells, row_count, truncated, entity_iris, notices}
@@ -987,30 +1085,50 @@ def execute_query(graph: QueryGraph, sparql: str, *, max_construct_triples: int 
                   ``turtle`` then carries TriG text -- UDR-0182 D5)
     - ASK      -> {kind, value, notices}
 
-    Every response also carries ``scope``. Results are restored to the file's
-    lexical forms and blank-node labels (UDR-0181 D2); ``notices`` state what
-    could not be (D3). ``Store.query()`` cannot mutate; a SPARQL UPDATE string
+    Every response also carries ``scope`` and ``entailment``. Results are restored to
+    the file's lexical forms and blank-node labels (UDR-0181 D2); ``notices`` state
+    what could not be (D3). ``Store.query()`` cannot mutate; a SPARQL UPDATE string
     fails its parser. Raises ``ValueError`` with the parser message on an invalid query.
+
+    With an entailment mode other than ``simple`` (PRP-0209, UDR-0191 D6) the query
+    runs on the mode's entailed copy of the Store (stated + inferred, also inside the
+    named graphs) and again on the stated Store; what only the first run gives is
+    marked inferred: SELECT ``row_inferred`` (one bool per row) and ``inferred_count``;
+    CONSTRUCT / DESCRIBE ``turtle`` (the stated part), ``inferred_turtle`` (the
+    answer's format) and ``inferred_count``; ASK ``inferred``.
+    Raises ``EntailmentError`` (a ``ValueError``) for a refused mode or input size.
     """
     import pyoxigraph as ox
 
+    from app.ontology import entailment as ent
     from app.ontology.vocabulary import term_to_json
 
+    mode = ent.parse_mode(entailment)
     index = graph.index
     scope = graph.scope if isinstance(graph.scope, str) else term_to_json(graph.scope)
-    try:
-        result = graph.store.query(sparql)
-    except Exception as exc:  # SyntaxError and friends from the SPARQL parser
-        raise ValueError(f"SPARQL error: {exc}") from exc
+    entailed = mode != ent.SIMPLE
+    if entailed:
+        ensure_entailment(graph, mode)
+    # The entailed copy answers every query form as written -- GRAPH, FROM and FROM NAMED
+    # included (UDR-0191 D3 / D7); the stated Store gives the baseline for the marks.
+    result = _run(graph.entailed[mode] if entailed else graph.store, sparql)
+    baseline = _run(graph.store, sparql) if entailed else None
+
+    def notices_with(ambiguous: int) -> list[dict[str, Any]]:
+        return [*graph.import_notices, *lexical_notices(index, sparql, ambiguous)]
 
     if isinstance(result, ox.QuerySolutions):
         columns = [str(v).lstrip("?") for v in result.variables]
         rows: list[list[str]] = []
         cells: list[list[dict[str, Any] | None]] = []
+        row_inferred: list[bool] = []
         entity_iris: set[str] = set()
         truncated = False
         ambiguous = 0
         computed = computed_variables(sparql)
+        stated_rows: Counter[tuple[str | None, ...]] | None = None
+        if baseline is not None:
+            stated_rows = Counter(_row_key(solution, baseline.variables) for solution in baseline)
         for solution in result:
             if len(rows) >= SELECT_MAX_ROWS:
                 truncated = True
@@ -1029,9 +1147,16 @@ def execute_query(graph: QueryGraph, sparql: str, *, max_construct_triples: int 
                 cell_row.append(cell)
                 if isinstance(term, ox.NamedNode):
                     entity_iris.add(term.value)
+            if stated_rows is not None:
+                key = _row_key(solution, result.variables)
+                if stated_rows[key] > 0:
+                    stated_rows[key] -= 1
+                    row_inferred.append(False)
+                else:
+                    row_inferred.append(True)
             rows.append(row)
             cells.append(cell_row)
-        return {
+        answer: dict[str, Any] = {
             "kind": "select",
             "columns": columns,
             "rows": rows,
@@ -1040,20 +1165,50 @@ def execute_query(graph: QueryGraph, sparql: str, *, max_construct_triples: int 
             "truncated": truncated,
             "entity_iris": sorted(entity_iris),
             "scope": scope,
-            "notices": [*graph.import_notices, *lexical_notices(index, sparql, ambiguous)],
+            "entailment": mode,
+            "notices": notices_with(ambiguous),
         }
+        if stated_rows is not None:
+            answer["row_inferred"] = row_inferred
+            answer["inferred_count"] = sum(row_inferred)
+            removed = sum(count for count in stated_rows.values() if count > 0)
+            if removed and not truncated:
+                answer["notices"].append(
+                    {
+                        "code": "entailment_removed_rows",
+                        "message": f"{removed} row(s) of the answer without inference are not in this answer.",
+                    }
+                )
+        return answer
 
     if isinstance(result, ox.QueryBoolean):
-        notices = [*graph.import_notices, *lexical_notices(index, sparql, 0)]
-        return {"kind": "ask", "value": bool(result), "scope": scope, "notices": notices}
+        answer = {
+            "kind": "ask",
+            "value": bool(result),
+            "scope": scope,
+            "entailment": mode,
+            "notices": notices_with(0),
+        }
+        if baseline is not None:
+            answer["inferred"] = bool(result) and not bool(baseline)
+        return answer
 
     # Remaining result kind: triples from CONSTRUCT / DESCRIBE. The cap and the
     # count apply AFTER restoration (merged triples come back).
-    triples, ambiguous = restore_triples(index, list(result))
+    raw = list(result)
+    inferred_raw: list[Any] = []
+    if baseline is not None:
+        stated_set = set(baseline)
+        inferred_raw = [t for t in raw if t not in stated_set]
+        raw = [t for t in raw if t in stated_set]
+    triples, ambiguous = restore_triples(index, raw)
+    inferred_triples, inferred_ambiguous = restore_triples(index, inferred_raw) if inferred_raw else ([], 0)
     truncated = False
-    if max_construct_triples and len(triples) > max_construct_triples:
-        triples = triples[:max_construct_triples]
+    if max_construct_triples and len(triples) + len(inferred_triples) > max_construct_triples:
+        # Stated first (PRP-0209 2.7): the cap counts both parts.
         truncated = True
+        triples = triples[:max_construct_triples]
+        inferred_triples = inferred_triples[: max_construct_triples - len(triples)]
     prefixes = _construct_prefixes(graph.document)
     text = ""
     fmt = "turtle"
@@ -1074,15 +1229,62 @@ def execute_query(graph: QueryGraph, sparql: str, *, max_construct_triples: int 
             text = _serialize_answer(quads, ox.RdfFormat.TRIG, prefixes)
     elif triples:
         text = _serialize_answer(triples, ox.RdfFormat.TURTLE, prefixes)
-    return {
+    answer = {
         "kind": "construct",
         "format": fmt,
         "turtle": text,
-        "triple_count": len(triples),
+        "triple_count": len(triples) + len(inferred_triples),
         "truncated": truncated,
         "scope": scope,
-        "notices": [*graph.import_notices, *lexical_notices(index, sparql, ambiguous)],
+        "entailment": mode,
+        "notices": notices_with(ambiguous + inferred_ambiguous),
     }
+    if baseline is not None:
+        # The inferred part in the answer's format: for a dataset each inferred triple is
+        # written under the named graphs it was inferred in, else in the default block
+        # (UDR-0191 D7).
+        inferred_text = ""
+        if inferred_triples and fmt == "trig":
+            where = graph.inferred_graphs.get(mode, {})
+            default_graph = ox.DefaultGraph()
+            inferred_quads = [
+                ox.Quad(t.subject, t.predicate, t.object, g)
+                for t in inferred_triples
+                for g in where.get(t) or [default_graph]
+            ]
+            order = {g: i for i, g in enumerate([default_graph, *graph.graphs])}
+            inferred_quads.sort(key=lambda q: order.get(q.graph_name, len(order)))
+            inferred_text = _serialize_answer(inferred_quads, ox.RdfFormat.TRIG, prefixes)
+        elif inferred_triples:
+            inferred_text = _serialize_answer(inferred_triples, ox.RdfFormat.TURTLE, prefixes)
+        answer["inferred_turtle"] = inferred_text
+        answer["inferred_count"] = len(inferred_triples)
+    # The same triples as rows for a table (CTR-0171 v9): typed subject / predicate /
+    # object, the named graph (None = the default graph) and whether the row is inferred.
+    # A triple held in several graphs gives one row per graph. Capped like SELECT.
+    where = graph.inferred_graphs.get(mode, {}) if baseline is not None else {}
+    rows: list[dict[str, Any]] = []
+    for inferred, part in ((False, triples), (True, inferred_triples)):
+        for t in part:
+            if graph.provenance is None:
+                holders: list[Any] = [None]
+            elif inferred:
+                holders = where.get(t) or [None]
+            else:
+                holders = [g for g in graph.provenance.get(t) or [None] if not isinstance(g, ox.DefaultGraph)] or [None]
+            for g in holders:
+                rows.append(
+                    {
+                        "s": term_to_json(t.subject),
+                        "p": term_to_json(t.predicate),
+                        "o": term_to_json(t.object),
+                        "graph": term_to_json(g) if g is not None else None,
+                        "inferred": inferred,
+                    }
+                )
+    answer["triples"] = rows[:SELECT_MAX_ROWS]
+    answer["triples_truncated"] = len(rows) > SELECT_MAX_ROWS
+    return answer
 
 
 def graph_names(ontology_id: str) -> list[str]:

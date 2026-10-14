@@ -90,7 +90,7 @@ _SETTINGS_DETAIL: dict[str, str] = {
     "manage_cron": "CRON_ENABLED=false",
     "manage_pipeline": "PIPELINE_ENABLED=false",
     "manage_webhook": "WEBHOOK_ENABLED=false",
-    "query_ontology": "ONTOLOGY_ENABLED=false",
+    "ontology_query": "ONTOLOGY_ENABLED=false",
     # PRP-0189: the gate AND the host facts (Windows, interactive session, loopback);
     # the exact reason code is appended by _computer_use_detail at report time.
     **dict.fromkeys(

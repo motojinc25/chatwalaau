@@ -438,10 +438,10 @@ def _build_tools_and_instructions(
     # shared agent only when ONTOLOGY_ENABLED so the LLM can answer questions from
     # the operator's RDF concept models (catalog + CONSTRUCT-only NL query answering
     # fenced Turtle). Read-only by construction.
-    if settings.ontology_enabled and _fn_ok("query_ontology"):
-        from app.ontology.tool import ONTOLOGY_TOOL_INSTRUCTION, query_ontology
+    if settings.ontology_enabled and _fn_ok("ontology_query"):
+        from app.ontology.tool import ONTOLOGY_TOOL_INSTRUCTION, ontology_query
 
-        tools.append(query_ontology)
+        tools.append(ontology_query)
         guidance.append(ToolGuidance("ontology", ONTOLOGY_TOOL_INSTRUCTION))
 
     # Computer Use (PRP-0189, FEAT-0071, UDR-0171). Registered only where the backend

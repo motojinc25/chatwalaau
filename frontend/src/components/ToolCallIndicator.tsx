@@ -132,7 +132,7 @@ const toolDisplayNames: Record<string, { label: string; doneLabel: string; icon:
   manage_webhook: { label: 'Managing webhooks...', doneLabel: 'Managed webhooks', icon: Webhook },
   manage_memory: { label: 'Updating agent memory...', doneLabel: 'Updated agent memory', icon: BookOpen },
   manage_user_memory: { label: 'Updating your preferences...', doneLabel: 'Updated your preferences', icon: BookOpen },
-  query_ontology: { label: 'Querying the ontology...', doneLabel: 'Queried the ontology', icon: Network },
+  ontology_query: { label: 'Querying the ontology...', doneLabel: 'Queried the ontology', icon: Network },
 
   // ---- Computer Use (CTR-0235, PRP-0189) ---------------------------------------
   computer_list_windows: { label: 'Listing windows...', doneLabel: 'Listed windows', icon: ListTree },

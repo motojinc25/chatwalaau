@@ -1,4 +1,5 @@
-"""query_ontology MAF Function Tool (CTR-0172, PRP-0105, UDR-0084 D9).
+"""ontology_query MAF Function Tool (CTR-0172, PRP-0105, UDR-0084 D9; renamed from
+query_ontology by PRP-0209 / UDR-0191 D9 -- ontology tools are named ``ontology_*``).
 
 A session-common agent tool (registered on the shared agent when
 ONTOLOGY_ENABLED -- the manage_cron / manage_webhook precedent) that lets the
@@ -15,6 +16,9 @@ LLM answer questions from the operator's concept models:
   with named graphs the answer is TriG (```trig), each triple under the graphs
   that hold it, and ``graph`` narrows the question to one graph (CTR-0172 v3,
   UDR-0182 D4 / D5).
+- ``entailment``: ``simple`` (default, stated statements only) or ``rdfs`` (CTR-0172
+  v5, UDR-0191 D9): the inferred triples come in a second block labelled as inferred
+  and not stated in any file.
 
 Errors (unknown ontology, un-convertible question, empty result) return short
 diagnostic text and never raise into the run.
@@ -30,6 +34,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import Field
 
 from app.core.config import settings
+from app.ontology import entailment as entailment_modes
 from app.ontology import nl, store
 
 logger = logging.getLogger(__name__)
@@ -37,13 +42,17 @@ logger = logging.getLogger(__name__)
 ONTOLOGY_TOOL_INSTRUCTION = (
     "\n\n## Ontology Concept Models\n"
     "The operator maintains RDF concept models (ontologies) you can query with the "
-    "query_ontology tool. Use action='catalog' first to see which ontologies exist and "
+    "ontology_query tool. Use action='catalog' first to see which ontologies exist and "
     "what they describe, then action='query' with the ontology id (or exact name) and a "
     "natural-language question. The answer arrives as RDF Turtle in a ```turtle code "
     "block (TriG in a ```trig block when the ontology has named graphs; pass graph to "
     "ask about one of them) -- treat it as authoritative structured knowledge about the "
     "domain's entities and relationships. An ontology's answer also covers the ontologies "
-    "it imports (listed as imports in the catalog) unless the operator turned that off."
+    "it imports (listed as imports in the catalog) unless the operator turned that off. "
+    "Pass entailment='rdfs' for questions about class membership, class or property "
+    "hierarchies, or what follows from domains, ranges and sub-properties: the answer then "
+    "adds a second block of INFERRED triples (RDFS entailment, not stated in any file) -- "
+    "when you use them, say that they are inferred."
 )
 
 
@@ -85,7 +94,7 @@ def _resolve_entry(selector: str) -> dict[str, str] | list[dict[str, str]] | Non
     return None
 
 
-async def query_ontology(
+async def ontology_query(
     action: Annotated[str, Field(description="One of: catalog, query.")],
     ontology: Annotated[
         str,
@@ -102,13 +111,22 @@ async def query_ontology(
             "'default' for the default graph. Empty = all graphs."
         ),
     ] = "",
+    entailment: Annotated[
+        str,
+        Field(
+            description="For query, optional: 'simple' (default) answers from the stated triples only; "
+            "'rdfs' also applies RDFS entailment (subclass / subproperty hierarchies, domains, ranges) "
+            "and returns the inferred triples in a separate block."
+        ),
+    ] = "simple",
 ) -> str:
     """Query the operator's RDF ontology concept models.
 
     Use action="catalog" to list the available ontologies (id, name,
     description), then action="query" with an ontology id/name plus a
     natural-language question. The answer is the matching subgraph as RDF
-    Turtle in a fenced code block.
+    Turtle in a fenced code block; with entailment="rdfs" the inferred triples
+    follow in a second block.
     """
     act = (action or "").strip().lower()
 
@@ -137,13 +155,14 @@ async def query_ontology(
 
     try:
         scope = store.parse_scope(graph.strip() or None)
+        mode = entailment_modes.parse_mode(entailment)
     except ValueError as exc:
         return f"Error: {exc}"
     try:
         # Off the event loop, from the query cache when the revision is cached (UDR-0183 D1 / D4).
         loaded = await run_in_threadpool(store.load_store, resolved["id"], scope)
     except Exception as exc:
-        logger.warning("query_ontology could not load %s", resolved["id"], exc_info=True)
+        logger.warning("ontology_query could not load %s", resolved["id"], exc_info=True)
         return f"Error: could not load ontology {resolved['id']}: {exc}"
 
     try:
@@ -152,18 +171,25 @@ async def query_ontology(
     except ValueError as exc:
         return f"Error: could not translate the question into SPARQL: {exc}"
     except Exception as exc:
-        logger.warning("query_ontology NL->SPARQL failed for %s", resolved["id"], exc_info=True)
+        logger.warning("ontology_query NL->SPARQL failed for %s", resolved["id"], exc_info=True)
         return f"Error: the SPARQL generation model call failed: {exc}"
 
     try:
         result = await run_in_threadpool(
-            store.execute_query, loaded, sparql, max_construct_triples=settings.ontology_tool_max_triples
+            store.execute_query,
+            loaded,
+            sparql,
+            max_construct_triples=settings.ontology_tool_max_triples,
+            entailment=mode,
         )
+    except entailment_modes.EntailmentError as exc:
+        return f"Error: {exc}"
     except ValueError as exc:
         return f"Error: the generated SPARQL failed to execute: {exc}\nGenerated query:\n{sparql}"
 
     turtle = result.get("turtle", "")
-    if not turtle:
+    inferred = result.get("inferred_turtle", "")
+    if not turtle and not inferred:
         return (
             f"Ontology '{resolved['name']}' ({resolved['id']}) returned no triples for this "
             f"question.\nGenerated SPARQL:\n{sparql}"
@@ -178,19 +204,27 @@ async def query_ontology(
     # model never reports a count the file contradicts.
     for item in result.get("notices") or []:
         notice += f"\n(Note: {item['message']})"
+    # UDR-0191 D9: the inferred triples in their own block, labelled as not stated.
+    inferred_block = ""
+    if mode != entailment_modes.SIMPLE:
+        inferred_block = (
+            f"\n\nInferred (RDFS entailment; not stated in any ontology file):\n```turtle\n{inferred}\n```"
+            if inferred
+            else "\n\nInferred (RDFS entailment): no further triples."
+        )
     if result.get("format") == "trig":
         # UDR-0182 D5: each triple is written under the named graph(s) that hold it.
         return (
             f"Ontology: {resolved['name']} ({resolved['id']}), {store.scope_label(loaded.scope)}\n"
             f"Generated SPARQL:\n{sparql}\n\n"
             "Result (RDF TriG; each triple is under the named graph(s) that hold it, the rest is "
-            f"in the default graph):\n```trig\n{turtle}\n```{notice}"
+            f"in the default graph):\n```trig\n{turtle}\n```{inferred_block}{notice}"
         )
     return (
         f"Ontology: {resolved['name']} ({resolved['id']})\n"
         f"Generated SPARQL:\n{sparql}\n\n"
-        f"Result (RDF Turtle):\n```turtle\n{turtle}\n```{notice}"
+        f"Result (RDF Turtle):\n```turtle\n{turtle}\n```{inferred_block}{notice}"
     )
 
 
-__all__ = ["ONTOLOGY_TOOL_INSTRUCTION", "query_ontology"]
+__all__ = ["ONTOLOGY_TOOL_INSTRUCTION", "ontology_query"]

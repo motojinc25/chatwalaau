@@ -690,9 +690,9 @@ class Settings(BaseSettings):
     # Ontology Concept Modeling (CTR-0006, CTR-0169..0173, PRP-0105, UDR-0084)
     # Rule-based concept models as RDF knowledge graphs (Turtle file SSOT +
     # catalog.json, pyoxigraph read-only SPARQL, NL -> SPARQL via the registry
-    # chokepoint, session-common query_ontology tool). ONTOLOGY_ENABLED (UDR-0084
+    # chokepoint, session-common ontology_query tool). ONTOLOGY_ENABLED (UDR-0084
     # D12) gates the whole feature: when FALSE the /api/ontology surface returns
-    # 404, the query_ontology tool is not registered, and the sidebar icon is
+    # 404, the ontology_query tool is not registered, and the sidebar icon is
     # hidden.
     # PRP-0139 / UDR-0122 D6 changed the default false -> TRUE.
     ontology_enabled: bool = True
@@ -700,7 +700,7 @@ class Settings(BaseSettings):
     ontology_dir: str = ".ontologies"
     # Upload/import and save size cap in bytes (UDR-0084 D10).
     ontology_max_file_bytes: int = 10_485_760  # 10 MiB
-    # Cap on triples serialized into a query_ontology tool answer (UDR-0084 D9);
+    # Cap on triples serialized into an ontology_query tool answer (UDR-0084 D9);
     # truncation is explicitly noticed in the tool result.
     ontology_tool_max_triples: int = 200
     # Memory budget (MiB) for loaded query Stores kept between searches, keyed by
@@ -718,6 +718,10 @@ class Settings(BaseSettings):
     ontology_query_include_imports: bool = True
     ontology_imports_max_ontologies: int = 20
     ontology_imports_max_mb: int = 50
+    # RDFS entailment at query time (PRP-0209 / UDR-0191 D8): the largest input (stated
+    # statements of the query Store's default graph, imports included) the engine accepts.
+    # owlrl is pure Python: about 3.7 ms per stated statement (v0.186.0), so 3,000 ~ 10 s.
+    ontology_entailment_max_triples: int = 3_000
     # The NL -> SPARQL completion model is the catalog `roles.ontology_nl` binding
     # (PRP-0115 / UDR-0096); the removed ONTOLOGY_NL_MODEL env var no longer applies.
 

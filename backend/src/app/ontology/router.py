@@ -10,7 +10,8 @@
     PUT    /api/ontology/{id}               -- save the projection (backup + atomic)
     POST   /api/ontology/{id}/statements    -- explicit statement operations (UDR-0182 D9)
     GET    /api/ontology/{id}/export        -- download (?format=; lossy formats refused, D7)
-    POST   /api/ontology/{id}/query         -- read-only SPARQL (SELECT/CONSTRUCT/ASK), scoped
+    POST   /api/ontology/{id}/query         -- read-only SPARQL (SELECT/CONSTRUCT/ASK), scoped,
+                                               with an entailment mode (UDR-0191 D1)
     POST   /api/ontology/{id}/nl-query      -- natural language -> SPARQL -> execute, scoped
     GET    /api/ontology/{id}/history       -- versions, newest first (UDR-0184 D2)
     GET    /api/ontology/{id}/history/{version}/diff     -- statement diff (D4)
@@ -61,7 +62,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import verify_api_key
 from app.core.config import settings
-from app.ontology import formats, history, imports, nl, store
+from app.ontology import entailment, formats, history, imports, nl, store
 from app.ontology.operations import StaleConflict, StatementNotFound, apply_operations
 from app.ontology.vocabulary import (
     PROJECTION_VERSION,
@@ -140,12 +141,15 @@ class QueryRequest(BaseModel):
     scope: Any = None
     # Include the owl:imports closure (UDR-0189 D5); omitted = the App Settings default.
     imports: bool | None = None
+    # PRP-0209 / UDR-0191 D1: "simple" (omitted) or "rdfs"; "owl-rl" is reserved (422).
+    entailment: str | None = Field(default=None, max_length=32)
 
 
 class NlQueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     scope: Any = None
     imports: bool | None = None
+    entailment: str | None = Field(default=None, max_length=32)
 
 
 class ImportMapEntry(BaseModel):
@@ -207,6 +211,13 @@ def _scope_or_422(value: Any) -> Any:
         return store.parse_scope(value)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"error": "invalid_scope", "message": str(exc)}) from exc
+
+
+def _entailment_or_422(value: Any) -> str:
+    try:
+        return entailment.parse_mode(value)
+    except entailment.EntailmentError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
 
 
 def _save(ontology_id: str, text: str, dataset: bool, entry: dict[str, Any] | None = None) -> str | None:
@@ -658,9 +669,11 @@ async def export_ontology(ontology_id: str, format: str | None = None) -> Respon
     return Response(content=content, media_type=f"{fmt.media_type}; charset=utf-8", headers=headers)
 
 
-def _run_sparql(ontology_id: str, scope: Any, sparql: str, include: bool | None = None) -> dict[str, Any]:
+def _run_sparql(
+    ontology_id: str, scope: Any, sparql: str, include: bool | None = None, mode: str = entailment.SIMPLE
+) -> dict[str, Any]:
     """Load (from the cache when possible) and query, in a worker thread (UDR-0183 D1 / D4)."""
-    return store.execute_query(store.load_store(ontology_id, scope, include), sparql)
+    return store.execute_query(store.load_store(ontology_id, scope, include), sparql, entailment=mode)
 
 
 @router.post("/{ontology_id}/query", dependencies=[Depends(verify_api_key)])
@@ -669,9 +682,12 @@ async def run_query(ontology_id: str, body: QueryRequest) -> dict:
     _require_enabled()
     _entry_or_404(ontology_id)
     scope = _scope_or_422(body.scope)
+    mode = _entailment_or_422(body.entailment)
     try:
         nl.ensure_read_only(body.sparql)
-        result = await run_in_threadpool(_run_sparql, ontology_id, scope, body.sparql, body.imports)
+        result = await run_in_threadpool(_run_sparql, ontology_id, scope, body.sparql, body.imports, mode)
+    except entailment.EntailmentError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return result
@@ -687,6 +703,7 @@ async def run_nl_query(ontology_id: str, body: NlQueryRequest) -> dict:
     """
     _require_enabled()
     _entry_or_404(ontology_id)
+    mode = _entailment_or_422(body.entailment)
     graph = await run_in_threadpool(store.load_store, ontology_id, _scope_or_422(body.scope), body.imports)
     try:
         sparql = await nl.generate_sparql(body.question, graph)
@@ -696,7 +713,9 @@ async def run_nl_query(ontology_id: str, body: NlQueryRequest) -> dict:
         logger.warning("nl-query completion failed for %s", ontology_id, exc_info=True)
         raise HTTPException(status_code=502, detail="The SPARQL generation model call failed.") from exc
     try:
-        result = await run_in_threadpool(store.execute_query, graph, sparql)
+        result = await run_in_threadpool(store.execute_query, graph, sparql, entailment=mode)
+    except entailment.EntailmentError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
     except ValueError as exc:
         # Surface the generated (broken) query so the user can fix it in the editor.
         return {"sparql": sparql, "kind": "error", "error": str(exc)}

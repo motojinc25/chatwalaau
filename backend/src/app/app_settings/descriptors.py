@@ -976,6 +976,21 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         min=1,
         max=1024,
     ),
+    # PRP-0209 (CTR-0198, UDR-0191 D8): RDFS entailment input bound.
+    SettingDescriptor(
+        "ontology_entailment_max_triples",
+        "Ontology entailment: largest input (statements)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "Largest number of stated statements (imports included) a search with RDFS entailment "
+            "accepts. The reasoner needs about 10 seconds for 3,000 statements; larger ontologies "
+            "are refused with a message."
+        ),
+        min=100,
+        max=1_000_000,
+    ),
     # ---- Schedule (runtime) -----------------------------------------------
     SettingDescriptor(
         "cron_tick_seconds",
