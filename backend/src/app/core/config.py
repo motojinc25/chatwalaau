@@ -722,6 +722,12 @@ class Settings(BaseSettings):
     # statements of the query Store's default graph, imports included) the engine accepts.
     # owlrl is pure Python: about 3.7 ms per stated statement (v0.186.0), so 3,000 ~ 10 s.
     ontology_entailment_max_triples: int = 3_000
+    # OWL 2 RL entailment at query time (PRP-0210 / UDR-0192 D7, D8): its own input bound
+    # (owlrl's OWL 2 RL closure is about 8-10 times slower than its RDFS closure), and the
+    # output bound K -- inferred statements per stated statement -- that stops owl:sameAs
+    # growth (eq-rep-*) from filling memory and the cache.
+    ontology_owl_rl_max_triples: int = 1_000
+    ontology_owl_rl_max_inferred_ratio: int = 50
     # The NL -> SPARQL completion model is the catalog `roles.ontology_nl` binding
     # (PRP-0115 / UDR-0096); the removed ONTOLOGY_NL_MODEL env var no longer applies.
 

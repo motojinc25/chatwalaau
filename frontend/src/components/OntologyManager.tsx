@@ -229,16 +229,28 @@ interface CatalogEntry {
 interface QueryNotice {
   code: string
   message: string
+  /** `entailment_inconsistent` (CTR-0171 v10, UDR-0192 D5): the total and the first 20 findings. */
+  count?: number
+  truncated?: boolean
+  items?: InconsistencyItem[]
+}
+
+/** One inconsistency OWL 2 RL found (graph null = the merge of the ontology's graphs). */
+interface InconsistencyItem {
+  kind: string
+  graph: string | null
+  message: string
+  terms: string[]
 }
 
 /** A typed SELECT cell; `lexical_forms` lists the file's spellings when it is ambiguous. */
 type QueryCell = (Term & { lexical_forms?: string[] }) | null
 
 /**
- * The search entailment modes (PRP-0209 / UDR-0191 D1). `simple` answers from the stated
- * statements only; OWL 2 RL joins this list with its own proposal.
+ * The search entailment modes (PRP-0209 / UDR-0191 D1, PRP-0210 / UDR-0192 D1). `simple`
+ * answers from the stated statements only; `owl-rl` includes everything `rdfs` gives.
  */
-type Entailment = 'simple' | 'rdfs'
+type Entailment = 'simple' | 'rdfs' | 'owl-rl'
 const ENTAILMENT_OPTIONS: { value: Entailment; label: string; title: string }[] = [
   { value: 'simple', label: 'None', title: 'Only the statements written in the ontology files.' },
   {
@@ -247,7 +259,20 @@ const ENTAILMENT_OPTIONS: { value: Entailment; label: string; title: string }[] 
     title:
       'Also what RDFS entails: subclass and subproperty hierarchies, domains and ranges. Inferred results are marked and never written to the file.',
   },
+  {
+    value: 'owl-rl',
+    label: 'OWL 2 RL',
+    title:
+      'Also what OWL 2 RL entails: transitive, symmetric and inverse properties, equivalences, owl:sameAs, restrictions and keys, on top of RDFS. Slower; limited to smaller ontologies. Inconsistencies are reported.',
+  },
 ]
+
+/** How an answer names the entailment that produced its inferred part. */
+const ENTAILMENT_LABELS: Record<Entailment, string> = {
+  simple: 'No entailment',
+  rdfs: 'RDFS entailment',
+  'owl-rl': 'OWL 2 RL entailment',
+}
 
 type QueryResult =
   | {
@@ -4145,18 +4170,52 @@ function InferredBadge() {
   )
 }
 
-/** One muted line per notice: what the query engine could not give back as written. */
+/**
+ * One muted line per notice: what the query engine could not give back as written. An
+ * OWL 2 RL inconsistency is a warning box listing its findings (UDR-0192 D5 / D10).
+ */
 function QueryNotices({ notices }: { notices?: QueryNotice[] }) {
   if (!notices?.length) return null
+  const inconsistent = notices.find((notice) => notice.code === 'entailment_inconsistent')
+  const lines = notices.filter((notice) => notice !== inconsistent)
   return (
     <div className="mb-1 space-y-0.5">
-      {notices.map((notice) => (
+      {inconsistent && <InconsistencyBox notice={inconsistent} />}
+      {lines.map((notice) => (
         <p key={notice.code} className="flex items-start gap-1 text-[10px] text-amber-700" data-notice={notice.code}>
           <Info className="mt-px h-3 w-3 shrink-0" />
           {notice.message}
         </p>
       ))}
     </div>
+  )
+}
+
+/** The inconsistencies of an OWL 2 RL answer: the answer is still shown below (UDR-0192 D5). */
+function InconsistencyBox({ notice }: { notice: QueryNotice }) {
+  const items = notice.items ?? []
+  const count = notice.count ?? items.length
+  const more = count - items.length
+  return (
+    <section
+      aria-label="Inconsistencies"
+      data-notice={notice.code}
+      className="mb-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-[11px] text-red-800">
+      <p className="flex items-start gap-1 font-medium">
+        <TriangleAlert className="mt-px h-3 w-3 shrink-0" />
+        Inconsistent ontology (OWL 2 RL) -- {count} finding{count === 1 ? '' : 's'}
+      </p>
+      <ul className="mt-0.5 list-disc space-y-0.5 pl-5">
+        {items.map((item) => (
+          <li key={`${item.kind}:${item.message}`} data-kind={item.kind}>
+            {item.message}
+            {item.graph && <span className="ml-1 rounded bg-red-100 px-1 text-[10px]">{item.graph}</span>}
+          </li>
+        ))}
+        {more > 0 && <li>and {more} more</li>}
+      </ul>
+      <p className="mt-0.5 text-[10px] text-red-700">{notice.message}</p>
+    </section>
   )
 }
 
@@ -4251,7 +4310,9 @@ function QueryResultView({ result, inspector }: { result: QueryResult | null; in
               <section aria-label="Inferred triples">
                 <p className="mb-1 flex items-center">
                   <InferredBadge />
-                  <span className="ml-1">RDFS entailment, not written in any ontology file</span>
+                  <span className="ml-1">
+                    {ENTAILMENT_LABELS[result.entailment ?? 'rdfs']}, not written in any ontology file
+                  </span>
                 </p>
                 <TurtleAnswer
                   text={result.inferred_turtle ?? ''}

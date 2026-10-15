@@ -526,6 +526,11 @@ class QueryGraph:
     entailments: dict[str, int] = field(default_factory=dict)
     inferred_graphs: dict[str, dict[Any, list[Any]]] = field(default_factory=dict)
     entailment_lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
+    # PRP-0210 / UDR-0192 D5 / D8: per mode, the notices every answer of that mode carries
+    # (inconsistencies, owl:sameAs pairs), and a remembered output-bound refusal
+    # (message, detail) so the engine does not run again for the same files.
+    entailment_notices: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    entailment_refusals: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
 
 
 def parse_scope(value: Any) -> Any:
@@ -1010,6 +1015,99 @@ def _charge_cache(graph: QueryGraph, extra: int) -> None:
         _evict_to(cache_budget_bytes())
 
 
+# Inconsistency items an answer lists (PRP-0210 2.5; operator Q3 left it to the proposal).
+INCONSISTENCY_NOTICE_ITEMS = 20
+
+_LOCAL_NAME = re.compile(r"[A-Za-z_][\w-]*")
+
+
+def _display(term: Any, prefixes: dict[str, str]) -> str:
+    """A term as an answer writes it: ``prefix:local`` when a prefix fits, else N-Triples."""
+    import pyoxigraph as ox
+
+    if isinstance(term, ox.NamedNode):
+        best: tuple[str, str] | None = None
+        for prefix, iri in prefixes.items():
+            if iri and term.value.startswith(iri) and (best is None or len(iri) > len(best[1])):
+                local = term.value[len(iri) :]
+                if not local or _LOCAL_NAME.fullmatch(local):
+                    best = (prefix, iri)
+        if best is not None:
+            return f"{best[0]}:{term.value[len(best[1]) :]}"
+        return f"<{term.value}>"
+    return str(term)
+
+
+def _entailment_notices(
+    graph: QueryGraph, mode: str, findings: list[dict[str, Any]], same_as: int
+) -> list[dict[str, Any]]:
+    """The notices every ``mode`` answer carries (UDR-0192 D5, D8)."""
+    from app.ontology import entailment
+
+    notices: list[dict[str, Any]] = []
+    prefixes = _construct_prefixes(graph.document)
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for finding in findings:
+        shown = [
+            term if isinstance(term, str) else _display(restore_term(graph.index, term)[0], prefixes)
+            for term in finding["terms"]
+        ]
+        try:
+            message = finding["template"] % tuple(shown)
+        except (TypeError, ValueError):
+            message = finding["template"]
+        key = (finding["kind"], message)
+        if key in seen:
+            continue
+        seen.add(key)
+        graph_name = finding.get("graph")
+        items.append(
+            {
+                "kind": finding["kind"],
+                "graph": None if graph_name is None else _display(graph_name, prefixes),
+                "message": message,
+                "terms": shown,
+            }
+        )
+    if items:
+        order = {kind: i for i, kind in enumerate(entailment.FINDING_KINDS)}
+        items.sort(key=lambda item: (order.get(item["kind"], len(order)), item["message"]))
+        notices.append(
+            {
+                "code": "entailment_inconsistent",
+                "message": (
+                    f"The ontology is inconsistent under {entailment.MODE_LABELS[mode]} "
+                    f"({len(items)} finding(s)). An inconsistent ontology entails everything; this "
+                    "answer holds only what the rules derived."
+                ),
+                "count": len(items),
+                "truncated": len(items) > INCONSISTENCY_NOTICE_ITEMS,
+                "items": items[:INCONSISTENCY_NOTICE_ITEMS],
+            }
+        )
+    if same_as:
+        notices.append(
+            {
+                "code": "entailment_same_as",
+                "message": (
+                    f"{same_as} owl:sameAs pair(s) between different names: the statements of each "
+                    "name are copied to the other."
+                ),
+                "count": same_as,
+            }
+        )
+    return notices
+
+
+def _same_as_pairs(statements: list[Any]) -> int:
+    """owl:sameAs pairs between different names (UDR-0192 D8)."""
+    same_as = "http://www.w3.org/2002/07/owl#sameAs"
+    return len(
+        {frozenset((t.subject, t.object)) for t in statements if t.predicate.value == same_as and t.subject != t.object}
+    )
+
+
 def ensure_entailment(graph: QueryGraph, mode: str) -> int:
     """Build ``mode``'s entailed copy of the query Store, once (D3, D7, D8).
 
@@ -1019,6 +1117,10 @@ def ensure_entailment(graph: QueryGraph, mode: str) -> int:
     graph (``entailment.scoped_closure``). ``graph.store`` is never changed, so
     ``simple`` answers are exactly the stated ones. Returns the number of inferred
     statements. ``simple`` needs nothing.
+
+    ``owl-rl`` (PRP-0210, UDR-0192): the inconsistencies found become a notice every
+    answer of the mode carries (D5); a result with more than K inferred statements per
+    stated one is refused (D8), and the refusal is remembered with the Store.
     """
     from app.ontology import entailment
 
@@ -1028,6 +1130,9 @@ def ensure_entailment(graph: QueryGraph, mode: str) -> int:
         held = graph.entailments.get(mode)
         if held is not None:
             return held
+        refused = graph.entailment_refusals.get(mode)
+        if refused is not None:
+            raise entailment.EntailmentTooLarge(refused[0], **refused[1])
         import pyoxigraph as ox
 
         default_graph = ox.DefaultGraph()
@@ -1036,7 +1141,33 @@ def ensure_entailment(graph: QueryGraph, mode: str) -> int:
             name: [quad.triple for quad in graph.store.quads_for_pattern(None, None, None, name)]
             for name in graph.graphs
         }
-        merge_inferred, per_graph = entailment.scoped_closure(merged, named, mode=mode)
+        owl_rl = mode == entailment.OWL_RL
+        findings: list[dict[str, Any]] | None = [] if owl_rl else None
+        merge_inferred, per_graph = entailment.scoped_closure(merged, named, mode=mode, findings=findings)
+        count = len(merge_inferred) + sum(len(inferred) for inferred in per_graph.values())
+        same_as = _same_as_pairs([*merged, *merge_inferred]) if owl_rl else 0
+        if owl_rl:
+            ratio_limit = entailment.max_inferred_ratio()
+            if count > ratio_limit * max(1, len(merged)):
+                ratio = count / max(1, len(merged))
+                message = (
+                    f"OWL 2 RL entailment inferred {count:,} statements from {len(merged):,} "
+                    f"({ratio:.1f} per statement); at most {ratio_limit:,} per statement are accepted "
+                    f"(App Settings: {entailment.RATIO_SETTING})."
+                )
+                if same_as:
+                    message += f" {same_as:,} owl:sameAs pair(s) copy statements between names."
+                detail = {
+                    "statements": len(merged),
+                    "inferred": count,
+                    "ratio": round(ratio, 1),
+                    "limit": ratio_limit,
+                    "reason": "inferred_ratio",
+                    "setting": entailment.RATIO_SETTING,
+                    "same_as_pairs": same_as,
+                }
+                graph.entailment_refusals[mode] = (message, detail)
+                raise entailment.EntailmentTooLarge(message, **detail)
         entailed = ox.Store()
         entailed.extend(graph.store)
         entailed.extend(ox.Quad(t.subject, t.predicate, t.object, default_graph) for t in merge_inferred)
@@ -1045,9 +1176,9 @@ def ensure_entailment(graph: QueryGraph, mode: str) -> int:
             entailed.extend(ox.Quad(t.subject, t.predicate, t.object, name) for t in inferred)
             for t in inferred:
                 where.setdefault(t, []).append(name)
-        count = len(merge_inferred) + sum(len(inferred) for inferred in per_graph.values())
         graph.entailed[mode] = entailed
         graph.inferred_graphs[mode] = where
+        graph.entailment_notices[mode] = _entailment_notices(graph, mode, findings or [], same_as)
         graph.entailments[mode] = count
         quads = len(entailed)
     _charge_cache(graph, quads * CACHE_COST_PER_INFERRED)
@@ -1115,7 +1246,11 @@ def execute_query(
     baseline = _run(graph.store, sparql) if entailed else None
 
     def notices_with(ambiguous: int) -> list[dict[str, Any]]:
-        return [*graph.import_notices, *lexical_notices(index, sparql, ambiguous)]
+        return [
+            *graph.import_notices,
+            *graph.entailment_notices.get(mode, []),
+            *lexical_notices(index, sparql, ambiguous),
+        ]
 
     if isinstance(result, ox.QuerySolutions):
         columns = [str(v).lstrip("?") for v in result.variables]

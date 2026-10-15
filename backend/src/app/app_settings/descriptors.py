@@ -979,7 +979,7 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
     # PRP-0209 (CTR-0198, UDR-0191 D8): RDFS entailment input bound.
     SettingDescriptor(
         "ontology_entailment_max_triples",
-        "Ontology entailment: largest input (statements)",
+        "Ontology RDFS entailment: largest input (statements)",
         "ontology",
         "int",
         SCOPE_RUNTIME,
@@ -990,6 +990,37 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         ),
         min=100,
         max=1_000_000,
+    ),
+    # PRP-0210 (CTR-0198, UDR-0192 D7 / D8): OWL 2 RL entailment input and output bounds.
+    SettingDescriptor(
+        "ontology_owl_rl_max_triples",
+        "Ontology OWL 2 RL entailment: largest input (statements)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "Largest number of stated statements (imports included) a search with OWL 2 RL "
+            "entailment accepts. OWL 2 RL is about 7 times slower than RDFS: about 4 seconds for "
+            "1,000 statements (more with named graphs or owl:sameAs); larger ontologies are refused "
+            "with a message."
+        ),
+        min=100,
+        max=1_000_000,
+    ),
+    SettingDescriptor(
+        "ontology_owl_rl_max_inferred_ratio",
+        "Ontology OWL 2 RL entailment: largest output (inferred per stated statement)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "A search with OWL 2 RL entailment is refused when the inferred statements exceed this "
+            "many per stated statement -- usually because owl:sameAs copies every statement of one "
+            "name to the other. The reasoner has run by then; the refusal keeps memory and answers "
+            "small and is remembered until a file changes."
+        ),
+        min=2,
+        max=10_000,
     ),
     # ---- Schedule (runtime) -----------------------------------------------
     SettingDescriptor(

@@ -16,9 +16,10 @@ LLM answer questions from the operator's concept models:
   with named graphs the answer is TriG (```trig), each triple under the graphs
   that hold it, and ``graph`` narrows the question to one graph (CTR-0172 v3,
   UDR-0182 D4 / D5).
-- ``entailment``: ``simple`` (default, stated statements only) or ``rdfs`` (CTR-0172
-  v5, UDR-0191 D9): the inferred triples come in a second block labelled as inferred
-  and not stated in any file.
+- ``entailment``: ``simple`` (default, stated statements only), ``rdfs`` (CTR-0172
+  v5, UDR-0191 D9) or ``owl-rl`` (CTR-0172 v6, UDR-0192 D10): the inferred triples come
+  in a second block labelled as inferred and not stated in any file. An ``owl-rl``
+  answer from an inconsistent ontology starts with the inconsistencies (UDR-0192 D5).
 
 Errors (unknown ontology, un-convertible question, empty result) return short
 diagnostic text and never raise into the run.
@@ -52,7 +53,11 @@ ONTOLOGY_TOOL_INSTRUCTION = (
     "Pass entailment='rdfs' for questions about class membership, class or property "
     "hierarchies, or what follows from domains, ranges and sub-properties: the answer then "
     "adds a second block of INFERRED triples (RDFS entailment, not stated in any file) -- "
-    "when you use them, say that they are inferred."
+    "when you use them, say that they are inferred. Pass entailment='owl-rl' only when the "
+    "question depends on OWL: transitive, symmetric or inverse properties, equivalent classes "
+    "or properties, owl:sameAs, restrictions, intersections or unions, keys or functional "
+    "properties (OWL 2 RL entailment; slower and limited to smaller ontologies). If an owl-rl "
+    "answer reports an inconsistent ontology, give the answer together with that warning."
 )
 
 
@@ -115,8 +120,10 @@ async def ontology_query(
         str,
         Field(
             description="For query, optional: 'simple' (default) answers from the stated triples only; "
-            "'rdfs' also applies RDFS entailment (subclass / subproperty hierarchies, domains, ranges) "
-            "and returns the inferred triples in a separate block."
+            "'rdfs' also applies RDFS entailment (subclass / subproperty hierarchies, domains, ranges); "
+            "'owl-rl' applies OWL 2 RL entailment on top (transitive / symmetric / inverse properties, "
+            "equivalence, owl:sameAs, restrictions, keys; slower, smaller ontologies only). Inferred "
+            "triples come in a separate block."
         ),
     ] = "simple",
 ) -> str:
@@ -125,8 +132,8 @@ async def ontology_query(
     Use action="catalog" to list the available ontologies (id, name,
     description), then action="query" with an ontology id/name plus a
     natural-language question. The answer is the matching subgraph as RDF
-    Turtle in a fenced code block; with entailment="rdfs" the inferred triples
-    follow in a second block.
+    Turtle in a fenced code block; with entailment="rdfs" or "owl-rl" the
+    inferred triples follow in a second block.
     """
     act = (action or "").strip().lower()
 
@@ -189,11 +196,6 @@ async def ontology_query(
 
     turtle = result.get("turtle", "")
     inferred = result.get("inferred_turtle", "")
-    if not turtle and not inferred:
-        return (
-            f"Ontology '{resolved['name']}' ({resolved['id']}) returned no triples for this "
-            f"question.\nGenerated SPARQL:\n{sparql}"
-        )
     notice = ""
     if result.get("truncated"):
         notice = (
@@ -202,25 +204,47 @@ async def ontology_query(
         )
     # UDR-0181 D3: say what the query engine could not give back as written, so the
     # model never reports a count the file contradicts.
+    warning = ""
     for item in result.get("notices") or []:
+        if item.get("code") == "entailment_inconsistent":
+            # UDR-0192 D5: the inconsistencies come BEFORE the triples.
+            lines = [
+                f"- {finding['message']}" + (f" (graph {finding['graph']})" if finding.get("graph") else "")
+                for finding in item.get("items") or []
+            ]
+            more = item.get("count", 0) - len(lines)
+            if more > 0:
+                lines.append(f"- ... and {more} more")
+            warning = (
+                f"Inconsistent ontology (OWL 2 RL): {item.get('count', len(lines))} finding(s)\n"
+                + "\n".join(lines)
+                + "\nResults come from an inconsistent ontology; present them with this warning.\n\n"
+            )
+            continue
         notice += f"\n(Note: {item['message']})"
+    if not turtle and not inferred:
+        return warning + (
+            f"Ontology '{resolved['name']}' ({resolved['id']}) returned no triples for this "
+            f"question.\nGenerated SPARQL:\n{sparql}"
+        )
     # UDR-0191 D9: the inferred triples in their own block, labelled as not stated.
     inferred_block = ""
     if mode != entailment_modes.SIMPLE:
+        label = entailment_modes.MODE_LABELS[mode]
         inferred_block = (
-            f"\n\nInferred (RDFS entailment; not stated in any ontology file):\n```turtle\n{inferred}\n```"
+            f"\n\nInferred ({label}; not stated in any ontology file):\n```turtle\n{inferred}\n```"
             if inferred
-            else "\n\nInferred (RDFS entailment): no further triples."
+            else f"\n\nInferred ({label}): no further triples."
         )
     if result.get("format") == "trig":
         # UDR-0182 D5: each triple is written under the named graph(s) that hold it.
-        return (
+        return warning + (
             f"Ontology: {resolved['name']} ({resolved['id']}), {store.scope_label(loaded.scope)}\n"
             f"Generated SPARQL:\n{sparql}\n\n"
             "Result (RDF TriG; each triple is under the named graph(s) that hold it, the rest is "
             f"in the default graph):\n```trig\n{turtle}\n```{inferred_block}{notice}"
         )
-    return (
+    return warning + (
         f"Ontology: {resolved['name']} ({resolved['id']})\n"
         f"Generated SPARQL:\n{sparql}\n\n"
         f"Result (RDF Turtle):\n```turtle\n{turtle}\n```{inferred_block}{notice}"
