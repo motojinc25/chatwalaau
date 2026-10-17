@@ -177,6 +177,8 @@ def versions(ontology_id: str) -> list[dict[str, Any]]:
             "added": producer.get("added") if producer else None,
             "removed": producer.get("removed") if producer else None,
             "restored_from": producer.get("restored_from") if producer else None,
+            # PRP-0212 (UDR-0194 D13): saved anyway although strict mode found SHACL violations.
+            "shacl_override": bool(producer.get("shacl_override")) if producer else False,
             "bytes": size,
             "format": fmt,
             "legacy": False,

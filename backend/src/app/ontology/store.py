@@ -119,7 +119,11 @@ _write_listeners: list[Callable[[str, str], None]] = []
 
 
 def add_write_listener(listener: Callable[[str, str], None]) -> None:
-    """Register ``listener(ontology_id, kind)``; ``kind`` is "write" or "delete" (idempotent)."""
+    """Register ``listener(ontology_id, kind)`` (idempotent).
+
+    ``kind`` is "write", "delete", or "shacl" (only the catalog's SHACL block changed,
+    PRP-0212 / UDR-0194 D5).
+    """
     if listener not in _write_listeners:
         _write_listeners.append(listener)
 
@@ -191,7 +195,7 @@ def _normalize_entry(raw: Any) -> dict[str, str] | None:
     # Single-segment confinement: a catalog-derived filename must never traverse.
     if Path(file_name).name != file_name or not file_name.endswith(FILE_SUFFIXES):
         file_name = f"{entry_id}.ttl"
-    return {
+    normalized: dict[str, Any] = {
         "id": entry_id,
         "name": str(raw.get("name") or "").strip() or entry_id,
         "description": str(raw.get("description") or "").strip(),
@@ -199,6 +203,82 @@ def _normalize_entry(raw: Any) -> dict[str, str] | None:
         "created_at": str(raw.get("created_at") or "").strip() or _now(),
         "updated_at": str(raw.get("updated_at") or "").strip() or _now(),
     }
+    shacl = normalize_shacl(raw.get("shacl"), entry_id)
+    if shacl is not None:
+        normalized["shacl"] = shacl
+    return normalized  # type: ignore[return-value]
+
+
+# ---- SHACL validation settings of a catalog entry (PRP-0212, UDR-0194 D1) ------------
+
+SHACL_INFERENCE = ("none", "rdfs", "owl-rl")
+MAX_SHAPES_ONTOLOGIES = 10
+MAX_SHAPES_GRAPHS = 50
+_GRAPH_IRI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:[^\s<>\"{}|\\^`]*$")
+
+
+def normalize_shacl(raw: Any, own_id: str | None = None) -> dict[str, Any] | None:
+    """The catalog ``shacl`` block, tolerant (unusable values are dropped; None = no block).
+
+    ``shapes_graphs``: graph IRIs of the same ontology; ``shapes_ontologies``: other
+    catalog ids (kept when the ontology no longer exists -- reported as missing);
+    ``inference``: one of ``SHACL_INFERENCE`` (default ``none``, operator R11);
+    ``strict``: block saves with violations (default false, operator Q1).
+    """
+    if not isinstance(raw, dict):
+        return None
+    graphs: list[str] = []
+    for item in raw.get("shapes_graphs") or []:
+        text = str(item or "").strip()
+        if text.startswith("<") and text.endswith(">"):
+            text = text[1:-1]
+        if _GRAPH_IRI_RE.match(text) and text not in graphs:
+            graphs.append(text)
+    ontologies: list[str] = []
+    for item in raw.get("shapes_ontologies") or []:
+        text = str(item or "").strip()
+        if _ID_RE.match(text) and text != own_id and text not in ontologies:
+            ontologies.append(text)
+    inference = str(raw.get("inference") or "none").strip().lower()
+    return {
+        "shapes_graphs": graphs[:MAX_SHAPES_GRAPHS],
+        "shapes_ontologies": ontologies[:MAX_SHAPES_ONTOLOGIES],
+        "inference": inference if inference in SHACL_INFERENCE else "none",
+        "strict": raw.get("strict") is True,
+    }
+
+
+def shacl_config(entry: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The entry's ``shacl`` block when it declares at least one shapes source, else None."""
+    block = (entry or {}).get("shacl")
+    if not isinstance(block, dict):
+        return None
+    if not block.get("shapes_graphs") and not block.get("shapes_ontologies"):
+        return None
+    return block
+
+
+def set_shacl(ontology_id: str, block: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Replace (or with None remove) the entry's ``shacl`` block; returns the entry."""
+    with _CATALOG_LOCK:
+        entries = read_catalog()
+        updated: dict[str, Any] | None = None
+        for entry in entries:
+            if entry["id"] == ontology_id:
+                normalized = normalize_shacl(block, ontology_id) if block is not None else None
+                if normalized is None:
+                    entry.pop("shacl", None)  # type: ignore[misc]
+                else:
+                    entry["shacl"] = normalized  # type: ignore[assignment]
+                entry["updated_at"] = _now()
+                updated = entry
+                break
+        if updated is None:
+            return None
+        write_catalog(entries)
+    logger.info("ontology validation settings changed: %s", ontology_id)
+    notify_written(ontology_id, "shacl")
+    return updated
 
 
 def read_catalog() -> list[dict[str, str]]:

@@ -302,8 +302,8 @@ def _schedule(ontology_id: str, kind: str) -> None:
 def _on_write(ontology_id: str, kind: str) -> None:
     """``store`` write listener (any thread)."""
     loop = _loop
-    if loop is None or not settings.pipeline_enabled:
-        return
+    if loop is None or not settings.pipeline_enabled or kind == "shacl":
+        return  # a changed SHACL block (PRP-0212) changes no entailment
     with contextlib.suppress(RuntimeError):  # the loop is closing
         loop.call_soon_threadsafe(_schedule, ontology_id, kind)
 

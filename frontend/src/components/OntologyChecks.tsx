@@ -1,5 +1,5 @@
 /**
- * The inspector's Checks tab (CTR-0173 v11, PRP-0206 / UDR-0188).
+ * The inspector's Checks tab (CTR-0173 v11, PRP-0206 / UDR-0188; SHACL groups: v16, PRP-0212 / UDR-0194 D9).
  *
  * Lists the findings `runChecks` computes over the whole model, grouped per check:
  * warnings open, information collapsed. Findings never block a save and are never
@@ -92,6 +92,10 @@ export function OntologyChecksPane(props: {
   onOpenImports?: (iri: string) => void
   /** owl_inconsistency: open the Explain tab for the finding (PRP-0211 / UDR-0193 D15). */
   onExplain?: (finding: Finding) => void
+  /** SHACL results: open the Shapes view on the finding's shape and path (PRP-0212 / UDR-0194 D9). */
+  onShowShape?: (finding: Finding) => void
+  /** SHACL results: list every result of the finding's group. */
+  onShaclMore?: (finding: Finding) => void
 }) {
   const [showIgnored, setShowIgnored] = useState(false)
   const visible = useMemo(
@@ -108,7 +112,8 @@ export function OntologyChecksPane(props: {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center justify-between gap-2 border-b p-2 text-[11px] text-zinc-600">
         <span>
-          Findings never block saving. Most of them are legal RDFS / OWL -- they are worth a look, not errors.
+          Findings never block saving (SHACL violations do only in strict mode). Most of them are legal RDFS / OWL --
+          they are worth a look, not errors.
         </span>
         <label className="flex shrink-0 items-center gap-1" title="Also list the findings you ignored (this browser)">
           <input type="checkbox" checked={showIgnored} onChange={(e) => setShowIgnored(e.target.checked)} />
@@ -149,6 +154,8 @@ function CheckGroup(props: {
   /** Import findings: open the Imports dialog for this import IRI (PRP-0207 / UDR-0189 D7). */
   onOpenImports?: (iri: string) => void
   onExplain?: (finding: Finding) => void
+  onShowShape?: (finding: Finding) => void
+  onShaclMore?: (finding: Finding) => void
 }) {
   const [open, setOpen] = useState(props.defaultOpen)
   // Declare all: per OWN namespace only; other vocabularies are declared one at a time (D3).
@@ -218,6 +225,8 @@ function FindingRow(props: {
   /** Import findings: open the Imports dialog for this import IRI (PRP-0207 / UDR-0189 D7). */
   onOpenImports?: (iri: string) => void
   onExplain?: (finding: Finding) => void
+  onShowShape?: (finding: Finding) => void
+  onShaclMore?: (finding: Finding) => void
 }) {
   const { finding: f } = props
   const id = findingId(f)
@@ -226,6 +235,12 @@ function FindingRow(props: {
   return (
     <div className={cn('rounded border px-1.5 py-1 text-[11px]', isIgnored && 'opacity-50')}>
       <p className="text-zinc-700">{f.message}</p>
+      {f.shacl && (
+        <p className="font-mono text-[10px] text-zinc-500">
+          {f.shacl.shape?.shown ?? '?'} -- {f.shacl.path ?? '(node)'} -- {f.shacl.constraint ?? f.shacl.component}
+          {f.shacl.count > 1 ? ` (${f.shacl.count} results)` : ''}
+        </p>
+      )}
       {f.stale && <p className="text-[10px] text-amber-700">Based on the last saved version.</p>}
       <div className="mt-0.5 flex flex-wrap items-center gap-1">
         {f.graphLabel && (
@@ -243,6 +258,19 @@ function FindingRow(props: {
             {i === 1 && f.code === 'undeclared_class' ? `used by ${name(term)}` : name(term)}
           </button>
         ))}
+        {f.shacl && f.shacl.more > 0 && (
+          <button
+            type="button"
+            className="rounded px-1 text-[10px] text-blue-700 hover:underline"
+            onClick={() => props.onShaclMore?.(f)}>
+            and {f.shacl.more} more
+          </button>
+        )}
+        {f.shacl && f.shacl.imported > 0 && (
+          <span className="text-[10px] text-zinc-400" title="Focus nodes that exist only in an imported ontology">
+            {f.shacl.imported} from imported ontologies
+          </span>
+        )}
         {f.code === 'undeclared_class' && f.namespace && !f.own && (
           <span className="text-[10px] text-zinc-400" title={f.namespace}>
             other vocabulary
@@ -256,6 +284,11 @@ function FindingRow(props: {
             className="h-6 text-[10px]"
             onClick={() => f.importIri && props.onOpenImports?.(f.importIri)}>
             Open Imports
+          </Button>
+        )}
+        {f.shacl?.shape && props.onShowShape && (
+          <Button variant="outline" size="sm" className="h-6 text-[10px]" onClick={() => props.onShowShape?.(f)}>
+            Show shape
           </Button>
         )}
         {f.explainKey && props.onExplain && (

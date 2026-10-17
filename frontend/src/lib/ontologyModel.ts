@@ -563,7 +563,10 @@ export function classHierarchy(model: OntologyModel, entityIri: string): { super
   return { supers: supers.sort(), subs: [...new Set(subs)].sort() }
 }
 
-const RESERVED_NAMESPACES = [RDF, RDFS, OWL, XSD]
+// PRP-0212 (UDR-0194 D12): the SHACL vocabulary is a W3C vocabulary too -- sh:NodeShape is
+// neither an undeclared class nor a class of individuals.
+const SH_NAMESPACE = 'http://www.w3.org/ns/shacl#'
+const RESERVED_NAMESPACES = [RDF, RDFS, OWL, XSD, SH_NAMESPACE]
 const CLASS_USE_PREDICATES = new Set([RDFS_SUB_CLASS_OF, RDFS_DOMAIN, RDFS_RANGE])
 
 /**
@@ -699,6 +702,22 @@ export function inScope(statement: Statement, scope: GraphScope): boolean {
 }
 
 const LAYOUT_PREDICATES = new Set([CW_X, CW_Y])
+
+/**
+ * The model without the statements of `hidden` graphs (graph keys), layout kept: the
+ * declared SHACL shapes graphs are not drawn as data (PRP-0212, UDR-0194 D12).
+ */
+export function withoutGraphs(model: OntologyModel, hidden: Set<string>): OntologyModel {
+  if (hidden.size === 0) return model
+  const resources: Resource[] = []
+  for (const resource of model.resources) {
+    const kept = resource.statements.filter((s) => !s.g || !hidden.has(termKey(s.g)))
+    if (kept.length === 0) continue
+    if (kept.every((s) => LAYOUT_PREDICATES.has(s.p)) && kept.length < resource.statements.length) continue
+    resources.push(kept.length === resource.statements.length ? resource : { ...resource, statements: kept })
+  }
+  return { ...model, resources: classifyResources(resources) }
+}
 
 /**
  * The model the canvas draws for a graph selection: only statements in `scope`,
@@ -901,6 +920,25 @@ export function addResource(model: OntologyModel, term: Term, statements: Statem
 
 export function removeResource(model: OntologyModel, key: string): OntologyModel {
   return withResource(model, key, () => null)
+}
+
+/**
+ * Rewrite the statements of `subject`: drop those `drop` matches, then add `add` (no
+ * duplicates). A subject left without statements is removed. Used by the Shapes table
+ * (PRP-0212, UDR-0194 D11) -- statements it does not touch are kept as they are.
+ */
+export function rewriteStatements(
+  model: OntologyModel,
+  subject: Term,
+  drop: (statement: Statement) => boolean,
+  add: Statement[],
+): OntologyModel {
+  return withResource(model, termKey(subject), (resource) => {
+    const kept = (resource?.statements ?? []).filter((s) => !drop(s))
+    for (const statement of add) if (!kept.some((s) => statementEquals(s, statement))) kept.push(statement)
+    if (kept.length === 0) return null
+    return { term: subject, role: resource?.role ?? 'other', statements: kept }
+  })
 }
 
 export function createEntity(
@@ -1821,12 +1859,21 @@ export type CheckCode =
   // PRP-0211 (UDR-0193 D13): from the backend's stored OWL 2 RL result, not computed here.
   | 'owl_inconsistency'
   | 'owl_consistency_unchecked'
+  // PRP-0212 (UDR-0194 D9): from the backend's stored SHACL validation result.
+  | 'shacl_violation'
+  | 'shacl_warning'
+  | 'shacl_info'
+  | 'shacl_shapes_error'
+  | 'shacl_unchecked'
+  | 'shacl_unsupported'
 
 export type CheckSeverity = 'warning' | 'info'
 
 /** The catalogue, in display order (UDR-0188 D2). */
 export const CHECKS: readonly { code: CheckCode; severity: CheckSeverity; title: string }[] = [
   { code: 'owl_inconsistency', severity: 'warning', title: 'Inconsistent (OWL 2 RL)' },
+  { code: 'shacl_violation', severity: 'warning', title: 'SHACL violations' },
+  { code: 'shacl_shapes_error', severity: 'warning', title: 'Shapes that are not valid SHACL' },
   { code: 'undeclared_class', severity: 'warning', title: 'Undeclared classes' },
   { code: 'unresolved_import', severity: 'warning', title: 'Imports not in the catalog' },
   { code: 'ambiguous_import', severity: 'warning', title: 'Ambiguous imports' },
@@ -1844,6 +1891,10 @@ export const CHECKS: readonly { code: CheckCode; severity: CheckSeverity; title:
   { code: 'duplicate_label', severity: 'info', title: 'Duplicate labels' },
   { code: 'import_cycle', severity: 'info', title: 'Import cycles' },
   { code: 'owl_consistency_unchecked', severity: 'info', title: 'Consistency (OWL 2 RL)' },
+  { code: 'shacl_warning', severity: 'info', title: 'SHACL warnings' },
+  { code: 'shacl_info', severity: 'info', title: 'SHACL notes' },
+  { code: 'shacl_unchecked', severity: 'info', title: 'Validation (SHACL)' },
+  { code: 'shacl_unsupported', severity: 'info', title: 'SHACL constructs ignored (SPARQL, SHACL-AF)' },
 ]
 
 /** One removable statement a cycle or self-loop finding offers to delete. */
@@ -1875,8 +1926,25 @@ export interface Finding {
   explainKey?: string
   /** owl_inconsistency: the named graph it was found in (shown), null = the merge. */
   graphLabel?: string | null
-  /** owl_inconsistency: computed from the last SAVED version while the model has edits. */
+  /** owl_inconsistency / shacl_*: computed from the last SAVED version while the model has edits. */
   stale?: boolean
+  /** shacl_violation / shacl_warning / shacl_info: one group of results (PRP-0212, UDR-0194 D9). */
+  shacl?: ShaclFindingInfo
+}
+
+/** The (shape, path, constraint) group a SHACL finding stands for. */
+export interface ShaclFindingInfo {
+  severity: 'violation' | 'warning' | 'info'
+  /** The node shape, as N-Triples and as shown (null: the shape is unknown). */
+  shape: { nt: string; shown: string } | null
+  path: string | null
+  component: string
+  constraint: string | null
+  /** Results in the group and focus nodes beyond the chips listed. */
+  count: number
+  more: number
+  /** Focus nodes that exist only in an imported ontology. */
+  imported: number
 }
 
 export interface CheckContext {

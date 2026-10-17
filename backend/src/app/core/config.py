@@ -743,6 +743,15 @@ class Settings(BaseSettings):
     ontology_query_max_rows: int = 1_000
     ontology_entailment_precompute: bool = True
     ontology_entailment_build_timeout_seconds: int = 600
+    # PRP-0212 (UDR-0194 D4): the folder of computed results -- stored entailment (PRP-0211)
+    # and SHACL validation results. Relative = under ONTOLOGY_DIR (the default is the
+    # PRP-0211 folder); absolute = as is. A cache: deleting or moving it is safe.
+    ontology_results_dir: str = ".entailment"
+    # PRP-0212 (UDR-0194 D5, D8, D13; operator Q6): SHACL validation bounds (App Settings).
+    ontology_shacl_max_triples: int = 100_000
+    ontology_shacl_max_results: int = 10_000
+    ontology_shacl_build_timeout_seconds: int = 300
+    ontology_shacl_strict_timeout_seconds: int = 30
     # The NL -> SPARQL completion model is the catalog `roles.ontology_nl` binding
     # (PRP-0115 / UDR-0096); the removed ONTOLOGY_NL_MODEL env var no longer applies.
 

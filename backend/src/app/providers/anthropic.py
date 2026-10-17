@@ -90,6 +90,41 @@ def _log_lane(lane: str) -> None:
 
 _EXTENDED_CACHE_BETA = "extended-cache-ttl-2025-04-11"
 
+# Thinking-block prefix binding (UDR-0141 amendment, v0.189.0). Claude Opus 5.5 binds a
+# thinking block's signature to the content that preceded it when it was created, and
+# rejects a replayed block whose prefix is missing with 400 "The block is bound to a
+# different conversation". Compaction (CTR-0098) removes exactly that prefix -- older
+# turns and older tool rounds of the SAME turn -- so every compacted Prompt-lane call
+# that replays thinking failed. `drop_block` lets the service drop only the mismatched
+# blocks; a block whose prefix is intact is kept (measured live on Foundry: opus-5-5
+# rejects without it and answers with it; opus-5 and fable-5-1 accept it as a no-op).
+_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+
+
+def _add_beta(run_options: dict[str, Any], beta: str) -> None:
+    betas = run_options.get("betas")
+    if isinstance(betas, set):
+        betas.add(beta)
+    elif isinstance(betas, (list, tuple)):
+        run_options["betas"] = set(betas) | {beta}
+    else:
+        run_options["betas"] = {beta}
+
+
+def tolerate_thinking_prefix_mismatch(run_options: dict[str, Any]) -> dict[str, Any]:
+    """Ask the service to drop, not reject, thinking blocks whose prefix was compacted.
+
+    Acts only when the request enables thinking (a ``family: bare`` request carries no
+    ``thinking`` and is left byte-for-byte unchanged). The ``thinking`` dict is copied,
+    never mutated, because MAF may reuse the options object across loop iterations.
+    """
+    thinking = run_options.get("thinking")
+    if not isinstance(thinking, dict):
+        return run_options
+    run_options["thinking"] = {**thinking, "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+    _add_beta(run_options, _THINKING_BINDING_BETA)
+    return run_options
+
 
 def _cache_control_marker(ttl: str) -> dict[str, Any]:
     """Return the ``cache_control`` object for the configured TTL.
@@ -176,13 +211,7 @@ def _inject_prompt_cache(run_options: dict[str, Any], ttl: str) -> dict[str, Any
                 _mark_message_breakpoint(msg, marker)
 
     if ttl == "1h":
-        betas = run_options.get("betas")
-        if isinstance(betas, set):
-            betas.add(_EXTENDED_CACHE_BETA)
-        elif isinstance(betas, (list, tuple)):
-            run_options["betas"] = set(betas) | {_EXTENDED_CACHE_BETA}
-        else:
-            run_options["betas"] = {_EXTENDED_CACHE_BETA}
+        _add_beta(run_options, _EXTENDED_CACHE_BETA)
 
     return run_options
 
@@ -213,6 +242,9 @@ class _PromptCacheMixin:
         # performs it.
         if has_structured_format(run_options):
             strip_web_search(run_options)
+        # UDR-0141 amendment (v0.189.0): a compacted history replays thinking blocks
+        # whose creation prefix is gone; Opus 5.5 rejects those unless told to drop them.
+        tolerate_thinking_prefix_mismatch(run_options)
         # Prompt caching (PRP-0080, UDR-0056). Gated here so the wrapper is applied
         # unconditionally (for the structured strip above) while caching stays an
         # output-transparent opt-out -- byte-for-byte when both are off.

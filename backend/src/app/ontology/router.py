@@ -2,7 +2,7 @@
 
     GET    /api/ontology/catalog            -- list the catalog (also the SPA probe)
     POST   /api/ontology/catalog            -- create an ontology (name + description)
-    PATCH  /api/ontology/catalog/{id}       -- rename (name and/or description)
+    PATCH  /api/ontology/catalog/{id}       -- rename (name and/or description), SHACL block
     DELETE /api/ontology/catalog/{id}       -- delete (backup-then-remove)
     POST   /api/ontology/import             -- import Turtle / TriG / N-Triples / N-Quads /
                                                RDF-XML / JSON-LD (UDR-0182 D6)
@@ -29,6 +29,13 @@
     GET    /api/ontology/{id}/entailment/statements -- inferred statements for the views (D17)
     POST   /api/ontology/{id}/explain       -- why a statement is inferred / an
                                                inconsistency holds (D14 / D15)
+    GET    /api/ontology/{id}/shacl         -- SHACL validation state and result groups
+                                               (PRP-0212, UDR-0194 D9)
+    GET    /api/ontology/{id}/shacl/results -- the stored SHACL results, filtered and paged
+
+PATCH /catalog/{id} also takes the ``shacl`` block (UDR-0194 D1). With strict mode on,
+PUT /{id} and POST /{id}/statements refuse a version with SHACL violations (422
+``shacl_violations``) unless ``shacl_override`` is true (D13).
 
 Every endpoint depends on ``verify_api_key`` (CTR-0083; loopback bypass) --
 the mutations and the query POSTs are gated per invariant 7, the GETs follow
@@ -137,9 +144,11 @@ class OntologyCreate(BaseModel):
 
 
 class OntologyRename(BaseModel):
-    # At least one of name/description must be present (validated in the handler).
+    # At least one of name/description/shacl must be present (validated in the handler).
     name: str | None = Field(default=None, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
+    # PRP-0212 (UDR-0194 D1): the SHACL validation block; null removes it.
+    shacl: dict[str, Any] | None = None
 
 
 class QueryRequest(BaseModel):
@@ -179,6 +188,8 @@ class StatementOperations(BaseModel):
     on_stale: Literal["refuse", "rebase"] = "refuse"
     # Blank-node labels this client created; renamed when the file uses them (D6).
     fresh_blank_nodes: list[str] = Field(default_factory=list)
+    # PRP-0212 (UDR-0194 D13): save although strict mode finds SHACL violations.
+    shacl_override: bool = False
 
 
 class ProjectionSave(BaseModel):
@@ -194,6 +205,8 @@ class ProjectionSave(BaseModel):
     revision: str | None = None
     # 3 = the client knows statement graphs (``g``); required on a dataset (UDR-0182 D2).
     projection_version: int | None = None
+    # PRP-0212 (UDR-0194 D13): save although strict mode finds SHACL violations.
+    shacl_override: bool = False
 
 
 _STALE_REVISION = {
@@ -243,6 +256,56 @@ def _search_error(exc: Exception) -> HTTPException | None:
     return None
 
 
+def _strict_check(ontology_id: str, text: str, dataset: bool, override: bool) -> dict[str, Any] | None:
+    """Strict mode (PRP-0212, UDR-0194 D13): validate the text before it is written.
+
+    Runs under the caller's write lock, in a search worker, bounded by
+    ``ontology_shacl_strict_timeout_seconds``. Violations without ``override`` raise 422
+    ``shacl_violations`` (nothing is written). A check that does not finish lets the
+    save through (operator Q5): the answer says so. None = strict mode is off.
+    """
+    config = store.shacl_config(store.get_entry(ontology_id))
+    if config is None or not config.get("strict"):
+        return None
+    setting = "ontology_shacl_strict_timeout_seconds"
+    limit = max(0, int(settings.ontology_shacl_strict_timeout_seconds)) or None
+    payload = {"ontology_id": ontology_id, "text": text, "dataset": dataset}
+    try:
+        outcome = workers.run_blocking("shacl_candidate", payload, timeout=limit)
+    except workers.QueryTimeout:
+        return {
+            "checked": False,
+            "reason": "timeout",
+            "message": f"The SHACL check did not finish within {limit} s (App Settings: {setting}); saved without it.",
+        }
+    except Exception as exc:
+        logger.warning("strict SHACL check of %s failed", ontology_id, exc_info=True)
+        return {"checked": False, "reason": "failed", "message": f"The SHACL check failed ({exc}); saved without it."}
+    if not outcome.get("checked"):
+        reason = outcome.get("reason") or "unchecked"
+        why = outcome.get("message") or reason
+        return {
+            "checked": False,
+            "reason": reason,
+            "message": f"The SHACL check could not run ({why}); saved without it.",
+        }
+    count = int(outcome.get("violation_count") or 0)
+    if count and not override:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "shacl_violations",
+                "count": count,
+                "results": outcome.get("violations") or [],
+                "message": (
+                    f"This version has {count} SHACL violation(s), and strict mode is on for this "
+                    "ontology. Nothing was saved. Fix them, or save anyway."
+                ),
+            },
+        )
+    return {"checked": True, "violations": count, "overridden": bool(count and override)}
+
+
 def _save(ontology_id: str, text: str, dataset: bool, entry: dict[str, Any] | None = None) -> str | None:
     """Write through the store (backup + atomic; ``.ttl`` / ``.trig`` switch, UDR-0182 D3).
 
@@ -289,13 +352,60 @@ async def rename_ontology(ontology_id: str, body: OntologyRename) -> dict:
     """
     _require_enabled()
     _guard_demo()
-    if body.name is None and body.description is None:
-        raise HTTPException(status_code=422, detail="Provide name and/or description")
+    shacl_given = "shacl" in body.model_fields_set
+    if body.name is None and body.description is None and not shacl_given:
+        raise HTTPException(status_code=422, detail="Provide name, description and/or shacl")
     _entry_or_404(ontology_id)
-    entry = store.rename_ontology(ontology_id, name=body.name, description=body.description)
-    if entry is None:  # raced with a delete
-        raise HTTPException(status_code=404, detail={"error": "ontology_not_found"})
+    block = _shacl_block_or_422(ontology_id, body.shacl) if shacl_given else None
+    entry: dict[str, Any] | None = None
+    if body.name is not None or body.description is not None:
+        entry = store.rename_ontology(ontology_id, name=body.name, description=body.description)
+        if entry is None:  # raced with a delete
+            raise HTTPException(status_code=404, detail={"error": "ontology_not_found"})
+    if shacl_given:
+        entry = await run_in_threadpool(store.set_shacl, ontology_id, block)
+        if entry is None:
+            raise HTTPException(status_code=404, detail={"error": "ontology_not_found"})
+    assert entry is not None
     return {**entry, "base_iri": base_iri_for(entry["id"])}
+
+
+def _shacl_block_or_422(ontology_id: str, raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The PATCH ``shacl`` block, checked strictly (the reader is tolerant; UDR-0194 D1)."""
+
+    def refuse(message: str) -> HTTPException:
+        return HTTPException(status_code=422, detail={"error": "invalid_shacl", "message": message})
+
+    if raw is None:
+        return None
+    allowed = {"shapes_graphs", "shapes_ontologies", "inference", "strict"}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise refuse(f"Unknown field(s): {', '.join(unknown)}.")
+    graphs = raw.get("shapes_graphs") or []
+    ontologies = raw.get("shapes_ontologies") or []
+    if not isinstance(graphs, list) or not isinstance(ontologies, list):
+        raise refuse("shapes_graphs and shapes_ontologies are lists.")
+    normalized = store.normalize_shacl(raw, ontology_id) or {}
+    for item in graphs:
+        text = str(item or "").strip().removeprefix("<").removesuffix(">")
+        if text not in normalized.get("shapes_graphs", []):
+            raise refuse(f"Not a graph IRI: {item!r}.")
+    if len(graphs) > store.MAX_SHAPES_GRAPHS:
+        raise refuse(f"At most {store.MAX_SHAPES_GRAPHS} shapes graphs.")
+    if len(ontologies) > store.MAX_SHAPES_ONTOLOGIES:
+        raise refuse(f"At most {store.MAX_SHAPES_ONTOLOGIES} shapes ontologies.")
+    for item in ontologies:
+        if item == ontology_id:
+            raise refuse("An ontology cannot be its own shapes ontology; declare a shapes graph instead.")
+        if store.get_entry(str(item)) is None:
+            raise refuse(f"Unknown ontology: {item!r}.")
+    inference = raw.get("inference", "none")
+    if inference not in store.SHACL_INFERENCE:
+        raise refuse(f"inference is one of {', '.join(store.SHACL_INFERENCE)}.")
+    if "strict" in raw and not isinstance(raw["strict"], bool):
+        raise refuse("strict is true or false.")
+    return normalized
 
 
 @router.delete("/catalog/{ontology_id}", dependencies=[Depends(verify_api_key)])
@@ -867,6 +977,93 @@ async def explain_statement(ontology_id: str, body: ExplainRequest, request: Req
         raise
 
 
+@router.get("/{ontology_id}/shacl", dependencies=[Depends(verify_api_key)])
+async def shacl_status(ontology_id: str, compute: bool = False) -> dict:
+    """The SHACL validation state of the current version, with its result groups (UDR-0194 D9).
+
+    ``compute=true`` asks for a missing result: queued as a job when the job engine runs,
+    else validated now in a search worker (screen time limit).
+    """
+    from app.ontology import shacl_jobs
+
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    try:
+        current = await run_in_threadpool(shacl_jobs.status, ontology_id)
+        if compute and current["configured"] and current["state"] == "missing":
+            if shacl_jobs.active():
+                job = await shacl_jobs.submit(ontology_id, reason="request")
+                current.update(state="queued", job_id=job.id)
+            else:
+                await workers.run("shacl", {"ontology_id": ontology_id}, budget=workers.Budget(workers.SCREEN))
+                current = await run_in_threadpool(shacl_jobs.status, ontology_id)
+        return current
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "ontology_not_found"}) from exc
+    except Exception as exc:
+        mapped = _search_error(exc)
+        if mapped is not None:
+            raise mapped from exc
+        raise
+
+
+@router.get("/{ontology_id}/shacl/results", dependencies=[Depends(verify_api_key)])
+async def shacl_results_page(
+    ontology_id: str,
+    severity: str | None = None,
+    shape: str | None = None,
+    path: str | None = None,
+    component: str | None = None,
+    focus: str | None = None,
+    offset: int = 0,
+    limit: int = 100,
+) -> dict:
+    """The stored results of the current version, filtered and paged (UDR-0194 D9).
+
+    ``shape`` and ``focus`` are terms in N-Triples (as results carry them); ``limit`` is
+    at most 500.
+    """
+    from app.ontology import shacl_results
+
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    if severity is not None and severity not in ("violation", "warning", "info"):
+        raise HTTPException(status_code=422, detail={"error": "invalid_severity", "message": severity})
+    offset = max(0, offset)
+    limit = max(1, min(500, limit))
+
+    def page() -> dict[str, Any]:
+        config = store.shacl_config(store.get_entry(ontology_id))
+        if config is None:
+            return {"state": "not_configured", "total": 0, "items": []}
+        key = shacl_results.key_for(ontology_id, config)
+        record = shacl_results.lookup(key)
+        if record is None or record.get("state") != shacl_results.READY:
+            return {"state": (record or {}).get("state", "missing"), "total": 0, "items": []}
+        items = [
+            item
+            for item in shacl_results.load_results(key)
+            if (severity is None or item["severity"] == severity)
+            and (shape is None or (item.get("shape") or {}).get("nt") == shape)
+            and (path is None or item.get("path") == path)
+            and (component is None or item.get("component") == component)
+            and (focus is None or item["focus"]["nt"] == focus)
+        ]
+        return {
+            "state": record["state"],
+            "revision": record.get("revision"),
+            "total": len(items),
+            "truncated": bool(record.get("truncated")),
+            "offset": offset,
+            "items": items[offset : offset + limit],
+        }
+
+    try:
+        return await run_in_threadpool(page)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "ontology_not_found"}) from exc
+
+
 @router.get("/{ontology_id}", dependencies=[Depends(verify_api_key)])
 async def get_ontology(ontology_id: str) -> dict:
     """The CTR-0169 v3 statement-complete projection plus the file ``revision``."""
@@ -912,7 +1109,7 @@ async def save_ontology(ontology_id: str, body: ProjectionSave) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    def write() -> str | None:
+    def write() -> tuple[str | None, dict[str, Any] | None]:
         with store.write_lock(ontology_id):
             entry = _entry_or_404(ontology_id)
             if store.is_dataset(entry) and body.projection_version != PROJECTION_VERSION:
@@ -927,16 +1124,21 @@ async def save_ontology(ontology_id: str, body: ProjectionSave) -> dict:
                     },
                 )
             _check_revision(ontology_id, body.revision)
-            return _save(ontology_id, text, dataset)
+            checked = _strict_check(ontology_id, text, dataset, body.shacl_override)
+            history = {"shacl_override": True} if checked and checked.get("overridden") else None
+            return _save(ontology_id, text, dataset, history), checked
 
-    backup = await run_in_threadpool(write)
+    backup, checked = await run_in_threadpool(write)
     logger.info("ontology saved: %s (backup=%s)", ontology_id, backup)
-    return {
+    answer: dict[str, Any] = {
         "saved": True,
         "id": ontology_id,
         "backup": backup,
         "revision": store.revision_of(text.encode("utf-8")),
     }
+    if checked is not None:
+        answer["shacl"] = checked
+    return answer
 
 
 def _apply_and_save(ontology_id: str, body: StatementOperations) -> tuple[str, str | None, dict[str, Any]]:
@@ -965,13 +1167,14 @@ def _apply_and_save(ontology_id: str, body: StatementOperations) -> tuple[str, s
         dataset = any(is_named(q) for q in quads)
         text = write_document(quads, document, trig=dataset)
         after = set(quads)
-        backup = _save(
-            ontology_id,
-            text,
-            dataset,
-            {"kind": "statements", "added": len(after - before), "removed": len(before - after)},
-        )
+        checked = _strict_check(ontology_id, text, dataset, body.shacl_override)
+        history: dict[str, Any] = {"kind": "statements", "added": len(after - before), "removed": len(before - after)}
+        if checked and checked.get("overridden"):
+            history["shacl_override"] = True
+        backup = _save(ontology_id, text, dataset, history)
     report["rebased"] = stale
+    if checked is not None:
+        report["shacl"] = checked
     return text, backup, report
 
 

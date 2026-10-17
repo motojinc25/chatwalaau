@@ -527,6 +527,30 @@ function candidatesFor(column: DataColumn, index: IndividualIndex, all: Resource
 
 // ---- The table ------------------------------------------------------------------------
 
+/** SHACL results of one individual (PRP-0212, UDR-0194 D12): violations, else warnings / notes. */
+function ShaclChip(props: { counts?: { violation: number; warning: number; info: number }; onClick: () => void }) {
+  const counts = props.counts
+  if (!counts) return null
+  const others = counts.warning + counts.info
+  if (counts.violation === 0 && others === 0) return null
+  const text =
+    counts.violation > 0
+      ? `${counts.violation} violation${counts.violation === 1 ? '' : 's'}`
+      : `${others} SHACL note${others === 1 ? '' : 's'}`
+  return (
+    <button
+      type="button"
+      className={cn(
+        'ml-1 rounded px-1 text-[10px]',
+        counts.violation > 0 ? 'bg-amber-100 text-amber-800' : 'bg-sky-50 text-sky-700',
+      )}
+      title="SHACL results of the last saved version: list them"
+      onClick={props.onClick}>
+      {text}
+    </button>
+  )
+}
+
 export function IndividualsView(props: {
   /** The full model (edits address its statements). */
   model: OntologyModel
@@ -547,6 +571,9 @@ export function IndividualsView(props: {
   /** PRP-0211 (UDR-0193 D19): inferred memberships (switch on), never edited. */
   inferred?: InferredData | null
   onExplainInferred?: (statement: InferredStatement) => void
+  /** PRP-0212 (UDR-0194 D12): SHACL results per individual (term key) of the last validation. */
+  shaclCounts?: Map<string, { violation: number; warning: number; info: number }>
+  onShowShaclResults?: (term: Term) => void
 }) {
   const { model, index, ctx, group } = props
   const inferredCount = useMemo(() => {
@@ -752,6 +779,10 @@ export function IndividualsView(props: {
                       {group.kind === 'class' && row.cls !== group.iri && (
                         <span className="text-[10px] text-zinc-400">{props.classLabel(row.cls)}</span>
                       )}
+                      <ShaclChip
+                        counts={props.shaclCounts?.get(termKey(row.resource.term))}
+                        onClick={() => props.onShowShaclResults?.(row.resource.term)}
+                      />
                       {props.inferred && (
                         <InferredTypeChips
                           types={props.inferred.types.get(key) ?? []}

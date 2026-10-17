@@ -61,6 +61,7 @@ import {
   RotateCcw,
   Search,
   SendHorizontal,
+  ShieldCheck,
   Square,
   Trash2,
   TriangleAlert,
@@ -95,6 +96,7 @@ import {
   ResourcesPane,
   TermView,
 } from '@/components/OntologyInspector'
+import { ShapesView } from '@/components/OntologyShapes'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -220,8 +222,10 @@ import {
   type VocabularyStyle,
   vocabularyStyle,
   vocabularyStyleReason,
+  withoutGraphs,
   XSD,
 } from '@/lib/ontologyModel'
+import { hasShapes, type ShapesGraph, targetedClasses } from '@/lib/ontologyShapes'
 import { cn } from '@/lib/utils'
 import '@/lib/monaco-setup'
 import '@xyflow/react/dist/style.css'
@@ -237,6 +241,67 @@ interface CatalogEntry {
   name: string
   description: string
   updated_at?: string
+  /** PRP-0212 (UDR-0194 D1): the SHACL validation settings. */
+  shacl?: ShaclSettings
+}
+
+/** The catalog's SHACL block (CTR-0171 v12). */
+interface ShaclSettings {
+  shapes_graphs: string[]
+  shapes_ontologies: string[]
+  inference: 'none' | 'rdfs' | 'owl-rl'
+  strict: boolean
+}
+
+type ShaclSeverity = 'violation' | 'warning' | 'info'
+
+/** One (shape, path, constraint) group of results (GET /{id}/shacl, UDR-0194 D9). */
+interface ShaclGroup {
+  key: string
+  severity: ShaclSeverity
+  shape: { nt: string; shown: string } | null
+  path: string | null
+  component: string
+  constraint: string | null
+  message: string
+  count: number
+  focus: { nt: string; shown: string; term: Term; imported: boolean }[]
+  focus_count: number
+}
+
+/** One stored result (GET /{id}/shacl/results; also the strict-mode refusal). */
+interface ShaclResultItem {
+  key: string
+  severity: ShaclSeverity
+  focus: { nt: string; shown: string; term: Term }
+  imported?: boolean
+  path: string | null
+  value: { nt: string; shown: string } | null
+  shape: { nt: string; shown: string } | null
+  component: string
+  constraint: string | null
+  message: string
+}
+
+interface ShaclStatus {
+  configured: boolean
+  settings: ShaclSettings | null
+  state: string
+  revision: string | null
+  inference: string
+  strict: boolean
+  shapes: { kind: 'graph' | 'ontology'; ref: string; revision: string | null; missing: boolean; name?: string | null }[]
+  conforms: boolean | null
+  counts: Record<ShaclSeverity, number> | null
+  unsupported: { construct: string; shape: string; count: number }[]
+  groups: ShaclGroup[]
+  focus_counts: Record<string, Record<ShaclSeverity, number>>
+  results_count: number
+  truncated: boolean
+  elapsed_ms: number | null
+  message: string | null
+  detail: { errors?: string[] } | null
+  precompute: boolean
 }
 
 /** A query notice: what the query engine could not give back as written (UDR-0181 D3). */
@@ -496,15 +561,17 @@ function writeShowImported(show: boolean): void {
 
 const NO_IRIS: Set<string> = new Set()
 
-/** Schema = the canvas (TBox); Data = individuals per class (ABox, UDR-0187 D2). */
-type ManagerView = 'schema' | 'data'
+/** Schema = the canvas (TBox); Data = individuals per class (ABox, UDR-0187 D2);
+ * Shapes = SHACL node shapes as tables (PRP-0212, UDR-0194 D10). */
+type ManagerView = 'schema' | 'data' | 'shapes'
 
 // Per-browser view preference, never saved in the ontology (UDR-0187 D2).
 const VIEW_STORAGE_KEY = 'chatwalaau.ontology.view'
 
 function readView(): ManagerView {
   try {
-    return localStorage.getItem(VIEW_STORAGE_KEY) === 'data' ? 'data' : 'schema'
+    const stored = localStorage.getItem(VIEW_STORAGE_KEY)
+    return stored === 'data' || stored === 'shapes' ? stored : 'schema'
   } catch {
     return 'schema'
   }
@@ -518,12 +585,19 @@ function writeView(view: ManagerView): void {
   }
 }
 
-/** The Schema | Data switch, shown in both views' toolbars. */
-function ViewSwitch(props: { view: ManagerView; onChange: (view: ManagerView) => void; disabled: boolean }) {
+/** The Schema | Data (| Shapes) switch, shown in every view's toolbar. */
+function ViewSwitch(props: {
+  view: ManagerView
+  onChange: (view: ManagerView) => void
+  disabled: boolean
+  /** The ontology has shapes or declares shapes sources (PRP-0212, UDR-0194 D10). */
+  shapes?: boolean
+}) {
+  const values: ManagerView[] = props.shapes ? ['schema', 'data', 'shapes'] : ['schema', 'data']
   return (
     <fieldset className="m-0 flex shrink-0 overflow-hidden rounded-md border p-0 text-xs">
       <legend className="sr-only">View</legend>
-      {(['schema', 'data'] as const).map((value) => (
+      {values.map((value) => (
         <button
           key={value}
           type="button"
@@ -532,17 +606,293 @@ function ViewSwitch(props: { view: ManagerView; onChange: (view: ManagerView) =>
           title={
             value === 'schema'
               ? 'Schema: classes, properties and "is a" on the canvas'
-              : 'Data: the individuals of each class, as a table'
+              : value === 'data'
+                ? 'Data: the individuals of each class, as a table'
+                : 'Shapes: the SHACL shapes the data is validated against, as tables'
           }
           className={cn(
             'h-7 px-2 font-medium',
             props.view === value ? 'bg-zinc-800 text-white' : 'bg-white text-zinc-600 hover:bg-zinc-100',
           )}
           onClick={() => props.onChange(value)}>
-          {value === 'schema' ? 'Schema' : 'Data'}
+          {value === 'schema' ? 'Schema' : value === 'data' ? 'Data' : 'Shapes'}
         </button>
       ))}
     </fieldset>
+  )
+}
+
+// ---- SHACL validation dialogs (PRP-0212, UDR-0194) --------------------------------------
+
+function ShaclResultsTable(props: { items: ShaclResultItem[]; onSelect: (term: Term) => void }) {
+  if (props.items.length === 0) return <p className="text-xs text-zinc-500">No results.</p>
+  return (
+    <div className="max-h-[50vh] overflow-y-auto rounded border">
+      <table className="w-full table-fixed border-collapse text-[11px]">
+        <thead>
+          <tr className="bg-zinc-50 text-left text-[10px] uppercase tracking-wide text-zinc-500">
+            <th className="w-[18%] px-2 py-1 font-medium">node</th>
+            <th className="w-[16%] px-2 py-1 font-medium">path</th>
+            <th className="w-[16%] px-2 py-1 font-medium">value</th>
+            <th className="w-[40%] px-2 py-1 font-medium">message</th>
+            <th className="w-[10%] px-2 py-1 font-medium">severity</th>
+          </tr>
+        </thead>
+        <tbody>
+          {props.items.map((item) => (
+            <tr key={item.key} className="border-t align-top">
+              <td className="px-2 py-1">
+                <button
+                  type="button"
+                  className="max-w-full truncate text-left text-blue-700 hover:underline"
+                  title={item.focus.nt}
+                  onClick={() => props.onSelect(item.focus.term)}>
+                  {item.focus.shown}
+                </button>
+              </td>
+              <td className="truncate px-2 py-1 font-mono text-[10px]" title={item.path ?? ''}>
+                {item.path ?? '(node)'}
+              </td>
+              <td className="truncate px-2 py-1 font-mono text-[10px]" title={item.value?.shown ?? ''}>
+                {item.value?.shown ?? ''}
+              </td>
+              <td className="px-2 py-1">
+                {item.message}
+                {item.constraint && <span className="ml-1 text-zinc-400">({item.constraint})</span>}
+              </td>
+              <td className="px-2 py-1">{item.severity}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function ShaclResultsDialog(props: {
+  ontologyId: string
+  title: string
+  query: Record<string, string>
+  stale: boolean
+  onClose: () => void
+  onSelect: (term: Term) => void
+}) {
+  const [items, setItems] = useState<ShaclResultItem[] | null>(null)
+  const [total, setTotal] = useState(0)
+  const [failed, setFailed] = useState<string | null>(null)
+  const queryKey = JSON.stringify(props.query)
+  useEffect(() => {
+    let cancelled = false
+    const params = new URLSearchParams({ ...(JSON.parse(queryKey) as Record<string, string>), limit: '500' })
+    void (async () => {
+      try {
+        const res = await fetch(`/api/ontology/${props.ontologyId}/shacl/results?${params}`)
+        if (!res.ok) throw new Error('Could not load the results')
+        const body = await res.json()
+        if (cancelled) return
+        setItems((body.items ?? []) as ShaclResultItem[])
+        setTotal(Number(body.total ?? 0))
+      } catch (err) {
+        if (!cancelled) setFailed(err instanceof Error ? err.message : 'Could not load the results')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [props.ontologyId, queryKey])
+  return (
+    <Dialog open onOpenChange={(o) => !o && props.onClose()}>
+      <DialogContent className="sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{props.title}</DialogTitle>
+          <DialogDescription>
+            SHACL results of the last saved version{props.stale ? ' (you have unsaved changes)' : ''}.
+          </DialogDescription>
+        </DialogHeader>
+        {failed && <p className="text-xs text-red-600">{failed}</p>}
+        {items === null && !failed ? (
+          <p className="flex items-center text-xs text-zinc-500">
+            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> Loading...
+          </p>
+        ) : (
+          items && <ShaclResultsTable items={items} onSelect={props.onSelect} />
+        )}
+        {items && total > items.length && (
+          <p className="text-xs text-zinc-500">
+            Showing {items.length} of {total} results.
+          </p>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ShaclSettingsDialog(props: {
+  ontologyId: string
+  settings: ShaclSettings | null
+  catalog: CatalogEntry[]
+  graphs: GraphTerm[]
+  graphName: (g: GraphTerm) => string
+  status: string
+  readOnly: boolean
+  onClose: () => void
+  onSaved: () => Promise<void>
+}) {
+  const [graphs, setGraphs] = useState<string[]>(props.settings?.shapes_graphs ?? [])
+  const [ontologies, setOntologies] = useState<string[]>(props.settings?.shapes_ontologies ?? [])
+  const [inference, setInference] = useState<ShaclSettings['inference']>(props.settings?.inference ?? 'none')
+  const [strict, setStrict] = useState(props.settings?.strict ?? false)
+  const [newGraph, setNewGraph] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState<string | null>(null)
+  const graphOptions = [
+    ...new Set([
+      ...props.graphs.filter((g) => g.type === 'iri').map((g) => g.value),
+      ...(props.settings?.shapes_graphs ?? []),
+      ...graphs,
+    ]),
+  ]
+  const toggle = (list: string[], value: string, on: boolean) =>
+    on ? [...list.filter((v) => v !== value), value] : list.filter((v) => v !== value)
+  const send = async (shacl: ShaclSettings | null) => {
+    setBusy(true)
+    setFailed(null)
+    try {
+      const res = await fetch(`/api/ontology/catalog/${props.ontologyId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shacl }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.detail?.message ?? 'Could not save the validation settings')
+      }
+      await props.onSaved()
+    } catch (err) {
+      setFailed(err instanceof Error ? err.message : 'Could not save the validation settings')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const addGraph = () => {
+    const value = newGraph.trim().replace(/^<|>$/g, '')
+    if (!/^[A-Za-z][A-Za-z0-9+.-]*:\S+$/.test(value)) {
+      setFailed('A shapes graph is named by a full IRI, e.g. https://example.org/g/shapes')
+      return
+    }
+    setGraphs((list) => toggle(list, value, true))
+    setNewGraph('')
+    setFailed(null)
+  }
+  return (
+    <Dialog open onOpenChange={(o) => !o && !busy && props.onClose()}>
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Validation (SHACL)</DialogTitle>
+          <DialogDescription>
+            Validate this ontology's data against SHACL shapes after every save. Shapes are kept in named graphs of this
+            ontology or in other ontologies; they are never part of the data. {props.status}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 text-xs">
+          <fieldset className="space-y-1">
+            <legend className="mb-1 font-medium text-zinc-700">Shapes graphs of this ontology</legend>
+            {graphOptions.length === 0 && <p className="text-zinc-500">No named graph yet: add one below.</p>}
+            {graphOptions.map((value) => (
+              <label key={value} className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={graphs.includes(value)}
+                  disabled={props.readOnly}
+                  onChange={(e) => setGraphs((list) => toggle(list, value, e.target.checked))}
+                />
+                <span className="truncate" title={value}>
+                  {props.graphName({ type: 'iri', value })}
+                </span>
+              </label>
+            ))}
+            <div className="flex items-center gap-1">
+              <Input
+                className="h-7 text-xs"
+                placeholder="New shapes graph IRI, e.g. https://example.org/g/shapes"
+                aria-label="New shapes graph IRI"
+                value={newGraph}
+                disabled={props.readOnly}
+                onChange={(e) => setNewGraph(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && addGraph()}
+              />
+              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={addGraph} disabled={props.readOnly}>
+                Add
+              </Button>
+            </div>
+          </fieldset>
+          <fieldset className="space-y-1">
+            <legend className="mb-1 font-medium text-zinc-700">Shapes ontologies</legend>
+            <div className="max-h-32 space-y-1 overflow-y-auto">
+              {props.catalog
+                .filter((entry) => entry.id !== props.ontologyId)
+                .map((entry) => (
+                  <label key={entry.id} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={ontologies.includes(entry.id)}
+                      disabled={props.readOnly || (!ontologies.includes(entry.id) && ontologies.length >= 10)}
+                      onChange={(e) => setOntologies((list) => toggle(list, entry.id, e.target.checked))}
+                    />
+                    <span className="truncate">{entry.name}</span>
+                  </label>
+                ))}
+            </div>
+          </fieldset>
+          <label className="flex items-center gap-2">
+            <span className="font-medium text-zinc-700">Inference before validation</span>
+            <select
+              className="h-7 rounded border px-1 text-xs"
+              value={inference}
+              disabled={props.readOnly}
+              onChange={(e) => setInference(e.target.value as ShaclSettings['inference'])}>
+              <option value="none">None (stated statements)</option>
+              <option value="rdfs">RDFS</option>
+              <option value="owl-rl">OWL 2 RL</option>
+            </select>
+          </label>
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={strict}
+              disabled={props.readOnly}
+              onChange={(e) => setStrict(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium text-zinc-700">Strict mode</span> -- a save with SHACL violations is refused
+              (you can still save anyway). File imports and restores are never refused.
+            </span>
+          </label>
+          {failed && <p className="text-red-600">{failed}</p>}
+        </div>
+        <DialogFooter className="gap-2 sm:justify-between">
+          <Button
+            variant="ghost"
+            onClick={() => void send(null)}
+            disabled={busy || props.readOnly || !props.settings}
+            title="Remove the validation settings of this ontology">
+            Turn off
+          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={props.onClose} disabled={busy}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void send({ shapes_graphs: graphs, shapes_ontologies: ontologies, inference, strict })}
+              disabled={busy || props.readOnly}>
+              {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+              Save settings
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -670,6 +1020,9 @@ interface EntityNodeData extends Record<string, unknown> {
   /** Direct individuals of this class (UDR-0187 D2); the badge opens the Data view. */
   individualCount: number
   onOpenData: (cls: string) => void
+  /** SHACL node shapes targeting this class (PRP-0212, UDR-0194 D12); the badge opens Shapes. */
+  shapeCount?: number
+  onOpenShapes?: (cls: string) => void
   iri: string
   /** A faded node: an imported class this ontology refers to (read-only, UDR-0189 D8). */
   imported?: boolean
@@ -747,6 +1100,19 @@ const EntityNode = memo(function EntityNode({ data }: NodeProps<EntityFlowNode>)
             data.onOpenData(data.iri)
           }}>
           x{data.individualCount}
+        </button>
+      )}
+      {(data.shapeCount ?? 0) > 0 && (
+        <button
+          type="button"
+          className="nodrag nopan absolute -left-2 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full border border-indigo-300 bg-indigo-50 px-0.5 text-indigo-700 hover:bg-indigo-100"
+          title={`${data.shapeCount} SHACL shape${data.shapeCount === 1 ? '' : 's'} target this class: open in the Shapes view`}
+          aria-label={`Open the shapes of ${data.label}`}
+          onClick={(e) => {
+            e.stopPropagation()
+            data.onOpenShapes?.(data.iri)
+          }}>
+          <ShieldCheck className="h-3 w-3" />
         </button>
       )}
       {/* Label below the circle (kept outside the shape per the design spec). */}
@@ -970,6 +1336,7 @@ function CanvasToolbar(props: {
   styleReason: string
   view: ManagerView
   onViewChange: (view: ManagerView) => void
+  shapesAvailable: boolean
   /** The Inferred switch (PRP-0211, UDR-0193 D17). */
   inferredMode: InferredMode
   onInferredModeChange: (mode: InferredMode) => void
@@ -979,7 +1346,12 @@ function CanvasToolbar(props: {
   const iconButton = 'h-7 w-7 text-zinc-600'
   return (
     <div className="ontology-toolbar flex shrink-0 items-center gap-1 border-b bg-zinc-50 px-2 py-1">
-      <ViewSwitch view={props.view} onChange={props.onViewChange} disabled={props.disabled} />
+      <ViewSwitch
+        view={props.view}
+        onChange={props.onViewChange}
+        disabled={props.disabled}
+        shapes={props.shapesAvailable}
+      />
       <div className="mx-1 h-4 w-px bg-zinc-200" />
       <Button
         variant="ghost"
@@ -1187,6 +1559,20 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   )
   // PRP-0211 (UDR-0193): the stored entailment's state, Explain, and the Inferred switch.
   const [entailmentStatus, setEntailmentStatus] = useState<EntailmentStatus | null>(null)
+  // PRP-0212 (UDR-0194): SHACL validation of the saved version, its settings and views.
+  const [shaclStatus, setShaclStatus] = useState<ShaclStatus | null>(null)
+  const [shaclDialogOpen, setShaclDialogOpen] = useState(false)
+  const [strictRefusal, setStrictRefusal] = useState<{
+    count: number
+    results: ShaclResultItem[]
+    message: string
+  } | null>(null)
+  const [shaclNotice, setShaclNotice] = useState<string | null>(null)
+  const [shaclList, setShaclList] = useState<{ title: string; query: Record<string, string> } | null>(null)
+  const [shapesGraphKey, setShapesGraphKey] = useState<string | null>(null)
+  const [shapeHighlight, setShapeHighlight] = useState<{ shape: string; path: string | null; nonce: number } | null>(
+    null,
+  )
   const [consistency, setConsistency] = useState<{
     revision: string
     state: string
@@ -1348,69 +1734,25 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
    * a newer file when they still fit (UDR-0183 D5 / D7). Returns false when the
    * document changed, which only the full PUT carries (PRP-0201 C3).
    */
-  const saveStatements = useCallback(async (): Promise<boolean> => {
-    const base = saveBaseRef.current
-    if (!selectedId || !base || documentKey(model.document) !== base.document) return false
-    const { operations, freshBlankNodes } = diffStatements(base.statements, model)
-    if (operations.length === 0) {
-      setDirty(false)
-      return true
-    }
-    const res = await fetch(`/api/ontology/${selectedId}/statements`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ revision, operations, fresh_blank_nodes: freshBlankNodes, on_stale: 'rebase' }),
-    })
-    if (!res.ok) {
-      const refused = await demoRefusal(res)
-      if (refused) {
-        setDemoBlocked(true)
-        throw new Error(refused)
+  const saveStatements = useCallback(
+    async (override = false): Promise<boolean> => {
+      const base = saveBaseRef.current
+      if (!selectedId || !base || documentKey(model.document) !== base.document) return false
+      const { operations, freshBlankNodes } = diffStatements(base.statements, model)
+      if (operations.length === 0) {
+        setDirty(false)
+        return true
       }
-      const body = await res.json().catch(() => null)
-      const detail = body?.detail
-      if (res.status === 409 && detail?.error === 'stale_conflict') {
-        // Nothing was written; the user decides by reloading (no overwrite, D8).
-        setSaveConflicts({ count: detail.count ?? 0, items: (detail.conflicts ?? []) as SaveConflict[] })
-        setStaleRevision(true)
-        throw new Error(detail.message ?? 'Some changes conflict with a newer version.')
-      }
-      if (detail?.pointer && typeof detail?.message === 'string') {
-        throw new Error(`Cannot save: ${detail.pointer} -- ${detail.message}`)
-      }
-      if (typeof detail?.message === 'string') throw new Error(detail.message)
-      throw new Error(typeof detail === 'string' ? detail : 'Failed to save the ontology')
-    }
-    const body = await res.json().catch(() => null)
-    if (body?.rebased) {
-      // Another tab saved first and these changes were applied on top: show both.
-      await loadOntology(selectedId, { keepView: true })
-      return true
-    }
-    const renamed = (body?.blank_nodes ?? {}) as Record<string, string>
-    const saved = renameBlankNodes(model, renamed)
-    saveBaseRef.current = saveBase(saved)
-    if (Object.keys(renamed).length > 0) setModel((current) => renameBlankNodes(current, renamed))
-    setRevision((body?.revision as string) ?? null)
-    setDirty(false)
-    return true
-  }, [selectedId, model, revision, loadOntology])
-
-  const save = useCallback(async () => {
-    if (!selectedId) return
-    setSaving(true)
-    setError(null)
-    setSaveConflicts(null)
-    try {
-      if (await saveStatements()) {
-        await fetchCatalog()
-        void fetchImports(selectedId)
-        return
-      }
-      const res = await fetch(`/api/ontology/${selectedId}`, {
-        method: 'PUT',
+      const res = await fetch(`/api/ontology/${selectedId}/statements`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...toPayload(model), revision }),
+        body: JSON.stringify({
+          revision,
+          operations,
+          fresh_blank_nodes: freshBlankNodes,
+          on_stale: 'rebase',
+          ...(override ? { shacl_override: true } : {}),
+        }),
       })
       if (!res.ok) {
         const refused = await demoRefusal(res)
@@ -1420,29 +1762,96 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         }
         const body = await res.json().catch(() => null)
         const detail = body?.detail
-        if (res.status === 409 && detail?.error === 'stale_revision') {
-          // Someone saved this ontology after it was opened here (UDR-0180 D8).
+        if (res.status === 409 && detail?.error === 'stale_conflict') {
+          // Nothing was written; the user decides by reloading (no overwrite, D8).
+          setSaveConflicts({ count: detail.count ?? 0, items: (detail.conflicts ?? []) as SaveConflict[] })
           setStaleRevision(true)
-          throw new Error(detail.message ?? 'The ontology was changed elsewhere.')
+          throw new Error(detail.message ?? 'Some changes conflict with a newer version.')
         }
-        if (detail?.error === 'invalid_projection') {
+        if (res.status === 422 && detail?.error === 'shacl_violations') {
+          setStrictRefusal({ count: detail.count ?? 0, results: detail.results ?? [], message: detail.message ?? '' })
+          throw new Error(detail.message ?? 'Strict mode: SHACL violations. Nothing was saved.')
+        }
+        if (detail?.pointer && typeof detail?.message === 'string') {
           throw new Error(`Cannot save: ${detail.pointer} -- ${detail.message}`)
         }
         if (typeof detail?.message === 'string') throw new Error(detail.message)
         throw new Error(typeof detail === 'string' ? detail : 'Failed to save the ontology')
       }
       const body = await res.json().catch(() => null)
+      setShaclNotice(body?.shacl?.checked === false ? (body.shacl.message as string) : null)
+      if (body?.rebased) {
+        // Another tab saved first and these changes were applied on top: show both.
+        await loadOntology(selectedId, { keepView: true })
+        return true
+      }
+      const renamed = (body?.blank_nodes ?? {}) as Record<string, string>
+      const saved = renameBlankNodes(model, renamed)
+      saveBaseRef.current = saveBase(saved)
+      if (Object.keys(renamed).length > 0) setModel((current) => renameBlankNodes(current, renamed))
       setRevision((body?.revision as string) ?? null)
-      saveBaseRef.current = saveBase(model)
       setDirty(false)
-      await fetchCatalog()
-      void fetchImports(selectedId)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save the ontology')
-    } finally {
-      setSaving(false)
-    }
-  }, [selectedId, model, revision, fetchCatalog, saveStatements, fetchImports])
+      return true
+    },
+    [selectedId, model, revision, loadOntology],
+  )
+
+  const save = useCallback(
+    async (override = false) => {
+      if (!selectedId) return
+      setSaving(true)
+      setError(null)
+      setSaveConflicts(null)
+      setStrictRefusal(null)
+      try {
+        if (await saveStatements(override)) {
+          await fetchCatalog()
+          void fetchImports(selectedId)
+          return
+        }
+        const res = await fetch(`/api/ontology/${selectedId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...toPayload(model), revision, ...(override ? { shacl_override: true } : {}) }),
+        })
+        if (!res.ok) {
+          const refused = await demoRefusal(res)
+          if (refused) {
+            setDemoBlocked(true)
+            throw new Error(refused)
+          }
+          const body = await res.json().catch(() => null)
+          const detail = body?.detail
+          if (res.status === 409 && detail?.error === 'stale_revision') {
+            // Someone saved this ontology after it was opened here (UDR-0180 D8).
+            setStaleRevision(true)
+            throw new Error(detail.message ?? 'The ontology was changed elsewhere.')
+          }
+          if (res.status === 422 && detail?.error === 'shacl_violations') {
+            setStrictRefusal({ count: detail.count ?? 0, results: detail.results ?? [], message: detail.message ?? '' })
+            throw new Error(detail.message ?? 'Strict mode: SHACL violations. Nothing was saved.')
+          }
+          if (detail?.error === 'invalid_projection') {
+            throw new Error(`Cannot save: ${detail.pointer} -- ${detail.message}`)
+          }
+          if (typeof detail?.message === 'string') throw new Error(detail.message)
+          throw new Error(typeof detail === 'string' ? detail : 'Failed to save the ontology')
+        }
+        const body = await res.json().catch(() => null)
+        setShaclNotice(body?.shacl?.checked === false ? (body.shacl.message as string) : null)
+        setRevision((body?.revision as string) ?? null)
+        saveBaseRef.current = saveBase(model)
+        setDirty(false)
+        await fetchCatalog()
+        void fetchImports(selectedId)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to save the ontology')
+      } finally {
+        setSaving(false)
+      }
+    },
+    [selectedId, model, revision, fetchCatalog, saveStatements, fetchImports],
+  )
 
   // ---- Catalog actions ----
 
@@ -1620,7 +2029,32 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // The canvas draws the selected graph(s) only; layout stays in the default graph
   // and is always shown (UDR-0182 D3 / D4). Edits still go to the full model.
   const graphs = useMemo(() => graphsOf(model), [model])
-  const viewModel = useMemo(() => scopeModel(model, graphScope), [model, graphScope])
+  // PRP-0212 (UDR-0194 D1, D12): the declared shapes graphs are not data -- the canvas and
+  // the Data view leave them out unless the graph selector picks one of them.
+  const selectedEntry = useMemo(() => catalog.find((entry) => entry.id === selectedId) ?? null, [catalog, selectedId])
+  const shaclSettings = selectedEntry?.shacl ?? null
+  const shapesGraphsKey = (shaclSettings?.shapes_graphs ?? []).join('\n')
+  const declaredShapesGraphs = useMemo<GraphTerm[]>(
+    () => (shapesGraphsKey ? shapesGraphsKey.split('\n').map((value) => ({ type: 'iri' as const, value })) : []),
+    [shapesGraphsKey],
+  )
+  const hiddenGraphs = useMemo(() => new Set(declaredShapesGraphs.map(termKey)), [declaredShapesGraphs])
+  const usedAsShapes = useMemo(
+    () => Boolean(selectedId && catalog.some((entry) => entry.shacl?.shapes_ontologies?.includes(selectedId))),
+    [catalog, selectedId],
+  )
+  const editableShapesGraphs = useMemo<ShapesGraph[]>(
+    () =>
+      declaredShapesGraphs.length > 0 ? declaredShapesGraphs : usedAsShapes || hasShapes(model, null) ? [null] : [],
+    [declaredShapesGraphs, usedAsShapes, model],
+  )
+  const shapesAvailable = editableShapesGraphs.length > 0 || (shaclSettings?.shapes_ontologies.length ?? 0) > 0
+  const currentShapesGraph =
+    editableShapesGraphs.find((g) => (g ? termKey(g) : '') === shapesGraphKey) ?? editableShapesGraphs[0] ?? null
+  const viewModel = useMemo(
+    () => (graphScope === 'all' ? withoutGraphs(model, hiddenGraphs) : scopeModel(model, graphScope)),
+    [model, graphScope, hiddenGraphs],
+  )
   // The imported vocabulary, kept beside the model and never written (UDR-0189 D6).
   const imported = useMemo(() => importedIndex(importsInfo), [importsInfo])
   // Faded nodes: the imported classes this ontology refers to (D8).
@@ -1644,6 +2078,32 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     setView(next)
     writeView(next)
   }, [])
+  const effectiveView: ManagerView = view === 'shapes' && !shapesAvailable ? 'schema' : view
+  // The classes shapes target (the canvas badge, UDR-0194 D12).
+  const shapeTargets = useMemo(() => targetedClasses(model, editableShapesGraphs), [model, editableShapesGraphs])
+  /** Open the Shapes view on one node shape (Show shape, the canvas badge). */
+  const openShape = useCallback(
+    (shapeKey: string, path: string | null) => {
+      const holder = editableShapesGraphs.find((g) =>
+        model.resources.some(
+          (r) =>
+            termKey(r.term) === shapeKey &&
+            r.statements.some((st) => (st.g ? termKey(st.g) : '') === (g ? termKey(g) : '')),
+        ),
+      )
+      if (holder !== undefined) setShapesGraphKey(holder ? termKey(holder) : '')
+      setShapeHighlight({ shape: shapeKey, path, nonce: Date.now() })
+      changeView('shapes')
+    },
+    [editableShapesGraphs, model, changeView],
+  )
+  const openShapesFor = useCallback(
+    (cls: string) => {
+      const first = shapeTargets.get(cls)?.[0]
+      if (first) openShape(termKey(first), null)
+    },
+    [shapeTargets, openShape],
+  )
   /** Open the Data view on one class (the canvas badge, a type chip). */
   const openData = useCallback(
     (cls: string) => {
@@ -1879,13 +2339,14 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // Every finding over the whole model (all graphs), once per change (D1 / D6).
   const findings = useMemo(
     () =>
-      runChecks(model, {
+      // The declared shapes graphs are not data (PRP-0212, UDR-0194 D12).
+      runChecks(withoutGraphs(model, hiddenGraphs), {
         bases: baseIri ? [baseIri] : [],
         diagnostics,
         imported,
         imports: importsInfo?.imports ?? [],
       }),
-    [model, baseIri, diagnostics, imported, importsInfo],
+    [model, hiddenGraphs, baseIri, diagnostics, imported, importsInfo],
   )
   // PRP-0211 (UDR-0193 D13): the OWL 2 RL consistency of the SAVED version, from the backend.
   const consistencyFindings = useMemo<Finding[]>(() => {
@@ -1927,7 +2388,95 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       }),
     )
   }, [entailmentStatus, consistency, dirty])
-  const allFindings = useMemo(() => [...consistencyFindings, ...findings], [consistencyFindings, findings])
+  // PRP-0212 (UDR-0194 D9): the SHACL results of the SAVED version, from the backend.
+  const shaclFindings = useMemo<Finding[]>(() => {
+    const status = shaclStatus
+    if (!status?.configured) return []
+    const out: Finding[] = []
+    const unchecked = (key: string, message: string): Finding => ({
+      code: 'shacl_unchecked',
+      severity: 'info',
+      key,
+      subjects: [],
+      message,
+    })
+    for (const source of status.shapes) {
+      if (source.missing) {
+        out.push(
+          unchecked(
+            `missing:${source.ref}`,
+            source.kind === 'graph'
+              ? `The shapes graph <${source.ref}> is not in this ontology yet.`
+              : `The shapes ontology ${source.ref} is not in the catalog any more.`,
+          ),
+        )
+      }
+    }
+    if (status.state === 'queued' || status.state === 'running' || status.state === 'missing') {
+      out.push(unchecked('computing', 'Validating with SHACL...'))
+      return out
+    }
+    if (status.state === 'shapes_error') {
+      const errors = status.detail?.errors?.length
+        ? status.detail.errors
+        : [status.message ?? 'The shapes are not valid SHACL.']
+      for (const [i, text] of errors.slice(0, 20).entries()) {
+        out.push({
+          code: 'shacl_shapes_error',
+          severity: 'warning',
+          key: `shape-error-${i}`,
+          subjects: [],
+          message: text,
+          stale: dirty,
+        })
+      }
+      return out
+    }
+    if (status.state !== 'ready') {
+      out.push(unchecked(status.state, `The data was not validated: ${status.message ?? status.state}`))
+      return out
+    }
+    for (const group of status.groups) {
+      const imported = group.focus.filter((f) => f.imported).length
+      out.push({
+        code:
+          group.severity === 'violation'
+            ? 'shacl_violation'
+            : group.severity === 'warning'
+              ? 'shacl_warning'
+              : 'shacl_info',
+        severity: group.severity === 'violation' ? 'warning' : 'info',
+        key: group.key,
+        subjects: group.focus.filter((f) => !f.imported).map((f) => f.term),
+        message: group.message,
+        stale: dirty,
+        shacl: {
+          severity: group.severity,
+          shape: group.shape,
+          path: group.path,
+          component: group.component,
+          constraint: group.constraint,
+          count: group.count,
+          more: Math.max(0, group.focus_count - group.focus.length),
+          imported,
+        },
+      })
+    }
+    for (const item of status.unsupported) {
+      out.push({
+        code: 'shacl_unsupported',
+        severity: 'info',
+        key: `${item.construct}|${item.shape}`,
+        subjects: [],
+        message: `${item.construct} on ${item.shape} is not SHACL Core and was ignored${item.count > 1 ? ` (${item.count}x)` : ''}.`,
+      })
+    }
+    return out
+  }, [shaclStatus, dirty])
+  const allFindings = useMemo(
+    () => [...consistencyFindings, ...shaclFindings, ...findings],
+    [consistencyFindings, shaclFindings, findings],
+  )
   const ignoredChecks = useIgnoredChecks(selectedId)
   const warningCount = useMemo(
     () => allFindings.filter((f) => f.severity === 'warning' && !ignoredChecks.ignored.has(findingId(f))).length,
@@ -2042,9 +2591,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const resource = findResource(model, key)
       if (!resource) return
       if (resource.role === 'entity' || relEdges.some((e) => termKey(iriTerm(e.iri)) === key)) changeView('schema')
+      else if (effectiveView === 'shapes') changeView('data')
       selectResource(key)
     },
-    [model, relEdges, changeView, selectResource],
+    [model, relEdges, changeView, selectResource, effectiveView],
   )
 
   // ---- The Inferred switch (PRP-0211, UDR-0193 D17-D20) ----
@@ -2183,6 +2733,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
               matched: Boolean(highlight?.has(entity.iri)),
               individualCount: dataIndex.members.get(entity.iri)?.length ?? 0,
               onOpenData: openData,
+              shapeCount: shapeTargets.get(entity.iri)?.length ?? 0,
+              onOpenShapes: openShapesFor,
               iri: entity.iri,
             },
           }),
@@ -2215,7 +2767,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
             }),
           ),
         ),
-    [views, ghostViews, positionOf, selection, related, highlight, dataIndex, openData],
+    [views, ghostViews, positionOf, selection, related, highlight, dataIndex, openData, shapeTargets, openShapesFor],
   )
 
   // FLICKER FIX: node positions live in local React Flow state during a drag
@@ -2500,12 +3052,12 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   useEffect(() => {
     if (!importSettling) return
     const layoutPending = !layoutFailed && unpositioned.some((value) => !autoPositions.has(value))
-    const drawn = view === 'data' || views.length === 0 || nodesReady
+    const drawn = effectiveView !== 'schema' || views.length === 0 || nodesReady
     if (!loading && !layoutPending && drawn) {
       setImportSettling(false)
       setImporting(false)
     }
-  }, [importSettling, layoutFailed, unpositioned, autoPositions, view, views.length, nodesReady, loading])
+  }, [importSettling, layoutFailed, unpositioned, autoPositions, effectiveView, views.length, nodesReady, loading])
   useEffect(() => {
     if (!importSettling) return
     // Never block the editor for long: a canvas that cannot settle ends the wait anyway.
@@ -2650,6 +3202,60 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     searchSignal,
     searchFailure,
   ])
+
+  // ---- SHACL validation: state, groups, polling (PRP-0212, UDR-0194 D9) ----
+
+  const fetchShaclStatus = useCallback(async (id: string) => {
+    try {
+      let res = await fetch(`/api/ontology/${id}/shacl`)
+      if (!res.ok) return
+      let body = (await res.json()) as ShaclStatus
+      // A missing result no job computes (validation turned on before this version, results
+      // deleted, no background jobs) is asked for: queued as a job, or validated now.
+      if (body.configured && body.state === 'missing') {
+        res = await fetch(`/api/ontology/${id}/shacl?compute=true`)
+        if (res.ok) body = (await res.json()) as ShaclStatus
+      }
+      setShaclStatus(body)
+    } catch {
+      // the state is a hint; editing still works
+    }
+  }, [])
+  const shaclSettingsKey = JSON.stringify(shaclSettings)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refetched when the saved version or the settings change
+  useEffect(() => {
+    setShaclStatus(null)
+    if (open && selectedId) void fetchShaclStatus(selectedId)
+  }, [open, selectedId, revision, shaclSettingsKey, fetchShaclStatus])
+  const validating = shaclStatus?.configured && (shaclStatus.state === 'queued' || shaclStatus.state === 'running')
+  useEffect(() => {
+    if (!open || !selectedId || !validating) return
+    const timer = window.setInterval(() => void fetchShaclStatus(selectedId), 2000)
+    return () => window.clearInterval(timer)
+  }, [open, selectedId, validating, fetchShaclStatus])
+  const shaclCounts = useMemo(() => {
+    const map = new Map<string, Record<ShaclSeverity, number>>()
+    for (const [nt, counts] of Object.entries(shaclStatus?.focus_counts ?? {})) map.set(nt, counts)
+    return map
+  }, [shaclStatus])
+  const shapeResultCounts = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const group of shaclStatus?.groups ?? []) {
+      if (group.shape) map.set(group.shape.nt, (map.get(group.shape.nt) ?? 0) + group.count)
+    }
+    return map
+  }, [shaclStatus])
+  const shaclSummary = useMemo(() => {
+    const status = shaclStatus
+    if (!status?.configured) return 'Validation (SHACL) is not configured for this ontology.'
+    if (status.state === 'queued' || status.state === 'running' || status.state === 'missing') return 'Validating...'
+    if (status.state !== 'ready') return `Not validated: ${status.message ?? status.state}`
+    const c = status.counts ?? { violation: 0, warning: 0, info: 0 }
+    const inference = status.inference === 'none' ? 'no inference' : `inference ${status.inference.toUpperCase()}`
+    return `Last saved version: ${c.violation} violation(s), ${c.warning} warning(s), ${c.info} note(s) -- ${inference}${
+      status.strict ? ', strict mode' : ''
+    }`
+  }, [shaclStatus])
 
   // ---- Stored entailment: state, consistency, Explain, inferred views (PRP-0211, UDR-0193) ----
 
@@ -2870,6 +3476,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                   <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reload
                 </Button>
               )}
+              {shaclNotice && (
+                <span className="max-w-[320px] truncate text-xs text-amber-700" title={shaclNotice}>
+                  {shaclNotice}
+                </span>
+              )}
               {dirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
               <Button
                 variant="outline"
@@ -2884,6 +3495,22 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                     className="ml-1 rounded-full bg-amber-100 px-1 text-[10px] text-amber-800"
                     title={`${importWarnings} import(s) not resolved`}>
                     {importWarnings}
+                  </span>
+                )}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => setShaclDialogOpen(true)}
+                disabled={!selectedId || loading}
+                title={`Validation (SHACL): ${shaclSummary}`}>
+                <ShieldCheck className="mr-1 h-3.5 w-3.5" /> Validation
+                {shaclStatus?.state === 'ready' && (shaclStatus.counts?.violation ?? 0) > 0 && (
+                  <span
+                    className="ml-1 rounded-full bg-amber-100 px-1 text-[10px] text-amber-800"
+                    title={`${shaclStatus.counts?.violation} SHACL violation(s) in the last saved version`}>
+                    {shaclStatus.counts?.violation}
                   </span>
                 )}
               </Button>
@@ -2980,10 +3607,57 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                   />
                 }
                 center={
-                  view === 'data' && selectedId && !loading ? (
+                  effectiveView === 'shapes' && selectedId && !loading ? (
                     <div className="flex min-h-0 flex-1 flex-col">
                       <div className="flex shrink-0 items-center gap-1 border-b bg-zinc-50 px-2 py-1">
-                        <ViewSwitch view={view} onChange={changeView} disabled={false} />
+                        <ViewSwitch view={effectiveView} onChange={changeView} disabled={false} shapes />
+                        <span className="ml-2 text-[11px] text-zinc-500">
+                          SHACL shapes, SHACL Core. Edits are saved with Save.
+                        </span>
+                      </div>
+                      <ShapesView
+                        model={model}
+                        prefixes={model.document.prefixes}
+                        graphs={editableShapesGraphs}
+                        graph={currentShapesGraph}
+                        onGraphChange={(g) => setShapesGraphKey(g ? termKey(g) : '')}
+                        graphLabel={(g) => (g ? `graph ${graphName(g)}` : 'the default graph (a shapes ontology)')}
+                        readOnly={demoBlocked}
+                        base={baseIri || 'https://chatwalaau.com/ontology/local#'}
+                        classOptions={[...views.map((v) => v.iri), ...imported.classes]}
+                        propertyOptions={[
+                          ...model.resources
+                            .filter((r) => r.role === 'object_property' || r.role === 'datatype_property')
+                            .flatMap((r) => (r.term.type === 'iri' ? [r.term.value] : [])),
+                          ...imported.properties.flatMap((r) => (r.term.type === 'iri' ? [r.term.value] : [])),
+                        ]}
+                        onUpdate={updateModel}
+                        resultCounts={shapeResultCounts}
+                        onShowResults={(shape) =>
+                          setShaclList({
+                            title: `Results of ${compactTerm(shape, model)}`,
+                            query: { shape: termKey(shape) },
+                          })
+                        }
+                        shapesOntologies={(shaclSettings?.shapes_ontologies ?? []).map((id) => {
+                          const entry = catalog.find((e) => e.id === id)
+                          return { id, name: entry?.name ?? id, missing: !entry }
+                        })}
+                        onOpenOntology={(id) => guardDirty(() => void loadOntology(id))}
+                        highlight={shapeHighlight}
+                        status={shaclSummary}
+                        onConfigure={() => setShaclDialogOpen(true)}
+                      />
+                    </div>
+                  ) : effectiveView === 'data' && selectedId && !loading ? (
+                    <div className="flex min-h-0 flex-1 flex-col">
+                      <div className="flex shrink-0 items-center gap-1 border-b bg-zinc-50 px-2 py-1">
+                        <ViewSwitch
+                          view={effectiveView}
+                          onChange={changeView}
+                          disabled={false}
+                          shapes={shapesAvailable}
+                        />
                         <div className="mx-1 h-4 w-px bg-zinc-200" />
                         <GraphScopeControl
                           graphs={graphs}
@@ -3025,6 +3699,13 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         onCreate={requestCreateIndividual}
                         inferred={dataInferred}
                         onExplainInferred={explainInferred}
+                        shaclCounts={shaclCounts}
+                        onShowShaclResults={(term) =>
+                          setShaclList({
+                            title: `SHACL results of ${compactTerm(term, model)}`,
+                            query: { focus: termKey(term) },
+                          })
+                        }
                       />
                     </div>
                   ) : (
@@ -3049,8 +3730,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         onShowImportedChange={changeShowImported}
                         style={vocabStyle}
                         styleReason={vocabularyStyleReason(vocabStyle, model)}
-                        view={view}
+                        view={effectiveView}
                         onViewChange={changeView}
+                        shapesAvailable={shapesAvailable}
                         inferredMode={inferredMode}
                         onInferredModeChange={changeInferredMode}
                         inferredNote={
@@ -3306,6 +3988,17 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                           finding.explainKey &&
                           void explain({ mode: 'owl-rl', finding: finding.explainKey, label: finding.message }, 'all')
                         }
+                        onShowShape={(finding) =>
+                          finding.shacl?.shape && openShape(finding.shacl.shape.nt, finding.shacl.path)
+                        }
+                        onShaclMore={(finding) => {
+                          const info = finding.shacl
+                          if (!info) return
+                          const query: Record<string, string> = { severity: info.severity, component: info.component }
+                          if (info.shape) query.shape = info.shape.nt
+                          if (info.path) query.path = info.path
+                          setShaclList({ title: finding.message, query })
+                        }}
                       />
                     ) : rightTab === 'explain' ? (
                       <ExplainPane
@@ -3441,6 +4134,73 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* PRP-0212 (UDR-0194 D1): validation settings of the selected ontology. */}
+      {shaclDialogOpen && selectedId && (
+        <ShaclSettingsDialog
+          ontologyId={selectedId}
+          settings={shaclSettings}
+          catalog={catalog}
+          graphs={graphs}
+          graphName={graphName}
+          status={shaclSummary}
+          readOnly={demoBlocked}
+          onClose={() => setShaclDialogOpen(false)}
+          onSaved={async () => {
+            await fetchCatalog()
+            setShaclDialogOpen(false)
+          }}
+        />
+      )}
+
+      {/* PRP-0212 (UDR-0194 D13): strict mode refused the save. */}
+      <Dialog open={strictRefusal !== null} onOpenChange={(o) => !o && setStrictRefusal(null)}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Not saved: SHACL violations</DialogTitle>
+            <DialogDescription>{strictRefusal?.message}</DialogDescription>
+          </DialogHeader>
+          <ShaclResultsTable
+            items={strictRefusal?.results ?? []}
+            onSelect={(term) => {
+              setStrictRefusal(null)
+              selectFindingSubject(term)
+            }}
+          />
+          {strictRefusal && strictRefusal.count > strictRefusal.results.length && (
+            <p className="text-xs text-zinc-500">... and {strictRefusal.count - strictRefusal.results.length} more</p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setStrictRefusal(null)}>
+              Fix
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setStrictRefusal(null)
+                void save(true)
+              }}
+              title="Save this version although it has SHACL violations (recorded in History)">
+              Save anyway
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* PRP-0212 (UDR-0194 D9): the stored results of one group, shape or node. */}
+      {shaclList && selectedId && (
+        <ShaclResultsDialog
+          ontologyId={selectedId}
+          title={shaclList.title}
+          query={shaclList.query}
+          stale={dirty}
+          onClose={() => setShaclList(null)}
+          onSelect={(term) => {
+            setShaclList(null)
+            selectFindingSubject(term)
+          }}
+        />
+      )}
 
       {/* Rename (name + description); id and projection unchanged (PRP-0116, CTR-0171). */}
       <Dialog open={renameTarget !== null} onOpenChange={(o) => !renaming && !o && setRenameTarget(null)}>

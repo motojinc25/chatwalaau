@@ -1097,6 +1097,54 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         min=10,
         max=3_600,
     ),
+    # PRP-0212 (UDR-0194 D5, D8, D13): SHACL validation bounds.
+    SettingDescriptor(
+        "ontology_shacl_max_triples",
+        "Ontology SHACL validation: largest data (statements)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "Largest number of data statements (stated plus inferred, imports included) SHACL "
+            "validation accepts. It runs in the background after each save: about 12 seconds for "
+            "100,000 statements with simple shapes; larger data is reported as too large."
+        ),
+        min=1_000,
+        max=1_000_000,
+    ),
+    SettingDescriptor(
+        "ontology_shacl_max_results",
+        "Ontology SHACL validation: results kept per version",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help="Validation results stored for each ontology version (the counts stay exact).",
+        min=100,
+        max=100_000,
+    ),
+    SettingDescriptor(
+        "ontology_shacl_build_timeout_seconds",
+        "Ontology SHACL validation: time limit (seconds)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help="A background SHACL validation that runs longer than this is stopped and reported.",
+        min=10,
+        max=3_600,
+    ),
+    SettingDescriptor(
+        "ontology_shacl_strict_timeout_seconds",
+        "Ontology SHACL strict mode: check time limit (seconds)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "In strict mode a save is validated before it is written. A check that does not "
+            "finish within this time lets the save through with a notice."
+        ),
+        min=5,
+        max=600,
+    ),
     # ---- Schedule (runtime) -----------------------------------------------
     SettingDescriptor(
         "cron_tick_seconds",

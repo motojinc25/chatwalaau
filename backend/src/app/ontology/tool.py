@@ -25,6 +25,10 @@ LLM answer questions from the operator's concept models:
   narrower question); the catalog lists the entailment modes already computed for each
   ontology (``entailment_ready``); ``action="explain"`` explains why one statement is
   inferred (the rules applied and the stated statements it rests on).
+- PRP-0212 (CTR-0172 v8, UDR-0194 D14): ``action="validate"`` answers the stored SHACL
+  validation of an ontology's current version (counts, results grouped by shape, path
+  and constraint, then examples; ``focus`` narrows to one node); the catalog lists each
+  ontology's ``validation`` state.
 
 Errors (unknown ontology, un-convertible question, empty result) return short
 diagnostic text and never raise into the run.
@@ -66,8 +70,14 @@ ONTOLOGY_TOOL_INSTRUCTION = (
     "When the user asks WHY something holds or why the ontology is inconsistent, use "
     "action='explain' with the statement as one Turtle triple (prefixes of the ontology allowed) "
     "and the entailment mode; it answers the rules applied and the stated statements behind it. "
+    "When the user asks whether the data satisfies its constraints or shapes (SHACL), use "
+    "action='validate' (optionally focus='<node>' for one node); ontologies with shapes show "
+    "validation in the catalog. "
     "Searches have a time limit: if one times out, ask a narrower question."
 )
+
+# Result lines a validate answer lists at most (besides the groups; UDR-0194 D14).
+_VALIDATE_RESULTS = 50
 
 
 # Named graphs listed per ontology in the catalog summary (UDR-0182 D5).
@@ -90,8 +100,30 @@ def _catalog_summary() -> list[dict[str, object]]:
         ready = _ready_modes(e["id"])
         if ready:
             item["entailment_ready"] = ready
+        validation = _validation_summary(e)
+        if validation is not None:
+            item["validation"] = validation
         out.append(item)
     return out
+
+
+def _validation_summary(entry: dict[str, object]) -> dict[str, object] | None:
+    """PRP-0212 (UDR-0194 D14): the SHACL state of an ontology with shapes, else None."""
+    from app.ontology import shacl_results
+
+    config = store.shacl_config(entry)  # type: ignore[arg-type]
+    if config is None:
+        return None
+    try:
+        record = shacl_results.lookup(shacl_results.key_for(str(entry["id"]), config))
+    except (KeyError, ValueError):
+        return None
+    if record is None:
+        return {"state": "not_validated_yet"}
+    if record.get("state") != shacl_results.READY:
+        return {"state": record.get("state")}
+    counts = record.get("counts") or {}
+    return {"state": "ready", "conforms": bool(record.get("conforms")), "violations": counts.get("violation", 0)}
 
 
 def _ready_modes(ontology_id: str) -> list[str]:
@@ -130,10 +162,10 @@ def _resolve_entry(selector: str) -> dict[str, str] | list[dict[str, str]] | Non
 
 
 async def ontology_query(
-    action: Annotated[str, Field(description="One of: catalog, query, explain.")],
+    action: Annotated[str, Field(description="One of: catalog, query, explain, validate.")],
     ontology: Annotated[
         str,
-        Field(description="For query / explain: the target ontology id (preferred) or its exact name."),
+        Field(description="For query / explain / validate: the target ontology id (preferred) or its exact name."),
     ] = "",
     question: Annotated[
         str,
@@ -163,6 +195,13 @@ async def ontology_query(
             "(the ontology's prefixes may be used)."
         ),
     ] = "",
+    focus: Annotated[
+        str,
+        Field(
+            description="For validate, optional: only the results about this node (a prefixed name "
+            "of the ontology, <iri>, or a full IRI)."
+        ),
+    ] = "",
 ) -> str:
     """Query the operator's RDF ontology concept models.
 
@@ -177,8 +216,8 @@ async def ontology_query(
     if act == "catalog":
         return json.dumps({"ontologies": await run_in_threadpool(_catalog_summary)}, ensure_ascii=False)
 
-    if act not in ("query", "explain"):
-        return "Error: 'action' must be one of catalog, query, explain."
+    if act not in ("query", "explain", "validate"):
+        return "Error: 'action' must be one of catalog, query, explain, validate."
 
     resolved = _resolve_entry(ontology)
     if resolved is None:
@@ -196,6 +235,8 @@ async def ontology_query(
         )
     if act == "explain":
         return await _explain(resolved, statement, entailment, graph)
+    if act == "validate":
+        return await _validate(resolved, focus)
     if not (question or "").strip():
         return "Error: 'question' is required for query."
 
@@ -331,6 +372,122 @@ async def _explain(resolved: dict[str, str], statement: str, entailment: str, gr
     except ValueError as exc:
         return f"Error: {exc}"
     return explain.render_text(result, ontology=f"{resolved['name']} ({resolved['id']})")
+
+
+def _validation_view(ontology_id: str, focus: str) -> dict[str, object]:
+    """The stored record and results of the current version, ``focus`` applied (blocking)."""
+    from app.ontology import shacl_results
+
+    config = store.shacl_config(store.get_entry(ontology_id))
+    if config is None:
+        return {"record": None}
+    key = shacl_results.key_for(ontology_id, config)
+    record = shacl_results.lookup(key)
+    if record is None or record.get("state") != shacl_results.READY:
+        return {"record": record}
+    items = shacl_results.load_results(key)
+    wanted = (focus or "").strip()
+    if wanted:
+        prefixes = dict(record.get("prefixes") or {})
+        iri = wanted[1:-1] if wanted.startswith("<") and wanted.endswith(">") else wanted
+        name, _, local = wanted.partition(":")
+        if name in prefixes and not wanted.startswith("<"):
+            iri = prefixes[name] + local
+        targets = {f"<{iri}>", wanted}
+        items = [item for item in items if item["focus"]["nt"] in targets or item["focus"]["shown"] == wanted]
+    return {"record": record, "items": items}
+
+
+def _render_validation(resolved: dict[str, str], record: dict[str, object], items: list, focus: str) -> str:
+    counts = dict(record.get("counts") or {})  # type: ignore[call-overload]
+    lines = [
+        f"SHACL validation of {resolved['name']} ({resolved['id']}), version {str(record.get('revision'))[:12]}; "
+        f"inference before validation: {record.get('inference', 'none')}.",
+    ]
+    shapes = []
+    for source in record.get("sources") or []:  # type: ignore[union-attr]
+        label = (
+            f"graph <{source['ref']}>"
+            if source["kind"] == "graph"
+            else f"ontology {source.get('name') or source['ref']}"
+        )
+        shapes.append(label + (" (missing)" if source.get("missing") else ""))
+    if shapes:
+        lines.append("Shapes: " + "; ".join(shapes) + ".")
+    verdict = "conforms" if record.get("conforms") else "does not conform"
+    lines.append(
+        f"Result: {verdict} -- {counts.get('violation', 0)} violation(s), {counts.get('warning', 0)} warning(s), "
+        f"{counts.get('info', 0)} note(s)."
+    )
+    budget = max(1, min(_VALIDATE_RESULTS, int(settings.ontology_tool_max_triples)))
+    if focus.strip():
+        lines.append(f"Results about {focus.strip()}: {len(items)}.")
+    else:
+        groups = list(record.get("groups") or [])  # type: ignore[call-overload]
+        if groups:
+            lines.append("By shape, path and constraint (count):")
+            for group in groups[:budget]:
+                shape = (group.get("shape") or {}).get("shown") or "?"
+                path = group.get("path") or "(node)"
+                constraint = group.get("constraint") or group.get("component")
+                lines.append(
+                    f"- [{group['severity']}] {shape} -- {path} -- {constraint}: {group['count']} "
+                    f'("{group.get("message")}")'
+                )
+            if len(groups) > budget:
+                lines.append(f"- ... and {len(groups) - budget} more group(s)")
+    if items:
+        lines.append(f"Results (first {min(budget, len(items))}):")
+        for item in items[:budget]:
+            value = f" (value {item['value']['shown']})" if item.get("value") else ""
+            lines.append(
+                f"- [{item['severity']}] {item['focus']['shown']} -- {item.get('path') or '(node)'} -- "
+                f"{item['message']}{value}"
+            )
+    unsupported = list(record.get("unsupported") or [])  # type: ignore[call-overload]
+    if unsupported:
+        ignored = ", ".join(f"{u['construct']} on {u['shape']}" for u in unsupported[:10])
+        lines.append(f"Ignored (only SHACL Core is validated): {ignored}.")
+    return "\n".join(lines)
+
+
+async def _validate(resolved: dict[str, str], focus: str) -> str:
+    """``action="validate"``: the stored SHACL validation of the current version (UDR-0194 D14)."""
+    import time
+
+    from app.ontology import shacl_jobs
+
+    if store.shacl_config(await run_in_threadpool(store.get_entry, resolved["id"])) is None:
+        return (
+            f"Ontology '{resolved['name']}' ({resolved['id']}) has no shapes; SHACL validation is not "
+            "configured for it (the operator declares shapes graphs or shapes ontologies in the catalog)."
+        )
+    budget = workers.Budget(workers.AGENT)
+    try:
+        if shacl_jobs.active():
+            limit = budget.remaining() or float(max(1, int(settings.ontology_tool_timeout_seconds) or 20))
+            current = await shacl_jobs.wait_ready(resolved["id"], time.monotonic() + limit)
+        else:
+            await workers.run("shacl", {"ontology_id": resolved["id"]}, budget=budget)
+            current = await run_in_threadpool(shacl_jobs.status, resolved["id"])
+    except workers.QueryTimeout as exc:
+        return f"Error: {exc}"
+    except workers.WorkerFailed as exc:
+        return f"Error: the validation failed ({exc}); try again."
+    except KeyError:
+        return f"Error: ontology {resolved['id']} no longer exists."
+    state = current.get("state")
+    if state in ("missing", "queued", "running"):
+        return "Validation is still running; try again shortly."
+    if state != "ready":
+        return (
+            f"SHACL validation of {resolved['name']} ({resolved['id']}) did not run: {current.get('message') or state}."
+        )
+    view = await run_in_threadpool(_validation_view, resolved["id"], focus)
+    record = view.get("record")
+    if not isinstance(record, dict) or record.get("state") != "ready":
+        return "Validation is still running; try again shortly."
+    return _render_validation(resolved, record, list(view.get("items") or []), focus)
 
 
 __all__ = ["ONTOLOGY_TOOL_INSTRUCTION", "ontology_query"]

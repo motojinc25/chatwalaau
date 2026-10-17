@@ -20,6 +20,8 @@ export interface HistoryVersion {
   bytes: number
   format: 'turtle' | 'trig'
   legacy: boolean
+  /** PRP-0212 (UDR-0194 D13): saved anyway although strict mode found SHACL violations. */
+  shacl_override?: boolean
 }
 
 export interface DiffStatement {
@@ -80,6 +82,11 @@ function changes(v: HistoryVersion): number | null {
 
 /** What produced a version, in words. */
 export function describeVersion(v: HistoryVersion, formatTime: (iso: string) => string = (iso) => iso): string {
+  const text = describeWrite(v, formatTime)
+  return v.shacl_override ? `${text} despite SHACL violations` : text
+}
+
+function describeWrite(v: HistoryVersion, formatTime: (iso: string) => string): string {
   if (v.kind === null) return v.version === CURRENT_VERSION ? 'Current version' : 'Earlier version'
   switch (v.kind) {
     case 'create':

@@ -4,8 +4,12 @@ The inferred statements of an entailment mode are computed after every write (by
 ``ontology-entailment`` Pipeline Job, ``entailment_jobs``) or at the first search that
 needs them, and kept beside the ontology files -- never in them:
 
-    <ontology_dir>/.entailment/<ontology id>/<key hash>-<mode>.nq.gz   inferred statements
-    <ontology_dir>/.entailment/<ontology id>/<key hash>-<mode>.json    the record
+    <results dir>/<ontology id>/<key hash>-<mode>.nq.gz   inferred statements
+    <results dir>/<ontology id>/<key hash>-<mode>.json    the record
+
+The results dir is ``ONTOLOGY_RESULTS_DIR`` (PRP-0212, UDR-0194 D4; default
+``<ontology_dir>/.entailment``); the SHACL validation results (``shacl_results``) live in
+the same per-ontology folders.
 
 The key is the query-cache key -- (id, revision, kind, scope, imports signature),
 UDR-0183 D1 / UDR-0189 D5 -- so a result answers for exactly the file versions it was
@@ -51,10 +55,41 @@ STATES = (READY, TOO_LARGE, FAILED, TIMEOUT)
 MAX_STORED_FINDINGS = 1000
 
 
+_refused_dirs: set[str] = set()
+
+
 def results_root() -> Path:
+    """The results folder: ``ONTOLOGY_RESULTS_DIR`` (PRP-0212, UDR-0194 D4).
+
+    Relative = under ``ONTOLOGY_DIR`` (default ``.entailment``, the PRP-0211 folder);
+    absolute = as is. A value that is the ontology folder itself or one of its ancestors
+    is refused with a warning and the default is used: pruning deletes files in the
+    results folder, so it must never hold the ontology files.
+    """
+    from pathlib import Path
+
+    from app.core.config import settings
     from app.ontology.store import ontology_dir
 
-    return ontology_dir() / RESULTS_DIRNAME
+    base = ontology_dir()
+    raw = str(getattr(settings, "ontology_results_dir", "") or "").strip() or RESULTS_DIRNAME
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    try:
+        resolved, home = candidate.resolve(), base.resolve()
+    except OSError:
+        return base / RESULTS_DIRNAME
+    if resolved == home or resolved in home.parents:
+        if raw not in _refused_dirs:
+            _refused_dirs.add(raw)
+            logger.warning(
+                "ONTOLOGY_RESULTS_DIR=%r is the ontology folder or one of its parents; using %r instead",
+                raw,
+                RESULTS_DIRNAME,
+            )
+        return base / RESULTS_DIRNAME
+    return candidate
 
 
 def folder(ontology_id: str) -> Path:
@@ -408,7 +443,7 @@ def prune(ontology_id: str, revision: str, signature: list[list[str]] | None) ->
         if record.get("revision") == revision and (imports is None or imports == signature):
             continue
         stem = record["_file"].removesuffix(".json")
-        for name in (f"{stem}.json", f"{stem}.nq.gz"):
+        for name in (f"{stem}.json", f"{stem}.nq.gz", f"{stem}.json.gz"):
             path = folder(ontology_id) / name
             try:
                 if path.is_file():

@@ -54,6 +54,7 @@ PHASE_LABELS = {
     "entailment": "computing entailment",
     "query": "running the query",
     "explain": "explaining",
+    "validate": "validating with SHACL",
 }
 
 
@@ -134,11 +135,29 @@ def _op_statements(payload: dict[str, Any], phase: Callable[[str], None]) -> dic
     return inferred_views.statements_op(payload, phase)
 
 
+def _op_shacl(payload: dict[str, Any], phase: Callable[[str], None]) -> dict[str, Any]:
+    """PRP-0212 (UDR-0194 D5): validate the current version when no job engine runs."""
+    from app.ontology import shacl_results
+
+    phase("validate")
+    return shacl_results.build(payload["ontology_id"])
+
+
+def _op_shacl_candidate(payload: dict[str, Any], phase: Callable[[str], None]) -> dict[str, Any]:
+    """PRP-0212 (UDR-0194 D13): strict mode -- validate a text before it is written."""
+    from app.ontology import shacl_results
+
+    phase("validate")
+    return shacl_results.candidate(payload["ontology_id"], payload["text"], payload.get("dataset"))
+
+
 OPS: dict[str, Callable[[dict[str, Any], Callable[[str], None]], Any]] = {
     "summary": _op_summary,
     "query": _op_query,
     "explain": _op_explain,
     "statements": _op_statements,
+    "shacl": _op_shacl,
+    "shacl_candidate": _op_shacl_candidate,
 }
 
 
@@ -475,6 +494,23 @@ async def _entailment_ready(ontology_id: str, scope: Any, imports: bool | None, 
     return False
 
 
+def run_blocking(op: str, payload: dict[str, Any], *, timeout: float | None, lane: str = SCREEN) -> Any:
+    """Run ``op`` from a worker thread and wait (strict mode holds the write lock meanwhile).
+
+    With 0 workers the work runs in this thread, without a time limit.
+    """
+    if configured_workers() == 0:
+        return OPS[op](payload, _no_phase)
+    return supervisor.run(
+        op,
+        payload,
+        timeout=timeout,
+        stop=threading.Event(),
+        lane=lane,
+        affinity=payload.get("ontology_id"),
+    )
+
+
 def shutdown() -> None:
     """End the workers (app shutdown)."""
     supervisor.shutdown()
@@ -493,6 +529,7 @@ __all__ = [
     "explain",
     "query",
     "run",
+    "run_blocking",
     "shutdown",
     "summary",
     "supervisor",

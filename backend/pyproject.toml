@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.188.0"
+version = "0.189.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -199,6 +199,10 @@ dependencies = [
     # gate (tests/invariants/test_prp0209_entailment_w3c.py). Imported lazily by
     # app.ontology.entailment on the first rdfs query only.
     "owlrl[oxigraph]==7.6.2",
+    # PRP-0212 / UDR-0194 D7 / D15: SHACL Core validation of ontology data, pinned EXACTLY --
+    # a version move runs the W3C SHACL Core gate (tests/invariants/test_prp0212_shacl_w3c.py).
+    # Imported lazily by app.ontology.shacl inside the validation child process only.
+    "pyshacl==0.40.1",
     # Computer Use desktop provider
     "chatwalaau-computer-use>=0.2,<0.3; sys_platform == 'win32' and platform_machine == 'AMD64'",
     "mcp>=1.26,<2",
