@@ -984,9 +984,9 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         "int",
         SCOPE_RUNTIME,
         help=(
-            "Largest number of stated statements (imports included) a search with RDFS entailment "
-            "accepts. The reasoner needs about 10 seconds for 3,000 statements; larger ontologies "
-            "are refused with a message."
+            "Largest number of stated statements (imports included) RDFS entailment accepts. It is "
+            "computed in the background after each save: about 13 seconds for 100,000 statements "
+            "(more with named graphs); larger ontologies are refused with a message."
         ),
         min=100,
         max=1_000_000,
@@ -999,10 +999,10 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         "int",
         SCOPE_RUNTIME,
         help=(
-            "Largest number of stated statements (imports included) a search with OWL 2 RL "
-            "entailment accepts. OWL 2 RL is about 7 times slower than RDFS: about 4 seconds for "
-            "1,000 statements (more with named graphs or owl:sameAs); larger ontologies are refused "
-            "with a message."
+            "Largest number of stated statements (imports included) OWL 2 RL entailment accepts. It "
+            "is computed in the background after each save: about 20-50 seconds for 10,000 "
+            "statements (more with named graphs or owl:sameAs); larger ontologies are refused with "
+            "a message."
         ),
         min=100,
         max=1_000_000,
@@ -1021,6 +1021,81 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         ),
         min=2,
         max=10_000,
+    ),
+    # PRP-0211 (CTR-0198, UDR-0193 D3-D9): search workers and time limits, row bound,
+    # entailment computed after every write.
+    SettingDescriptor(
+        "ontology_query_workers",
+        "Ontology search worker processes",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "Ontology searches (Ontology screen and agent) run in this many background processes, "
+            "so a search that runs too long can be stopped. They share the query cache. 0 runs "
+            "searches inside the server process as before, without time limits."
+        ),
+        min=0,
+        max=8,
+    ),
+    SettingDescriptor(
+        "ontology_query_timeout_seconds",
+        "Ontology screen: search time limit (seconds)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "A SPARQL or natural-language search from the Ontology screen is stopped after this "
+            "many seconds (waiting included; the model's SPARQL generation is not counted). "
+            "0 = no limit."
+        ),
+        min=0,
+        max=600,
+    ),
+    SettingDescriptor(
+        "ontology_tool_timeout_seconds",
+        "Agent ontology_query tool: time limit (seconds)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "A search the agent runs with the ontology_query tool is stopped after this many "
+            "seconds and the agent is told to ask a narrower question. 0 = no limit."
+        ),
+        min=0,
+        max=600,
+    ),
+    SettingDescriptor(
+        "ontology_query_max_rows",
+        "Ontology screen: largest search result (rows)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help="SELECT rows and CONSTRUCT triples shown by a search on the Ontology screen; the rest is cut off.",
+        min=10,
+        max=100_000,
+    ),
+    SettingDescriptor(
+        "ontology_entailment_precompute",
+        "Ontology: compute entailment after each save",
+        "ontology",
+        "bool",
+        SCOPE_RUNTIME,
+        help=(
+            "After every save, RDFS and OWL 2 RL entailment are computed in the background (a "
+            "Pipeline Job), so searches with entailment answer at once. Off: they are computed "
+            "when a search first asks for them."
+        ),
+    ),
+    SettingDescriptor(
+        "ontology_entailment_build_timeout_seconds",
+        "Ontology: entailment computation time limit (seconds)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help="A background entailment computation that runs longer than this is stopped and reported.",
+        min=10,
+        max=3_600,
     ),
     # ---- Schedule (runtime) -----------------------------------------------
     SettingDescriptor(

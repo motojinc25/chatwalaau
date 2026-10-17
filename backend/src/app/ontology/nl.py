@@ -208,7 +208,12 @@ def schema_summary(graph: Any) -> str:
 
 
 def cached_schema_summary(graph: Any) -> str:
-    """``schema_summary`` computed once per loaded graph and kept with it (UDR-0183 D2)."""
+    """``schema_summary`` computed once per loaded graph and kept with it (UDR-0183 D2).
+
+    A summary a search worker already made (text, UDR-0193 D3) is returned as it is.
+    """
+    if isinstance(graph, str):
+        return graph
     summary = getattr(graph, "nl_summary", None)
     if summary is None:
         summary = schema_summary(graph)
@@ -249,7 +254,10 @@ def ensure_read_only(sparql: str, *, construct_only: bool = False) -> None:
 
 
 async def generate_sparql(question: str, graph: Any, *, construct_only: bool = False) -> str:
-    """NL -> SPARQL via one non-streaming completion through the chokepoint (D8)."""
+    """NL -> SPARQL via one non-streaming completion through the chokepoint (D8).
+
+    ``graph`` is a loaded query graph, or its schema summary text.
+    """
     from agent_framework import Message
     from fastapi.concurrency import run_in_threadpool
 
@@ -259,8 +267,9 @@ async def generate_sparql(question: str, graph: Any, *, construct_only: bool = F
     form = "CONSTRUCT" if construct_only else "SELECT, CONSTRUCT, ASK, or DESCRIBE"
     model = resolve_task_model("ontology_nl")
     client = _build_chat_client(model)
-    # The summary reads the Store: off the event loop (UDR-0183 D4), once per entry.
-    schema = await run_in_threadpool(cached_schema_summary, graph)
+    # ``graph`` is the schema summary itself when a search worker made it (UDR-0193 D3);
+    # else the summary reads the Store: off the event loop (UDR-0183 D4), once per entry.
+    schema = graph if isinstance(graph, str) else await run_in_threadpool(cached_schema_summary, graph)
     messages = [
         Message(role="system", contents=[_NL_SYSTEM_PROMPT.format(form=form)]),
         Message(

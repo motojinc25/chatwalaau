@@ -55,6 +55,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 import uuid
 
@@ -84,7 +85,14 @@ FILE_SUFFIXES = (TURTLE_SUFFIX, TRIG_SUFFIX)
 
 # Result-shape caps for the read-only executor (payload bound, not a security
 # boundary -- CTR-0083 gates the callers).
-SELECT_MAX_ROWS = 1000
+# PRP-0211 (UDR-0193 D6): the row bound of the screen lanes is the App Settings key
+# ``ontology_query_max_rows`` (it replaced the constant SELECT_MAX_ROWS = 1000).
+
+
+def max_rows() -> int:
+    """The ``ontology_query_max_rows`` App Settings bound (SELECT rows, triples table)."""
+    return max(1, int(settings.ontology_query_max_rows))
+
 
 # Locks (UDR-0183 D4). Order: ``write_lock(id)`` before ``_CATALOG_LOCK``, never the
 # reverse. On Windows ``os.replace`` fails while another thread has the target open,
@@ -102,6 +110,32 @@ def write_lock(ontology_id: str) -> Iterator[None]:
         lock = _WRITE_LOCKS.setdefault(ontology_id, threading.RLock())
     with lock:
         yield
+
+
+# PRP-0211 (UDR-0193 D7): called with the ontology id after every write -- create,
+# save (statement operations and version restores included), trash restore, delete --
+# so the entailment builds can follow. Listeners must not raise; errors are logged.
+_write_listeners: list[Callable[[str, str], None]] = []
+
+
+def add_write_listener(listener: Callable[[str, str], None]) -> None:
+    """Register ``listener(ontology_id, kind)``; ``kind`` is "write" or "delete" (idempotent)."""
+    if listener not in _write_listeners:
+        _write_listeners.append(listener)
+
+
+def remove_write_listener(listener: Callable[[str, str], None]) -> None:
+    if listener in _write_listeners:
+        _write_listeners.remove(listener)
+
+
+def notify_written(ontology_id: str, kind: str = "write") -> None:
+    """Tell the write listeners that ``ontology_id`` was written (or deleted)."""
+    for listener in _write_listeners:
+        try:
+            listener(ontology_id, kind)
+        except Exception:
+            logger.warning("ontology write listener failed for %s", ontology_id, exc_info=True)
 
 
 def _now() -> str:
@@ -272,6 +306,7 @@ def create_ontology(
         },
     )
     logger.info("ontology created: %s (%s)", entry_id, entry["name"])
+    notify_written(entry_id)
     return entry
 
 
@@ -334,8 +369,13 @@ def delete_ontology(ontology_id: str) -> bool:
             },
         )
     invalidate_query_cache(ontology_id)
+    # PRP-0211 (UDR-0193 D8): the stored entailment results go with the ontology.
+    from app.ontology import entailment_results
+
+    entailment_results.remove(ontology_id)
     history.expire_trash()
     logger.info("ontology deleted: %s (backup kept)", ontology_id)
+    notify_written(ontology_id, "delete")
     return True
 
 
@@ -405,6 +445,7 @@ def save_ontology_text(
         )
         history_log.prune(ontology_id)
     invalidate_query_cache(ontology_id)
+    notify_written(ontology_id)
     return backup_name
 
 
@@ -455,6 +496,7 @@ def restore_deleted_ontology(ontology_id: str, text: str, *, dataset: bool, rest
         )
     invalidate_query_cache(ontology_id)
     logger.info("deleted ontology restored: %s from %s", ontology_id, restored_from)
+    notify_written(ontology_id)
     return entry
 
 
@@ -531,6 +573,9 @@ class QueryGraph:
     # (message, detail) so the engine does not run again for the same files.
     entailment_notices: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     entailment_refusals: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
+    # PRP-0211 (UDR-0193 D8): the query-cache key this graph was loaded for (None when it
+    # was built outside ``load_store``); the stored entailment results are kept per key.
+    key: tuple[Any, ...] | None = None
 
 
 def parse_scope(value: Any) -> Any:
@@ -615,6 +660,58 @@ def _blank_prefix(data: bytes, imported: list[Any]) -> str:
     return f"cwz{len(data)}"
 
 
+_BLANK_LABEL_RE = re.compile(rb"_:([^\s;,()\[\]{}<>\"'^|]+)")
+
+
+class _StableBlanks:
+    """Parser-made blank-node labels made the same in every process (UDR-0193 D8).
+
+    A parser labels the blank nodes a file writes without a label (``[ ... ]``, list
+    cells) with random ids, so two loads of one file version disagree. Stored entailment
+    results name blank nodes of the query Store, so such labels are replaced, in parse
+    order, by ``<prefix><n>``; labels the file writes (``_:x``) are kept as they are.
+    """
+
+    def __init__(self, data: bytes, prefix: str) -> None:
+        import pyoxigraph as ox
+
+        self._ox = ox
+        found = _BLANK_LABEL_RE.findall(data)
+        self._explicit = {m.decode("utf-8", "replace") for m in found} | {
+            m.rstrip(b".").decode("utf-8", "replace") for m in found
+        }
+        self._prefix = prefix
+        self._map: dict[str, Any] = {}
+
+    def term(self, term: Any) -> Any:
+        ox = self._ox
+        if isinstance(term, ox.BlankNode):
+            if term.value in self._explicit:
+                return term
+            node = self._map.get(term.value)
+            if node is None:
+                node = self._map[term.value] = ox.BlankNode(f"{self._prefix}{len(self._map)}")
+            return node
+        if isinstance(term, ox.Triple):
+            subject, obj = self.term(term.subject), self.term(term.object)
+            if subject is term.subject and obj is term.object:
+                return term
+            return ox.Triple(subject, term.predicate, obj)
+        return term
+
+    def quad(self, quad: Any) -> Any:
+        ox = self._ox
+        subject, obj, graph = quad.subject, quad.object, quad.graph_name
+        hidden = ox.BlankNode | ox.Triple
+        if not isinstance(subject, hidden) and not isinstance(obj, hidden) and not isinstance(graph, ox.BlankNode):
+            return quad
+        new_subject, new_object = self.term(subject), self.term(obj)
+        new_graph = self.term(graph) if isinstance(graph, ox.BlankNode) else graph
+        if new_subject is subject and new_object is obj and new_graph is graph:
+            return quad
+        return ox.Quad(new_subject, quad.predicate, new_object, new_graph)
+
+
 def _merge_imports(
     store: Any,
     imported: list[Any],
@@ -658,9 +755,11 @@ def _merge_imports(
         named_ok = graph_name not in own_graphs and graph_name not in import_graphs
         target = graph_name if named_ok else default_graph
         parser = ox.parse(item.data, format=ox.RdfFormat.TRIG)
+        stable = _StableBlanks(item.data, f"{prefix}{k}y")
 
-        def quads(parser: Any = parser, target: Any = target, term: Any = term) -> Any:
-            for quad in parser:
+        def quads(parser: Any = parser, target: Any = target, term: Any = term, stable: Any = stable) -> Any:
+            for parsed in parser:
+                quad = stable.quad(parsed)
                 subject, obj = quad.subject, quad.object
                 if not isinstance(subject, ox.NamedNode):
                     subject = term(subject)
@@ -730,10 +829,12 @@ def _build_query_graph(entry: dict[str, str], data: bytes, scope: Any, imported:
     document: dict[str, Any] = {"prefixes": [], "base": None, "version": None}
     if data.strip():
         parser = ox.parse(data, format=ox.RdfFormat.TRIG)
+        stable = _StableBlanks(data, f"{_blank_prefix(data, imported or [])}p")
 
         def quads() -> Any:
             nonlocal count, named_quads
-            for quad in parser:
+            for parsed in parser:
+                quad = stable.quad(parsed)
                 if provenance is None:
                     # A graph file (.ttl): every quad is in the default graph -- the
                     # PRP-0199 hot path, no extra objects per quad.
@@ -893,18 +994,15 @@ def include_imports(value: bool | None) -> bool:
     return bool(value)
 
 
-def load_store(ontology_id: str, scope: Any = "all", imports: bool | None = None) -> QueryGraph:
-    """The ontology loaded for the query lanes, from the cache when its revision is cached.
+def resolve_query(
+    ontology_id: str, scope: Any = "all", imports: bool | None = None
+) -> tuple[dict[str, str], bytes, Any, list[Any], list[dict[str, Any]], tuple[Any, ...]]:
+    """What a query lane request reads: (entry, bytes, scope, imported, notices, cache key).
 
-    The stored bytes are read and hashed on every call (about 20 ms at the 10 MB
-    cap); the key carries that revision, so an entry built from other bytes is never
-    returned (UDR-0183 D1). Within the ``ontology_query_cache_mb`` budget entries are
-    kept least-recently-used first; one larger than the budget is built, used and not
-    kept; a budget of 0 builds every time (D3). Concurrent requests for one key share
-    one load. A cached entry is never changed (D2): the Store only ever answers
-    ``query()`` and the lexical index fills its lookup tables under its own lock.
+    The stored bytes are read and hashed (about 20 ms at the 10 MB cap); the key carries
+    that revision and the (id, revision) of every imported ontology (UDR-0183 D1,
+    UDR-0189 D5). Raises ``KeyError`` for an unknown id, ``ValueError`` for a bad scope.
     """
-    global _cache_total
     pair = read_entry_and_bytes(ontology_id)
     if pair is None:
         raise KeyError(ontology_id)
@@ -920,13 +1018,36 @@ def load_store(ontology_id: str, scope: Any = "all", imports: bool | None = None
         imported = closure.loaded
         closure_notices = [{"code": "imports", "message": text} for text in closure.notices]
     signature = tuple((item.ontology_id, item.revision) for item in imported) or None
+    key = cache_key(ontology_id, revision_of(data), is_dataset(entry), scope, signature)
+    return entry, data, scope, imported, closure_notices, key
+
+
+def query_key(ontology_id: str, scope: Any = "all", imports: bool | None = None) -> tuple[Any, ...]:
+    """The cache key a query lane request would load (UDR-0193 D8: stored results use it)."""
+    return resolve_query(ontology_id, scope, imports)[5]
+
+
+def load_store(ontology_id: str, scope: Any = "all", imports: bool | None = None) -> QueryGraph:
+    """The ontology loaded for the query lanes, from the cache when its revision is cached.
+
+    The stored bytes are read and hashed on every call (about 20 ms at the 10 MB
+    cap); the key carries that revision, so an entry built from other bytes is never
+    returned (UDR-0183 D1). Within the ``ontology_query_cache_mb`` budget entries are
+    kept least-recently-used first; one larger than the budget is built, used and not
+    kept; a budget of 0 builds every time (D3). Concurrent requests for one key share
+    one load. A cached entry is never changed (D2): the Store only ever answers
+    ``query()`` and the lexical index fills its lookup tables under its own lock.
+    """
+    global _cache_total
+    entry, data, scope, imported, closure_notices, key = resolve_query(ontology_id, scope, imports)
     budget = cache_budget_bytes()
     if budget <= 0:
         if _cache:
             invalidate_query_cache()
-        return _with_notices(_build_query_graph(entry, data, scope, imported), closure_notices)
+        graph = _build_query_graph(entry, data, scope, imported)
+        graph.key = key
+        return _with_notices(graph, closure_notices)
     dataset = is_dataset(entry)
-    key = cache_key(ontology_id, revision_of(data), dataset, scope, signature)
     with _cache_lock:
         hit = _cache.get(key)
         if hit is not None:
@@ -944,6 +1065,7 @@ def load_store(ontology_id: str, scope: Any = "all", imports: bool | None = None
             cache_stats["misses"] += 1
         try:
             graph = _build_query_graph(entry, data, scope, imported)
+            graph.key = key
         except BaseException:
             with _cache_lock:
                 _loading.pop(key, None)
@@ -1038,6 +1160,29 @@ def _display(term: Any, prefixes: dict[str, str]) -> str:
     return str(term)
 
 
+def display_finding(
+    graph: QueryGraph, finding: dict[str, Any], prefixes: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """One inconsistency finding as answers show it: kind, graph, message, terms (UDR-0192 D5)."""
+    if prefixes is None:
+        prefixes = _construct_prefixes(graph.document)
+    shown = [
+        term if isinstance(term, str) else _display(restore_term(graph.index, term)[0], prefixes)
+        for term in finding["terms"]
+    ]
+    try:
+        message = finding["template"] % tuple(shown)
+    except (TypeError, ValueError):
+        message = finding["template"]
+    graph_name = finding.get("graph")
+    return {
+        "kind": finding["kind"],
+        "graph": None if graph_name is None else _display(graph_name, prefixes),
+        "message": message,
+        "terms": shown,
+    }
+
+
 def _entailment_notices(
     graph: QueryGraph, mode: str, findings: list[dict[str, Any]], same_as: int
 ) -> list[dict[str, Any]]:
@@ -1049,27 +1194,12 @@ def _entailment_notices(
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for finding in findings:
-        shown = [
-            term if isinstance(term, str) else _display(restore_term(graph.index, term)[0], prefixes)
-            for term in finding["terms"]
-        ]
-        try:
-            message = finding["template"] % tuple(shown)
-        except (TypeError, ValueError):
-            message = finding["template"]
-        key = (finding["kind"], message)
+        item = display_finding(graph, finding, prefixes)
+        key = (item["kind"], item["message"])
         if key in seen:
             continue
         seen.add(key)
-        graph_name = finding.get("graph")
-        items.append(
-            {
-                "kind": finding["kind"],
-                "graph": None if graph_name is None else _display(graph_name, prefixes),
-                "message": message,
-                "terms": shown,
-            }
-        )
+        items.append(item)
     if items:
         order = {kind: i for i, kind in enumerate(entailment.FINDING_KINDS)}
         items.sort(key=lambda item: (order.get(item["kind"], len(order)), item["message"]))
@@ -1108,7 +1238,84 @@ def _same_as_pairs(statements: list[Any]) -> int:
     )
 
 
-def ensure_entailment(graph: QueryGraph, mode: str) -> int:
+@dataclass
+class EntailmentComputation:
+    """The inferred statements of one mode for one query Store (UDR-0191 D3 / D7)."""
+
+    merge_inferred: list[Any]
+    per_graph: dict[Any, list[Any]]
+    findings: list[dict[str, Any]]
+    same_as: int
+    count: int
+    stated: int
+
+
+def compute_entailment(graph: QueryGraph, mode: str) -> EntailmentComputation:
+    """Run the closure of ``mode`` over ``graph``'s Store: the merge and each named graph.
+
+    Raises ``EntailmentTooLarge`` above the input bound (``reason: "input"``) or, for
+    ``owl-rl``, above K inferred statements per stated one (``reason: "inferred_ratio"``,
+    UDR-0192 D8), and ``EntailmentFailed`` when the engine fails.
+    """
+    import pyoxigraph as ox
+
+    from app.ontology import entailment
+
+    default_graph = ox.DefaultGraph()
+    merged = [quad.triple for quad in graph.store.quads_for_pattern(None, None, None, default_graph)]
+    named = {
+        name: [quad.triple for quad in graph.store.quads_for_pattern(None, None, None, name)] for name in graph.graphs
+    }
+    owl_rl = mode == entailment.OWL_RL
+    findings: list[dict[str, Any]] | None = [] if owl_rl else None
+    merge_inferred, per_graph = entailment.scoped_closure(merged, named, mode=mode, findings=findings)
+    count = len(merge_inferred) + sum(len(inferred) for inferred in per_graph.values())
+    same_as = _same_as_pairs([*merged, *merge_inferred]) if owl_rl else 0
+    if owl_rl:
+        ratio_limit = entailment.max_inferred_ratio()
+        if count > ratio_limit * max(1, len(merged)):
+            ratio = count / max(1, len(merged))
+            message = (
+                f"OWL 2 RL entailment inferred {count:,} statements from {len(merged):,} "
+                f"({ratio:.1f} per statement); at most {ratio_limit:,} per statement are accepted "
+                f"(App Settings: {entailment.RATIO_SETTING})."
+            )
+            if same_as:
+                message += f" {same_as:,} owl:sameAs pair(s) copy statements between names."
+            raise entailment.EntailmentTooLarge(
+                message,
+                statements=len(merged),
+                inferred=count,
+                ratio=round(ratio, 1),
+                limit=ratio_limit,
+                reason="inferred_ratio",
+                setting=entailment.RATIO_SETTING,
+                same_as_pairs=same_as,
+            )
+    return EntailmentComputation(merge_inferred, per_graph, findings or [], same_as, count, len(merged))
+
+
+def _apply_entailment(graph: QueryGraph, mode: str, result: EntailmentComputation) -> int:
+    """Build ``mode``'s entailed copy of ``graph``'s Store from ``result`` (lock held)."""
+    import pyoxigraph as ox
+
+    default_graph = ox.DefaultGraph()
+    entailed = ox.Store()
+    entailed.extend(graph.store)
+    entailed.extend(ox.Quad(t.subject, t.predicate, t.object, default_graph) for t in result.merge_inferred)
+    where: dict[Any, list[Any]] = {}
+    for name, inferred in result.per_graph.items():
+        entailed.extend(ox.Quad(t.subject, t.predicate, t.object, name) for t in inferred)
+        for t in inferred:
+            where.setdefault(t, []).append(name)
+    graph.entailed[mode] = entailed
+    graph.inferred_graphs[mode] = where
+    graph.entailment_notices[mode] = _entailment_notices(graph, mode, result.findings, result.same_as)
+    graph.entailments[mode] = result.count
+    return len(entailed)
+
+
+def ensure_entailment(graph: QueryGraph, mode: str, *, compute: bool = True) -> int:
     """Build ``mode``'s entailed copy of the query Store, once (D3, D7, D8).
 
     The copy holds every quad of ``graph.store`` plus the inferred statements: those of
@@ -1118,11 +1325,17 @@ def ensure_entailment(graph: QueryGraph, mode: str) -> int:
     ``simple`` answers are exactly the stated ones. Returns the number of inferred
     statements. ``simple`` needs nothing.
 
+    PRP-0211 (UDR-0193 D8 / D9): the inferred statements come from the STORED result of
+    the graph's key when there is one (computed after a save); a stored refusal is
+    raised as it was recorded. Without one, ``compute`` runs the closure here (and stores
+    the result); ``compute=False`` raises ``EntailmentPending`` instead.
+
     ``owl-rl`` (PRP-0210, UDR-0192): the inconsistencies found become a notice every
     answer of the mode carries (D5); a result with more than K inferred statements per
     stated one is refused (D8), and the refusal is remembered with the Store.
     """
     from app.ontology import entailment
+    from app.ontology import entailment_results as results
 
     if mode == entailment.SIMPLE:
         return 0
@@ -1132,55 +1345,46 @@ def ensure_entailment(graph: QueryGraph, mode: str) -> int:
             return held
         refused = graph.entailment_refusals.get(mode)
         if refused is not None:
-            raise entailment.EntailmentTooLarge(refused[0], **refused[1])
-        import pyoxigraph as ox
-
-        default_graph = ox.DefaultGraph()
-        merged = [quad.triple for quad in graph.store.quads_for_pattern(None, None, None, default_graph)]
-        named = {
-            name: [quad.triple for quad in graph.store.quads_for_pattern(None, None, None, name)]
-            for name in graph.graphs
-        }
-        owl_rl = mode == entailment.OWL_RL
-        findings: list[dict[str, Any]] | None = [] if owl_rl else None
-        merge_inferred, per_graph = entailment.scoped_closure(merged, named, mode=mode, findings=findings)
-        count = len(merge_inferred) + sum(len(inferred) for inferred in per_graph.values())
-        same_as = _same_as_pairs([*merged, *merge_inferred]) if owl_rl else 0
-        if owl_rl:
-            ratio_limit = entailment.max_inferred_ratio()
-            if count > ratio_limit * max(1, len(merged)):
-                ratio = count / max(1, len(merged))
-                message = (
-                    f"OWL 2 RL entailment inferred {count:,} statements from {len(merged):,} "
-                    f"({ratio:.1f} per statement); at most {ratio_limit:,} per statement are accepted "
-                    f"(App Settings: {entailment.RATIO_SETTING})."
-                )
-                if same_as:
-                    message += f" {same_as:,} owl:sameAs pair(s) copy statements between names."
-                detail = {
-                    "statements": len(merged),
-                    "inferred": count,
-                    "ratio": round(ratio, 1),
-                    "limit": ratio_limit,
-                    "reason": "inferred_ratio",
-                    "setting": entailment.RATIO_SETTING,
-                    "same_as_pairs": same_as,
-                }
-                graph.entailment_refusals[mode] = (message, detail)
-                raise entailment.EntailmentTooLarge(message, **detail)
-        entailed = ox.Store()
-        entailed.extend(graph.store)
-        entailed.extend(ox.Quad(t.subject, t.predicate, t.object, default_graph) for t in merge_inferred)
-        where: dict[Any, list[Any]] = {}
-        for name, inferred in per_graph.items():
-            entailed.extend(ox.Quad(t.subject, t.predicate, t.object, name) for t in inferred)
-            for t in inferred:
-                where.setdefault(t, []).append(name)
-        graph.entailed[mode] = entailed
-        graph.inferred_graphs[mode] = where
-        graph.entailment_notices[mode] = _entailment_notices(graph, mode, findings or [], same_as)
-        graph.entailments[mode] = count
-        quads = len(entailed)
+            if not results.refusal_stale(refused[1], mode):
+                raise entailment.EntailmentTooLarge(refused[0], **refused[1])
+            graph.entailment_refusals.pop(mode, None)  # a bound was raised since
+        record = results.lookup(graph.key, mode)
+        if record is not None:
+            if record.get("state") != results.READY:
+                exc = results.refusal(record)
+                if record.get("state") in (results.TOO_LARGE, results.FAILED):
+                    graph.entailment_refusals[mode] = (
+                        str(exc),
+                        {k: v for k, v in exc.detail.items() if k not in ("code", "message")},
+                    )
+                raise exc
+            quads = _apply_entailment(graph, mode, results.load(graph.key, mode, record))
+        elif not compute:
+            raise entailment.EntailmentPending(
+                f"{entailment.MODE_LABELS[mode]} of this ontology is still being computed; try again shortly.",
+                mode=mode,
+                state="queued",
+            )
+        else:
+            started = time.monotonic()
+            try:
+                result = compute_entailment(graph, mode)
+            except entailment.EntailmentTooLarge as exc:
+                if exc.detail.get("reason") == "inferred_ratio":
+                    graph.entailment_refusals[mode] = (
+                        str(exc),
+                        {k: v for k, v in exc.detail.items() if k not in ("code", "message")},
+                    )
+                results.save_refusal(graph.key, mode, exc, elapsed_ms=int((time.monotonic() - started) * 1000))
+                raise
+            except entailment.EntailmentFailed as exc:
+                results.save_refusal(graph.key, mode, exc, elapsed_ms=int((time.monotonic() - started) * 1000))
+                raise
+            results.save_ready(
+                graph.key, mode, result, elapsed_ms=int((time.monotonic() - started) * 1000), graph=graph
+            )
+            quads = _apply_entailment(graph, mode, result)
+        count = graph.entailments[mode]
     _charge_cache(graph, quads * CACHE_COST_PER_INFERRED)
     return count
 
@@ -1235,6 +1439,7 @@ def execute_query(
     from app.ontology.vocabulary import term_to_json
 
     mode = ent.parse_mode(entailment)
+    row_bound = max_rows()
     index = graph.index
     scope = graph.scope if isinstance(graph.scope, str) else term_to_json(graph.scope)
     entailed = mode != ent.SIMPLE
@@ -1265,7 +1470,7 @@ def execute_query(
         if baseline is not None:
             stated_rows = Counter(_row_key(solution, baseline.variables) for solution in baseline)
         for solution in result:
-            if len(rows) >= SELECT_MAX_ROWS:
+            if len(rows) >= row_bound:
                 truncated = True
                 break
             row: list[str] = []
@@ -1417,8 +1622,8 @@ def execute_query(
                         "inferred": inferred,
                     }
                 )
-    answer["triples"] = rows[:SELECT_MAX_ROWS]
-    answer["triples_truncated"] = len(rows) > SELECT_MAX_ROWS
+    answer["triples"] = rows[:row_bound]
+    answer["triples_truncated"] = len(rows) > row_bound
     return answer
 
 
@@ -1442,12 +1647,15 @@ def graph_names(ontology_id: str) -> list[str]:
 
 __all__ = [
     "FILE_SUFFIXES",
-    "SELECT_MAX_ROWS",
     "QueryGraph",
+    "add_write_listener",
     "cache_stats",
     "cached_entries",
+    "compute_entailment",
     "create_ontology",
     "delete_ontology",
+    "display_finding",
+    "ensure_entailment",
     "execute_query",
     "get_entry",
     "graph_names",
@@ -1455,12 +1663,16 @@ __all__ = [
     "invalidate_query_cache",
     "is_dataset",
     "load_store",
+    "max_rows",
+    "notify_written",
     "ontology_dir",
     "parse_scope",
+    "query_key",
     "read_catalog",
     "read_entry_and_bytes",
     "read_ontology_bytes",
     "rename_ontology",
+    "resolve_query",
     "restore_deleted_ontology",
     "revision_of",
     "save_ontology_text",

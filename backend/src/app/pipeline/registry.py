@@ -51,13 +51,27 @@ class ParamSpec:
 
 @dataclass(frozen=True)
 class JobType:
-    """A registered pipeline job type."""
+    """A registered pipeline job type.
+
+    PRP-0211 (CTR-0073 v5, UDR-0193 D1) -- two opt-in limits, for any type:
+
+    - ``timeout_seconds``: a callable giving the run's time limit in seconds (read when
+      the run starts, so an App Settings value applies; 0 or None = no limit). On expiry
+      the engine sets the cancel event and the job ends ``failed`` with a timeout error;
+      a runner whose work runs through ``app.pipeline.process.run_in_process`` is then
+      really stopped (its child process is ended).
+    - ``max_concurrent``: run under the type's OWN slot limit instead of the shared
+      ``pipeline_max_concurrent_jobs`` one, so the type neither takes nor waits for the
+      slots of other types.
+    """
 
     name: str
     label: str
     description: str
     runner: JobRunner
     params: list[ParamSpec] = field(default_factory=list)
+    timeout_seconds: Callable[[], float] | None = None
+    max_concurrent: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -116,6 +130,11 @@ def get_runner(job_type: str) -> JobRunner | None:
     return jt.runner if jt else None
 
 
+def get_job_type(job_type: str) -> JobType | None:
+    """Return the registered job type, or None if unknown."""
+    return JOB_TYPES.get(job_type)
+
+
 def get_available_types() -> list[str]:
     """Return the list of registered job-type names."""
     return list(JOB_TYPES.keys())
@@ -131,6 +150,7 @@ __all__ = [
     "JobType",
     "ParamSpec",
     "get_available_types",
+    "get_job_type",
     "get_runner",
     "job_types_info",
     "register_job_type",

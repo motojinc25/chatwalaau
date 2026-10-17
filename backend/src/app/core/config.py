@@ -705,7 +705,8 @@ class Settings(BaseSettings):
     ontology_tool_max_triples: int = 200
     # Memory budget (MiB) for loaded query Stores kept between searches, keyed by
     # (ontology, revision, scope); 0 disables the cache (PRP-0201 / UDR-0183 D3).
-    ontology_query_cache_mb: int = 512
+    # PRP-0211 (UDR-0193 D10): 512 -> 1,024 so a large stored entailment result stays cached.
+    ontology_query_cache_mb: int = 1_024
     # History retention (PRP-0202 / UDR-0184 D3): after each write keep the newest N
     # backups, plus the newest per UTC day for the last N days, then drop the oldest while
     # over the size limit (0 = no size limit); the newest backup is always kept. Deleted
@@ -718,16 +719,30 @@ class Settings(BaseSettings):
     ontology_query_include_imports: bool = True
     ontology_imports_max_ontologies: int = 20
     ontology_imports_max_mb: int = 50
-    # RDFS entailment at query time (PRP-0209 / UDR-0191 D8): the largest input (stated
-    # statements of the query Store's default graph, imports included) the engine accepts.
-    # owlrl is pure Python: about 3.7 ms per stated statement (v0.186.0), so 3,000 ~ 10 s.
-    ontology_entailment_max_triples: int = 3_000
+    # RDFS entailment (PRP-0209 / UDR-0191 D8): the largest input (stated statements of the
+    # query Store's default graph, imports included) the engine accepts. PRP-0211 (UDR-0193
+    # D10, operator Q3): 3,000 -> 100,000 -- computed in the background after each save by
+    # the direct RDFS engine (about 13 s for 100,000).
+    ontology_entailment_max_triples: int = 100_000
     # OWL 2 RL entailment at query time (PRP-0210 / UDR-0192 D7, D8): its own input bound
     # (owlrl's OWL 2 RL closure is about 8-10 times slower than its RDFS closure), and the
     # output bound K -- inferred statements per stated statement -- that stops owl:sameAs
     # growth (eq-rep-*) from filling memory and the cache.
-    ontology_owl_rl_max_triples: int = 1_000
+    # PRP-0211 (UDR-0193 D10, operator Q3): 1,000 -> 10,000, computed in the background
+    # (owlrl: about 20-50 s for 10,000).
+    ontology_owl_rl_max_triples: int = 10_000
     ontology_owl_rl_max_inferred_ratio: int = 50
+    # PRP-0211 (UDR-0193 D3-D9): ontology searches run in worker processes (0 = in the API
+    # process's threads, as before, without time limits); their time limits, separate for
+    # the Ontology screen and the agent tool (operator Q1; 0 = no limit); the row bound of
+    # the screen lanes; entailment computed by a Pipeline Job after every write (switch)
+    # and that job's time limit.
+    ontology_query_workers: int = 2
+    ontology_query_timeout_seconds: int = 30
+    ontology_tool_timeout_seconds: int = 20
+    ontology_query_max_rows: int = 1_000
+    ontology_entailment_precompute: bool = True
+    ontology_entailment_build_timeout_seconds: int = 600
     # The NL -> SPARQL completion model is the catalog `roles.ontology_nl` binding
     # (PRP-0115 / UDR-0096); the removed ONTOLOGY_NL_MODEL env var no longer applies.
 

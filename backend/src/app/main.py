@@ -377,6 +377,12 @@ async def lifespan(_app: FastAPI):
         from app.pipeline.engine import start_pipeline
 
         start_pipeline()
+        # PRP-0211 (UDR-0193 D7): the ontology-entailment job type, queued after every
+        # ontology write so searches with entailment answer from a stored result.
+        if settings.ontology_enabled:
+            from app.ontology import entailment_jobs
+
+            entailment_jobs.start()
     # Microsoft Teams integration (PRP-0092, CTR-0138, UDR-0070 D2). When
     # TEAMS_ENABLED, register the SDK messaging route onto this app + set up Bot
     # Framework JWT validation WITHOUT starting the SDK's own server (app.initialize,
@@ -405,6 +411,13 @@ async def lifespan(_app: FastAPI):
         from app.cron.engine import stop_scheduler
 
         await stop_scheduler()
+    # Shutdown: stop queuing ontology entailment builds and end the ontology search
+    # workers (PRP-0211, UDR-0193 D3 / D7).
+    from app.ontology import entailment_jobs
+    from app.ontology import workers as ontology_workers
+
+    entailment_jobs.stop()
+    ontology_workers.shutdown()
     # Shutdown: drain in-flight pipeline jobs (PRP-0096, CTR-0073).
     if settings.pipeline_enabled:
         from app.pipeline.engine import stop_pipeline

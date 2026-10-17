@@ -38,6 +38,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   useInternalNode,
+  useNodesInitialized,
   useReactFlow,
 } from '@xyflow/react'
 import {
@@ -51,6 +52,7 @@ import {
   KeyRound,
   Layers,
   LayoutGrid,
+  Lightbulb,
   ListChecks,
   Loader2,
   Maximize,
@@ -59,6 +61,7 @@ import {
   RotateCcw,
   Search,
   SendHorizontal,
+  Square,
   Trash2,
   TriangleAlert,
   Upload,
@@ -70,6 +73,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { findingId, OntologyChecksPane, useIgnoredChecks } from '@/components/OntologyChecks'
 import { type DataGroup, IndividualDetail, IndividualsView, individualLabel } from '@/components/OntologyDataView'
+import { ExplainPane, type ExplainRequest, type ExplainResult } from '@/components/OntologyExplain'
 import { DeletedOntologiesDialog, HistoryPanel } from '@/components/OntologyHistory'
 import {
   ImportedDetail,
@@ -101,6 +105,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { BusyOverlay } from '@/components/ui/busy-overlay'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -111,6 +116,15 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import {
+  type InferredMode,
+  type InferredStatement,
+  type InferredStatements,
+  inferredCanvas,
+  inferredData,
+  readInferredMode,
+  writeInferredMode,
+} from '@/lib/ontologyInferred'
 import {
   addImport,
   addSubclassOf,
@@ -272,6 +286,115 @@ const ENTAILMENT_LABELS: Record<Entailment, string> = {
   simple: 'No entailment',
   rdfs: 'RDFS entailment',
   'owl-rl': 'OWL 2 RL entailment',
+}
+
+/** The state of the stored entailment of one mode (PRP-0211, CTR-0171 v11, UDR-0193 D12). */
+interface EntailmentModeStatus {
+  state: 'missing' | 'queued' | 'running' | 'ready' | 'too_large' | 'failed' | 'timeout'
+  label: string
+  stated?: number | null
+  inferred?: number | null
+  elapsed_ms?: number | null
+  running_seconds?: number
+  findings_count?: number
+  message?: string | null
+}
+
+interface EntailmentStatus {
+  revision: string
+  precompute: boolean
+  modes: Partial<Record<'rdfs' | 'owl-rl', EntailmentModeStatus>>
+}
+
+/** A short text for an entailment state (the Search pane and the Inferred switch). */
+function entailmentStateText(status: EntailmentModeStatus | undefined): string | null {
+  if (!status) return null
+  switch (status.state) {
+    case 'ready':
+      return 'Ready'
+    case 'queued':
+      return 'Computing (queued)...'
+    case 'running':
+      return `Computing... ${Math.round(status.running_seconds ?? 0)} s`
+    case 'too_large':
+      return status.message ?? 'Too large'
+    case 'timeout':
+      return status.message ?? 'Did not finish in time'
+    case 'failed':
+      return status.message ?? 'Could not be computed'
+    default:
+      return 'Computed at the next search'
+  }
+}
+
+/** Watches React Flow's node measuring (inside the provider): true once every node is measured. */
+function NodesReady({ onChange }: { onChange: (ready: boolean) => void }) {
+  const initialized = useNodesInitialized()
+  useEffect(() => onChange(initialized), [initialized, onChange])
+  return null
+}
+
+/** The "Inferred: Off | RDFS | OWL 2 RL" switch of the canvas and the Data view (UDR-0193 D17). */
+function InferredSwitch(props: {
+  mode: InferredMode
+  onChange: (mode: InferredMode) => void
+  disabled: boolean
+  note: string | null
+}) {
+  return (
+    <label
+      className="flex items-center gap-1 text-[11px] text-zinc-600"
+      title="Show what RDFS / OWL 2 RL infer from the saved ontology, faintly. Inferred items are never edited or saved; click one to see why. Remembered in this browser.">
+      Inferred
+      <select
+        aria-label="Inferred"
+        className="h-6 rounded border bg-white px-1 text-[11px]"
+        value={props.mode}
+        disabled={props.disabled}
+        onChange={(e) => props.onChange(e.target.value as InferredMode)}>
+        <option value="off">Off</option>
+        <option value="rdfs">RDFS</option>
+        <option value="owl-rl">OWL 2 RL</option>
+      </select>
+      {props.note && (
+        <span className="max-w-[220px] truncate text-[10px] text-zinc-500" data-inferred-note title={props.note}>
+          {props.note}
+        </span>
+      )}
+    </label>
+  )
+}
+
+/** The canvas legend shown with inferred edges (UDR-0193 D18). */
+function InferredLegend() {
+  const row = (dash: string | undefined, opacity: number, text: string, open = false) => (
+    <div className="flex items-center gap-1.5">
+      <svg width="28" height="8" aria-hidden="true">
+        <line
+          x1="0"
+          y1="4"
+          x2="28"
+          y2="4"
+          stroke="#64748b"
+          strokeWidth="1.5"
+          strokeDasharray={dash}
+          opacity={opacity}
+        />
+        {!open && <polygon points="22,1 28,4 22,7" fill="#64748b" opacity={opacity} />}
+      </svg>
+      <span>{text}</span>
+    </div>
+  )
+  return (
+    <section
+      aria-label="Legend"
+      className="pointer-events-none absolute bottom-2 left-2 z-[5] space-y-0.5 rounded border bg-white/90 p-1.5 text-[10px] text-zinc-600 shadow-sm">
+      {row(undefined, 1, 'relationship')}
+      {row('6 4', 1, 'is a', true)}
+      {row('2 4', 0.5, 'inferred (click: why)')}
+      {row('2 4', 0.5, 'derived from owl:inverseOf')}
+    </section>
+  )
 }
 
 type QueryResult =
@@ -471,6 +594,9 @@ const CARDINALITY_SYMBOL: Record<string, string> = {
   'many-to-many': 'N:M',
 }
 
+/** owl:inverseOf: the derived inverse edges of the Inferred switch (PRP-0211, UDR-0193 D18). */
+const OWL_INVERSE_OF = 'http://www.w3.org/2002/07/owl#inverseOf'
+
 const COLOR_PRESETS = ['', '#3b82f6', '#22c55e', '#eab308', '#f97316', '#ef4444', '#a855f7', '#14b8a6']
 
 const XSD_RANGES = ['string', 'integer', 'decimal', 'boolean', 'date', 'dateTime'] as const
@@ -655,6 +781,12 @@ interface RelEdgeData extends Record<string, unknown> {
   relationshipIri: string
   /** An "is a" edge (rdfs:subClassOf, UDR-0185 D3): dashed, open arrow to the superclass. */
   isa?: boolean
+  /** PRP-0211 (UDR-0193 D18): an inferred / derived edge -- dotted, faint, never edited. */
+  inferred?: 'inferred' | 'derived'
+  /** The statement Explain is asked about (inferred edges). */
+  explain?: { s: Term; p: Term; o: Term; graph: Term | null }
+  /** A derived inverse edge: the property it is the inverse of. */
+  inverseOf?: string
 }
 
 const PARALLEL_SPREAD = 26 // px of perpendicular offset per fan-out step
@@ -688,7 +820,7 @@ const FloatingRelationshipEdge = memo(function FloatingRelationshipEdge({
     stroke: d.stroke,
     strokeWidth: d.strokeWidth,
     opacity: d.opacity,
-    strokeDasharray: d.isa ? '6 4' : undefined,
+    strokeDasharray: d.inferred ? '2 4' : d.isa ? '6 4' : undefined,
   }
 
   let path: string
@@ -838,6 +970,10 @@ function CanvasToolbar(props: {
   styleReason: string
   view: ManagerView
   onViewChange: (view: ManagerView) => void
+  /** The Inferred switch (PRP-0211, UDR-0193 D17). */
+  inferredMode: InferredMode
+  onInferredModeChange: (mode: InferredMode) => void
+  inferredNote: string | null
 }) {
   const { zoomIn, zoomOut, fitView } = useReactFlow()
   const iconButton = 'h-7 w-7 text-zinc-600'
@@ -887,6 +1023,12 @@ function CanvasToolbar(props: {
           Imported
         </label>
       )}
+      <InferredSwitch
+        mode={props.inferredMode}
+        onChange={props.onInferredModeChange}
+        disabled={props.disabled}
+        note={props.inferredNote}
+      />
       <span
         className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600"
         title={props.styleReason}>
@@ -1040,7 +1182,33 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [deleteImporters, setDeleteImporters] = useState<{ id: string; name: string }[] | null>(null)
 
   // Right pane
-  const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search' | 'history' | 'checks'>('detail')
+  const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search' | 'history' | 'checks' | 'explain'>(
+    'detail',
+  )
+  // PRP-0211 (UDR-0193): the stored entailment's state, Explain, and the Inferred switch.
+  const [entailmentStatus, setEntailmentStatus] = useState<EntailmentStatus | null>(null)
+  const [consistency, setConsistency] = useState<{
+    revision: string
+    state: string
+    message: string | null
+    items: {
+      key: string
+      kind: string
+      graph: string | null
+      message: string
+      terms: string[]
+      subjects: Term[]
+    }[]
+  } | null>(null)
+  const [explainRequest, setExplainRequest] = useState<ExplainRequest | null>(null)
+  const [explainResult, setExplainResult] = useState<ExplainResult | null>(null)
+  const [explainLoading, setExplainLoading] = useState(false)
+  const [explainError, setExplainError] = useState<string | null>(null)
+  // A derived inverse edge explains itself (no rule of the reasoner gives it, UDR-0193 D20).
+  const [explainNote, setExplainNote] = useState<string | null>(null)
+  const [inferredMode, setInferredMode] = useState<InferredMode>(readInferredMode)
+  const [inferredStatements, setInferredStatements] = useState<InferredStatements | null>(null)
+  const searchAbortRef = useRef<AbortController | null>(null)
   // Deleted ontologies (PRP-0202 / UDR-0184 D6).
   const [trashOpen, setTrashOpen] = useState(false)
   // A characteristic turned on in an RDFS-only ontology waits for confirmation (PRP-0204 Q1).
@@ -1063,6 +1231,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [renameDescription, setRenameDescription] = useState('')
   const [renaming, setRenaming] = useState(false)
   const [importing, setImporting] = useState(false)
+  // PRP-0211 (UDR-0193 D2): the file being imported, and "loaded, waiting until drawn".
+  const [importLabel, setImportLabel] = useState<string | null>(null)
+  const [importSettling, setImportSettling] = useState(false)
+  const [nodesReady, setNodesReady] = useState(false)
+  const [layoutFailed, setLayoutFailed] = useState(false)
   const importInputRef = useRef<HTMLInputElement | null>(null)
 
   // Unsaved-changes confirmation: the action to run once the user discards.
@@ -1126,6 +1299,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         if (options.keepView) return
         setIncludeImports(null)
         setAutoPositions(new Map())
+        setLayoutFailed(false)
+        setExplainRequest(null)
+        setExplainResult(null)
         layoutCommittedRef.current = false
         reifierChoiceRef.current = new Map()
         setGraphScope('all')
@@ -1354,7 +1530,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const importOntology = useCallback(
     async (file: File) => {
       setImporting(true)
+      setImportLabel(file.name)
       setError(null)
+      let settled = false
       try {
         const form = new FormData()
         form.append('file', file)
@@ -1379,10 +1557,13 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         const entry = (await res.json()) as CatalogEntry
         await fetchCatalog()
         await loadOntology(entry.id)
+        // Loaded: the overlay stays until the new canvas is laid out and drawn (UDR-0193 D2).
+        settled = true
+        setImportSettling(true)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to import the file')
       } finally {
-        setImporting(false)
+        if (!settled) setImporting(false)
       }
     },
     [fetchCatalog, loadOntology],
@@ -1706,10 +1887,51 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       }),
     [model, baseIri, diagnostics, imported, importsInfo],
   )
+  // PRP-0211 (UDR-0193 D13): the OWL 2 RL consistency of the SAVED version, from the backend.
+  const consistencyFindings = useMemo<Finding[]>(() => {
+    const owl = entailmentStatus?.modes['owl-rl']
+    if (!owl) return []
+    if (owl.state === 'queued' || owl.state === 'running') {
+      return [
+        {
+          code: 'owl_consistency_unchecked',
+          severity: 'info',
+          key: 'computing',
+          subjects: [],
+          message: 'Checking consistency (OWL 2 RL)...',
+        },
+      ]
+    }
+    if (owl.state === 'too_large' || owl.state === 'timeout' || owl.state === 'failed') {
+      return [
+        {
+          code: 'owl_consistency_unchecked',
+          severity: 'info',
+          key: owl.state,
+          subjects: [],
+          message: `Consistency was not checked: ${owl.message ?? owl.state}`,
+        },
+      ]
+    }
+    if (owl.state !== 'ready' || !consistency) return []
+    return consistency.items.map(
+      (item): Finding => ({
+        code: 'owl_inconsistency',
+        severity: 'warning',
+        key: item.key,
+        subjects: item.subjects,
+        message: item.message,
+        explainKey: item.key,
+        graphLabel: item.graph,
+        stale: dirty,
+      }),
+    )
+  }, [entailmentStatus, consistency, dirty])
+  const allFindings = useMemo(() => [...consistencyFindings, ...findings], [consistencyFindings, findings])
   const ignoredChecks = useIgnoredChecks(selectedId)
   const warningCount = useMemo(
-    () => findings.filter((f) => f.severity === 'warning' && !ignoredChecks.ignored.has(findingId(f))).length,
-    [findings, ignoredChecks.ignored],
+    () => allFindings.filter((f) => f.severity === 'warning' && !ignoredChecks.ignored.has(findingId(f))).length,
+    [allFindings, ignoredChecks.ignored],
   )
   const [externalDeclare, setExternalDeclare] = useState<Finding | null>(null)
   const [declareAll, setDeclareAll] = useState<{ namespace: string; classes: string[] } | null>(null)
@@ -1823,6 +2045,67 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       selectResource(key)
     },
     [model, relEdges, changeView, selectResource],
+  )
+
+  // ---- The Inferred switch (PRP-0211, UDR-0193 D17-D20) ----
+
+  const changeInferredMode = useCallback((mode: InferredMode) => {
+    setInferredMode(mode)
+    writeInferredMode(mode)
+  }, [])
+  const inferredState = inferredMode === 'off' ? undefined : entailmentStatus?.modes[inferredMode]
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refetched when the saved version changes
+  useEffect(() => {
+    if (!open || !selectedId || inferredMode === 'off' || inferredState?.state !== 'ready') {
+      if (inferredMode === 'off') setInferredStatements(null)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch(`/api/ontology/${selectedId}/entailment/statements?mode=${inferredMode}`)
+        if (!res.ok) return
+        const body = (await res.json()) as InferredStatements
+        if (!cancelled) setInferredStatements(body)
+      } catch {
+        // the views stay as stated
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [open, selectedId, inferredMode, inferredState?.state, entailmentStatus?.revision])
+
+  // The inferred statements of the graph the canvas shows (UDR-0193 D17 / D20): with unsaved
+  // edits only those about things that still exist are kept.
+  const shownInferred = useMemo<InferredStatement[]>(() => {
+    if (inferredMode === 'off' || !inferredStatements || inferredStatements.mode !== inferredMode) return []
+    const inScope = inferredStatements.statements.filter((statement) =>
+      graphScope === 'all'
+        ? true
+        : graphScope === 'default'
+          ? statement.graph === null
+          : statement.graph !== null && termKey(statement.graph) === termKey(graphScope),
+    )
+    if (!dirty) return inScope
+    const known = new Set(model.resources.map((r) => termKey(r.term)))
+    return inScope.filter((statement) => known.has(termKey(statement.s)))
+  }, [inferredMode, inferredStatements, graphScope, dirty, model])
+  const inferredNote =
+    inferredMode === 'off'
+      ? null
+      : inferredState?.state !== 'ready'
+        ? entailmentStateText(inferredState)
+        : dirty
+          ? 'from the last saved version'
+          : inferredStatements?.truncated
+            ? 'only the first 20,000 inferred statements'
+            : null
+
+  // The Data view's inferred memberships and values (UDR-0193 D19).
+  const dataInferred = useMemo(
+    () => (shownInferred.length > 0 ? inferredData(shownInferred, (term) => termKey(term)) : null),
+    [shownInferred],
   )
 
   // ---- React Flow derivation ----
@@ -1992,13 +2275,38 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     [nodes, commitPositions],
   )
 
+  // PRP-0211 (UDR-0193 D18): the inferred / derived edges worth drawing, reduced and capped.
+  const inferredEdges = useMemo(() => {
+    if (shownInferred.length === 0 && inferredMode === 'off') return null
+    const entities = new Set([...views.map((v) => v.iri), ...ghostViews.map((g) => g.iri)])
+    const properties = viewModel.resources
+      .filter((r) => r.role === 'object_property' && r.term.type === 'iri')
+      .map((r) => ({
+        iri: (r.term as { value: string }).value,
+        domains: r.statements
+          .filter((s) => s.p === RDFS_DOMAIN && s.o.type === 'iri')
+          .map((s) => (s.o as { value: string }).value),
+        ranges: r.statements
+          .filter((s) => s.p === RDFS_RANGE && s.o.type === 'iri')
+          .map((s) => (s.o as { value: string }).value),
+        inverses: r.statements
+          .filter((s) => s.p === OWL_INVERSE_OF && s.o.type === 'iri')
+          .map((s) => (s.o as { value: string }).value),
+      }))
+    const focus = selection?.kind === 'entity' ? selection.iri : null
+    return inferredCanvas(shownInferred, entities, isaEdges, properties, focus)
+  }, [shownInferred, inferredMode, views, ghostViews, viewModel, isaEdges, selection])
+
   const edges = useMemo<Edge[]>(() => {
     // Fan-out bookkeeping: how many relationships share each unordered node pair,
     // and this edge's index within that group (UDR-0098 D2).
     const pairKey = (s: string, t: string) => (s < t ? `${s}|${t}` : `${t}|${s}`)
     const shownIsa = showIsa ? isaEdges : []
+    const extra = inferredEdges
+      ? [...(showIsa ? inferredEdges.isa : []), ...inferredEdges.same, ...inferredEdges.relationships]
+      : []
     const pairTotal = new Map<string, number>()
-    for (const rel of [...relEdges, ...shownIsa]) {
+    for (const rel of [...relEdges, ...shownIsa, ...extra]) {
       const key = pairKey(rel.source, rel.target)
       pairTotal.set(key, (pairTotal.get(key) ?? 0) + 1)
     }
@@ -2062,8 +2370,69 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         } satisfies RelEdgeData,
       }
     })
-    return [...relationships, ...isa]
-  }, [relEdges, isaEdges, showIsa, selection, related, highlight])
+    // Inferred / derived edges: dotted, faint, never selected for editing (UDR-0193 D18 / D20).
+    const labelOf = (iri: string) =>
+      relEdges.find((e) => e.iri === iri)?.label ?? compactIri(iri, model.document.prefixes)
+    const faint = (
+      edge: { id: string; source: string; target: string },
+      data: Partial<RelEdgeData>,
+      closed: boolean,
+    ): Edge => {
+      const key = pairKey(edge.source, edge.target)
+      const parallelIndex = pairSeen.get(key) ?? 0
+      pairSeen.set(key, parallelIndex + 1)
+      const isRelated = selection?.kind === 'entity' && (edge.source === selection.iri || edge.target === selection.iri)
+      const stroke = isRelated ? '#93c5fd' : '#64748b'
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        type: 'floating',
+        deletable: false,
+        markerEnd: closed ? { type: MarkerType.ArrowClosed, color: stroke } : { type: MarkerType.Arrow, color: stroke },
+        data: {
+          label: '',
+          stroke,
+          strokeWidth: 1.5,
+          opacity: highlight !== null && !(highlight.has(edge.source) || highlight.has(edge.target)) ? 0.1 : 0.5,
+          labelColor: '#64748b',
+          parallelIndex,
+          parallelCount: pairTotal.get(key) ?? 1,
+          relationshipIri: '',
+          inferred: 'inferred',
+          ...data,
+        } satisfies RelEdgeData,
+      }
+    }
+    const inferred: Edge[] = []
+    if (inferredEdges) {
+      if (showIsa) {
+        for (const edge of inferredEdges.isa) {
+          inferred.push(faint(edge, { label: 'is a', isa: true, explain: edge.statement }, false))
+        }
+      }
+      for (const edge of inferredEdges.same) {
+        inferred.push(faint(edge, { label: 'same as', explain: edge.statement }, false))
+      }
+      for (const edge of inferredEdges.relationships) {
+        inferred.push(
+          faint(
+            edge,
+            edge.derived
+              ? {
+                  label: `${labelOf(edge.property)} (inverse of ${labelOf(edge.inverseOf ?? '')})`,
+                  inferred: 'derived',
+                  inverseOf: edge.inverseOf,
+                  relationshipIri: edge.property,
+                }
+              : { label: labelOf(edge.property), explain: edge.statement, relationshipIri: edge.property },
+            true,
+          ),
+        )
+      }
+    }
+    return [...relationships, ...isa, ...inferred]
+  }, [relEdges, isaEdges, showIsa, selection, related, highlight, inferredEdges, model.document.prefixes])
 
   /** elkjs layered layout of the given entities (all when `only` is undefined). */
   const computeLayout = useCallback(
@@ -2119,11 +2488,33 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       })
       .catch(() => {
         // the grid fallback stays in place
+        if (!cancelled) setLayoutFailed(true)
       })
     return () => {
       cancelled = true
     }
   }, [unpositionedKey, views, ghostViews, autoPositions, computeLayout])
+
+  // PRP-0211 (UDR-0193 D2): an import ends when its canvas is ready -- loaded, the
+  // unpositioned entities laid out (or the layout failed), every node measured.
+  useEffect(() => {
+    if (!importSettling) return
+    const layoutPending = !layoutFailed && unpositioned.some((value) => !autoPositions.has(value))
+    const drawn = view === 'data' || views.length === 0 || nodesReady
+    if (!loading && !layoutPending && drawn) {
+      setImportSettling(false)
+      setImporting(false)
+    }
+  }, [importSettling, layoutFailed, unpositioned, autoPositions, view, views.length, nodesReady, loading])
+  useEffect(() => {
+    if (!importSettling) return
+    // Never block the editor for long: a canvas that cannot settle ends the wait anyway.
+    const timer = window.setTimeout(() => {
+      setImportSettling(false)
+      setImporting(false)
+    }, 20000)
+    return () => window.clearTimeout(timer)
+  }, [importSettling])
 
   const resetLayout = useCallback(async () => {
     if (views.length === 0) return
@@ -2179,6 +2570,27 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // "Include imports" (UDR-0189 D5): the switch, else the App Settings default.
   const effectiveIncludeImports = includeImports ?? importsInfo?.include_imports_default ?? true
 
+  /** A new search's abort signal; Stop aborts it and the server stops the search (UDR-0193 D5). */
+  const searchSignal = useCallback(() => {
+    searchAbortRef.current?.abort()
+    const controller = new AbortController()
+    searchAbortRef.current = controller
+    return controller.signal
+  }, [])
+  const stopSearch = useCallback(() => {
+    searchAbortRef.current?.abort()
+    searchAbortRef.current = null
+  }, [])
+  const searchFailure = useCallback(
+    (err: unknown, fallback: string) =>
+      err instanceof DOMException && err.name === 'AbortError'
+        ? 'The search was stopped.'
+        : err instanceof Error
+          ? err.message
+          : fallback,
+    [],
+  )
+
   const runSparql = useCallback(async () => {
     if (!selectedId || !sparql.trim()) return
     setQueryRunning(true)
@@ -2189,6 +2601,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sparql, scope: graphScope, imports: effectiveIncludeImports, entailment }),
+        signal: searchSignal(),
       })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
@@ -2197,11 +2610,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       }
       applyResult(body as QueryResult)
     } catch (err) {
-      applyResult({ kind: 'error', error: err instanceof Error ? err.message : 'Query failed' })
+      applyResult({ kind: 'error', error: searchFailure(err, 'Query failed') })
     } finally {
       setQueryRunning(false)
     }
-  }, [selectedId, sparql, graphScope, applyResult, effectiveIncludeImports, entailment])
+  }, [selectedId, sparql, graphScope, applyResult, effectiveIncludeImports, entailment, searchSignal, searchFailure])
 
   const runNlQuery = useCallback(async () => {
     if (!selectedId || !nlQuestion.trim()) return
@@ -2212,6 +2625,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: nlQuestion, scope: graphScope, imports: effectiveIncludeImports, entailment }),
+        signal: searchSignal(),
       })
       const body = await res.json().catch(() => null)
       if (!res.ok) {
@@ -2222,11 +2636,120 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       if (typeof body?.sparql === 'string') setSparql(body.sparql)
       applyResult(body as QueryResult)
     } catch (err) {
-      applyResult({ kind: 'error', error: err instanceof Error ? err.message : 'Natural-language search failed' })
+      applyResult({ kind: 'error', error: searchFailure(err, 'Natural-language search failed') })
     } finally {
       setNlRunning(false)
     }
-  }, [selectedId, nlQuestion, graphScope, applyResult, effectiveIncludeImports, entailment])
+  }, [
+    selectedId,
+    nlQuestion,
+    graphScope,
+    applyResult,
+    effectiveIncludeImports,
+    entailment,
+    searchSignal,
+    searchFailure,
+  ])
+
+  // ---- Stored entailment: state, consistency, Explain, inferred views (PRP-0211, UDR-0193) ----
+
+  const fetchEntailmentStatus = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`/api/ontology/${id}/entailment`)
+      if (!res.ok) return
+      setEntailmentStatus((await res.json()) as EntailmentStatus)
+    } catch {
+      // the state is a hint; searches still work
+    }
+  }, [])
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refetched when the saved version changes
+  useEffect(() => {
+    setEntailmentStatus(null)
+    setConsistency(null)
+    setInferredStatements(null)
+    if (open && selectedId) void fetchEntailmentStatus(selectedId)
+  }, [open, selectedId, revision, fetchEntailmentStatus])
+  // Poll while a mode is being computed (after a save, UDR-0193 D7).
+  // A missing result is about to be queued when entailment is computed after saves.
+  const computing = Object.values(entailmentStatus?.modes ?? {}).some(
+    (m) => m?.state === 'queued' || m?.state === 'running' || (m?.state === 'missing' && entailmentStatus?.precompute),
+  )
+  useEffect(() => {
+    if (!open || !selectedId || !computing) return
+    const timer = window.setInterval(() => void fetchEntailmentStatus(selectedId), 2000)
+    return () => window.clearInterval(timer)
+  }, [open, selectedId, computing, fetchEntailmentStatus])
+  // The saved version may be ready although no save happened in this session: ask once more
+  // shortly after opening when nothing is known yet.
+  const owlState = entailmentStatus?.modes['owl-rl']?.state
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refetched when the saved version changes
+  useEffect(() => {
+    if (!open || !selectedId || owlState !== 'ready') return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch(`/api/ontology/${selectedId}/entailment/findings?mode=owl-rl`)
+        if (!res.ok) return
+        const body = await res.json()
+        if (!cancelled) setConsistency(body)
+      } catch {
+        // Checks still lists the other findings
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [open, selectedId, owlState, entailmentStatus?.revision])
+
+  const explain = useCallback(
+    async (request: ExplainRequest, scope: GraphScope | 'all' = graphScope) => {
+      if (!selectedId) return
+      setExplainRequest(request)
+      setExplainResult(null)
+      setExplainError(null)
+      setExplainNote(null)
+      setExplainLoading(true)
+      setRightTab('explain')
+      try {
+        const res = await fetch(`/api/ontology/${selectedId}/explain`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode: request.mode,
+            ...('finding' in request ? { finding: request.finding } : { statement: request.statement }),
+            scope,
+            imports: effectiveIncludeImports,
+          }),
+        })
+        const body = await res.json().catch(() => null)
+        if (!res.ok) {
+          setExplainError(errorDetail(body, 'The explanation failed'))
+          return
+        }
+        setExplainResult(body as ExplainResult)
+      } catch (err) {
+        setExplainError(err instanceof Error ? err.message : 'The explanation failed')
+      } finally {
+        setExplainLoading(false)
+      }
+    },
+    [selectedId, graphScope, effectiveIncludeImports],
+  )
+  /** Explain an inferred item of the views (the standard key: all graphs). */
+  const explainInferred = useCallback(
+    (statement: InferredStatement) => {
+      if (inferredMode === 'off') return
+      void explain(
+        {
+          mode: inferredMode,
+          statement: { s: statement.s, p: statement.p, o: statement.o, graph: statement.graph },
+          label: [statement.s, statement.p, statement.o].map((term) => compactTerm(term, model)).join(' '),
+        },
+        'all',
+      )
+    },
+    [inferredMode, explain, model],
+  )
 
   // ---- Derived detail-pane data ----
 
@@ -2431,7 +2954,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           )}
 
           <ReactFlowProvider>
-            <div className="relative flex min-h-0 flex-1">
+            <div className="relative flex min-h-0 flex-1" aria-busy={saving || importing ? true : undefined}>
               <PanelLayout
                 left={
                   <CatalogPane
@@ -2474,6 +2997,13 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         <span className="ml-2 text-[11px] text-zinc-500">
                           {dataIndex.keys.size} individual{dataIndex.keys.size === 1 ? '' : 's'}
                         </span>
+                        <div className="mx-1 h-4 w-px bg-zinc-200" />
+                        <InferredSwitch
+                          mode={inferredMode}
+                          onChange={changeInferredMode}
+                          disabled={false}
+                          note={inferredNote}
+                        />
                       </div>
                       <IndividualsView
                         model={model}
@@ -2493,6 +3023,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         }}
                         onCommit={commitEdits}
                         onCreate={requestCreateIndividual}
+                        inferred={dataInferred}
+                        onExplainInferred={explainInferred}
                       />
                     </div>
                   ) : (
@@ -2519,8 +3051,16 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         styleReason={vocabularyStyleReason(vocabStyle, model)}
                         view={view}
                         onViewChange={changeView}
+                        inferredMode={inferredMode}
+                        onInferredModeChange={changeInferredMode}
+                        inferredNote={
+                          inferredEdges && inferredEdges.hidden > 0
+                            ? `${inferredEdges.hidden} more inferred relationships are not drawn`
+                            : inferredNote
+                        }
                       />
-                      <div className="min-h-0 flex-1">
+                      <div className="relative min-h-0 flex-1">
+                        {inferredMode !== 'off' && selectedId && !loading && <InferredLegend />}
                         {selectedId ? (
                           loading ? (
                             <div className="flex h-full items-center justify-center text-sm text-zinc-500">
@@ -2547,6 +3087,35 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                               }}
                               onEdgeClick={(_, edge) => {
                                 const data = edge.data as RelEdgeData | undefined
+                                // PRP-0211 (UDR-0193 D20): an inferred edge is never edited -- it explains itself.
+                                if (data?.inferred) {
+                                  if (data.inferred === 'derived') {
+                                    setExplainRequest({
+                                      mode: inferredMode === 'owl-rl' ? 'owl-rl' : 'rdfs',
+                                      finding: '',
+                                      label: data.label,
+                                    })
+                                    setExplainResult(null)
+                                    setExplainLoading(false)
+                                    setExplainError(null)
+                                    setExplainNote(
+                                      `Derived from owl:inverseOf: ${data.label}. The edge mirrors the domain and range of ${compactIri(data.inverseOf ?? '', model.document.prefixes)} (stated); OWL 2 RL itself gives an inverse property no domain or range.`,
+                                    )
+                                    setRightTab('explain')
+                                  } else if (data.explain && inferredMode !== 'off') {
+                                    void explain(
+                                      {
+                                        mode: inferredMode,
+                                        statement: data.explain,
+                                        label: [data.explain.s, data.explain.p, data.explain.o]
+                                          .map((term) => compactTerm(term, model))
+                                          .join(' '),
+                                      },
+                                      'all',
+                                    )
+                                  }
+                                  return
+                                }
                                 if (data?.isa) setSelection({ kind: 'isa', source: edge.source, target: edge.target })
                                 else setSelection({ kind: 'relationship', iri: data?.relationshipIri ?? edge.id })
                                 setRightTab('detail')
@@ -2556,6 +3125,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                               minZoom={0.1}
                               proOptions={{ hideAttribution: false }}>
                               <Background gap={16} />
+                              <NodesReady onChange={setNodesReady} />
                             </ReactFlow>
                           )
                         ) : (
@@ -2570,7 +3140,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                 right={
                   <div className="flex min-h-0 flex-1 flex-col">
                     <div className="flex shrink-0 border-b text-xs">
-                      {(['detail', 'resources', 'search', 'history', 'checks'] as const).map((tab) => (
+                      {(['detail', 'resources', 'search', 'history', 'checks', 'explain'] as const).map((tab) => (
                         <button
                           key={tab}
                           type="button"
@@ -2604,8 +3174,14 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                                 </span>
                               )}
                             </span>
+                          ) : tab === 'explain' ? (
+                            <span className="inline-flex items-center gap-1">
+                              <Lightbulb className="h-3 w-3" /> Explain
+                            </span>
                           ) : (
-                            'Detail'
+                            <span className="inline-flex items-center gap-1">
+                              <Info className="h-3 w-3" /> Detail
+                            </span>
                           )}
                         </button>
                       ))}
@@ -2642,6 +3218,16 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                           {...statementHandlers(selection.key)}
                           onOpenClass={openData}
                           onDelete={() => requestDeleteIndividual(selection.key)}
+                          inferred={
+                            dataInferred
+                              ? {
+                                  types: dataInferred.types.get(selection.key) ?? [],
+                                  values: dataInferred.values.get(selection.key) ?? [],
+                                  stale: dirty,
+                                  onExplain: explainInferred,
+                                }
+                              : undefined
+                          }
                         />
                       ) : selection?.kind === 'resource' ? (
                         <ResourceDetail
@@ -2705,7 +3291,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                       />
                     ) : rightTab === 'checks' ? (
                       <OntologyChecksPane
-                        findings={findings}
+                        findings={allFindings}
                         ignored={ignoredChecks.ignored}
                         onIgnore={ignoredChecks.ignore}
                         onUnignore={ignoredChecks.unignore}
@@ -2716,6 +3302,19 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         onDeclareAll={(namespace, classes) => setDeclareAll({ namespace, classes })}
                         onRemoveEdge={(edge: CheckEdge) => updateModel((prev) => removeCheckEdge(prev, edge))}
                         onOpenImports={(iri) => openImports(iri)}
+                        onExplain={(finding) =>
+                          finding.explainKey &&
+                          void explain({ mode: 'owl-rl', finding: finding.explainKey, label: finding.message }, 'all')
+                        }
+                      />
+                    ) : rightTab === 'explain' ? (
+                      <ExplainPane
+                        request={explainRequest}
+                        result={explainResult}
+                        loading={explainLoading}
+                        error={explainError}
+                        note={explainNote}
+                        onSelect={selectFindingSubject}
                       />
                     ) : (
                       <SearchPane
@@ -2749,20 +3348,27 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                         onIncludeImportsChange={setIncludeImports}
                         entailment={entailment}
                         onEntailmentChange={setEntailment}
+                        entailmentState={
+                          entailment === 'simple' ? null : entailmentStateText(entailmentStatus?.modes[entailment])
+                        }
+                        onStop={stopSearch}
+                        onExplain={(row, mode) =>
+                          void explain({
+                            mode,
+                            statement: { s: row.s, p: row.p, o: row.o, graph: row.graph },
+                            label: [row.s, row.p, row.o].map((term) => compactTerm(term, model)).join(' '),
+                          })
+                        }
                       />
                     )}
                   </div>
                 }
               />
 
-              {/* Blocking indicator while a mutation is in flight (PRP-0090 precedent). */}
+              {/* Blocking indicator while a mutation is in flight (PRP-0090 precedent); a file
+                  import lasts until its canvas is drawn (PRP-0211, UDR-0193 D2). */}
               {(saving || importing) && (
-                <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/70">
-                  <div className="flex items-center gap-2 text-sm text-zinc-700">
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                    {saving ? 'Saving...' : 'Importing...'}
-                  </div>
-                </div>
+                <BusyOverlay label={saving ? 'Saving...' : `Importing ${importLabel ?? 'the file'}...`} />
               )}
             </div>
           </ReactFlowProvider>
@@ -4006,8 +4612,15 @@ function SearchPane(props: {
   /** The entailment mode of the next search (UDR-0191 D10). */
   entailment: Entailment
   onEntailmentChange: (mode: Entailment) => void
+  /** The stored result's state for the chosen mode (PRP-0211, UDR-0193 D12); null for None. */
+  entailmentState: string | null
+  /** Stop the running search (UDR-0193 D5). */
+  onStop: () => void
+  /** Why? on an inferred triples-table row (UDR-0193 D15). */
+  onExplain: (row: TripleRow, mode: 'rdfs' | 'owl-rl') => void
 }) {
   const current = ENTAILMENT_OPTIONS.find((option) => option.value === props.entailment)
+  const running = props.queryRunning || props.nlRunning
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 space-y-2 border-b p-2">
@@ -4040,6 +4653,11 @@ function SearchPane(props: {
               ))}
             </select>
           </label>
+          {props.entailmentState && (
+            <span className="text-[10px] text-zinc-500" data-entailment-state>
+              {props.entailmentState}
+            </span>
+          )}
         </div>
         {props.scopeLabel && (
           <p className="text-[10px] text-teal-700" data-search-scope>
@@ -4106,6 +4724,16 @@ function SearchPane(props: {
               title="Restore the default SPARQL query">
               <RotateCcw className="mr-1 h-3 w-3" /> Reset
             </Button>
+            {running && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 text-xs"
+                onClick={props.onStop}
+                title="Stop the running search (the server stops it too)">
+                <Square className="mr-1 h-3 w-3" /> Stop
+              </Button>
+            )}
             {props.highlightActive && (
               <Button variant="outline" size="sm" className="h-6 text-xs" onClick={props.onClearHighlight}>
                 Clear highlight
@@ -4115,7 +4743,7 @@ function SearchPane(props: {
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-2">
-        <QueryResultView result={props.result} inspector={props.inspector} />
+        <QueryResultView result={props.result} inspector={props.inspector} onExplain={props.onExplain} />
       </div>
     </div>
   )
@@ -4238,7 +4866,17 @@ function QueryCellView(props: { cell: QueryCell | undefined; text: string; inspe
   )
 }
 
-function QueryResultView({ result, inspector }: { result: QueryResult | null; inspector: InspectorContext }) {
+type TripleRow = { s: Term; p: Term; o: Term; graph: Term | null; inferred: boolean }
+
+function QueryResultView({
+  result,
+  inspector,
+  onExplain,
+}: {
+  result: QueryResult | null
+  inspector: InspectorContext
+  onExplain?: (row: TripleRow, mode: 'rdfs' | 'owl-rl') => void
+}) {
   if (!result) return <p className="text-xs text-zinc-400">Run a query to see results here.</p>
   if (result.kind === 'error') return <p className="whitespace-pre-wrap text-xs text-red-600">{result.error}</p>
   if (result.kind === 'ask') {
@@ -4295,7 +4933,20 @@ function QueryResultView({ result, inspector }: { result: QueryResult | null; in
                         )}
                       </td>
                     ))}
-                    {entailed && <td className="border px-1 py-1 align-top">{row.inferred && <InferredBadge />}</td>}
+                    {entailed && (
+                      <td className="border px-1 py-1 align-top">
+                        {row.inferred && <InferredBadge />}
+                        {row.inferred && onExplain && result.entailment && result.entailment !== 'simple' && (
+                          <button
+                            type="button"
+                            className="ml-1 text-[10px] text-blue-700 hover:underline"
+                            title="Why is this inferred?"
+                            onClick={() => onExplain(row, result.entailment as 'rdfs' | 'owl-rl')}>
+                            Why?
+                          </button>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

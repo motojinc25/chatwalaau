@@ -18,12 +18,13 @@ import asyncio
 from datetime import UTC, datetime
 import logging
 import time
+from typing import Any
 import uuid
 
 from app.core.config import settings
 from app.pipeline import store as store_mod
 from app.pipeline.models import Job, JobStatus
-from app.pipeline.registry import get_available_types, get_runner
+from app.pipeline.registry import JobType, get_available_types, get_job_type, get_runner
 from app.pipeline.store import store
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,18 @@ class JobQueue:
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._sem: asyncio.Semaphore | None = None
+        self._type_sems: dict[str, asyncio.Semaphore] = {}
+        self._timed_out: set[str] = set()
 
-    def _semaphore(self) -> asyncio.Semaphore:
+    def _semaphore(self, job_type: JobType | None = None) -> asyncio.Semaphore:
         # Created lazily on the running loop. Bound from settings (>=1).
+        if job_type is not None and job_type.max_concurrent:
+            # PRP-0211 (UDR-0193 D1): a type with its own slot limit never shares the pool.
+            sem = self._type_sems.get(job_type.name)
+            if sem is None:
+                sem = asyncio.Semaphore(max(1, int(job_type.max_concurrent)))
+                self._type_sems[job_type.name] = sem
+            return sem
         if self._sem is None:
             limit = max(1, int(settings.pipeline_max_concurrent_jobs))
             self._sem = asyncio.Semaphore(limit)
@@ -70,10 +80,11 @@ class JobQueue:
         runner = get_runner(job.type)
         if runner is None:  # defensive; submit() already validated
             return
+        job_type = get_job_type(job.type)
         run_dir = None
         started = time.monotonic()
         try:
-            async with self._semaphore():
+            async with self._semaphore(job_type):
                 if cancel_event.is_set():
                     job.status = JobStatus.cancelled
                     job.completed_at = datetime.now(UTC).isoformat()
@@ -85,7 +96,11 @@ class JobQueue:
                 run_id, run_dir = store_mod.start_run(job)
                 job.last_run_id = run_id
                 store.save(job)
-                await runner(job, store, cancel_event)
+                limit = _time_limit(job_type)
+                if limit > 0:
+                    await self._run_limited(runner, job, cancel_event, limit)
+                else:
+                    await runner(job, store, cancel_event)
         except Exception:
             logger.exception("Pipeline job %s failed", job.id)
             job.status = JobStatus.failed
@@ -103,6 +118,37 @@ class JobQueue:
                     logger.warning("Failed to finalize run for job %s", job.id, exc_info=True)
             self._running_tasks.pop(job.id, None)
             self._cancel_events.pop(job.id, None)
+
+    async def _run_limited(self, runner: Any, job: Job, cancel_event: asyncio.Event, limit: float) -> None:
+        """Run ``runner`` with a time limit (PRP-0211, UDR-0193 D1).
+
+        On expiry the cancel event is set (a process-backed runner ends its child) and the
+        job is recorded ``failed`` with a timeout error, whatever the runner wrote.
+        """
+        task = asyncio.ensure_future(runner(job, store, cancel_event))
+        done, _ = await asyncio.wait({task}, timeout=limit)
+        if task in done:
+            task.result()
+            return
+        self._timed_out.add(job.id)
+        cancel_event.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=_TIMEOUT_GRACE_SECONDS)
+        except TimeoutError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        except Exception:
+            logger.debug("Pipeline job %s raised after its timeout", job.id, exc_info=True)
+        final = store.load(job.id) or job
+        final.status = JobStatus.failed
+        final.error = f"Timed out after {limit:g} s"
+        final.completed_at = datetime.now(UTC).isoformat()
+        store.save(final)
+        logger.warning("Pipeline job %s (%s) timed out after %g s", job.id, job.type, limit)
+
+    def timed_out(self, job_id: str) -> bool:
+        """True when ``job_id``'s cancel event was set by its type's time limit (UDR-0193 D1)."""
+        return job_id in self._timed_out
 
     async def cancel(self, job_id: str) -> Job:
         """Request cancellation of a running or pending job."""
@@ -158,6 +204,21 @@ class JobQueue:
             t.cancel()
         if still:
             await asyncio.gather(*still, return_exceptions=True)
+
+
+# Seconds a timed-out runner gets to wind down after its cancel event is set.
+_TIMEOUT_GRACE_SECONDS = 15.0
+
+
+def _time_limit(job_type: JobType | None) -> float:
+    """The type's time limit in seconds (0 = none); a failing callable means none."""
+    if job_type is None or job_type.timeout_seconds is None:
+        return 0.0
+    try:
+        return max(0.0, float(job_type.timeout_seconds() or 0))
+    except Exception:
+        logger.warning("Pipeline job type %s: unreadable time limit", job_type.name, exc_info=True)
+        return 0.0
 
 
 # Module-level singleton shared by the router (CTR-0146) and the agent tool (CTR-0147).

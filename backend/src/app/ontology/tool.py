@@ -20,6 +20,11 @@ LLM answer questions from the operator's concept models:
   v5, UDR-0191 D9) or ``owl-rl`` (CTR-0172 v6, UDR-0192 D10): the inferred triples come
   in a second block labelled as inferred and not stated in any file. An ``owl-rl``
   answer from an inconsistent ontology starts with the inconsistencies (UDR-0192 D5).
+- PRP-0211 (CTR-0172 v7, UDR-0193): the search runs in a search worker under the agent
+  time limit ``ontology_tool_timeout_seconds`` (a timeout answers a message asking for a
+  narrower question); the catalog lists the entailment modes already computed for each
+  ontology (``entailment_ready``); ``action="explain"`` explains why one statement is
+  inferred (the rules applied and the stated statements it rests on).
 
 Errors (unknown ontology, un-convertible question, empty result) return short
 diagnostic text and never raise into the run.
@@ -36,7 +41,7 @@ from pydantic import Field
 
 from app.core.config import settings
 from app.ontology import entailment as entailment_modes
-from app.ontology import nl, store
+from app.ontology import nl, store, workers
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +61,12 @@ ONTOLOGY_TOOL_INSTRUCTION = (
     "when you use them, say that they are inferred. Pass entailment='owl-rl' only when the "
     "question depends on OWL: transitive, symmetric or inverse properties, equivalent classes "
     "or properties, owl:sameAs, restrictions, intersections or unions, keys or functional "
-    "properties (OWL 2 RL entailment; slower and limited to smaller ontologies). If an owl-rl "
-    "answer reports an inconsistent ontology, give the answer together with that warning."
+    "properties (OWL 2 RL entailment; limited to smaller ontologies). If an owl-rl "
+    "answer reports an inconsistent ontology, give the answer together with that warning. "
+    "When the user asks WHY something holds or why the ontology is inconsistent, use "
+    "action='explain' with the statement as one Turtle triple (prefixes of the ontology allowed) "
+    "and the entailment mode; it answers the rules applied and the stated statements behind it. "
+    "Searches have a time limit: if one times out, ask a narrower question."
 )
 
 
@@ -78,8 +87,29 @@ def _catalog_summary() -> list[dict[str, object]]:
         imported = direct_import_names(e["id"], resolver)
         if imported:
             item["imports"] = imported
+        ready = _ready_modes(e["id"])
+        if ready:
+            item["entailment_ready"] = ready
         out.append(item)
     return out
+
+
+def _ready_modes(ontology_id: str) -> list[str]:
+    """The entailment modes whose stored result is ready (UDR-0193 D12); [] when not computed."""
+    from app.ontology import entailment_jobs
+    from app.ontology import entailment_results as results
+
+    if not entailment_jobs.active():
+        return []
+    try:
+        key = store.query_key(ontology_id)
+    except (KeyError, ValueError):
+        return []
+    return [
+        mode
+        for mode in entailment_jobs.build_modes()
+        if (record := results.lookup(key, mode)) is not None and record.get("state") == results.READY
+    ]
 
 
 def _resolve_entry(selector: str) -> dict[str, str] | list[dict[str, str]] | None:
@@ -100,10 +130,10 @@ def _resolve_entry(selector: str) -> dict[str, str] | list[dict[str, str]] | Non
 
 
 async def ontology_query(
-    action: Annotated[str, Field(description="One of: catalog, query.")],
+    action: Annotated[str, Field(description="One of: catalog, query, explain.")],
     ontology: Annotated[
         str,
-        Field(description="For query: the target ontology id (preferred) or its exact name."),
+        Field(description="For query / explain: the target ontology id (preferred) or its exact name."),
     ] = "",
     question: Annotated[
         str,
@@ -122,10 +152,17 @@ async def ontology_query(
             description="For query, optional: 'simple' (default) answers from the stated triples only; "
             "'rdfs' also applies RDFS entailment (subclass / subproperty hierarchies, domains, ranges); "
             "'owl-rl' applies OWL 2 RL entailment on top (transitive / symmetric / inverse properties, "
-            "equivalence, owl:sameAs, restrictions, keys; slower, smaller ontologies only). Inferred "
-            "triples come in a separate block."
+            "equivalence, owl:sameAs, restrictions, keys; smaller ontologies only). Inferred "
+            "triples come in a separate block. For explain: 'rdfs' or 'owl-rl'."
         ),
     ] = "simple",
+    statement: Annotated[
+        str,
+        Field(
+            description="For explain: ONE statement as a Turtle triple, e.g. 'ex:bolt ex:partOf ex:engine .' "
+            "(the ontology's prefixes may be used)."
+        ),
+    ] = "",
 ) -> str:
     """Query the operator's RDF ontology concept models.
 
@@ -140,8 +177,8 @@ async def ontology_query(
     if act == "catalog":
         return json.dumps({"ontologies": await run_in_threadpool(_catalog_summary)}, ensure_ascii=False)
 
-    if act != "query":
-        return "Error: 'action' must be one of catalog, query."
+    if act not in ("query", "explain"):
+        return "Error: 'action' must be one of catalog, query, explain."
 
     resolved = _resolve_entry(ontology)
     if resolved is None:
@@ -157,6 +194,8 @@ async def ontology_query(
             },
             ensure_ascii=False,
         )
+    if act == "explain":
+        return await _explain(resolved, statement, entailment, graph)
     if not (question or "").strip():
         return "Error: 'question' is required for query."
 
@@ -165,16 +204,20 @@ async def ontology_query(
         mode = entailment_modes.parse_mode(entailment)
     except ValueError as exc:
         return f"Error: {exc}"
+    # PRP-0211 (UDR-0193 D3 / D4): the summary and the query run in a search worker under
+    # the agent time limit; the model's SPARQL generation is not counted.
+    budget = workers.Budget(workers.AGENT)
     try:
-        # Off the event loop, from the query cache when the revision is cached (UDR-0183 D1 / D4).
-        loaded = await run_in_threadpool(store.load_store, resolved["id"], scope)
+        schema = await workers.summary(resolved["id"], scope=scope, imports=None, budget=budget)
+    except workers.QueryTimeout as exc:
+        return f"Error: {exc} Ask a narrower question."
     except Exception as exc:
         logger.warning("ontology_query could not load %s", resolved["id"], exc_info=True)
         return f"Error: could not load ontology {resolved['id']}: {exc}"
 
     try:
         # CONSTRUCT-only lane (UDR-0084 D9): the answer is always a graph.
-        sparql = await nl.generate_sparql(question, loaded, construct_only=True)
+        sparql = await nl.generate_sparql(question, schema, construct_only=True)
     except ValueError as exc:
         return f"Error: could not translate the question into SPARQL: {exc}"
     except Exception as exc:
@@ -182,15 +225,21 @@ async def ontology_query(
         return f"Error: the SPARQL generation model call failed: {exc}"
 
     try:
-        result = await run_in_threadpool(
-            store.execute_query,
-            loaded,
-            sparql,
+        result = await workers.query(
+            resolved["id"],
+            scope=scope,
+            imports=None,
+            sparql=sparql,
+            mode=mode,
+            budget=budget,
             max_construct_triples=settings.ontology_tool_max_triples,
-            entailment=mode,
         )
+    except workers.QueryTimeout as exc:
+        return f"Error: {exc} Ask a narrower question.\nGenerated SPARQL:\n{sparql}"
     except entailment_modes.EntailmentError as exc:
         return f"Error: {exc}"
+    except workers.WorkerFailed as exc:
+        return f"Error: the search failed ({exc}); try again."
     except ValueError as exc:
         return f"Error: the generated SPARQL failed to execute: {exc}\nGenerated query:\n{sparql}"
 
@@ -239,7 +288,7 @@ async def ontology_query(
     if result.get("format") == "trig":
         # UDR-0182 D5: each triple is written under the named graph(s) that hold it.
         return warning + (
-            f"Ontology: {resolved['name']} ({resolved['id']}), {store.scope_label(loaded.scope)}\n"
+            f"Ontology: {resolved['name']} ({resolved['id']}), {store.scope_label(scope)}\n"
             f"Generated SPARQL:\n{sparql}\n\n"
             "Result (RDF TriG; each triple is under the named graph(s) that hold it, the rest is "
             f"in the default graph):\n```trig\n{turtle}\n```{inferred_block}{notice}"
@@ -249,6 +298,39 @@ async def ontology_query(
         f"Generated SPARQL:\n{sparql}\n\n"
         f"Result (RDF Turtle):\n```turtle\n{turtle}\n```{inferred_block}{notice}"
     )
+
+
+async def _explain(resolved: dict[str, str], statement: str, entailment: str, graph: str) -> str:
+    """``action="explain"``: why one statement holds (UDR-0193 D16)."""
+    from app.ontology import explain
+
+    if not (statement or "").strip():
+        return "Error: 'statement' (one Turtle triple) is required for explain."
+    try:
+        scope = store.parse_scope(graph.strip() or None)
+        mode = entailment_modes.parse_mode(entailment or "rdfs")
+    except ValueError as exc:
+        return f"Error: {exc}"
+    if mode == entailment_modes.SIMPLE:
+        mode = entailment_modes.RDFS
+    try:
+        result = await workers.explain(
+            resolved["id"],
+            scope=scope,
+            imports=None,
+            mode=mode,
+            statement=statement.strip(),
+            budget=workers.Budget(workers.AGENT),
+        )
+    except workers.QueryTimeout as exc:
+        return f"Error: {exc}"
+    except entailment_modes.EntailmentError as exc:
+        return f"Error: {exc}"
+    except workers.WorkerFailed as exc:
+        return f"Error: the explanation failed ({exc}); try again."
+    except ValueError as exc:
+        return f"Error: {exc}"
+    return explain.render_text(result, ontology=f"{resolved['name']} ({resolved['id']})")
 
 
 __all__ = ["ONTOLOGY_TOOL_INSTRUCTION", "ontology_query"]

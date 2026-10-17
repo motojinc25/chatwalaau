@@ -90,6 +90,8 @@ export function OntologyChecksPane(props: {
   onRemoveEdge: (edge: CheckEdge) => void
   /** Import findings: open the Imports dialog for this import IRI (PRP-0207 / UDR-0189 D7). */
   onOpenImports?: (iri: string) => void
+  /** owl_inconsistency: open the Explain tab for the finding (PRP-0211 / UDR-0193 D15). */
+  onExplain?: (finding: Finding) => void
 }) {
   const [showIgnored, setShowIgnored] = useState(false)
   const visible = useMemo(
@@ -146,6 +148,7 @@ function CheckGroup(props: {
   onRemoveEdge: (edge: CheckEdge) => void
   /** Import findings: open the Imports dialog for this import IRI (PRP-0207 / UDR-0189 D7). */
   onOpenImports?: (iri: string) => void
+  onExplain?: (finding: Finding) => void
 }) {
   const [open, setOpen] = useState(props.defaultOpen)
   // Declare all: per OWN namespace only; other vocabularies are declared one at a time (D3).
@@ -214,6 +217,7 @@ function FindingRow(props: {
   onRemoveEdge: (edge: CheckEdge) => void
   /** Import findings: open the Imports dialog for this import IRI (PRP-0207 / UDR-0189 D7). */
   onOpenImports?: (iri: string) => void
+  onExplain?: (finding: Finding) => void
 }) {
   const { finding: f } = props
   const id = findingId(f)
@@ -222,7 +226,13 @@ function FindingRow(props: {
   return (
     <div className={cn('rounded border px-1.5 py-1 text-[11px]', isIgnored && 'opacity-50')}>
       <p className="text-zinc-700">{f.message}</p>
+      {f.stale && <p className="text-[10px] text-amber-700">Based on the last saved version.</p>}
       <div className="mt-0.5 flex flex-wrap items-center gap-1">
+        {f.graphLabel && (
+          <span className="rounded bg-teal-50 px-1 text-[10px] text-teal-700" title="Found in this named graph">
+            {f.graphLabel}
+          </span>
+        )}
         {f.subjects.map((term, i) => (
           <button
             key={termKey(term)}
@@ -246,6 +256,11 @@ function FindingRow(props: {
             className="h-6 text-[10px]"
             onClick={() => f.importIri && props.onOpenImports?.(f.importIri)}>
             Open Imports
+          </Button>
+        )}
+        {f.explainKey && props.onExplain && (
+          <Button variant="outline" size="sm" className="h-6 text-[10px]" onClick={() => props.onExplain?.(f)}>
+            Explain
           </Button>
         )}
         {!props.readOnly && f.code === 'undeclared_class' && (

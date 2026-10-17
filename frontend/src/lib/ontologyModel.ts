@@ -1818,11 +1818,15 @@ export type CheckCode =
   | 'ambiguous_import'
   | 'import_over_limit'
   | 'import_cycle'
+  // PRP-0211 (UDR-0193 D13): from the backend's stored OWL 2 RL result, not computed here.
+  | 'owl_inconsistency'
+  | 'owl_consistency_unchecked'
 
 export type CheckSeverity = 'warning' | 'info'
 
 /** The catalogue, in display order (UDR-0188 D2). */
 export const CHECKS: readonly { code: CheckCode; severity: CheckSeverity; title: string }[] = [
+  { code: 'owl_inconsistency', severity: 'warning', title: 'Inconsistent (OWL 2 RL)' },
   { code: 'undeclared_class', severity: 'warning', title: 'Undeclared classes' },
   { code: 'unresolved_import', severity: 'warning', title: 'Imports not in the catalog' },
   { code: 'ambiguous_import', severity: 'warning', title: 'Ambiguous imports' },
@@ -1839,6 +1843,7 @@ export const CHECKS: readonly { code: CheckCode; severity: CheckSeverity; title:
   { code: 'orphan_declaration', severity: 'info', title: 'Orphan declarations' },
   { code: 'duplicate_label', severity: 'info', title: 'Duplicate labels' },
   { code: 'import_cycle', severity: 'info', title: 'Import cycles' },
+  { code: 'owl_consistency_unchecked', severity: 'info', title: 'Consistency (OWL 2 RL)' },
 ]
 
 /** One removable statement a cycle or self-loop finding offers to delete. */
@@ -1866,6 +1871,12 @@ export interface Finding {
   notDrawn?: boolean
   /** Import findings: the import IRI (opens the Imports dialog, UDR-0189 D7). */
   importIri?: string
+  /** owl_inconsistency: the stored finding's key for Explain (PRP-0211, UDR-0193 D15). */
+  explainKey?: string
+  /** owl_inconsistency: the named graph it was found in (shown), null = the merge. */
+  graphLabel?: string | null
+  /** owl_inconsistency: computed from the last SAVED version while the model has edits. */
+  stale?: boolean
 }
 
 export interface CheckContext {

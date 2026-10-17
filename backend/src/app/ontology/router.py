@@ -23,6 +23,12 @@
     PUT    /api/ontology/import-map         -- replace the mapping table
     GET    /api/ontology/{id}/imports       -- imports, their resolution, imported vocabulary (D6)
     GET    /api/ontology/{id}/importers     -- the ontologies that import this one (D9)
+    GET    /api/ontology/{id}/entailment    -- the stored entailment results' state per mode
+                                               (UDR-0193 D12)
+    GET    /api/ontology/{id}/entailment/findings   -- OWL 2 RL inconsistencies (D13)
+    GET    /api/ontology/{id}/entailment/statements -- inferred statements for the views (D17)
+    POST   /api/ontology/{id}/explain       -- why a statement is inferred / an
+                                               inconsistency holds (D14 / D15)
 
 Every endpoint depends on ``verify_api_key`` (CTR-0083; loopback bypass) --
 the mutations and the query POSTs are gated per invariant 7, the GETs follow
@@ -43,7 +49,9 @@ prefixes / base / VERSION (UDR-0084 D10, UDR-0180 D6). GET returns a ``revision`
 (SHA-256 of the stored file); a PUT carrying a different one is refused with 409
 ``stale_revision`` before anything is written (UDR-0180 D8).
 
-Parsing, loading, querying, serializing and writing run in worker threads, never on
+Searches run in worker processes with time limits (CTR-0171 v11, UDR-0193 D3-D6:
+422 ``query_timeout``, 503 ``query_worker_failed``; a caller that disconnects stops its
+search). Parsing, loading, serializing and writing run in worker threads, never on
 the event loop; every "check revision -> read -> apply -> write" holds the
 ontology's write lock (CTR-0170 v4 / CTR-0171 v6, UDR-0183 D4). ``POST /statements``
 with ``on_stale: "rebase"`` applies a request made against an older revision to the
@@ -56,13 +64,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import verify_api_key
 from app.core.config import settings
-from app.ontology import entailment, formats, history, imports, nl, store
+from app.ontology import entailment, formats, history, imports, nl, store, workers
 from app.ontology.operations import StaleConflict, StatementNotFound, apply_operations
 from app.ontology.vocabulary import (
     PROJECTION_VERSION,
@@ -141,7 +149,7 @@ class QueryRequest(BaseModel):
     scope: Any = None
     # Include the owl:imports closure (UDR-0189 D5); omitted = the App Settings default.
     imports: bool | None = None
-    # PRP-0209 / UDR-0191 D1: "simple" (omitted) or "rdfs"; "owl-rl" is reserved (422).
+    # PRP-0209 / UDR-0191 D1, PRP-0210: "simple" (omitted), "rdfs" or "owl-rl".
     entailment: str | None = Field(default=None, max_length=32)
 
 
@@ -218,6 +226,21 @@ def _entailment_or_422(value: Any) -> str:
         return entailment.parse_mode(value)
     except entailment.EntailmentError as exc:
         raise HTTPException(status_code=422, detail=exc.detail) from exc
+
+
+def _search_error(exc: Exception) -> HTTPException | None:
+    """The HTTP answer of a search lane failure (UDR-0193 D4-D6), None when not one of them."""
+    if isinstance(exc, workers.QueryTimeout):
+        return HTTPException(status_code=422, detail=exc.detail)
+    if isinstance(exc, workers.QueryStopped):
+        return HTTPException(status_code=422, detail={"error": "query_stopped", "message": "The search was stopped."})
+    if isinstance(exc, workers.WorkerFailed):
+        return HTTPException(status_code=503, detail={"error": "query_worker_failed", "message": str(exc)})
+    if isinstance(exc, entailment.EntailmentError):
+        return HTTPException(status_code=422, detail=exc.detail)
+    if isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail={"error": "ontology_not_found"})
+    return None
 
 
 def _save(ontology_id: str, text: str, dataset: bool, entry: dict[str, Any] | None = None) -> str | None:
@@ -669,57 +692,179 @@ async def export_ontology(ontology_id: str, format: str | None = None) -> Respon
     return Response(content=content, media_type=f"{fmt.media_type}; charset=utf-8", headers=headers)
 
 
-def _run_sparql(
-    ontology_id: str, scope: Any, sparql: str, include: bool | None = None, mode: str = entailment.SIMPLE
-) -> dict[str, Any]:
-    """Load (from the cache when possible) and query, in a worker thread (UDR-0183 D1 / D4)."""
-    return store.execute_query(store.load_store(ontology_id, scope, include), sparql, entailment=mode)
-
-
 @router.post("/{ontology_id}/query", dependencies=[Depends(verify_api_key)])
-async def run_query(ontology_id: str, body: QueryRequest) -> dict:
-    """Run a READ-ONLY SPARQL query (SELECT / CONSTRUCT / ASK / DESCRIBE)."""
+async def run_query(ontology_id: str, body: QueryRequest, request: Request) -> dict:
+    """Run a READ-ONLY SPARQL query (SELECT / CONSTRUCT / ASK / DESCRIBE) in a search worker."""
     _require_enabled()
     _entry_or_404(ontology_id)
     scope = _scope_or_422(body.scope)
     mode = _entailment_or_422(body.entailment)
     try:
         nl.ensure_read_only(body.sparql)
-        result = await run_in_threadpool(_run_sparql, ontology_id, scope, body.sparql, body.imports, mode)
-    except entailment.EntailmentError as exc:
-        raise HTTPException(status_code=422, detail=exc.detail) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return result
+        return await workers.query(
+            ontology_id,
+            scope=scope,
+            imports=body.imports,
+            sparql=body.sparql,
+            mode=mode,
+            budget=workers.Budget(workers.SCREEN),
+            is_gone=request.is_disconnected,
+        )
+    except Exception as exc:
+        mapped = _search_error(exc)
+        if mapped is not None:
+            raise mapped from exc
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise
 
 
 @router.post("/{ontology_id}/nl-query", dependencies=[Depends(verify_api_key)])
-async def run_nl_query(ontology_id: str, body: NlQueryRequest) -> dict:
+async def run_nl_query(ontology_id: str, body: NlQueryRequest, request: Request) -> dict:
     """Natural language -> SPARQL (via the CTR-0102 chokepoint) -> execute.
 
     The generated SPARQL is returned to the caller (the UI places it into the
     SPARQL editor for refinement) and validated read-only BEFORE execution
-    (UDR-0084 D8).
+    (UDR-0084 D8). The schema summary and the execution run in a search worker under
+    the screen time limit; the model call is not counted (UDR-0193 D4).
     """
     _require_enabled()
     _entry_or_404(ontology_id)
     mode = _entailment_or_422(body.entailment)
-    graph = await run_in_threadpool(store.load_store, ontology_id, _scope_or_422(body.scope), body.imports)
+    scope = _scope_or_422(body.scope)
+    budget = workers.Budget(workers.SCREEN)
     try:
-        sparql = await nl.generate_sparql(body.question, graph)
+        schema = await workers.summary(
+            ontology_id, scope=scope, imports=body.imports, budget=budget, is_gone=request.is_disconnected
+        )
+    except Exception as exc:
+        mapped = _search_error(exc)
+        if mapped is not None:
+            raise mapped from exc
+        raise
+    try:
+        sparql = await nl.generate_sparql(body.question, schema)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"NL to SPARQL failed: {exc}") from exc
     except Exception as exc:  # provider/network failure -- keep the message short
         logger.warning("nl-query completion failed for %s", ontology_id, exc_info=True)
         raise HTTPException(status_code=502, detail="The SPARQL generation model call failed.") from exc
     try:
-        result = await run_in_threadpool(store.execute_query, graph, sparql, entailment=mode)
-    except entailment.EntailmentError as exc:
-        raise HTTPException(status_code=422, detail=exc.detail) from exc
-    except ValueError as exc:
-        # Surface the generated (broken) query so the user can fix it in the editor.
-        return {"sparql": sparql, "kind": "error", "error": str(exc)}
+        result = await workers.query(
+            ontology_id,
+            scope=scope,
+            imports=body.imports,
+            sparql=sparql,
+            mode=mode,
+            budget=budget,
+            is_gone=request.is_disconnected,
+        )
+    except Exception as exc:
+        mapped = _search_error(exc)
+        if mapped is not None:
+            raise mapped from exc
+        if isinstance(exc, ValueError):
+            # Surface the generated (broken) query so the user can fix it in the editor.
+            return {"sparql": sparql, "kind": "error", "error": str(exc)}
+        raise
     return {"sparql": sparql, **result}
+
+
+# ---- Stored entailment, consistency, inferred statements, Explain (UDR-0193) -----------
+
+
+@router.get("/{ontology_id}/entailment", dependencies=[Depends(verify_api_key)])
+async def entailment_status(ontology_id: str, scope: str | None = None, imports: bool | None = None) -> dict:
+    """Per mode, the state of the stored entailment result of a key (UDR-0193 D12)."""
+    from app.ontology import entailment_jobs
+
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    parsed = _scope_or_422(scope)
+    try:
+        return await run_in_threadpool(entailment_jobs.status, ontology_id, parsed, imports)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "ontology_not_found"}) from exc
+
+
+@router.get("/{ontology_id}/entailment/findings", dependencies=[Depends(verify_api_key)])
+async def entailment_findings(
+    ontology_id: str, mode: str = "owl-rl", scope: str | None = None, imports: bool | None = None
+) -> dict:
+    """The inconsistencies of the stored result of a key, all of them (UDR-0193 D13)."""
+    from app.ontology import inferred_views
+
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    parsed = _scope_or_422(scope)
+    chosen = _entailment_or_422(mode)
+    try:
+        return await run_in_threadpool(inferred_views.findings, ontology_id, parsed, imports, chosen)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"error": "ontology_not_found"}) from exc
+
+
+@router.get("/{ontology_id}/entailment/statements", dependencies=[Depends(verify_api_key)])
+async def entailment_statements(
+    ontology_id: str, mode: str = "rdfs", scope: str | None = None, imports: bool | None = None
+) -> dict:
+    """The inferred statements the canvas and the Data view draw (UDR-0193 D17)."""
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    parsed = _scope_or_422(scope)
+    chosen = _entailment_or_422(mode)
+    payload = {"ontology_id": ontology_id, "scope": parsed, "imports": imports, "mode": chosen}
+    try:
+        return await workers.run("statements", payload, budget=workers.Budget(workers.SCREEN))
+    except Exception as exc:
+        mapped = _search_error(exc)
+        if mapped is not None:
+            raise mapped from exc
+        raise
+
+
+class ExplainRequest(BaseModel):
+    mode: str = Field(default="rdfs", max_length=32)
+    # Term JSON {s, p, o, graph?} -- exactly one of statement / finding (a finding key).
+    statement: dict[str, Any] | None = None
+    finding: str | None = Field(default=None, max_length=64)
+    scope: Any = None
+    imports: bool | None = None
+
+
+@router.post("/{ontology_id}/explain", dependencies=[Depends(verify_api_key)])
+async def explain_statement(ontology_id: str, body: ExplainRequest, request: Request) -> dict:
+    """Why an inferred statement or an inconsistency holds (UDR-0193 D14 / D15)."""
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    scope = _scope_or_422(body.scope)
+    mode = _entailment_or_422(body.mode)
+    if mode == entailment.SIMPLE:
+        raise HTTPException(status_code=422, detail={"error": "explain_mode", "message": "Pick rdfs or owl-rl."})
+    if (body.statement is None) == (body.finding is None):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "explain_target", "message": "Give exactly one of statement or finding."},
+        )
+    try:
+        return await workers.explain(
+            ontology_id,
+            scope=scope,
+            imports=body.imports,
+            mode=mode,
+            statement=body.statement,
+            finding=body.finding,
+            budget=workers.Budget(workers.SCREEN),
+            is_gone=request.is_disconnected,
+        )
+    except Exception as exc:
+        mapped = _search_error(exc)
+        if mapped is not None:
+            raise mapped from exc
+        if isinstance(exc, ValueError):
+            code = getattr(exc, "code", "explain_invalid")
+            raise HTTPException(status_code=422, detail={"error": code, "message": str(exc)}) from exc
+        raise
 
 
 @router.get("/{ontology_id}", dependencies=[Depends(verify_api_key)])

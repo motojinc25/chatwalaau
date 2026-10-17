@@ -27,6 +27,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import type { InferredData, InferredStatement } from '@/lib/ontologyInferred'
 import {
   type CellValue,
   type ClassTree,
@@ -130,6 +131,8 @@ function TreeNode(props: {
   classLabel: (cls: string) => string
   selected: DataGroup | null
   onSelect: (group: DataGroup) => void
+  /** PRP-0211 (UDR-0193 D19): individuals inferred to belong to a class, beyond the stated ones. */
+  inferredCount?: (cls: string) => number
 }) {
   const [open, setOpen] = useState(props.depth === 0)
   // Cycles are cut: a class already on this path is not expanded again (UDR-0187 D2).
@@ -162,10 +165,20 @@ function TreeNode(props: {
           {props.classLabel(props.cls)}
         </button>
         <span className="shrink-0 text-[10px] text-zinc-500">{count}</span>
+        <InferredCount n={props.inferredCount?.(props.cls) ?? 0} />
       </div>
       {open &&
         children.map((child) => <TreeNode key={child} {...props} cls={child} depth={props.depth + 1} path={path} />)}
     </div>
+  )
+}
+
+function InferredCount({ n }: { n: number }) {
+  if (n <= 0) return null
+  return (
+    <span className="shrink-0 text-[10px] text-zinc-400" title={`${n} more individuals are inferred to belong here`}>
+      +{n} inferred
+    </span>
   )
 }
 
@@ -176,6 +189,7 @@ function ClassTreePane(props: {
   prefixes: PrefixDecl[]
   selected: DataGroup | null
   onSelect: (group: DataGroup) => void
+  inferredCount?: (cls: string) => number
 }) {
   const [query, setQuery] = useState('')
   const empty = useMemo(() => new Set<string>(), [])
@@ -207,6 +221,7 @@ function ClassTreePane(props: {
         onClick={() => props.onSelect({ kind: 'class', iri: cls })}>
         <span className="min-w-0 flex-1 truncate text-zinc-800">{label}</span>
         <span className="shrink-0 text-[10px] text-zinc-500">{props.index.members.get(cls)?.length ?? 0}</span>
+        <InferredCount n={props.inferredCount?.(cls) ?? 0} />
       </button>
     )
   }
@@ -237,6 +252,7 @@ function ClassTreePane(props: {
                 classLabel={props.classLabel}
                 selected={props.selected}
                 onSelect={props.onSelect}
+                inferredCount={props.inferredCount}
               />
             ))}
             {props.index.undeclared.length > 0 && (
@@ -528,8 +544,19 @@ export function IndividualsView(props: {
   onSelectIndividual: (key: string) => void
   onCommit: (key: string, edits: StatementEdit[]) => void
   onCreate: (cls: string) => void
+  /** PRP-0211 (UDR-0193 D19): inferred memberships (switch on), never edited. */
+  inferred?: InferredData | null
+  onExplainInferred?: (statement: InferredStatement) => void
 }) {
   const { model, index, ctx, group } = props
+  const inferredCount = useMemo(() => {
+    const inferred = props.inferred
+    if (!inferred) return undefined
+    return (cls: string) => {
+      const stated = new Set((index.members.get(cls) ?? []).map((r) => resourceKey(r)))
+      return (inferred.members.get(cls) ?? []).filter((key) => index.keys.has(key) && !stated.has(key)).length
+    }
+  }, [props.inferred, index])
   const [rowQuery, setRowQuery] = useState('')
   const [limit, setLimit] = useState(PAGE)
   const [hidden, setHidden] = useState(readHiddenColumns)
@@ -548,11 +575,24 @@ export function IndividualsView(props: {
       group.kind === 'noClass'
         ? index.noClass.map((resource) => ({ resource, cls: '' }))
         : classMembers(index, props.tree, group.iri, props.includeSubclasses)
-    return listed
-      .map((row) => ({ ...row, resource: byKey.get(resourceKey(row.resource)) ?? row.resource }))
+    const out: { resource: Resource; cls: string; inferred?: boolean }[] = listed.map((row) => ({
+      ...row,
+      resource: byKey.get(resourceKey(row.resource)) ?? row.resource,
+    }))
+    if (group.kind === 'class' && props.inferred) {
+      // Inferred members (UDR-0193 D19): listed too, marked.
+      const seen = new Set(out.map((row) => resourceKey(row.resource)))
+      for (const key of props.inferred.members.get(group.iri) ?? []) {
+        const resource = byKey.get(key)
+        if (!resource || seen.has(key) || !index.keys.has(key)) continue
+        seen.add(key)
+        out.push({ resource, cls: group.iri, inferred: true })
+      }
+    }
+    return out
       .map((row) => ({ ...row, label: individualLabel(row.resource, ctx.prefixes) }))
       .sort((a, b) => a.label.localeCompare(b.label))
-  }, [group, index, props.tree, props.includeSubclasses, byKey, ctx.prefixes])
+  }, [group, index, props.tree, props.includeSubclasses, byKey, ctx.prefixes, props.inferred])
 
   const needle = rowQuery.trim().toLowerCase()
   const filtered = needle
@@ -601,6 +641,7 @@ export function IndividualsView(props: {
           prefixes={ctx.prefixes}
           selected={group}
           onSelect={props.onGroupChange}
+          inferredCount={inferredCount}
         />
         <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-zinc-500">
           Select a class on the left to list its individuals.
@@ -622,6 +663,7 @@ export function IndividualsView(props: {
           setLimit(PAGE)
           props.onGroupChange(g)
         }}
+        inferredCount={inferredCount}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-2 py-1.5 text-xs">
@@ -709,6 +751,14 @@ export function IndividualsView(props: {
                       </button>
                       {group.kind === 'class' && row.cls !== group.iri && (
                         <span className="text-[10px] text-zinc-400">{props.classLabel(row.cls)}</span>
+                      )}
+                      {props.inferred && (
+                        <InferredTypeChips
+                          types={props.inferred.types.get(key) ?? []}
+                          classLabel={props.classLabel}
+                          onExplain={props.onExplainInferred}
+                          inferredMember={row.inferred === true}
+                        />
                       )}
                     </td>
                     <Cell
@@ -817,6 +867,34 @@ function Cell(props: {
 
 // ---- Individual Detail (UDR-0187 D5) ---------------------------------------------------
 
+/** Inferred memberships of one individual: marked chips; a click explains (UDR-0193 D19 / D20). */
+function InferredTypeChips(props: {
+  types: { cls: string; statement: InferredStatement }[]
+  classLabel: (cls: string) => string
+  onExplain?: (statement: InferredStatement) => void
+  inferredMember?: boolean
+}) {
+  if (props.types.length === 0 && !props.inferredMember) return null
+  return (
+    <span className="mt-0.5 flex flex-wrap gap-0.5" data-inferred-types>
+      {props.inferredMember && (
+        <span className="rounded bg-zinc-100 px-1 text-[10px] text-zinc-500">inferred member</span>
+      )}
+      {props.types.slice(0, 6).map(({ cls, statement }) => (
+        <button
+          key={cls}
+          type="button"
+          className="rounded border border-dashed px-1 text-[10px] text-zinc-500 hover:text-blue-700"
+          title="Inferred, not stated -- click to see why"
+          onClick={() => props.onExplain?.(statement)}>
+          {props.classLabel(cls)} (inferred)
+        </button>
+      ))}
+      {props.types.length > 6 && <span className="text-[10px] text-zinc-400">+{props.types.length - 6}</span>}
+    </span>
+  )
+}
+
 export function IndividualDetail(props: {
   resourceKey: string
   model: OntologyModel
@@ -830,6 +908,13 @@ export function IndividualDetail(props: {
   onAdd: (statement: StatementInput) => void
   onOpenClass: (cls: string) => void
   onDelete: () => void
+  /** PRP-0211 (UDR-0193 D19): what is inferred about this individual (switch on). */
+  inferred?: {
+    types: { cls: string; statement: InferredStatement }[]
+    values: InferredStatement[]
+    stale: boolean
+    onExplain: (statement: InferredStatement) => void
+  }
 }) {
   const { ctx } = props
   const [newType, setNewType] = useState('')
@@ -957,6 +1042,37 @@ export function IndividualDetail(props: {
           />
         </div>
       ))}
+      {props.inferred && (props.inferred.types.length > 0 || props.inferred.values.length > 0) && (
+        <section aria-label="Inferred" className="rounded border border-dashed p-2">
+          <span className={fieldLabel}>Inferred (not stated)</span>
+          {props.inferred.stale && <p className="text-[10px] text-amber-700">From the last saved version.</p>}
+          {props.inferred.types.length > 0 && (
+            <InferredTypeChips
+              types={props.inferred.types}
+              classLabel={props.classLabel}
+              onExplain={props.inferred.onExplain}
+            />
+          )}
+          <ul className="mt-1 space-y-0.5">
+            {props.inferred.values.slice(0, 50).map((statement) => (
+              <li
+                key={`${termKey(statement.p)}|${termKey(statement.o)}`}
+                className="flex items-start gap-1 text-[11px]">
+                <span className="min-w-0 flex-1 break-all text-zinc-500">
+                  {termText(statement.p, ctx.prefixes)} {termText(statement.o, ctx.prefixes)}
+                </span>
+                <button
+                  type="button"
+                  className="shrink-0 text-[10px] text-blue-700 hover:underline"
+                  title="Why is this inferred?"
+                  onClick={() => props.inferred?.onExplain(statement)}>
+                  Why?
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <AllStatements
         resourceKey={props.resourceKey}
         ctx={ctx}

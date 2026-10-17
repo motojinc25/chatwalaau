@@ -84,6 +84,21 @@ _DIFFERENT_FROM = f"{_OWL}differentFrom"
 # parallel only multiplies the memory of the working Stores.
 _ENGINE_LOCK = threading.Lock()
 
+# PRP-0211 (UDR-0193 D11): ``rdfs`` uses the direct engine (``rdfs_engine``), proven
+# equal to owlrl's ``RDFS_Semantics``; "owlrl" switches back (the tests use both).
+RDFS_ENGINE = "direct"
+
+# The engine of each mode, as stored results name it (UDR-0193 D8): a change of an
+# engine or of its rules MUST change its id, so no stored result is read again.
+ENGINE_IDS = {RDFS: "rdfs-direct-1", OWL_RL: "owlrl-7.6.2/side-rules-1"}
+
+
+def engine_id(mode: str) -> str:
+    """The id of the engine ``mode`` uses now."""
+    if mode == RDFS and RDFS_ENGINE != "direct":
+        return "owlrl-7.6.2/rdfs-1"
+    return ENGINE_IDS[mode]
+
 
 class EntailmentError(ValueError):
     """A refused entailment request; ``code`` is the machine-readable reason."""
@@ -101,6 +116,12 @@ class EntailmentUnavailable(EntailmentError):
 
 class EntailmentTooLarge(EntailmentError):
     code = "entailment_too_large"
+
+
+class EntailmentPending(EntailmentError):
+    """The stored result of this mode is still being computed (PRP-0211, UDR-0193 D9)."""
+
+    code = "entailment_pending"
 
 
 class EntailmentFailed(EntailmentError):
@@ -425,6 +446,17 @@ def _expand(work: Any, mode: str, axioms: bool) -> None:
     prp-* look-ups) never fired; in place, every rule sees every statement. The caller
     takes the inferred statements as the difference with the input.
     """
+    if mode == RDFS and RDFS_ENGINE == "direct":
+        # PRP-0211 (UDR-0193 D11): owlrl's RDFS result, computed directly (proven equal).
+        from app.ontology import rdfs_engine
+
+        rdfs_engine.expand(work, axioms=axioms)
+        return
+    owlrl_expand(work, mode, axioms)
+
+
+def owlrl_expand(work: Any, mode: str, axioms: bool) -> None:
+    """One owlrl run (``RDFS_Semantics`` or ``RDFS_OWLRL_Semantics``) on ``work``, in place."""
     with _ENGINE_LOCK:
         import owlrl
 
@@ -793,6 +825,7 @@ def scoped_closure(
 
 __all__ = [
     "DEFAULT_MODE",
+    "ENGINE_IDS",
     "FINDING_KINDS",
     "INPUT_SETTINGS",
     "MODES",
@@ -800,20 +833,24 @@ __all__ = [
     "OWL_RL",
     "RATIO_SETTING",
     "RDFS",
+    "RDFS_ENGINE",
     "REGIME_IRIS",
     "RESERVED_MODES",
     "SIMPLE",
     "EntailmentError",
     "EntailmentFailed",
+    "EntailmentPending",
     "EntailmentTooLarge",
     "EntailmentUnavailable",
     "axiomatic_closure",
     "closure",
+    "engine_id",
     "input_bound",
     "is_trivial",
     "max_inferred_ratio",
     "max_input_triples",
     "max_owl_rl_input_triples",
+    "owlrl_expand",
     "parse_mode",
     "scoped_closure",
 ]
