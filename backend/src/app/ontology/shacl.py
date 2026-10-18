@@ -34,6 +34,7 @@ import logging
 import re
 import time
 from typing import TYPE_CHECKING, Any
+import warnings
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -519,12 +520,21 @@ def _graph(triples: Any, convert: _ToRdflib) -> tuple[Any, int]:
 
 @contextmanager
 def _quiet_rdflib() -> Iterator[None]:
-    """rdflib logs a warning per ill-typed literal; the validation reports them instead."""
+    """rdflib complains per ill-typed literal; the validation reports them instead.
+
+    Two channels: most lexical forms are logged on ``rdflib.term``, but an unrecognised
+    ``xsd:boolean`` ("none", "yes") goes through ``warnings.warn`` (``_parseBoolean``),
+    which the logger level does not reach -- the W3C case ``property/or-datatypes-001``
+    surfaced it. Only that message is silenced; validation runs in its own child process,
+    so the process-wide filter state is not shared with a request.
+    """
     term_logger = logging.getLogger("rdflib.term")
     level = term_logger.level
     term_logger.setLevel(logging.ERROR)
     try:
-        yield
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r"Parsing weird boolean", category=UserWarning)
+            yield
     finally:
         term_logger.setLevel(level)
 

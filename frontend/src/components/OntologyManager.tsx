@@ -24,6 +24,23 @@
  * ontologies) with unsaved changes asks for confirmation first.
  */
 
+import {
+  closestCenter,
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import Editor from '@monaco-editor/react'
 import type { Connection, Edge, EdgeProps, Node, NodeChange, NodeProps } from '@xyflow/react'
 import {
@@ -45,6 +62,8 @@ import {
   ArchiveRestore,
   Braces,
   Download,
+  FilePlus2,
+  GripVertical,
   History,
   ImageDown,
   Import,
@@ -96,6 +115,7 @@ import {
   ResourcesPane,
   TermView,
 } from '@/components/OntologyInspector'
+import { MergeDialog } from '@/components/OntologyMerge'
 import { ShapesView } from '@/components/OntologyShapes'
 import {
   AlertDialog,
@@ -118,6 +138,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { useEntryVisible } from '@/lib/narrowSurface'
 import {
   type InferredMode,
   type InferredStatement,
@@ -127,6 +148,7 @@ import {
   readInferredMode,
   writeInferredMode,
 } from '@/lib/ontologyInferred'
+import { applyMerge, type MergePlan } from '@/lib/ontologyMerge'
 import {
   addImport,
   addSubclassOf,
@@ -226,6 +248,7 @@ import {
   XSD,
 } from '@/lib/ontologyModel'
 import { hasShapes, type ShapesGraph, targetedClasses } from '@/lib/ontologyShapes'
+import { chooseTabLevel, showsLabel, type TabLevel } from '@/lib/panelTabs'
 import { cn } from '@/lib/utils'
 import '@/lib/monaco-setup'
 import '@xyflow/react/dist/style.css'
@@ -1554,9 +1577,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [deleteImporters, setDeleteImporters] = useState<{ id: string; name: string }[] | null>(null)
 
   // Right pane
-  const [rightTab, setRightTab] = useState<'detail' | 'resources' | 'search' | 'history' | 'checks' | 'explain'>(
-    'detail',
-  )
+  const [rightTab, setRightTab] = useState<RightTab>('detail')
   // PRP-0211 (UDR-0193): the stored entailment's state, Explain, and the Inferred switch.
   const [entailmentStatus, setEntailmentStatus] = useState<EntailmentStatus | null>(null)
   // PRP-0212 (UDR-0194): SHACL validation of the saved version, its settings and views.
@@ -1568,6 +1589,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     message: string
   } | null>(null)
   const [shaclNotice, setShaclNotice] = useState<string | null>(null)
+  // PRP-0213 (UDR-0195 D1-D6): Merge into the open ontology; one step back until saved.
+  const [mergeOpen, setMergeOpen] = useState(false)
+  const [mergeUndo, setMergeUndo] = useState<{ model: OntologyModel; dirty: boolean; count: number } | null>(null)
   const [shaclList, setShaclList] = useState<{ title: string; query: Record<string, string> } | null>(null)
   const [shapesGraphKey, setShapesGraphKey] = useState<string | null>(null)
   const [shapeHighlight, setShapeHighlight] = useState<{ shape: string; path: string | null; nonce: number } | null>(
@@ -1643,6 +1667,29 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       setError(err instanceof Error ? err.message : 'Failed to load the ontology catalog')
     }
   }, [])
+
+  /** Reorder the catalog: optimistic, rolled back on failure (PRP-0213, UDR-0195 D8 / D9). */
+  const reorderCatalog = useCallback(
+    async (ids: string[]) => {
+      const previous = catalog
+      const byId = new Map(catalog.map((entry) => [entry.id, entry]))
+      setCatalog(ids.map((id) => byId.get(id)).filter((entry): entry is CatalogEntry => entry !== undefined))
+      try {
+        const res = await fetch('/api/ontology/catalog/order', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        })
+        if (!res.ok) throw new Error('Could not save the order of the ontologies')
+        const body = await res.json()
+        setCatalog((body.ontologies ?? []) as CatalogEntry[])
+      } catch (err) {
+        setCatalog(previous)
+        setError(err instanceof Error ? err.message : 'Could not save the order of the ontologies')
+      }
+    },
+    [catalog],
+  )
 
   /** Resolve the imports of an ontology and read the imported vocabulary (UDR-0189 D6). */
   const fetchImports = useCallback(async (id: string) => {
@@ -2025,6 +2072,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // ---- Editing the model (every edit is a statement edit; UDR-0180 D1 / D4) ----
 
   const markDirty = useCallback(() => setDirty(true), [])
+  // A save, a load or a discard (dirty -> false) ends the one-step "Undo merge" (UDR-0195 D5).
+  useEffect(() => {
+    if (!dirty) setMergeUndo(null)
+  }, [dirty])
 
   // The canvas draws the selected graph(s) only; layout stays in the default graph
   // and is always shown (UDR-0182 D3 / D4). Edits still go to the full model.
@@ -2213,6 +2264,24 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     },
     [markDirty],
   )
+
+  /** Apply a merge plan as unsaved additions, keeping one step back (PRP-0213, UDR-0195 D5 / D6). */
+  const applyMergePlan = useCallback(
+    (plan: MergePlan) => {
+      setMergeUndo({ model, dirty, count: plan.statements.length })
+      updateModel((prev) => applyMerge(prev, plan))
+      setMergeOpen(false)
+    },
+    [model, dirty, updateModel],
+  )
+
+  /** Return to the model before the last merge (also drops edits made after it). */
+  const undoMerge = useCallback(() => {
+    if (!mergeUndo) return
+    setModel(mergeUndo.model)
+    setDirty(mergeUndo.dirty)
+    setMergeUndo(null)
+  }, [mergeUndo])
 
   /** Answer "delete its annotations too?" for a pending statement deletion (default: keep). */
   const resolvePendingDelete = useCallback(
@@ -3482,6 +3551,16 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                 </span>
               )}
               {dirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
+              {mergeUndo && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={undoMerge}
+                  title={`Remove the ${mergeUndo.count} merged statement(s) -- edits made after the merge are undone too`}>
+                  <RotateCcw className="mr-1 h-3.5 w-3.5" /> Undo merge
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -3497,6 +3576,19 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                     {importWarnings}
                   </span>
                 )}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => setMergeOpen(true)}
+                disabled={!selectedId || loading || busy || demoBlocked}
+                title={
+                  demoBlocked
+                    ? 'Disabled in demo mode'
+                    : 'Merge a file or another ontology into this one (added as unsaved changes)'
+                }>
+                <FilePlus2 className="mr-1 h-3.5 w-3.5" /> Merge
               </Button>
               <Button
                 variant="outline"
@@ -3603,6 +3695,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                       setRenameTarget(entry)
                     }}
                     onDelete={(entry) => setDeleteTarget(entry)}
+                    onReorder={(ids) => void reorderCatalog(ids)}
                     readOnly={demoBlocked}
                   />
                 }
@@ -3821,53 +3914,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                 }
                 right={
                   <div className="flex min-h-0 flex-1 flex-col">
-                    <div className="flex shrink-0 border-b text-xs">
-                      {(['detail', 'resources', 'search', 'history', 'checks', 'explain'] as const).map((tab) => (
-                        <button
-                          key={tab}
-                          type="button"
-                          className={cn(
-                            'flex-1 px-3 py-2 font-medium capitalize',
-                            rightTab === tab
-                              ? 'border-b-2 border-blue-500 text-blue-600'
-                              : 'text-zinc-500 hover:text-zinc-700',
-                          )}
-                          onClick={() => setRightTab(tab)}>
-                          {tab === 'search' ? (
-                            <span className="inline-flex items-center gap-1">
-                              <Search className="h-3 w-3" /> Search
-                            </span>
-                          ) : tab === 'resources' ? (
-                            <span className="inline-flex items-center gap-1">
-                              <Users className="h-3 w-3" /> Resources
-                            </span>
-                          ) : tab === 'history' ? (
-                            <span className="inline-flex items-center gap-1">
-                              <History className="h-3 w-3" /> History
-                            </span>
-                          ) : tab === 'checks' ? (
-                            <span className="inline-flex items-center gap-1">
-                              <ListChecks className="h-3 w-3" /> Checks
-                              {warningCount > 0 && (
-                                <span
-                                  className="rounded-full bg-amber-100 px-1 text-[10px] text-amber-800"
-                                  title={`${warningCount} warning${warningCount === 1 ? '' : 's'} (not ignored)`}>
-                                  {warningCount}
-                                </span>
-                              )}
-                            </span>
-                          ) : tab === 'explain' ? (
-                            <span className="inline-flex items-center gap-1">
-                              <Lightbulb className="h-3 w-3" /> Explain
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1">
-                              <Info className="h-3 w-3" /> Detail
-                            </span>
-                          )}
-                        </button>
-                      ))}
-                    </div>
+                    <PanelTabStrip active={rightTab} onSelect={setRightTab} checksBadge={warningCount} />
                     {rightTab === 'detail' ? (
                       selection?.kind === 'isa' ? (
                         <IsaDetail
@@ -4136,6 +4183,18 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       </Dialog>
 
       {/* PRP-0212 (UDR-0194 D1): validation settings of the selected ontology. */}
+      {mergeOpen && selectedId && (
+        <MergeDialog
+          ontologyId={selectedId}
+          ontologyName={selectedEntry?.name ?? selectedId}
+          model={model}
+          catalog={catalog}
+          shapesGraphs={shaclSettings?.shapes_graphs ?? []}
+          graphName={graphName}
+          onClose={() => setMergeOpen(false)}
+          onMerge={(plan) => applyMergePlan(plan)}
+        />
+      )}
       {shaclDialogOpen && selectedId && (
         <ShaclSettingsDialog
           ontologyId={selectedId}
@@ -4747,8 +4806,27 @@ function CatalogPane(props: {
   onExport: (entry: CatalogEntry) => void
   onRename: (entry: CatalogEntry) => void
   onDelete: (entry: CatalogEntry) => void
+  /** The catalog ids in the new order (PRP-0213, UDR-0195 D8). */
+  onReorder: (ids: string[]) => void
   readOnly: boolean
 }) {
+  // Drag and drop with a handle, and the keyboard (Space, arrows, Space); off in demo mode
+  // and on a narrow viewport (UDR-0195 D9, the folder-order precedent).
+  const reorderable = useEntryVisible('ontology.listReorder') && !props.readOnly && props.catalog.length > 1
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+  const noSensors = useSensors()
+  const ids = props.catalog.map((entry) => entry.id)
+  const onDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const from = ids.indexOf(String(active.id))
+    const to = ids.indexOf(String(over.id))
+    if (from < 0 || to < 0) return
+    props.onReorder(arrayMove(ids, from, to))
+  }
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center justify-between border-b px-2 py-1.5">
@@ -4791,54 +4869,198 @@ function CatalogPane(props: {
         {props.catalog.length === 0 ? (
           <p className="px-3 py-4 text-xs text-zinc-500">No ontologies yet. Create or import one.</p>
         ) : (
-          props.catalog.map((entry) => (
-            <div
-              key={entry.id}
-              className={cn(
-                'group flex w-full items-start gap-1 border-b px-2 py-2 text-left',
-                props.selectedId === entry.id ? 'bg-blue-50' : 'hover:bg-zinc-50',
-              )}>
-              <button type="button" className="min-w-0 flex-1 text-left" onClick={() => props.onSelect(entry.id)}>
-                <div className="truncate text-xs font-medium text-zinc-800">{entry.name}</div>
-                {entry.description && (
-                  <div className="mt-0.5 line-clamp-2 text-[10px] text-zinc-500">{entry.description}</div>
-                )}
-              </button>
-              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-5 w-5 text-zinc-500"
-                  disabled={props.readOnly}
-                  onClick={() => props.onRename(entry)}
-                  aria-label={`Rename ${entry.name}`}
-                  title="Rename">
-                  <Pencil className="h-3 w-3" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-5 w-5 text-zinc-500"
-                  onClick={() => props.onExport(entry)}
-                  aria-label={`Export ${entry.name}`}
-                  title="Export (choose a format)">
-                  <Download className="h-3 w-3" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-5 w-5 text-zinc-500 hover:text-red-600"
-                  disabled={props.readOnly}
-                  onClick={() => props.onDelete(entry)}
-                  aria-label={`Delete ${entry.name}`}
-                  title="Delete">
-                  <Trash2 className="h-3 w-3" />
-                </Button>
-              </div>
-            </div>
-          ))
+          <DndContext
+            sensors={reorderable ? sensors : noSensors}
+            collisionDetection={closestCenter}
+            onDragEnd={onDragEnd}
+            accessibility={{
+              screenReaderInstructions: {
+                draggable: 'To reorder, press Space, move with the arrow keys, and press Space again to drop.',
+              },
+            }}>
+            <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+              {props.catalog.map((entry) => (
+                <CatalogRow key={entry.id} entry={entry} reorderable={reorderable} {...props} />
+              ))}
+            </SortableContext>
+          </DndContext>
         )}
       </div>
+    </div>
+  )
+}
+
+/** One catalog row: a sortable item with a drag handle (PRP-0213, UDR-0195 D9). */
+function CatalogRow(props: {
+  entry: CatalogEntry
+  reorderable: boolean
+  selectedId: string | null
+  onSelect: (id: string) => void
+  onExport: (entry: CatalogEntry) => void
+  onRename: (entry: CatalogEntry) => void
+  onDelete: (entry: CatalogEntry) => void
+  readOnly: boolean
+}) {
+  const { entry } = props
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: entry.id,
+    disabled: !props.reorderable,
+  })
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      data-ontology-id={entry.id}
+      className={cn(
+        'group flex w-full items-start gap-1 border-b px-2 py-2 text-left',
+        props.selectedId === entry.id ? 'bg-blue-50' : 'hover:bg-zinc-50',
+        isDragging && 'relative z-10 opacity-80 shadow',
+      )}>
+      {props.reorderable && (
+        // @dnd-kit drag handle: `attributes` supply role="button" and the roledescription at runtime.
+        <button
+          type="button"
+          className="mt-0.5 shrink-0 cursor-grab text-zinc-300 opacity-0 transition-opacity hover:text-zinc-600 focus:opacity-100 group-hover:opacity-100"
+          aria-label={`Reorder ${entry.name}`}
+          title="Drag to reorder (or focus and press Space, then the arrow keys)"
+          {...attributes}
+          {...listeners}>
+          <GripVertical className="h-3.5 w-3.5" />
+        </button>
+      )}
+      <button type="button" className="min-w-0 flex-1 text-left" onClick={() => props.onSelect(entry.id)}>
+        <div className="truncate text-xs font-medium text-zinc-800">{entry.name}</div>
+        {entry.description && <div className="mt-0.5 line-clamp-2 text-[10px] text-zinc-500">{entry.description}</div>}
+      </button>
+      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-5 w-5 text-zinc-500"
+          disabled={props.readOnly}
+          onClick={() => props.onRename(entry)}
+          aria-label={`Rename ${entry.name}`}
+          title="Rename">
+          <Pencil className="h-3 w-3" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-5 w-5 text-zinc-500"
+          onClick={() => props.onExport(entry)}
+          aria-label={`Export ${entry.name}`}
+          title="Export (choose a format)">
+          <Download className="h-3 w-3" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-5 w-5 text-zinc-500 hover:text-red-600"
+          disabled={props.readOnly}
+          onClick={() => props.onDelete(entry)}
+          aria-label={`Delete ${entry.name}`}
+          title="Delete">
+          <Trash2 className="h-3 w-3" />
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// ---- Right pane: tab strip (PRP-0213, UDR-0195 D10 / D11) ---------------------------
+
+type RightTab = 'detail' | 'resources' | 'search' | 'history' | 'checks' | 'explain'
+
+const PANEL_TABS: { id: RightTab; label: string; Icon: typeof Info }[] = [
+  { id: 'detail', label: 'Detail', Icon: Info },
+  { id: 'resources', label: 'Resources', Icon: Users },
+  { id: 'search', label: 'Search', Icon: Search },
+  { id: 'history', label: 'History', Icon: History },
+  { id: 'checks', label: 'Checks', Icon: ListChecks },
+  { id: 'explain', label: 'Explain', Icon: Lightbulb },
+]
+
+function TabBadge(props: { count: number }) {
+  if (props.count <= 0) return null
+  return (
+    <span
+      className="rounded-full bg-amber-100 px-1 text-[10px] text-amber-800"
+      title={`${props.count} warning${props.count === 1 ? '' : 's'} (not ignored)`}>
+      {props.count}
+    </span>
+  )
+}
+
+/**
+ * The right pane's tabs. A hidden copy measures each tab with and without its label;
+ * the strip picks full / compact / icons by its own width (no fixed breakpoints). The
+ * name stays as title and aria-label at every level; never first letters.
+ */
+function PanelTabStrip(props: { active: RightTab; onSelect: (tab: RightTab) => void; checksBadge: number }) {
+  const stripRef = useRef<HTMLDivElement>(null)
+  const measureRef = useRef<HTMLDivElement>(null)
+  const [level, setLevel] = useState<TabLevel>('full')
+  const activeIndex = PANEL_TABS.findIndex((tab) => tab.id === props.active)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-measure when the badge changes the widths
+  useEffect(() => {
+    const strip = stripRef.current
+    const measure = measureRef.current
+    if (!strip || !measure) return
+    const update = () => {
+      const full = [...measure.querySelectorAll<HTMLElement>('[data-measure="full"]')].map((el) => el.offsetWidth)
+      const icon = [...measure.querySelectorAll<HTMLElement>('[data-measure="icon"]')].map((el) => el.offsetWidth)
+      setLevel(chooseTabLevel(strip.clientWidth, full, icon, activeIndex))
+    }
+    update()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(update)
+    observer.observe(strip)
+    return () => observer.disconnect()
+  }, [activeIndex, props.checksBadge])
+  return (
+    <div ref={stripRef} role="tablist" data-tab-level={level} className="relative flex shrink-0 border-b text-xs">
+      {/* Hidden measuring copy: each tab with its label and as an icon only. */}
+      <div
+        ref={measureRef}
+        aria-hidden="true"
+        className="pointer-events-none invisible absolute left-0 top-0 flex whitespace-nowrap font-medium">
+        {PANEL_TABS.map(({ id, label, Icon }) => (
+          <span key={id} className="flex">
+            <span data-measure="full" className="inline-flex items-center gap-1 px-3 py-2">
+              <Icon className="h-3 w-3" /> {label}
+              {id === 'checks' && <TabBadge count={props.checksBadge} />}
+            </span>
+            <span data-measure="icon" className="inline-flex items-center gap-1 px-2 py-2">
+              <Icon className="h-3 w-3" />
+              {id === 'checks' && <TabBadge count={props.checksBadge} />}
+            </span>
+          </span>
+        ))}
+      </div>
+      {PANEL_TABS.map(({ id, label, Icon }, index) => {
+        const labelled = showsLabel(level, index, activeIndex)
+        return (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={props.active === id}
+            aria-label={label}
+            title={label}
+            className={cn(
+              'min-w-0 py-2 font-medium',
+              labelled ? 'flex-1 px-3' : 'flex-1 px-2',
+              props.active === id ? 'border-b-2 border-blue-500 text-blue-600' : 'text-zinc-500 hover:text-zinc-700',
+            )}
+            onClick={() => props.onSelect(id)}>
+            <span className="inline-flex items-center gap-1 whitespace-nowrap">
+              <Icon className="h-3 w-3" />
+              {labelled && label}
+              {id === 'checks' && <TabBadge count={props.checksBadge} />}
+            </span>
+          </button>
+        )
+      })}
     </div>
   )
 }

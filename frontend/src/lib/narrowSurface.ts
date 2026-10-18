@@ -21,6 +21,8 @@ export type EntryId =
   | 'sidebar.sessionMenu'
   | 'sidebar.moveToFolder'
   | 'sidebar.folderReorder'
+  // ontology manager (PRP-0213): reordering the ontology list
+  | 'ontology.listReorder'
   // sidebar footer
   | 'sidebar.about'
   | 'sidebar.ontology'
@@ -73,6 +75,8 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   'sidebar.sessionMenu': 'all',
   'sidebar.moveToFolder': 'all',
   'sidebar.folderReorder': 'wide-only',
+  // PRP-0213 / UDR-0195 D9: dragging ontologies, like folders, is a wide-surface gesture.
+  'ontology.listReorder': 'wide-only',
   'sidebar.about': 'all',
   'sidebar.ontology': 'wide-only',
   // Token Usage Dashboard (PRP-0173): a ~90% modal, an out-of-scope screen on a phone.

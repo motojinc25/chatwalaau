@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.189.0"
+version = "0.192.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "pydantic-settings>=2.9.0",
     "python-dotenv>=1.1.0",
-    # Microsoft Agent Framework family: EXACT pins (PRP-0182, UDR-0164 D1;
+    # Microsoft Agent Framework family: EXACT pins (PRP-0215, UDR-0197 D1;
     # policy from PRP-0108, UDR-0086 D1; method from PRP-0126, UDR-0109 D1/D2).
     # MAF ships breaking changes inside minor releases (1.8.0 async Skill lookup,
     # 1.9.0 MCP sampling guardrails, 1.10.0 SkillsProvider approval-by-default,
@@ -30,7 +30,12 @@ dependencies = [
     # 1.17.0 sequence-only agent middleware + `agent-hooks` core extra removal,
     # 1.18.0 storage-key derivation + ranged file reads + masked SecretString +
     # Lab removed from core[all], 1.19.0 per-request Anthropic parsing state passed
-    # POSITIONALLY to `_prepare_options` + hosted/local shell-call separation);
+    # POSITIONALLY to `_prepare_options` + hosted/local shell-call separation,
+    # 1.20.0 core[all] bound to the release cohort (a transitive PRE-RELEASE uv will
+    # not take unasked, see [tool.uv] below) + stricter stateless reasoning replay +
+    # a required `context` on SkillsProvider._run_skill_script,
+    # 1.21.0 the Anthropic SDK MAJOR move 0.80 -> 1.x on httpx2 forced by the cohort
+    # bound + upstream drop of temperature / top_p / top_k on the Claude lane);
     # a version bump is a deliberate, PRP-reviewed act, never a routine refresh.
     #
     # 1.19.0's breaking change for THIS codebase is filed under "Fixed" (#8237):
@@ -41,23 +46,33 @@ dependencies = [
     # send-path test drives each built client through `get_response`.
     #
     # The family does NOT share a version line (UDR-0109 D1, carried by UDR-0129 D1
-    # and reaffirmed unamended by UDR-0131 D1, UDR-0139 D1, UDR-0162 D1 and UDR-0164
-    # D1): each package is pinned at the version published in the SAME release wave
-    # as `agent-framework==1.19.0` (2026-09-18), so the declared set and the resolved
-    # set are identical for uv.lock AND for a bare `pip install chatwalaau`.
+    # and reaffirmed unamended by UDR-0131 D1, UDR-0139 D1, UDR-0162 D1, UDR-0164 D1
+    # UDR-0197 D1 and UDR-0198 D1): each package is pinned at the version published in
+    # the SAME release wave as `agent-framework==1.21.0` (2026-10-08), so the declared set and
+    # the resolved set are identical for uv.lock AND for a bare `pip install chatwalaau`.
     #
     # A package that published NO artifact in the target wave is HELD at its current
     # pin, and REJOINS at the first wave that does publish it -- at that wave's
-    # build, in ONE step, however many waves it missed. The 1.19.0 wave is the second
+    # build, in ONE step, however many waves it missed. The 1.21.0 wave is the fourth
     # FULL wave in a row: nothing is held.
     #
     # Transitive GA family packages are NOT declared (UDR-0109 D2) but are moved in
-    # uv.lock to their wave-consistent GA build (UDR-0162 D2, UDR-0164 D2):
-    # agent-framework-orchestrations 1.2.0 (1.19.0 wave), agent-framework-github-copilot
-    # 2.0.0 (no 1.19.0-wave build). A fresh resolve of the whole lock is its own
-    # proposal (UDR-0162 D2.4).
-    "agent-framework==1.19.0",
-    "agent-framework-ag-ui==1.4.0",
+    # uv.lock to their wave-consistent GA build (UDR-0162 D2, UDR-0198 D2):
+    # agent-framework-orchestrations 1.3.1, agent-framework-github-copilot 2.0.2 (both
+    # 1.21.0 wave). A fresh resolve of the whole lock is its own proposal (UDR-0162 D2.4).
+    #
+    # 1.20.0 raises EVERY connector floor in core[all] to the wave, so the minimal lock
+    # move is 86 packages (PRP-0215 M4), most under connectors app never imports. uv
+    # takes the NEWEST build satisfying a raised floor, which for eight undeclared
+    # family betas was already the 1.21.0 wave; they are moved back with targeted
+    # `uv lock -P <pkg>==<1.20-wave build>` (UDR-0197 D2), never with exclude-newer.
+    # 1.21.0 moves 21 packages (PRP-0216 M4) and needs no pull-back: it is the newest
+    # wave. The cohort bound requires agent-framework-anthropic b261008, which requires
+    # anthropic>=1.11,<2: the Anthropic SDK moves 0.80.0 -> 1.13.0 on `httpx2`, which
+    # (with httpcore2 and truststore) joins the RUNTIME closure (UDR-0198 D3).
+    # `anthropic` stays UNDECLARED -- held by the connector's range only.
+    "agent-framework==1.21.0",
+    "agent-framework-ag-ui==1.5.1",
     # NOTE (PRP-0183, UDR-0165 D4): `agent-framework-devui` is deliberately NOT
     # declared. The DevUI integration is removed from the product, so nothing in
     # `app/` imports or subclasses it and UDR-0109 D2 no longer requires a
@@ -71,15 +86,23 @@ dependencies = [
     # violation; beta packages are not exempt (anthropic is beta and declared for
     # the same reason). 1.0.0b260918 (#8206) resets PowerShell's
     # $LASTEXITCODE in PERSISTENT sessions, which the stateless workspace shell
-    # does not use.
-    "agent-framework-tools==1.0.0b260918",
+    # does not use. 1.0.0b261002 builds ShellPolicy on the `regex` engine (a new
+    # compiled wheel arriving through core 1.20.0) and validates shell / file access
+    # more strictly; LocalShellTool.__init__ and resolve_shell are byte-identical
+    # (PRP-0215 M5). 1.0.0b261008 (#9043) fixes PowerShell table output in PERSISTENT
+    # sessions only -- the workspace shell is stateless (PRP-0216 F5 table).
+    "agent-framework-tools==1.0.0b261008",
     # CodeAct compute sandbox (PRP-0193, UDR-0175 D10). DECLARED because ChatWalaʻau
     # SUBCLASSES it: app/agent/codeact `ChatWalaauCodeActProvider(MontyCodeActProvider)`
     # and `OffLoopExecuteCodeTool(MontyExecuteCodeTool)`, which overrides the private
     # `_run_code`. The transitively locked 1.0.0b260730 was INCOMPATIBLE with the
     # pydantic-monty 0.0.19 it pulled (`Monty(code, ...)` against the new worker-pool
     # API: every execute_code failed with a TypeError); 1.0.0b260918 requires >=0.0.23.
-    "agent-framework-monty==1.0.0b260918",
+    # 1.0.0b261002 is file-identical to b260918 (PRP-0215 M2) and still requires
+    # pydantic-monty <0.1, so pydantic-monty 1.x (GA 2026-09-25) cannot be adopted yet.
+    # 1.0.0b261008 (#9175) warns when a tool added to the CodeAct surface carries FIDES
+    # metadata; ChatWalaʻau adds none (PRP-0216 F10). Still pydantic-monty <0.1.
+    "agent-framework-monty==1.0.0b261008",
     # EXACT pin (UDR-0175 D10): app/agent/codeact/bridge.py drives the pydantic-monty
     # worker-pool API directly (off the event loop, D6), and that pre-1.0 API changed
     # incompatibly between 0.0.19 and 0.0.23.
@@ -104,7 +127,15 @@ dependencies = [
     # environment.type == "local"; anything else becomes a hosted shell_tool_call
     # nothing here executes. The harness shell must stay local (UDR-0164 D5).
     # `_prepare_options` is unchanged at 1.14.4 (PRP-0182 M5).
-    "agent-framework-openai==1.14.4",
+    # 1.15.0 (#8720) treats a `shell_call` WITHOUT an environment as local whenever a
+    # local shell tool is configured -- the rule UDR-0164 D5.2 restored downstream
+    # (UDR-0197 D4). It also validates stateless reasoning replay INSIDE
+    # `_prepare_options` (a reasoning id reused across groups is rejected) -- before
+    # ChatWalaʻau's wire de-duplication runs (UDR-0197 D5). `_prepare_options` itself is
+    # byte-identical (PRP-0215 M5).
+    # 1.16.0 only adds "max" to the reasoning-effort type (#8857) -- ChatWalaʻau has
+    # sent `max` since PRP-0184 (UDR-0166 D5) -- and keeps streamed logprobs (#8997).
+    "agent-framework-openai==1.16.0",
     # Anthropic (Claude) base-model provider, Direct + Foundry hostings
     # (PRP-0069, UDR-0045 D8). Already resolved transitively via
     # agent-framework-core[all]; declared explicitly to guarantee the capability.
@@ -123,7 +154,15 @@ dependencies = [
     # broke `_PromptCacheMixin` until it forwarded `*args` (PRP-0182 F1, UDR-0164
     # D4). A stream that fails after a local call started now raises
     # ResponseInvalidatedException (a ChatClientException) and the call is not run.
-    "agent-framework-anthropic==1.0.0b260918",
+    # 1.0.0b261002 copies the caller's metadata / response schema instead of mutating
+    # them (#8816) and sends a single stop string as a list (#8736); the signature of
+    # `_prepare_options` is unchanged (PRP-0215 M5).
+    # 1.0.0b261008 (#9119) moves to the Anthropic SDK 1.x (`anthropic>=1.11,<2`, built
+    # on httpx2: an httpx client is refused with TypeError), stops sending the GA
+    # code-execution beta, and DROPS temperature / top_p / top_k with a WARNING
+    # (UDR-0198 D3, D4). The Claude wire ChatWalaʻau builds is otherwise identical
+    # (PRP-0216 M6); `_prepare_options` is unchanged.
+    "agent-framework-anthropic==1.0.0b261008",
     # Microsoft Foundry base-model provider (PRP-0106, UDR-0085 D1): the stable
     # FoundryChatClient connector (OpenAI Responses API via a Foundry project
     # endpoint, Entra ID credential only). Already resolved transitively via the
@@ -137,7 +176,12 @@ dependencies = [
     # (#8219). `_prepare_options` is UNTOUCHED (PRP-0180 M5), so UDR-0085 D9 /
     # UDR-0128 D3's re-assertion at app/providers/foundry.py stands unchanged.
     # 1.13.1 leaves `_prepare_options` unchanged again (PRP-0182 M5).
-    "agent-framework-foundry==1.13.1",
+    # 1.14.0 accepts azure-ai-projects <2.8 (the lock keeps 2.3.0) and adds native
+    # computer-use and a provider-native reasoning replay hook, neither adopted
+    # (UDR-0197 D7); `_prepare_options` is unchanged (PRP-0215 M5).
+    # 1.14.1 requires core >=1.21.0 and declares its service-owned session keys for
+    # agents invoked as tools (#8853, not used here).
+    "agent-framework-foundry==1.14.1",
     # Declarative agents (PRP-0094, FEAT-0051, UDR-0072): the MAF AgentFactory front
     # end (create_agent_from_yaml / create_agent_from_yaml_path) used to PARSE and
     # VALIDATE declarative agent YAML. The runtime agent is built by ChatWalaʻau
@@ -151,7 +195,11 @@ dependencies = [
     # 1.1.0 (#8371) stops persisting response cookies in the owned HTTP client the
     # CTR-0186 jail delegates to (accepted, UDR-0164 D6); #8425 scopes MCP sessions
     # per invocation only when a client_provider is given -- the jail passes none.
-    "agent-framework-declarative==1.1.0",
+    # 1.2.0 (BREAKING - experimental): the jail's delegate rejects non-HTTP(S) and
+    # relative URLs and normalizes them (#8588); PowerFx state is bounded (#8511);
+    # SendActivity keeps expression results (#8509). Accepted (UDR-0197 D6).
+    # 1.2.1 keeps falsy values returned by PowerFx Search() (#8974).
+    "agent-framework-declarative==1.2.1",
     # OpenAI SDK: pinned BELOW 3.x on purpose (PRP-0161 F3, UDR-0139 D3).
     # `agent-framework-openai==1.14.2` (#7967) widened its ceiling to SDK 3.x, and a
     # fresh resolve of this declared set takes openai 2.54.0 -> 3.9.0 -- a MAJOR move
@@ -232,6 +280,17 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 app = ["_frontend_dist/**/*", "_frontend_dist/*", "templates/.env.template"]
+
+[tool.uv]
+# PRP-0215 / UDR-0197 D3: agent-framework-core[all]==1.20.0 requires
+# agent-framework-azure-contentunderstanding>=1.0.0b261002, which requires the
+# PRE-RELEASE azure-ai-contentunderstanding>=1.2.0b2 while a stable 1.1.0 exists. uv
+# does not take a transitive pre-release it was not asked for ("No solution found");
+# pip does (the specifier names a pre-release, PEP 440). This admits exactly that one
+# pre-release for uv; it is NOT a published dependency (nothing in app imports it).
+# Remove it when azure-ai-contentunderstanding ships a stable release that satisfies
+# the connector. Never use `prerelease = "allow"`.
+constraint-dependencies = ["azure-ai-contentunderstanding>=1.2.0b2"]
 
 [dependency-groups]
 dev = [

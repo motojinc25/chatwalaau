@@ -116,3 +116,6 @@ desktop/
 # path source exists); the Rust build output and wheels never enter the build context.
 computer-use/target/
 computer-use/dist/
+
+# ---- DEXPI toolkit outputs ----
+dexpi/

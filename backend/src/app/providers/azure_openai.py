@@ -27,6 +27,7 @@ from app.providers.base import (
 from app.providers.structured import (
     GENERIC_OBJECT_SCHEMA,
     STRUCTURED_OUTPUT_NAME,
+    collapse_duplicate_messages,
     dedupe_wire_input,
     drop_orphan_outputs,
     effective_schema,
@@ -85,6 +86,14 @@ class _StructuredOutputMixin:
         # UDR-0164 D4 (PRP-0182): forward positional extras. MAF 1.19.0's Anthropic
         # connector began passing a per-request `request_state` POSITIONALLY; a signature
         # without *args failed every request with TypeError before it was sent.
+        #
+        # PRP-0215 (UDR-0197 D5): MAF 1.20.0 (openai 1.15.0) validates stateless
+        # reasoning replay INSIDE super()._prepare_options and rejects a reasoning id
+        # repeated across groups -- before the serialized-list repair below can run. A
+        # duplicated assistant turn is therefore collapsed at the MESSAGE level first;
+        # `dedupe_wire_input` stays as the second layer (UDR-0131 D2). Inert when there
+        # is nothing to collapse.
+        messages = collapse_duplicate_messages(messages)
         run_options = await super()._prepare_options(messages, options, *args, **kwargs)  # type: ignore[misc]
         # PRP-0151 C4 / UDR-0129 D8, UDR-0113 posture. MAF 1.15.0's AgentLoopMiddleware
         # stamps `_agent_loop_iteration` into context.options for the length of a
@@ -158,37 +167,12 @@ class _StructuredOutputMixin:
             return None
         return super()._get_conversation_id(response, store)  # type: ignore[misc]
 
-    def _shell_item_to_contents(self, item: Any, local_shell_tool_name: str | None) -> list[Any]:
-        """Keep the harness shell LOCAL on Azure (PRP-0182 D5.3, UDR-0164 D5).
-
-        MAF 1.19.0 (#8294, openai 1.14.4) turns a Responses ``shell_call`` into a LOCAL
-        ``function_call`` -- the one ``WorkspaceShellTool`` executes -- only when the item
-        says ``environment.type == "local"``; anything else becomes a hosted
-        ``shell_tool_call`` that nothing here runs, and the NEXT request fails with
-        ``400 No tool output found for shell call``. Measured live (PRP-0182 ML-1): Azure
-        OpenAI returns ``environment: null`` for a shell tool declared
-        ``{"type": "shell", "environment": {"type": "local"}}``.
-
-        So, exactly the case MAF 1.18.0 treated as local -- a ``shell_call`` with NO
-        environment while a local shell tool is configured -- is handed to upstream with
-        the local environment filled in, and nothing else is touched (a hosted
-        environment stays hosted). Stateless replay then re-sends that item, local
-        environment included; Azure accepts it (measured live, PRP-0182 ML-1b), so no
-        framework field is read or rewritten here (UDR-0131 D4 stands).
-
-        Private-seam override: listed in the UDR-0110 D2 residue inventory
-        (test_prp0182_maf_119_upgrade.py).
-        """
-        if (
-            local_shell_tool_name
-            and getattr(item, "type", None) == "shell_call"
-            and getattr(item, "environment", None) is None
-            and hasattr(item, "model_copy")
-        ):
-            from openai.types.responses.response_local_environment import ResponseLocalEnvironment
-
-            item = item.model_copy(update={"environment": ResponseLocalEnvironment(type="local")})
-        return super()._shell_item_to_contents(item, local_shell_tool_name)  # type: ignore[misc]
+    # PRP-0215 (UDR-0197 D4): the PRP-0182 D5.3 `_shell_item_to_contents` override that
+    # filled `environment: local` into Azure's environment-less `shell_call` is RETIRED.
+    # openai 1.15.0 (#8720) classifies such an item as the local `run_shell` call itself
+    # whenever a local shell tool is configured, and Azure accepts the replayed item with
+    # `environment: null` (measured live, PRP-0215 ML-1, gpt-5.6-sol, 2026-10-09). One
+    # private seam fewer in the UDR-0110 D2 inventory.
 
 
 def _report_pairing(run_options: dict[str, Any]) -> None:

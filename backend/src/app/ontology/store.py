@@ -326,6 +326,29 @@ def get_entry(ontology_id: str) -> dict[str, str] | None:
     return None
 
 
+def reorder_catalog(ontology_ids: list[str]) -> list[dict[str, str]]:
+    """Reorder the catalog from an explicit id sequence (UDR-0195 D7 / D8).
+
+    The list order IS the presentation order. Idempotent bulk set: unknown ids are
+    ignored; catalog ids absent from ``ontology_ids`` are appended in their prior
+    relative order (the folder-order rule, UDR-0046 D6).
+    """
+    with _CATALOG_LOCK:
+        entries = read_catalog()
+        by_id = {entry["id"]: entry for entry in entries}
+        ordered: list[dict[str, str]] = []
+        consumed: set[str] = set()
+        for ontology_id in ontology_ids:
+            entry = by_id.get(ontology_id)
+            if entry is not None and ontology_id not in consumed:
+                ordered.append(entry)
+                consumed.add(ontology_id)
+        ordered.extend(entry for entry in entries if entry["id"] not in consumed)
+        if ordered != entries:
+            write_catalog(ordered)
+        return ordered
+
+
 def _touch_entry(ontology_id: str) -> None:
     with _CATALOG_LOCK:
         entries = read_catalog()
@@ -372,7 +395,7 @@ def create_ontology(
     _atomic_write_text(_file_path(entry), initial_turtle)
     with _CATALOG_LOCK:
         entries = read_catalog()
-        entries.append(entry)
+        entries.insert(0, entry)  # new entries go to the top (UDR-0195 D9)
         write_catalog(entries)
     from app.ontology import history
 
@@ -562,7 +585,7 @@ def restore_deleted_ontology(ontology_id: str, text: str, *, dataset: bool, rest
         _atomic_write_text(target, text)
         with _CATALOG_LOCK:
             entries = read_catalog()
-            entries.append(entry)
+            entries.insert(0, entry)  # a restored entry goes to the top (UDR-0195 D9)
             write_catalog(entries)
         history.append_entry(
             ontology_id,

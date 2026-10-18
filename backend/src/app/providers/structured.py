@@ -357,6 +357,143 @@ def _merge_into_first(first: dict[str, Any], other: dict[str, Any], key: tuple[s
 
 
 # ---------------------------------------------------------------------------
+# Identity uniqueness of the MESSAGES, before the connector (PRP-0215, UDR-0197 D5)
+# ---------------------------------------------------------------------------
+#
+# agent-framework-openai 1.15.0 validates stateless reasoning replay INSIDE the
+# connector's `_prepare_options` and raises ChatClientInvalidRequestException when one
+# reasoning id appears in more than one reasoning / tool-call group. A duplicated
+# assistant turn -- the PRP-0147 shape `dedupe_wire_input` above repairs on the
+# SERIALIZED input -- is exactly that, and the check runs BEFORE the serialized-list
+# repair can see it: the turn the 1.19 seam repaired became a failed turn at 1.20
+# (tests/integration/test_ctr0102_reasoning_replay.py, written first and failing).
+#
+# So the same identity rule is applied one layer earlier, to the Message objects the
+# connector receives. `dedupe_wire_input` stays behind it as the second layer
+# (UDR-0131 D2): it still catches anything this pass cannot see.
+
+# Content types carrying a provider-assigned identity, and the field holding it. The
+# Message-level counterpart of `_IDENTITY_FIELD` (UDR-0126 D3). `text` is absent on
+# purpose: identical text is legitimate (UDR-0126 D4).
+_CONTENT_IDENTITY_FIELD: dict[str, str] = {
+    "function_call": "call_id",
+    "function_result": "call_id",
+    "shell_tool_call": "call_id",
+    "shell_tool_result": "call_id",
+    "text_reasoning": "id",
+}
+
+
+def _content_identity(content: Any) -> tuple[str, str] | None:
+    ctype = getattr(content, "type", None)
+    field = _CONTENT_IDENTITY_FIELD.get(ctype) if isinstance(ctype, str) else None
+    if field is None:
+        return None
+    value = getattr(content, field, None)
+    return (ctype, value) if isinstance(value, str) and value else None
+
+
+def _comparable(content: Any) -> Any:
+    """A content's fields for the duplicate test, minus ``additional_properties``.
+
+    ``additional_properties`` is where a copy that round-tripped through the history
+    store differs benignly (the provider item id, RES-0003 F4); everything else -- the
+    encrypted reasoning above all -- must match for two copies to be one.
+    """
+    try:
+        data = content.to_dict()
+    except Exception:
+        return repr(content)
+    if isinstance(data, dict):
+        data = {k: v for k, v in data.items() if k not in ("additional_properties", "raw_representation")}
+    return data
+
+
+def _extra_weight(message: Any) -> int:
+    """How much provider-issued detail a copy still carries (the RES-0003 F4 tie-break)."""
+    total = 0
+    for content in getattr(message, "contents", None) or []:
+        extra = getattr(content, "additional_properties", None)
+        total += len(extra) if isinstance(extra, dict) else 0
+    return total
+
+
+def collapse_duplicate_messages(messages: Any) -> Any:
+    """Drop a message that repeats an earlier one's provider identities (UDR-0197 D5).
+
+    A message is a duplicate when it carries at least one provider identity, ALL of its
+    identities already appeared in an earlier message, and every identified content is
+    field-equal to that earlier content (``additional_properties`` aside). Then:
+
+    * the FIRST occurrence's POSITION is kept (UDR-0126 D4), and
+    * of the two copies, the one carrying more provider-issued detail is the one kept
+      at that position (UDR-0126 D7) -- the caller's objects are never mutated.
+
+    Not absorbed, logged at WARNING instead (UDR-0126 D7): a message whose identities
+    are only PARTLY seen, or whose identified contents DIFFER (e.g. the same reasoning
+    id with different encrypted content). A message without identities -- user text
+    above all -- is never touched.
+
+    Returns the input object itself when nothing is removed (inert and silent), else a
+    new list. Never raises: a repair at the request seam must not become a new way for
+    a turn to fail.
+    """
+    try:
+        if not isinstance(messages, (list, tuple)):
+            return messages
+        first_seen: dict[tuple[str, str], tuple[int, Any]] = {}
+        kept: list[Any] = []
+        removed: list[str] = []
+        for message in messages:
+            identified = [
+                (key, content)
+                for content in getattr(message, "contents", None) or []
+                if (key := _content_identity(content)) is not None
+            ]
+            keys = [key for key, _ in identified]
+            seen = [key for key in keys if key in first_seen]
+            if not keys or not seen:
+                for key, content in identified:
+                    first_seen[key] = (len(kept), content)
+                kept.append(message)
+                continue
+            if len(seen) != len(keys):
+                logger.warning(
+                    "[wire dedup] message carries identities PARTLY present earlier (%d of %d); keeping it. "
+                    "This is not the known duplication.",
+                    len(seen),
+                    len(keys),
+                )
+                for key, content in identified:
+                    first_seen.setdefault(key, (len(kept), content))
+                kept.append(message)
+                continue
+            differing = [key for key, content in identified if _comparable(content) != _comparable(first_seen[key][1])]
+            if differing:
+                logger.warning(
+                    "[wire dedup] %s %s appears twice with DIFFERING fields; keeping both. "
+                    "This is not the known duplication.",
+                    differing[0][0],
+                    differing[0][1],
+                )
+                kept.append(message)
+                continue
+            position = first_seen[keys[0]][0]
+            if position < len(kept) and _extra_weight(message) > _extra_weight(kept[position]):
+                kept[position] = message
+                for key, content in identified:
+                    first_seen[key] = (position, content)
+            removed.append("+".join(f"{kind}:{value}" for kind, value in keys))
+        if not removed:
+            return messages
+        logger.info("[wire dedup] collapsed %d duplicate message(s) before serialization: %s", len(removed), removed)
+        return kept
+    except Exception:  # a repair must never break the request
+        logger.exception("[wire dedup] message-level collapse failed; sending the messages unchanged")
+        return messages
+
+
+# ---------------------------------------------------------------------------
 # Pairing validity of the request input (PRP-0148 C2, UDR-0126 D6)
 # ---------------------------------------------------------------------------
 #

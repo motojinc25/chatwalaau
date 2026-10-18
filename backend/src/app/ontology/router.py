@@ -3,12 +3,15 @@
     GET    /api/ontology/catalog            -- list the catalog (also the SPA probe)
     POST   /api/ontology/catalog            -- create an ontology (name + description)
     PATCH  /api/ontology/catalog/{id}       -- rename (name and/or description), SHACL block
+    PUT    /api/ontology/catalog/order      -- reorder the catalog (PRP-0213, UDR-0195 D8)
     DELETE /api/ontology/catalog/{id}       -- delete (backup-then-remove)
     POST   /api/ontology/import             -- import Turtle / TriG / N-Triples / N-Quads /
                                                RDF-XML / JSON-LD (UDR-0182 D6)
     GET    /api/ontology/{id}               -- the JSON projection (CTR-0169 v3)
     PUT    /api/ontology/{id}               -- save the projection (backup + atomic)
     POST   /api/ontology/{id}/statements    -- explicit statement operations (UDR-0182 D9)
+    POST   /api/ontology/{id}/parse         -- a file's projection for a merge; writes
+                                               nothing (PRP-0213, UDR-0195 D2)
     GET    /api/ontology/{id}/export        -- download (?format=; lossy formats refused, D7)
     POST   /api/ontology/{id}/query         -- read-only SPARQL (SELECT/CONSTRUCT/ASK), scoped,
                                                with an entailment mode (UDR-0191 D1)
@@ -42,7 +45,7 @@ the mutations and the query POSTs are gated per invariant 7, the GETs follow
 the read convention. The whole surface returns 404 unless ONTOLOGY_ENABLED so
 the SPA can gate its launcher icon by probing the catalog (UDR-0084 D12).
 
-Under DEMO_MODE the nine WRITE endpoints (POST/PATCH/DELETE /catalog, POST /import,
+Under DEMO_MODE the ten WRITE endpoints (POST/PATCH/DELETE /catalog, PUT /catalog/order, POST /import,
 PUT /{id}, POST /{id}/statements, POST /{id}/history/{version}/restore, POST
 /trash/{id}/restore, PUT /import-map) refuse with 409 ``demo_mode`` and the manager renders read-only
 (PRP-0139 / UDR-0122). Reads -- including the SPARQL query lanes, which cannot
@@ -370,6 +373,24 @@ async def rename_ontology(ontology_id: str, body: OntologyRename) -> dict:
     return {**entry, "base_iri": base_iri_for(entry["id"])}
 
 
+class CatalogOrder(BaseModel):
+    # The catalog ids in the wanted order (UDR-0195 D8); unknown ids are ignored.
+    ids: list[str] = Field(max_length=10_000)
+
+
+@router.put("/catalog/order", dependencies=[Depends(verify_api_key)])
+async def reorder_catalog(body: CatalogOrder) -> dict:
+    """Reorder the catalog (PRP-0213, UDR-0195 D7 / D8): the list order IS the order.
+
+    Idempotent bulk set: unknown ids are ignored, catalog ids missing from ``ids`` are
+    appended in their prior relative order. 409 ``demo_mode`` like every catalog write.
+    """
+    _require_enabled()
+    _guard_demo()
+    entries = await run_in_threadpool(store.reorder_catalog, body.ids)
+    return {"ontologies": entries}
+
+
 def _shacl_block_or_422(ontology_id: str, raw: dict[str, Any] | None) -> dict[str, Any] | None:
     """The PATCH ``shacl`` block, checked strictly (the reader is tolerant; UDR-0194 D1)."""
 
@@ -418,6 +439,31 @@ async def delete_ontology(ontology_id: str) -> dict:
     return {"deleted": True, "id": ontology_id}
 
 
+def _parse_upload(data: bytes, filename: str, base_iri: str) -> tuple[str, int, bool, str]:
+    """Parse an upload with the import's parsers: (text, quad count, is a dataset, format).
+
+    Tries the formats the file name suggests (UDR-0182 D6); relative IRIs of a source
+    without a declared base resolve against ``base_iri`` (UDR-0181 D6). Raises
+    ``_ImportRejected`` when no format reads it and ``RemoteContextError`` for a remote
+    JSON-LD context (never fetched). Writes nothing.
+    """
+    import pyoxigraph as ox
+
+    errors: list[str] = []
+    for fmt in formats.import_formats(filename):
+        try:
+            text, quad_count, dataset = import_document(
+                data, fmt, rdfxml=fmt == ox.RdfFormat.RDF_XML, base_iri=base_iri
+            )
+        except RemoteContextError:
+            raise
+        except Exception as exc:  # syntax error for this format -- try the next
+            errors.append(f"{fmt}: {exc}")
+            continue
+        return text, quad_count, dataset, str(fmt)
+    raise _ImportRejected(f"Not a valid RDF document. {' / '.join(errors[:1])}")
+
+
 @router.post("/import", dependencies=[Depends(verify_api_key)])
 async def import_ontology(
     file: UploadFile = File(...),
@@ -433,8 +479,6 @@ async def import_ontology(
     ``pyoxigraph.parse`` (never a Store), so lexical forms stay exact. A remote
     JSON-LD ``@context`` is refused (422 ``remote_context_unsupported``), never fetched.
     """
-    import pyoxigraph as ox
-
     _require_enabled()
     _guard_demo()
     data = await file.read()
@@ -444,7 +488,6 @@ async def import_ontology(
             detail=f"File is {len(data)} bytes but the limit is {settings.ontology_max_file_bytes} bytes",
         )
 
-    candidates = formats.import_formats(file.filename or "")
     counted: list[int] = []
     datasets: list[bool] = []
 
@@ -452,21 +495,10 @@ async def import_ontology(
         # Relative IRIs of a source without a declared base resolve against the new
         # ontology's own base (UDR-0181 D6). Runs before anything is written: a
         # failure here leaves no file and no catalog entry.
-        errors: list[str] = []
-        for fmt in candidates:
-            try:
-                text, quad_count, dataset = import_document(
-                    data, fmt, rdfxml=fmt == ox.RdfFormat.RDF_XML, base_iri=base_iri_for(entry_id)
-                )
-            except RemoteContextError:
-                raise
-            except Exception as exc:  # syntax error for this format -- try the next
-                errors.append(f"{fmt}: {exc}")
-                continue
-            counted.append(quad_count)
-            datasets.append(dataset)
-            return text
-        raise _ImportRejected(f"Not a valid RDF document. {' / '.join(errors[:1])}")
+        text, quad_count, dataset, _ = _parse_upload(data, file.filename or "", base_iri_for(entry_id))
+        counted.append(quad_count)
+        datasets.append(dataset)
+        return text
 
     display_name = name.strip() or (file.filename or "").rsplit(".", 1)[0] or "Imported ontology"
     try:
@@ -487,6 +519,47 @@ async def import_ontology(
         ) from exc
     logger.info("ontology imported: %s (%d statements)", entry["id"], counted[0])
     return {**entry, "base_iri": base_iri_for(entry["id"]), "triple_count": counted[0]}
+
+
+@router.post("/{ontology_id}/parse", dependencies=[Depends(verify_api_key)])
+async def parse_file(ontology_id: str, file: UploadFile = File(...)) -> dict:
+    """Parse a file for a merge into this ontology; NOTHING is written (PRP-0213, UDR-0195 D2).
+
+    The upload's parsers and guards (size limit 413, format detection, a remote JSON-LD
+    ``@context`` refused with 422 ``remote_context_unsupported``); relative IRIs resolve
+    against THIS ontology's base. Returns the CTR-0169 v3 projection of the file plus
+    ``dataset``, ``format`` and ``statement_count``. Allowed in demo mode (it writes nothing).
+    """
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    data = await file.read()
+    if len(data) > settings.ontology_max_file_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File is {len(data)} bytes but the limit is {settings.ontology_max_file_bytes} bytes",
+        )
+
+    def work() -> dict[str, Any]:
+        text, _, dataset, fmt = _parse_upload(data, file.filename or "", base_iri_for(ontology_id))
+        projection = turtle_to_projection(text.encode("utf-8"))
+        return {
+            **projection,
+            "dataset": dataset,
+            "format": fmt,
+            "statement_count": projection["quad_count"],
+        }
+
+    try:
+        return await run_in_threadpool(work)
+    except _ImportRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RemoteContextError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "remote_context_unsupported", "url": exc.url, "message": str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Not a valid RDF document. {exc}") from exc
 
 
 # ---- History and trash (CTR-0171 v7, UDR-0184) ---------------------------------

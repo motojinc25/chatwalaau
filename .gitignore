@@ -118,3 +118,6 @@ batch-server.log
 
 # Agent Skills
 .skills/
+
+# DEXPI toolkit : local run outputs
+dexpi/out/
