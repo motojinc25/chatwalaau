@@ -294,6 +294,9 @@ def _expire(ontology_id: str, deleted: dict[str, Any], now: datetime) -> bool:
                     logger.warning("could not remove ontology backup %s", backup.name, exc_info=True)
         with contextlib.suppress(OSError):
             _log_path(ontology_id).unlink()
+        # PRP-0217 (UDR-0199 D4): the saved table mappings go with the expired ontology.
+        with contextlib.suppress(OSError, ValueError):
+            store.mappings_path(ontology_id).unlink(missing_ok=True)
     logger.info("deleted ontology %s expired from the trash", ontology_id)
     return True
 

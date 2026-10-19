@@ -10,7 +10,7 @@
  * individuals is decided here, in the view, never in the stored roles (D1).
  */
 
-import { ChevronRight, Columns3, Plus, Trash2, X } from 'lucide-react'
+import { ChevronRight, Columns3, Plus, TableProperties, Trash2, X } from 'lucide-react'
 import { useId, useMemo, useState } from 'react'
 import {
   AllStatements,
@@ -574,8 +574,25 @@ export function IndividualsView(props: {
   /** PRP-0212 (UDR-0194 D12): SHACL results per individual (term key) of the last validation. */
   shaclCounts?: Map<string, { violation: number; warning: number; info: number }>
   onShowShaclResults?: (term: Term) => void
+  /** PRP-0217 (UDR-0199 D1): Import table (CSV / TSV -> individuals of a class). */
+  onImportTable?: () => void
+  importTableDisabled?: string | null
 }) {
   const { model, index, ctx, group } = props
+  const importButton = props.onImportTable && !ctx.readOnly && (
+    <Button
+      variant="outline"
+      size="sm"
+      className="h-7 text-xs"
+      onClick={props.onImportTable}
+      disabled={Boolean(props.importTableDisabled)}
+      title={
+        props.importTableDisabled ??
+        'Import a CSV / TSV file as individuals of a class: checked with SHACL first, added as unsaved changes'
+      }>
+      <TableProperties className="mr-1 h-3.5 w-3.5" /> Import table
+    </Button>
+  )
   const inferredCount = useMemo(() => {
     const inferred = props.inferred
     if (!inferred) return undefined
@@ -670,8 +687,9 @@ export function IndividualsView(props: {
           onSelect={props.onGroupChange}
           inferredCount={inferredCount}
         />
-        <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-zinc-500">
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-sm text-zinc-500">
           Select a class on the left to list its individuals.
+          {importButton}
         </div>
       </div>
     )
@@ -737,6 +755,7 @@ export function IndividualsView(props: {
               {columns.length === 0 && <p className="px-2 py-1 text-xs text-zinc-400">No columns</p>}
             </DropdownMenuContent>
           </DropdownMenu>
+          {importButton}
           {group.kind === 'class' && !ctx.readOnly && (
             <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => props.onCreate(group.iri)}>
               <Plus className="mr-1 h-3.5 w-3.5" /> Individual

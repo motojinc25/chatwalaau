@@ -117,6 +117,7 @@ import {
 } from '@/components/OntologyInspector'
 import { MergeDialog } from '@/components/OntologyMerge'
 import { ShapesView } from '@/components/OntologyShapes'
+import { TableImportDialog } from '@/components/OntologyTableImport'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -248,6 +249,7 @@ import {
   XSD,
 } from '@/lib/ontologyModel'
 import { hasShapes, type ShapesGraph, targetedClasses } from '@/lib/ontologyShapes'
+import { applyTableImport, type TableMapping, type TablePreview } from '@/lib/ontologyTable'
 import { chooseTabLevel, showsLabel, type TabLevel } from '@/lib/panelTabs'
 import { cn } from '@/lib/utils'
 import '@/lib/monaco-setup'
@@ -1591,7 +1593,14 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [shaclNotice, setShaclNotice] = useState<string | null>(null)
   // PRP-0213 (UDR-0195 D1-D6): Merge into the open ontology; one step back until saved.
   const [mergeOpen, setMergeOpen] = useState(false)
-  const [mergeUndo, setMergeUndo] = useState<{ model: OntologyModel; dirty: boolean; count: number } | null>(null)
+  const [mergeUndo, setMergeUndo] = useState<{
+    model: OntologyModel
+    dirty: boolean
+    count: number
+    kind: 'merge' | 'import'
+  } | null>(null)
+  // PRP-0217 (UDR-0199 D1 / D2): Import table from the Data view; the same one step back.
+  const [tableOpen, setTableOpen] = useState(false)
   const [shaclList, setShaclList] = useState<{ title: string; query: Record<string, string> } | null>(null)
   const [shapesGraphKey, setShapesGraphKey] = useState<string | null>(null)
   const [shapeHighlight, setShapeHighlight] = useState<{ shape: string; path: string | null; nonce: number } | null>(
@@ -2268,9 +2277,20 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   /** Apply a merge plan as unsaved additions, keeping one step back (PRP-0213, UDR-0195 D5 / D6). */
   const applyMergePlan = useCallback(
     (plan: MergePlan) => {
-      setMergeUndo({ model, dirty, count: plan.statements.length })
+      setMergeUndo({ model, dirty, count: plan.statements.length, kind: 'merge' })
       updateModel((prev) => applyMerge(prev, plan))
       setMergeOpen(false)
+    },
+    [model, dirty, updateModel],
+  )
+
+  /** Apply an accepted table preview as unsaved edits (PRP-0217, UDR-0199 D2); one step back. */
+  const applyTablePreview = useCallback(
+    (preview: TablePreview, mapping: TableMapping) => {
+      setMergeUndo({ model, dirty, count: preview.add.length + preview.remove.length, kind: 'import' })
+      updateModel((prev) => applyTableImport(prev, preview))
+      setTableOpen(false)
+      setDataGroup({ kind: 'class', iri: mapping.class })
     },
     [model, dirty, updateModel],
   )
@@ -3557,8 +3577,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                   size="sm"
                   className="h-7 text-xs"
                   onClick={undoMerge}
-                  title={`Remove the ${mergeUndo.count} merged statement(s) -- edits made after the merge are undone too`}>
-                  <RotateCcw className="mr-1 h-3.5 w-3.5" /> Undo merge
+                  title={`Remove the ${mergeUndo.count} ${mergeUndo.kind === 'import' ? 'imported' : 'merged'} statement change(s) -- edits made after the ${mergeUndo.kind} are undone too`}>
+                  <RotateCcw className="mr-1 h-3.5 w-3.5" />{' '}
+                  {mergeUndo.kind === 'import' ? 'Undo import' : 'Undo merge'}
                 </Button>
               )}
               <Button
@@ -3798,6 +3819,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                             title: `SHACL results of ${compactTerm(term, model)}`,
                             query: { focus: termKey(term) },
                           })
+                        }
+                        onImportTable={() => setTableOpen(true)}
+                        importTableDisabled={
+                          demoBlocked ? 'Disabled in demo mode' : loading || busy ? 'Wait for the current action' : null
                         }
                       />
                     </div>
@@ -4183,6 +4208,23 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       </Dialog>
 
       {/* PRP-0212 (UDR-0194 D1): validation settings of the selected ontology. */}
+      {tableOpen && selectedId && (
+        <TableImportDialog
+          ontologyId={selectedId}
+          ontologyName={selectedEntry?.name ?? selectedId}
+          model={model}
+          baseIri={baseIri}
+          revision={revision}
+          dirty={dirty}
+          onSave={() => void save()}
+          onDiscard={() => void loadOntology(selectedId)}
+          defaultClass={dataGroup?.kind === 'class' ? dataGroup.iri : null}
+          graphName={graphName}
+          readOnly={demoBlocked}
+          onClose={() => setTableOpen(false)}
+          onApply={applyTablePreview}
+        />
+      )}
       {mergeOpen && selectedId && (
         <MergeDialog
           ontologyId={selectedId}

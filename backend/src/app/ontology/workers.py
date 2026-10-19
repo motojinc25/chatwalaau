@@ -151,6 +151,21 @@ def _op_shacl_candidate(payload: dict[str, Any], phase: Callable[[str], None]) -
     return shacl_results.candidate(payload["ontology_id"], payload["text"], payload.get("dataset"))
 
 
+def _op_table_preview(payload: dict[str, Any], phase: Callable[[str], None]) -> dict[str, Any]:
+    """PRP-0217 (UDR-0199 D6-D9): convert a table, validate stored + rows, attribute."""
+    from app.ontology import tables
+
+    phase("validate")
+    return tables.preview(
+        payload["ontology_id"],
+        payload["data"],
+        payload["filename"],
+        payload["mapping"],
+        payload.get("revision"),
+        max_rows=payload.get("max_rows"),
+    )
+
+
 OPS: dict[str, Callable[[dict[str, Any], Callable[[str], None]], Any]] = {
     "summary": _op_summary,
     "query": _op_query,
@@ -158,6 +173,7 @@ OPS: dict[str, Callable[[dict[str, Any], Callable[[str], None]], Any]] = {
     "statements": _op_statements,
     "shacl": _op_shacl,
     "shacl_candidate": _op_shacl_candidate,
+    "table_preview": _op_table_preview,
 }
 
 

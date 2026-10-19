@@ -1145,6 +1145,19 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         min=5,
         max=600,
     ),
+    SettingDescriptor(
+        "ontology_table_max_rows",
+        "Ontology table import: data rows (max)",
+        "ontology",
+        "int",
+        SCOPE_RUNTIME,
+        help=(
+            "A CSV / TSV file imported into an ontology (Data view, Import table) may hold at most "
+            "this many data rows; a larger file is refused with its row count."
+        ),
+        min=100,
+        max=100_000,
+    ),
     # ---- Schedule (runtime) -----------------------------------------------
     SettingDescriptor(
         "cron_tick_seconds",

@@ -12,6 +12,13 @@
     POST   /api/ontology/{id}/statements    -- explicit statement operations (UDR-0182 D9)
     POST   /api/ontology/{id}/parse         -- a file's projection for a merge; writes
                                                nothing (PRP-0213, UDR-0195 D2)
+    POST   /api/ontology/{id}/table/inspect -- a CSV / TSV file's columns, rows and a
+                                               suggested mapping; writes nothing (PRP-0217)
+    POST   /api/ontology/{id}/table/preview -- convert + SHACL + row attribution; writes
+                                               nothing (UDR-0199 D2, D6-D9)
+    GET    /api/ontology/{id}/table/mappings          -- the saved table mappings (D4)
+    PUT    /api/ontology/{id}/table/mappings/{name}   -- save one named mapping
+    DELETE /api/ontology/{id}/table/mappings/{name}   -- remove one named mapping
     GET    /api/ontology/{id}/export        -- download (?format=; lossy formats refused, D7)
     POST   /api/ontology/{id}/query         -- read-only SPARQL (SELECT/CONSTRUCT/ASK), scoped,
                                                with an entailment mode (UDR-0191 D1)
@@ -45,9 +52,10 @@ the mutations and the query POSTs are gated per invariant 7, the GETs follow
 the read convention. The whole surface returns 404 unless ONTOLOGY_ENABLED so
 the SPA can gate its launcher icon by probing the catalog (UDR-0084 D12).
 
-Under DEMO_MODE the ten WRITE endpoints (POST/PATCH/DELETE /catalog, PUT /catalog/order, POST /import,
+Under DEMO_MODE the twelve WRITE endpoints (POST/PATCH/DELETE /catalog, PUT /catalog/order, POST /import,
 PUT /{id}, POST /{id}/statements, POST /{id}/history/{version}/restore, POST
-/trash/{id}/restore, PUT /import-map) refuse with 409 ``demo_mode`` and the manager renders read-only
+/trash/{id}/restore, PUT /import-map, PUT/DELETE /{id}/table/mappings/{name}) refuse with 409
+``demo_mode`` and the manager renders read-only
 (PRP-0139 / UDR-0122). Reads -- including the SPARQL query lanes, which cannot
 mutate -- are deliberately untouched.
 
@@ -560,6 +568,172 @@ async def parse_file(ontology_id: str, file: UploadFile = File(...)) -> dict:
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"Not a valid RDF document. {exc}") from exc
+
+
+# ---- Table import (CTR-0171 v14, CTR-0247, PRP-0217 / UDR-0199) ----------------------
+
+
+async def _read_table_upload(file: UploadFile) -> bytes:
+    data = await file.read()
+    if len(data) > settings.ontology_max_file_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File is {len(data)} bytes but the limit is {settings.ontology_max_file_bytes} bytes",
+        )
+    return data
+
+
+def _table_error(exc: Exception) -> HTTPException | None:
+    from app.ontology import tables
+
+    if isinstance(exc, tables.TableError):
+        status = 409 if exc.code == "stale_revision" else 422
+        return HTTPException(status_code=status, detail=exc.detail)
+    if isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail={"error": "ontology_not_found"})
+    return None
+
+
+def _table_max_rows() -> int:
+    return max(1, int(settings.ontology_table_max_rows))
+
+
+@router.post("/{ontology_id}/table/inspect", dependencies=[Depends(verify_api_key)])
+async def inspect_table(
+    ontology_id: str,
+    file: UploadFile = File(...),
+    encoding: str = Form(default="auto"),
+    delimiter: str = Form(default="auto"),
+    header_row: int = Form(default=1),
+    class_iri: str = Form(default="", alias="class"),
+) -> dict:
+    """Read a CSV / TSV file: encoding, delimiter, columns, row count, first rows, and a
+    suggested mapping for ``class`` (UDR-0199 D4 / D5). Writes nothing; allowed in demo mode."""
+    from app.ontology import tables
+
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    data = await _read_table_upload(file)
+    try:
+        return await run_in_threadpool(
+            tables.inspect,
+            ontology_id,
+            data,
+            file.filename or "",
+            encoding=encoding,
+            delimiter=delimiter,
+            header_row=header_row,
+            class_iri=class_iri.strip() or None,
+            max_rows=_table_max_rows(),
+        )
+    except Exception as exc:
+        mapped = _table_error(exc)
+        if mapped is not None:
+            raise mapped from exc
+        raise
+
+
+@router.post("/{ontology_id}/table/preview", dependencies=[Depends(verify_api_key)])
+async def preview_table(
+    ontology_id: str,
+    file: UploadFile = File(...),
+    mapping: str = Form(...),
+    revision: str = Form(default=""),
+) -> dict:
+    """Convert a table with a mapping, validate the stored model plus the rows with the
+    ontology's SHACL configuration and trace every result to its rows (UDR-0199 D6-D9).
+
+    Writes nothing (D2); allowed in demo mode. 409 ``stale_revision`` when ``revision`` is
+    not the stored one. A validation that does not finish (time limit) answers the
+    conversion with ``shacl.checked = false`` (D9: importing then needs an explicit choice).
+    """
+    import json
+
+    from app.ontology import tables
+
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    data = await _read_table_upload(file)
+    try:
+        mapping_raw = json.loads(mapping)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail={"error": "invalid_mapping", "message": f"The mapping is not JSON: {exc}"}
+        ) from exc
+    payload = {
+        "ontology_id": ontology_id,
+        "data": data,
+        "filename": file.filename or "",
+        "mapping": mapping_raw,
+        "revision": revision.strip() or None,
+        "max_rows": _table_max_rows(),
+    }
+    setting = "ontology_shacl_build_timeout_seconds"
+    limit = max(0, int(settings.ontology_shacl_build_timeout_seconds)) or None
+    try:
+        return await run_in_threadpool(workers.run_blocking, "table_preview", payload, timeout=limit)
+    except workers.QueryTimeout:
+        unchecked = {
+            "checked": False,
+            "reason": "timeout",
+            "message": f"The SHACL check did not finish within {limit} s (App Settings: {setting}).",
+        }
+    except Exception as exc:
+        mapped = _table_error(exc) or _search_error(exc)
+        if mapped is not None:
+            raise mapped from exc
+        raise
+    try:
+        return await run_in_threadpool(
+            tables.preview,
+            ontology_id,
+            data,
+            payload["filename"],
+            mapping_raw,
+            payload["revision"],
+            max_rows=payload["max_rows"],
+            validate=False,
+            unchecked=unchecked,
+        )
+    except Exception as exc:
+        mapped = _table_error(exc)
+        if mapped is not None:
+            raise mapped from exc
+        raise
+
+
+@router.get("/{ontology_id}/table/mappings", dependencies=[Depends(verify_api_key)])
+async def list_table_mappings(ontology_id: str) -> dict:
+    """The saved table mappings of the ontology (UDR-0199 D4)."""
+    _require_enabled()
+    _entry_or_404(ontology_id)
+    return {"mappings": await run_in_threadpool(store.read_mappings, ontology_id)}
+
+
+@router.put("/{ontology_id}/table/mappings/{name}", dependencies=[Depends(verify_api_key)])
+async def save_table_mapping(ontology_id: str, name: str, body: dict[str, Any]) -> dict:
+    """Save or replace one named mapping (validated against CTR-0247); 409 in demo mode."""
+    from app.ontology import tables
+
+    _require_enabled()
+    _guard_demo()
+    _entry_or_404(ontology_id)
+    try:
+        mapping = tables.validate_mapping({**body, "name": name}, require_name=True)
+    except tables.TableError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
+    return await run_in_threadpool(store.save_mapping, ontology_id, mapping)
+
+
+@router.delete("/{ontology_id}/table/mappings/{name}", dependencies=[Depends(verify_api_key)])
+async def delete_table_mapping(ontology_id: str, name: str) -> dict:
+    """Remove one named mapping; 404 when there is none; 409 in demo mode."""
+    _require_enabled()
+    _guard_demo()
+    _entry_or_404(ontology_id)
+    if not await run_in_threadpool(store.delete_mapping, ontology_id, name):
+        raise HTTPException(status_code=404, detail={"error": "mapping_not_found"})
+    return {"deleted": name}
 
 
 # ---- History and trash (CTR-0171 v7, UDR-0184) ---------------------------------

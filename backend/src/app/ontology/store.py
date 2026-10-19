@@ -349,6 +349,71 @@ def reorder_catalog(ontology_ids: list[str]) -> list[dict[str, str]]:
         return ordered
 
 
+# ---- Saved table mappings (CTR-0170 v12, PRP-0217, UDR-0199 D4) ----------------------
+#
+# ``<id>.mappings.json`` beside the ontology file: the named CSV mappings of one
+# ontology, outside its content and its history. A delete keeps it (the trash restores
+# the ontology under the same id); the trash expiry removes it with the backups.
+
+MAPPINGS_FORMAT = "chatwalaau.table-mappings/1"
+
+
+def mappings_path(ontology_id: str) -> Path:
+    if not _ID_RE.match(ontology_id):
+        raise ValueError(f"not an ontology id: {ontology_id!r}")
+    return ontology_dir() / f"{ontology_id}.mappings.json"
+
+
+def read_mappings(ontology_id: str) -> list[dict[str, Any]]:
+    """The saved mappings, name order; an unreadable file reads as none (logged)."""
+    path = mappings_path(ontology_id)
+    with write_lock(ontology_id):
+        if not path.is_file():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("saved table mappings of %s are unreadable; ignored", ontology_id)
+            return []
+    items = raw.get("mappings") if isinstance(raw, dict) else None
+    if not isinstance(items, list):
+        return []
+    out = [item for item in items if isinstance(item, dict) and isinstance(item.get("name"), str)]
+    return sorted(out, key=lambda item: item["name"].casefold())
+
+
+def _write_mappings(ontology_id: str, items: list[dict[str, Any]]) -> None:
+    path = mappings_path(ontology_id)
+    if not items:
+        if path.is_file():
+            path.unlink()
+        return
+    body = {"format": MAPPINGS_FORMAT, "mappings": sorted(items, key=lambda item: item["name"].casefold())}
+    _atomic_write_text(path, json.dumps(body, ensure_ascii=False, indent=2))
+
+
+def save_mapping(ontology_id: str, mapping: dict[str, Any]) -> dict[str, Any]:
+    """Save or replace the mapping named ``mapping["name"]`` (already validated)."""
+    saved = {**mapping, "updated_at": _now()}
+    with write_lock(ontology_id):
+        items = [item for item in read_mappings(ontology_id) if item["name"] != mapping["name"]]
+        items.append(saved)
+        _write_mappings(ontology_id, items)
+    logger.info("table mapping saved: %s / %s", ontology_id, mapping["name"])
+    return saved
+
+
+def delete_mapping(ontology_id: str, name: str) -> bool:
+    with write_lock(ontology_id):
+        items = read_mappings(ontology_id)
+        kept = [item for item in items if item["name"] != name]
+        if len(kept) == len(items):
+            return False
+        _write_mappings(ontology_id, kept)
+    logger.info("table mapping deleted: %s / %s", ontology_id, name)
+    return True
+
+
 def _touch_entry(ontology_id: str) -> None:
     with _CATALOG_LOCK:
         entries = read_catalog()

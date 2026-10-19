@@ -752,6 +752,8 @@ class Settings(BaseSettings):
     ontology_shacl_max_results: int = 10_000
     ontology_shacl_build_timeout_seconds: int = 300
     ontology_shacl_strict_timeout_seconds: int = 30
+    # PRP-0217 (UDR-0199 D5; operator Q3): data rows one table import reads (App Settings).
+    ontology_table_max_rows: int = 10_000
     # The NL -> SPARQL completion model is the catalog `roles.ontology_nl` binding
     # (PRP-0115 / UDR-0096); the removed ONTOLOGY_NL_MODEL env var no longer applies.
 
