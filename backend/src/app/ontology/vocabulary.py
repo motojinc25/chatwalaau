@@ -50,6 +50,7 @@ RDF_TYPE = f"{RDF}type"
 RDF_LANG_STRING = f"{RDF}langString"
 RDF_DIR_LANG_STRING = f"{RDF}dirLangString"
 OWL_CLASS = f"{OWL}Class"
+OWL_ONTOLOGY = f"{OWL}Ontology"
 OWL_OBJECT_PROPERTY = f"{OWL}ObjectProperty"
 OWL_DATATYPE_PROPERTY = f"{OWL}DatatypeProperty"
 RDFS_LABEL = f"{RDFS}label"
@@ -160,7 +161,11 @@ def assign_roles(resources: list[dict[str, Any]]) -> None:
 
 
 def base_iri_for(ontology_id: str) -> str:
-    """The ontology's own namespace for NEW terms (PRP-0105 IMPL-4)."""
+    """The ORIGINAL namespace for new terms (PRP-0105 IMPL-4): an entry without a stored namespace.
+
+    PRP-0218 (UDR-0200 D3): callers that know the catalog entry use
+    ``store.namespace_of(id).vocabulary``, which equals this for such entries.
+    """
     return f"https://chatwalaau.com/ontology/{ontology_id}#"
 
 
@@ -702,17 +707,29 @@ def projection_to_turtle(projection: dict[str, Any]) -> str:
     return projection_to_text(projection)[0]
 
 
-def new_document_turtle(ontology_base: str) -> str:
-    """The initial Turtle of a NEW ontology: the built-in prefixes plus ``:`` = its base."""
+def new_document_turtle(
+    ontology_base: str, *, ontology_iri: str | None = None, data_namespace: str | None = None
+) -> str:
+    """The initial Turtle of a NEW ontology: the built-in prefixes plus ``:`` = its base.
+
+    PRP-0218 (UDR-0200 D8): an ontology with a STORED namespace also binds ``id:`` to its
+    data namespace (``{ontology_iri}/id/``) and starts with the header ``<ontology_iri> a owl:Ontology``;
+    the original form (no ``ontology_iri``) is unchanged.
+    """
+    import pyoxigraph as ox
+
+    prefixes = [{"prefix": "", "iri": ontology_base}]
+    quads: list[Any] = []
+    if ontology_iri:
+        if data_namespace and data_namespace != ontology_base:
+            prefixes.append({"prefix": "id", "iri": data_namespace})
+        quads.append(ox.Quad(ox.NamedNode(ontology_iri), ox.NamedNode(RDF_TYPE), ox.NamedNode(OWL_ONTOLOGY)))
     document = {
-        "prefixes": [
-            {"prefix": "", "iri": ontology_base},
-            *({"prefix": k, "iri": v} for k, v in TURTLE_PREFIXES.items()),
-        ],
+        "prefixes": [*prefixes, *({"prefix": k, "iri": v} for k, v in TURTLE_PREFIXES.items())],
         "base": None,
         "version": None,
     }
-    return write_document([], document)
+    return write_document(quads, document)
 
 
 class RemoteContextError(ValueError):

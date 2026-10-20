@@ -754,6 +754,9 @@ class Settings(BaseSettings):
     ontology_shacl_strict_timeout_seconds: int = 30
     # PRP-0217 (UDR-0199 D5; operator Q3): data rows one table import reads (App Settings).
     ontology_table_max_rows: int = 10_000
+    # PRP-0218 (UDR-0200 D1; operator: App Settings, not .env): the namespace NEW ontologies
+    # are named under. Each ontology stores its own namespace when created (D2).
+    ontology_iri_base: str = "https://chatwalaau.com/ontology/"
     # The NL -> SPARQL completion model is the catalog `roles.ontology_nl` binding
     # (PRP-0115 / UDR-0096); the removed ONTOLOGY_NL_MODEL env var no longer applies.
 

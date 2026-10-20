@@ -44,7 +44,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -62,6 +62,9 @@ from app.app_settings.descriptors import (
 )
 from app.core.config import COMPACTION_RULE_TEXT, compaction_bounds_satisfy_rule, settings
 from app.mcp.config import _strip_jsonc_comments
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +87,18 @@ class SettingsStoreError(Exception):
 # system does, which is not what D7's degrade rule is for (that rule exists for
 # values that no longer mean anything).
 _VALUE_ALIASES: dict[str, dict[str, str]] = {}
+
+
+def _ontology_iri_base(value: str) -> str:
+    from app.ontology.namespaces import normalize_iri_base
+
+    return normalize_iri_base(value)
+
+
+# A per-key check of a `str` value (PRP-0218, UDR-0200 D1): it returns the normalized
+# value or raises ValueError. Reached by `coerce_value`, so the WRITE path rejects and
+# the LOAD path falls back to the default with a warning (UDR-0141 D4 / D5).
+_STRING_CHECKS: dict[str, Callable[[str], str]] = {"ontology_iri_base": _ontology_iri_base}
 
 # A RETIRED key (descriptors.RETIRED_KEYS, UDR-0120 D7) is not an unknown key.
 # An unknown key is one this binary cannot interpret, so D5 preserves it; a
@@ -182,6 +197,14 @@ def coerce_value(key: str, raw: Any) -> tuple[Any, str | None]:
     if desc.max is not None and isinstance(value, int) and not isinstance(value, bool) and value > desc.max:
         fallback = default_for(key)
         return fallback, (f"{desc.env_name}: {raw!r} is above the maximum {desc.max}; using the default {fallback!r}")
+
+    check = _STRING_CHECKS.get(key)
+    if check is not None and isinstance(value, str):
+        try:
+            value = check(value)
+        except ValueError as exc:
+            fallback = default_for(key)
+            return fallback, (f"{desc.env_name}: {raw!r} is not valid ({exc}); using the default {fallback!r}")
 
     return value, None
 

@@ -115,6 +115,7 @@ import {
   ResourcesPane,
   TermView,
 } from '@/components/OntologyInspector'
+import { NewOntologyIriFields, newOntologyIriReady, OntologyIrisBlock } from '@/components/OntologyIri'
 import { MergeDialog } from '@/components/OntologyMerge'
 import { ShapesView } from '@/components/OntologyShapes'
 import { TableImportDialog } from '@/components/OntologyTableImport'
@@ -149,6 +150,7 @@ import {
   readInferredMode,
   writeInferredMode,
 } from '@/lib/ontologyInferred'
+import { type CatalogNamespace, DEFAULT_IRI_BASE, irisOf, namespaceRefusal, type OntologyIris } from '@/lib/ontologyIri'
 import { applyMerge, type MergePlan } from '@/lib/ontologyMerge'
 import {
   addImport,
@@ -268,6 +270,8 @@ interface CatalogEntry {
   updated_at?: string
   /** PRP-0212 (UDR-0194 D1): the SHACL validation settings. */
   shacl?: ShaclSettings
+  /** PRP-0218 (UDR-0200 D2): the namespace stored when the ontology was created. */
+  namespace?: CatalogNamespace
 }
 
 /** The catalog's SHACL block (CTR-0171 v12). */
@@ -1498,6 +1502,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // The loaded statement-complete projection (the editing SSOT of this modal).
   // `baseIri` is the catalog's minting namespace for NEW terms, not document.base.
   const [baseIri, setBaseIri] = useState('')
+  // PRP-0218 (UDR-0200 D3 / D8): new individuals are minted in their own namespace
+  // (`{ontology}/id/`); for the original form it equals `baseIri`.
+  const [individualsIri, setIndividualsIri] = useState('')
   const [model, setModel] = useState<OntologyModel>(EMPTY_MODEL)
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([])
   const [revision, setRevision] = useState<string | null>(null)
@@ -1642,6 +1649,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [createOpen, setCreateOpen] = useState(false)
   const [createName, setCreateName] = useState('')
   const [createDescription, setCreateDescription] = useState('')
+  // PRP-0218 (UDR-0200 D4): the IRI of the new ontology, decided once.
+  const [createShortName, setCreateShortName] = useState('')
+  const [createCustomIri, setCreateCustomIri] = useState('')
+  const [createUseCustom, setCreateUseCustom] = useState(false)
   const [creating, setCreating] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<CatalogEntry | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -1663,6 +1674,9 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   // the server payload, never inferred client-side, so the notice cannot claim a
   // restriction the backend is not enforcing.
   const [demoBlocked, setDemoBlocked] = useState(false)
+  // PRP-0218 (UDR-0200 D10): the IRI base new ontologies are named under (App Settings).
+  const [iriBase, setIriBase] = useState(DEFAULT_IRI_BASE)
+  const [iriBaseIsDefault, setIriBaseIsDefault] = useState(true)
 
   const fetchCatalog = useCallback(async () => {
     setError(null)
@@ -1672,6 +1686,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const data = await res.json()
       setCatalog((data.ontologies ?? []) as CatalogEntry[])
       setDemoBlocked(data.demo_mode === true)
+      setIriBase(typeof data.iri_base === 'string' ? data.iri_base : DEFAULT_IRI_BASE)
+      setIriBaseIsDefault(data.iri_base_is_default !== false)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load the ontology catalog')
     }
@@ -1730,6 +1746,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
         const loaded = fromProjection(data)
         setSelectedId(id)
         setBaseIri((data.base_iri as string) ?? '')
+        setIndividualsIri(((data.iri as OntologyIris | undefined)?.individuals ?? data.base_iri ?? '') as string)
         setModel(loaded)
         saveBaseRef.current = saveBase(loaded)
         setDiagnostics((data.diagnostics ?? []) as Diagnostic[])
@@ -1918,17 +1935,28 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       const res = await fetch('/api/ontology/catalog', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: createName, description: createDescription }),
+        body: JSON.stringify({
+          name: createName,
+          description: createDescription,
+          ...(createUseCustom
+            ? { ontology_iri: createCustomIri.trim() }
+            : createShortName.trim()
+              ? { short_name: createShortName.trim() }
+              : {}),
+        }),
       })
       if (!res.ok) {
         const refused = await demoRefusal(res)
         if (refused) setDemoBlocked(true)
-        throw new Error(refused ?? 'Failed to create the ontology')
+        throw new Error(refused ?? (await namespaceRefusal(res, 'Failed to create the ontology')))
       }
       const entry = (await res.json()) as CatalogEntry
       setCreateOpen(false)
       setCreateName('')
       setCreateDescription('')
+      setCreateShortName('')
+      setCreateCustomIri('')
+      setCreateUseCustom(false)
       await fetchCatalog()
       await loadOntology(entry.id)
     } catch (err) {
@@ -1936,7 +1964,30 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     } finally {
       setCreating(false)
     }
-  }, [createName, createDescription, fetchCatalog, loadOntology])
+  }, [createName, createDescription, createUseCustom, createCustomIri, createShortName, fetchCatalog, loadOntology])
+
+  /** Set the IRI of an ontology without one, once (PRP-0218, UDR-0200 D6); the error or null. */
+  const setOntologyIri = useCallback(
+    async (id: string, payload: { short_name?: string; ontology_iri?: string }): Promise<string | null> => {
+      const res = await fetch(`/api/ontology/catalog/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ namespace: payload }),
+      })
+      if (!res.ok) return (await demoRefusal(res)) ?? (await namespaceRefusal(res, 'Failed to set the IRI'))
+      const entry = (await res.json()) as CatalogEntry & { iri?: OntologyIris; base_iri?: string }
+      setRenameTarget((current) =>
+        current && current.id === id ? { ...current, namespace: entry.namespace } : current,
+      )
+      if (id === selectedId && entry.iri) {
+        setBaseIri(entry.iri.vocabulary)
+        setIndividualsIri(entry.iri.individuals)
+      }
+      await fetchCatalog()
+      return null
+    },
+    [selectedId, fetchCatalog],
+  )
 
   const renameOntology = useCallback(async () => {
     if (!renameTarget) return
@@ -2390,12 +2441,12 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     const cls = newIndividualClass
     if (!cls) return
     const name = newIndividualName.trim() || newIndividualLabel.trim() || 'individual'
-    const value = mintIri(baseIri || 'https://chatwalaau.com/ontology/local#', name, takenIris(model))
+    const value = mintIri(individualsIri || baseIri || 'https://chatwalaau.com/ontology/local#', name, takenIris(model))
     setNewIndividualClass(null)
     updateModel((prev) => createIndividual(prev, value, cls, newIndividualLabel))
     setSelection({ kind: 'individual', key: termKey(iriTerm(value)) })
     setRightTab('detail')
-  }, [newIndividualClass, newIndividualName, newIndividualLabel, baseIri, model, updateModel])
+  }, [newIndividualClass, newIndividualName, newIndividualLabel, individualsIri, baseIri, model, updateModel])
 
   const requestDeleteIndividual = useCallback(
     (key: string) => {
@@ -3481,10 +3532,11 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
     )
     if (own && own.term.type === 'iri') return { iri: own.term.value, exists: true }
     return {
-      iri: importsInfo?.catalog_iri ?? (selectedId ? `https://chatwalaau.com/ontology/${selectedId}` : ''),
+      // PRP-0218 (UDR-0200 D9): the stored ontology IRI when there is one.
+      iri: importsInfo?.catalog_iri ?? (selectedId ? irisOf(selectedId, selectedEntry?.namespace).ontology : ''),
       exists: false,
     }
-  }, [model, importsInfo, selectedId])
+  }, [model, importsInfo, selectedId, selectedEntry?.namespace])
   const importWarnings = useMemo(() => importWarningCount(importsInfo), [importsInfo])
   const openImports = useCallback((iri?: string) => {
     setMapIri(iri ?? null)
@@ -4194,12 +4246,32 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                 placeholder="What domain does this concept model describe?"
               />
             </div>
+            <NewOntologyIriFields
+              base={iriBase}
+              baseIsDefault={iriBaseIsDefault}
+              shortName={createShortName}
+              onShortName={setCreateShortName}
+              customIri={createCustomIri}
+              onCustomIri={setCreateCustomIri}
+              useCustom={createUseCustom}
+              onUseCustom={setCreateUseCustom}
+            />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
               Cancel
             </Button>
-            <Button onClick={() => void createOntology()} disabled={creating || !createName.trim()}>
+            <Button
+              onClick={() => void createOntology()}
+              disabled={
+                creating ||
+                !createName.trim() ||
+                !newOntologyIriReady({
+                  useCustom: createUseCustom,
+                  shortName: createShortName,
+                  customIri: createCustomIri,
+                })
+              }>
               {creating ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
               Create
             </Button>
@@ -4213,7 +4285,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
           ontologyId={selectedId}
           ontologyName={selectedEntry?.name ?? selectedId}
           model={model}
-          baseIri={baseIri}
+          baseIri={individualsIri || baseIri}
           revision={revision}
           dirty={dirty}
           onSave={() => void save()}
@@ -4337,6 +4409,17 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                 placeholder="What domain does this concept model describe?"
               />
             </div>
+            {renameTarget && (
+              <OntologyIrisBlock
+                key={renameTarget.id}
+                id={renameTarget.id}
+                namespace={renameTarget.namespace}
+                base={iriBase}
+                baseIsDefault={iriBaseIsDefault}
+                readOnly={demoBlocked}
+                onSet={(payload) => setOntologyIri(renameTarget.id, payload)}
+              />
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRenameTarget(null)} disabled={renaming}>

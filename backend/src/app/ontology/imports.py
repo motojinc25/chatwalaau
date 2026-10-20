@@ -5,7 +5,9 @@ connection. It resolves, by the first rule that answers (D2), to
 
     1. the mapping table          ``ONTOLOGY_DIR/import-map.json`` (D3)  -> ``map``
     2. a built-in W3C vocabulary  rdf, rdfs, owl, xsd (nothing merged)   -> ``builtin``
-    3. a catalog IRI              ``https://chatwalaau.com/ontology/{id}`` -> ``catalog``
+    3. a catalog IRI              ``https://chatwalaau.com/ontology/{id}``, or the
+                                  ontology IRI stored in the entry (``plant`` /
+                                  ``plant#``, PRP-0218 UDR-0200 D9)          -> ``catalog``
     4. the ONLY catalog ontology declaring it as its ontology IRI        -> ``ontology_iri``
     5. the ONLY catalog ontology declaring it as its version IRI         -> ``version_iri``
 
@@ -59,8 +61,9 @@ MATCHES = ("map", "builtin", "catalog", "ontology_iri", "version_iri")
 
 
 def catalog_iri(ontology_id: str) -> str:
-    """The IRI every catalog ontology can be imported by (D2 rule 3)."""
-    return f"{CATALOG_IRI_PREFIX}{ontology_id}"
+    """The IRI a catalog ontology is imported by (D2 rule 3): its stored ontology IRI, else
+    ``https://chatwalaau.com/ontology/{id}`` (which keeps resolving for every entry)."""
+    return store.namespace_of(ontology_id).ontology
 
 
 def builtin_name(iri: str) -> str | None:
@@ -201,6 +204,13 @@ class Resolver:
 
     def __init__(self) -> None:
         self.entries = {e["id"]: e for e in store.read_catalog()}
+        # PRP-0218 (UDR-0200 D9): stored ontology IRIs, with and without the trailing '#'.
+        self._by_namespace: dict[str, str] = {}
+        for ontology_id, entry in self.entries.items():
+            if entry.get("namespace"):
+                iri = store.namespace_of(ontology_id, entry).ontology
+                self._by_namespace[iri] = ontology_id
+                self._by_namespace[f"{iri}#"] = ontology_id
         self.mapping = read_import_map()
         self._headers: dict[str, Header] = {}
         self._by_ontology_iri: dict[str, list[str]] | None = None
@@ -237,6 +247,9 @@ class Resolver:
             candidate = iri[len(CATALOG_IRI_PREFIX) :]
             if candidate in self.entries:
                 return Resolution("resolved", "catalog", candidate)
+        named = self._by_namespace.get(iri)
+        if named is not None:
+            return Resolution("resolved", "catalog", named)
         if self._by_ontology_iri is None:
             self._index()
         assert self._by_ontology_iri is not None and self._by_version_iri is not None

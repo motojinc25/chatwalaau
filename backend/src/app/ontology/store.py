@@ -45,6 +45,7 @@ threads (D4): catalog read-modify-writes hold ``_CATALOG_LOCK`` and every
 from __future__ import annotations
 
 from collections import Counter, OrderedDict
+import contextlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -60,6 +61,7 @@ from typing import TYPE_CHECKING, Any
 import uuid
 
 from app.core.config import settings
+from app.ontology import namespaces
 from app.ontology.lexical import (
     LexicalIndex,
     build_index,
@@ -206,7 +208,65 @@ def _normalize_entry(raw: Any) -> dict[str, str] | None:
     shacl = normalize_shacl(raw.get("shacl"), entry_id)
     if shacl is not None:
         normalized["shacl"] = shacl
+    # PRP-0218 (UDR-0200 D2): the namespace decided once when the ontology was created.
+    namespace = namespaces.normalize_block(raw.get("namespace"))
+    if namespace is not None:
+        normalized["namespace"] = namespace
     return normalized  # type: ignore[return-value]
+
+
+# ---- IRI namespace of a catalog entry (PRP-0218, UDR-0200 D2-D7) --------------------
+
+
+def namespace_of(ontology_id: str, entry: dict[str, Any] | None = None) -> namespaces.Namespace:
+    """The three IRIs of an ontology: its STORED namespace, else the original form (D3)."""
+    if entry is None:
+        entry = get_entry(ontology_id)
+    block = (entry or {}).get("namespace")
+    return namespaces.of(ontology_id, block if isinstance(block, dict) else None)
+
+
+def _check_namespace_free(iri: str, entries: list[dict[str, Any]], own_id: str | None = None) -> None:
+    """409 ``namespace_taken`` when another catalog or trash ontology holds the IRI (D5 / D7)."""
+    from app.ontology import history
+
+    for entry in entries:
+        if entry["id"] != own_id and namespaces.clashes(iri, namespace_of(entry["id"], entry).ontology):
+            raise namespaces.NamespaceError(
+                "namespace_taken", f"{iri} is already used by the ontology '{entry['name']}'.", 409
+            )
+    catalog_ids = {entry["id"] for entry in entries}
+    for ontology_id, (name, held) in history.reserved_namespaces(catalog_ids).items():
+        if ontology_id != own_id and namespaces.clashes(iri, held):
+            raise namespaces.NamespaceError(
+                "namespace_taken",
+                f"{iri} is held by the deleted ontology '{name}' in the trash until it expires.",
+                409,
+            )
+
+
+def set_namespace(ontology_id: str, block: dict[str, Any]) -> dict[str, Any] | None:
+    """Store the namespace of an entry that has none, ONCE (D6); None when the id is unknown.
+
+    Raises ``NamespaceError`` 409 ``namespace_fixed`` when one is stored already and
+    ``namespace_taken`` when the IRI is used. Existing statements are NOT rewritten.
+    """
+    with _CATALOG_LOCK:
+        entries = read_catalog()
+        target = next((e for e in entries if e["id"] == ontology_id), None)
+        if target is None:
+            return None
+        if "namespace" in target:
+            raise namespaces.NamespaceError(
+                "namespace_fixed", "The IRI of this ontology is set already and cannot be changed.", 409
+            )
+        _check_namespace_free(block["ontology_iri"], entries, ontology_id)
+        target["namespace"] = block  # type: ignore[assignment]
+        target["updated_at"] = _now()
+        write_catalog(entries)
+    # No write listener: the content (and so entailment and SHACL) did not change.
+    logger.info("ontology namespace set: %s -> %s", ontology_id, block["ontology_iri"])
+    return target
 
 
 # ---- SHACL validation settings of a catalog entry (PRP-0212, UDR-0194 D1) ------------
@@ -437,6 +497,7 @@ def create_ontology(
     initial_turtle: str | Callable[[str], str] = "",
     dataset: bool | Callable[[], bool] = False,
     history_kind: str = "create",
+    namespace: Callable[[str], dict[str, Any] | None] | None = None,
 ) -> dict[str, str]:
     """Create a new catalog entry + its file.
 
@@ -444,12 +505,17 @@ def create_ontology(
     (a new ontology's header binds ``:`` to its own minting namespace). ``dataset``
     (or a callable asked after the factory ran) stores the content as TriG.
     ``history_kind`` ("create" / "import") is the first history log line (UDR-0184 D1).
+    ``namespace`` (PRP-0218, UDR-0200 D2 / D4) gives the block to store for the new id
+    (None = the original form); a used IRI raises ``NamespaceError`` before anything is written.
     """
     entry_id = f"ont_{uuid.uuid4().hex[:12]}"
+    block = namespace(entry_id) if namespace is not None else None
+    if block is not None:
+        _check_namespace_free(block["ontology_iri"], read_catalog())
     if callable(initial_turtle):
         initial_turtle = initial_turtle(entry_id)
     is_dataset = dataset() if callable(dataset) else dataset
-    entry = {
+    entry: dict[str, Any] = {
         "id": entry_id,
         "name": (name or "").strip() or entry_id,
         "description": (description or "").strip(),
@@ -457,9 +523,18 @@ def create_ontology(
         "created_at": _now(),
         "updated_at": _now(),
     }
+    if block is not None:
+        entry["namespace"] = block
     _atomic_write_text(_file_path(entry), initial_turtle)
     with _CATALOG_LOCK:
         entries = read_catalog()
+        if block is not None:
+            try:
+                _check_namespace_free(block["ontology_iri"], entries)  # raced with another create
+            except namespaces.NamespaceError:
+                with contextlib.suppress(OSError):
+                    _file_path(entry).unlink()
+                raise
         entries.insert(0, entry)  # new entries go to the top (UDR-0195 D9)
         write_catalog(entries)
     from app.ontology import history
@@ -534,6 +609,8 @@ def delete_ontology(ontology_id: str) -> bool:
                 "revision_after": None,
                 "name": entry["name"],
                 "description": entry["description"],
+                # PRP-0218 (UDR-0200 D7): the IRI stays reserved in the trash, a restore brings it back.
+                **({"namespace": entry["namespace"]} if entry.get("namespace") else {}),
             },
         )
     invalidate_query_cache(ontology_id)
@@ -645,6 +722,9 @@ def restore_deleted_ontology(ontology_id: str, text: str, *, dataset: bool, rest
             "created_at": _now(),
             "updated_at": _now(),
         }
+        block = namespaces.normalize_block((deleted or {}).get("namespace"))
+        if block is not None:  # PRP-0218 (UDR-0200 D7): reserved while in the trash
+            entry["namespace"] = block  # type: ignore[assignment]
         target = _file_path(entry)
         _backup(target)  # a stray file of the target name is kept, never overwritten silently
         _atomic_write_text(target, text)
@@ -1832,6 +1912,7 @@ __all__ = [
     "is_dataset",
     "load_store",
     "max_rows",
+    "namespace_of",
     "notify_written",
     "ontology_dir",
     "parse_scope",
@@ -1845,6 +1926,7 @@ __all__ = [
     "revision_of",
     "save_ontology_text",
     "scope_label",
+    "set_namespace",
     "write_catalog",
     "write_lock",
 ]

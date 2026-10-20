@@ -1158,6 +1158,19 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         min=100,
         max=100_000,
     ),
+    SettingDescriptor(
+        "ontology_iri_base",
+        "Ontology IRI base",
+        "ontology",
+        "str",
+        SCOPE_RUNTIME,
+        help=(
+            "Namespace for NEW ontologies, for example https://kg.example.com/ (absolute http(s), ending "
+            "with '/'). With your own base an ontology can get a short name: https://kg.example.com/plant, "
+            "its terms .../plant#Pump, its individuals .../plant/id/P-101. Existing ontologies keep their "
+            "IRIs. Use a domain your organization controls."
+        ),
+    ),
     # ---- Schedule (runtime) -----------------------------------------------
     SettingDescriptor(
         "cron_tick_seconds",

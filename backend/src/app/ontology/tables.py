@@ -893,7 +893,7 @@ def inspect(
 ) -> dict[str, Any]:
     """The file's encoding, delimiter, columns, row count and first rows; a suggested
     mapping when ``class_iri`` is given (D4: suggestions only pre-fill)."""
-    from app.ontology.vocabulary import base_iri_for
+    from app.ontology import store
 
     table = read_table(data, filename, encoding=encoding, delimiter=delimiter, header_row=header_row, max_rows=max_rows)
     out: dict[str, Any] = {
@@ -910,9 +910,10 @@ def inspect(
     }
     if class_iri:
         cls = _absolute_iri(class_iri, "class")
-        _, stored = _read_stored(ontology_id)
+        entry, stored = _read_stored(ontology_id)
         model = Model.read(stored)
-        out["suggestion"] = suggest(model, cls, table, base_iri_for(ontology_id))
+        # PRP-0218 (UDR-0200 D8): templates are suggested in the individuals namespace.
+        out["suggestion"] = suggest(model, cls, table, store.namespace_of(ontology_id, entry).individuals)
     return out
 
 
@@ -933,7 +934,6 @@ def preview(
     validation did not finish, D9: importing then needs an explicit choice).
     """
     from app.ontology import store
-    from app.ontology.vocabulary import base_iri_for
 
     entry, stored = _read_stored(ontology_id)
     current = store.revision_of(stored)
@@ -957,7 +957,7 @@ def preview(
     )
     mapping = validate_mapping(mapping_raw, table.columns)
     model = Model.read(stored)
-    rows = convert_rows(table, mapping, model, base_iri_for(ontology_id))
+    rows = convert_rows(table, mapping, model, store.namespace_of(ontology_id, entry).individuals)
     config = store.shacl_config(entry)
     if not validate:
         shacl: dict[str, Any] = dict(unchecked or {"checked": False, "reason": "skipped"})

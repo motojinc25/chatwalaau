@@ -80,7 +80,7 @@ that are gone (D5); fresh blank-node labels are renamed on every save (D6).
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -88,13 +88,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import verify_api_key
 from app.core.config import settings
-from app.ontology import entailment, formats, history, imports, nl, store, workers
+from app.ontology import entailment, formats, history, imports, namespaces, nl, store, workers
 from app.ontology.operations import StaleConflict, StatementNotFound, apply_operations
 from app.ontology.vocabulary import (
     PROJECTION_VERSION,
     ProjectionError,
     RemoteContextError,
-    base_iri_for,
     import_document,
     is_named,
     new_document_turtle,
@@ -103,6 +102,9 @@ from app.ontology.vocabulary import (
     turtle_to_projection,
     write_document,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +154,9 @@ class OntologyCreate(BaseModel):
     # The catalog description is the disambiguation key the agent tool uses to
     # pick the right ontology (UDR-0084 D3) -- encourage a meaningful one.
     description: str = Field(default="", max_length=2000)
+    # PRP-0218 (UDR-0200 D4 / D5): one of them, or neither (decided once, then fixed).
+    short_name: str | None = Field(default=None, max_length=200)
+    ontology_iri: str | None = Field(default=None, max_length=400)
 
 
 class OntologyRename(BaseModel):
@@ -160,6 +165,8 @@ class OntologyRename(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
     # PRP-0212 (UDR-0194 D1): the SHACL validation block; null removes it.
     shacl: dict[str, Any] | None = None
+    # PRP-0218 (UDR-0200 D6): {short_name} or {ontology_iri}, ONCE for an entry without one.
+    namespace: dict[str, Any] | None = None
 
 
 class QueryRequest(BaseModel):
@@ -331,6 +338,46 @@ def _save(ontology_id: str, text: str, dataset: bool, entry: dict[str, Any] | No
         raise HTTPException(status_code=500, detail=f"Could not save the ontology: {exc}") from exc
 
 
+# ---- IRI namespaces (PRP-0218, UDR-0200) ------------------------------------------
+
+
+def _namespace_error(exc: namespaces.NamespaceError) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+def _iri_base() -> str:
+    """The ``ontology_iri_base`` App Setting in force (an invalid value -> the default, D1)."""
+    return namespaces.current_base(settings.ontology_iri_base)
+
+
+def _decider(short_name: Any, ontology_iri: Any) -> Callable[[str], dict[str, Any] | None]:
+    """Check the request now (422 before any write) and give the per-id block factory (D4)."""
+    base = _iri_base()
+    try:
+        namespaces.decide("ont_000000000000", short_name=short_name, ontology_iri=ontology_iri, base=base)
+    except namespaces.NamespaceError as exc:
+        raise _namespace_error(exc) from exc
+    decided: dict[str, dict[str, Any] | None] = {}
+
+    def block_for(entry_id: str) -> dict[str, Any] | None:
+        if entry_id not in decided:
+            decided[entry_id] = namespaces.decide(entry_id, short_name=short_name, ontology_iri=ontology_iri, base=base)
+        return decided[entry_id]
+
+    return block_for
+
+
+def _parse_base(ns: namespaces.Namespace) -> str:
+    """The base for relative IRIs of an uploaded file (UDR-0181 D6, UDR-0200 D8)."""
+    return ns.ontology if ns.fixed else ns.vocabulary
+
+
+def _with_iri(entry: dict[str, Any]) -> dict[str, Any]:
+    """An entry plus ``base_iri`` (the vocabulary namespace, unchanged meaning) and ``iri`` (D10)."""
+    ns = store.namespace_of(entry["id"], entry)
+    return {**entry, "base_iri": ns.vocabulary, "iri": ns.to_json()}
+
+
 @router.get("/catalog", dependencies=[Depends(verify_api_key)])
 async def list_catalog() -> dict:
     """List the ontology catalog. 404 when the feature is disabled (SPA probe).
@@ -339,7 +386,14 @@ async def list_catalog() -> dict:
     SAME payload it already fetches (UDR-0122 D4).
     """
     _require_enabled()
-    return {"ontologies": store.read_catalog(), "demo_mode": bool(settings.demo_mode)}
+    base = _iri_base()
+    return {
+        "ontologies": store.read_catalog(),
+        "demo_mode": bool(settings.demo_mode),
+        # PRP-0218 (UDR-0200 D10): the New ontology dialog previews the IRIs from these.
+        "iri_base": base,
+        "iri_base_is_default": namespaces.is_default_base(base),
+    }
 
 
 @router.post("/catalog", dependencies=[Depends(verify_api_key)])
@@ -347,10 +401,19 @@ async def create_ontology(body: OntologyCreate) -> dict:
     """Create a new, empty ontology (consumes CTR-0083)."""
     _require_enabled()
     _guard_demo()
-    entry = store.create_ontology(
-        body.name, body.description, initial_turtle=lambda entry_id: new_document_turtle(base_iri_for(entry_id))
-    )
-    return {**entry, "base_iri": base_iri_for(entry["id"])}
+    block_for = _decider(body.short_name, body.ontology_iri)
+
+    def initial(entry_id: str) -> str:
+        ns = namespaces.of(entry_id, block_for(entry_id))
+        if not ns.fixed:
+            return new_document_turtle(ns.vocabulary)
+        return new_document_turtle(ns.vocabulary, ontology_iri=ns.ontology, data_namespace=ns.individuals)
+
+    try:
+        entry = store.create_ontology(body.name, body.description, initial_turtle=initial, namespace=block_for)
+    except namespaces.NamespaceError as exc:
+        raise _namespace_error(exc) from exc
+    return _with_iri(entry)
 
 
 @router.patch("/catalog/{ontology_id}", dependencies=[Depends(verify_api_key)])
@@ -364,11 +427,14 @@ async def rename_ontology(ontology_id: str, body: OntologyRename) -> dict:
     _require_enabled()
     _guard_demo()
     shacl_given = "shacl" in body.model_fields_set
-    if body.name is None and body.description is None and not shacl_given:
-        raise HTTPException(status_code=422, detail="Provide name, description and/or shacl")
+    if body.name is None and body.description is None and not shacl_given and body.namespace is None:
+        raise HTTPException(status_code=422, detail="Provide name, description, shacl and/or namespace")
     _entry_or_404(ontology_id)
     block = _shacl_block_or_422(ontology_id, body.shacl) if shacl_given else None
     entry: dict[str, Any] | None = None
+    if body.namespace is not None:
+        # PRP-0218 (UDR-0200 D6): once, for an entry without one; statements are not rewritten.
+        entry = await _set_namespace(ontology_id, body.namespace)
     if body.name is not None or body.description is not None:
         entry = store.rename_ontology(ontology_id, name=body.name, description=body.description)
         if entry is None:  # raced with a delete
@@ -378,7 +444,31 @@ async def rename_ontology(ontology_id: str, body: OntologyRename) -> dict:
         if entry is None:
             raise HTTPException(status_code=404, detail={"error": "ontology_not_found"})
     assert entry is not None
-    return {**entry, "base_iri": base_iri_for(entry["id"])}
+    return _with_iri(entry)
+
+
+async def _set_namespace(ontology_id: str, raw: dict[str, Any]) -> dict[str, Any]:
+    unknown = sorted(set(raw) - {"short_name", "ontology_iri"})
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "invalid_namespace", "message": f"Unknown field(s): {', '.join(unknown)}."},
+        )
+    try:
+        decided = namespaces.decide(
+            ontology_id, short_name=raw.get("short_name"), ontology_iri=raw.get("ontology_iri"), base=_iri_base()
+        )
+        if decided is None:
+            raise namespaces.NamespaceError(
+                "invalid_namespace",
+                "Give a short name (with an IRI base of your own in App Settings) or a full ontology IRI.",
+            )
+        entry = await run_in_threadpool(store.set_namespace, ontology_id, decided)
+    except namespaces.NamespaceError as exc:
+        raise _namespace_error(exc) from exc
+    if entry is None:
+        raise HTTPException(status_code=404, detail={"error": "ontology_not_found"})
+    return entry
 
 
 class CatalogOrder(BaseModel):
@@ -477,6 +567,8 @@ async def import_ontology(
     file: UploadFile = File(...),
     name: str = Form(default=""),
     description: str = Form(default=""),
+    short_name: str = Form(default=""),
+    ontology_iri: str = Form(default=""),
 ) -> dict:
     """Import an RDF file in any supported format (validate-then-commit).
 
@@ -498,12 +590,15 @@ async def import_ontology(
 
     counted: list[int] = []
     datasets: list[bool] = []
+    block_for = _decider(short_name, ontology_iri)
 
     def convert(entry_id: str) -> str:
         # Relative IRIs of a source without a declared base resolve against the new
-        # ontology's own base (UDR-0181 D6). Runs before anything is written: a
-        # failure here leaves no file and no catalog entry.
-        text, quad_count, dataset, _ = _parse_upload(data, file.filename or "", base_iri_for(entry_id))
+        # ontology's own base (UDR-0181 D6; its ontology IRI when it has a stored
+        # namespace, UDR-0200 D8). Runs before anything is written: a failure here
+        # leaves no file and no catalog entry.
+        base = _parse_base(namespaces.of(entry_id, block_for(entry_id)))
+        text, quad_count, dataset, _ = _parse_upload(data, file.filename or "", base)
         counted.append(quad_count)
         datasets.append(dataset)
         return text
@@ -517,7 +612,10 @@ async def import_ontology(
             initial_turtle=convert,
             dataset=lambda: datasets[0],
             history_kind="import",
+            namespace=block_for,
         )
+    except namespaces.NamespaceError as exc:
+        raise _namespace_error(exc) from exc
     except _ImportRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RemoteContextError as exc:
@@ -526,7 +624,7 @@ async def import_ontology(
             detail={"error": "remote_context_unsupported", "url": exc.url, "message": str(exc)},
         ) from exc
     logger.info("ontology imported: %s (%d statements)", entry["id"], counted[0])
-    return {**entry, "base_iri": base_iri_for(entry["id"]), "triple_count": counted[0]}
+    return {**_with_iri(entry), "triple_count": counted[0]}
 
 
 @router.post("/{ontology_id}/parse", dependencies=[Depends(verify_api_key)])
@@ -548,7 +646,8 @@ async def parse_file(ontology_id: str, file: UploadFile = File(...)) -> dict:
         )
 
     def work() -> dict[str, Any]:
-        text, _, dataset, fmt = _parse_upload(data, file.filename or "", base_iri_for(ontology_id))
+        base = _parse_base(store.namespace_of(ontology_id))
+        text, _, dataset, fmt = _parse_upload(data, file.filename or "", base)
         projection = turtle_to_projection(text.encode("utf-8"))
         return {
             **projection,
@@ -791,7 +890,7 @@ async def restore_deleted(ontology_id: str) -> dict:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     entry = await run_in_threadpool(work)
-    return {**entry, "base_iri": base_iri_for(ontology_id)}
+    return _with_iri(entry)
 
 
 def _import_map_payload() -> dict[str, Any]:
@@ -1321,7 +1420,7 @@ async def get_ontology(ontology_id: str) -> dict:
         projection = await run_in_threadpool(turtle_to_projection, data)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {**entry, "base_iri": base_iri_for(ontology_id), "revision": store.revision_of(data), **projection}
+    return {**_with_iri(entry), "revision": store.revision_of(data), **projection}
 
 
 @router.put("/{ontology_id}", dependencies=[Depends(verify_api_key)])
@@ -1404,7 +1503,7 @@ def _apply_and_save(ontology_id: str, body: StatementOperations) -> tuple[str, s
             quads, report = apply_operations(
                 quads,
                 body.operations,
-                ontology_base=base_iri_for(ontology_id),
+                ontology_base=store.namespace_of(ontology_id).vocabulary,
                 rebase=stale,
                 fresh_blank_nodes=body.fresh_blank_nodes,
             )

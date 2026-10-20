@@ -273,6 +273,30 @@ def _last_delete(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
+def reserved_namespaces(catalog_ids: set[str], *, now: datetime | None = None) -> dict[str, tuple[str, str]]:
+    """Ontology IRIs held by deleted ontologies still in the trash: id -> (name, IRI).
+
+    PRP-0218 (UDR-0200 D7): a deleted ontology keeps its IRI reserved until the trash
+    expires, so a restore never meets another ontology under the same IRI. Reads the
+    logs only (no expiry, no lock), so it is safe under the catalog lock.
+    """
+    now = now or datetime.now(UTC)
+    _, keep_days, _ = _retention()
+    held: dict[str, tuple[str, str]] = {}
+    for ontology_id in _ids_on_disk() - catalog_ids:
+        deleted = _last_delete(read_entries(ontology_id)) or {}
+        block = deleted.get("namespace")
+        if not isinstance(block, dict) or not block.get("ontology_iri"):
+            continue
+        try:
+            if now - datetime.fromisoformat(str(deleted.get("at"))) >= timedelta(days=keep_days):
+                continue
+        except ValueError:
+            pass
+        held[ontology_id] = (str(deleted.get("name") or ontology_id), str(block["ontology_iri"]))
+    return held
+
+
 def _expire(ontology_id: str, deleted: dict[str, Any], now: datetime) -> bool:
     """Remove a deleted ontology's logged backups and log once ``keep_days`` have passed."""
     _, keep_days, _ = _retention()
@@ -334,6 +358,8 @@ def trash(*, now: datetime | None = None) -> list[dict[str, Any]]:
                 "bytes": newest.size,
                 "format": newest.format,
                 "legacy": deleted is None,
+                # PRP-0218 (UDR-0200 D7): the IRI held until the trash expires.
+                "ontology_iri": ((deleted or {}).get("namespace") or {}).get("ontology_iri"),
             }
         )
     out.sort(key=lambda item: str(item["deleted_at"]), reverse=True)
