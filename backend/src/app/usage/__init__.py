@@ -35,6 +35,7 @@ every surface that presents its numbers has to say so.
 from app.usage.ledger import (
     LEDGER_FIELDS,
     TOKEN_FIELDS,
+    append_decision_usage,
     append_helper_usage,
     append_record,
     append_turn_usage,
@@ -45,6 +46,7 @@ from app.usage.ledger import (
 __all__ = [
     "LEDGER_FIELDS",
     "TOKEN_FIELDS",
+    "append_decision_usage",
     "append_helper_usage",
     "append_record",
     "append_turn_usage",

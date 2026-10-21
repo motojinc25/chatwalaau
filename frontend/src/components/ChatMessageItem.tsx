@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { type KeyboardEvent, memo, useCallback, useEffect, useRef, useState } from 'react'
 import { AuthedImage } from '@/components/AuthedImage'
+import { DecisionResults } from '@/components/DecisionResults'
 import { HarnessProgressPanel } from '@/components/HarnessProgressPanel'
 import { ImageGenerationResults } from '@/components/ImageGenerationResult'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
@@ -683,6 +684,8 @@ function ChatMessageItemImpl({
             {message.toolCalls && message.toolCalls.length > 0 && (
               <ImageGenerationResults toolCalls={message.toolCalls} onMaskEdit={onMaskEdit} />
             )}
+            {/* PRP-0219 (CTR-0248): decision_evaluate answers as a table. */}
+            {message.toolCalls && message.toolCalls.length > 0 && <DecisionResults toolCalls={message.toolCalls} />}
             {/* Declarative workflow run: node progress (live) + completion indicator,
                 rendered inside the message (the standalone panel was removed, v0.115.1). */}
             {workflowState && (

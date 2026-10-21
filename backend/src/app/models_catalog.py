@@ -39,10 +39,11 @@ rejected.
 
 Validation is fail-fast at load (UDR-0087 D3): at least one ``chat`` offering,
 at most one ``default: true`` chat offering, unique ids, a known provider, a
-v1 operation (``chat`` / ``embeddings`` / ``image`` / ``live``; anything else --
-audio, managed agents -- is rejected, not silently ignored), at most one
-``embeddings`` offering, at most one ``image`` offering and at most one ``live``
-offering (the GPT-Live voice deployment, PRP-0188 step 2).
+v1 operation (``chat`` / ``embeddings`` / ``image`` / ``live`` / ``decision``;
+anything else -- audio, managed agents -- is rejected, not silently ignored), at
+most one ``embeddings`` offering, at most one ``image`` offering, at most one
+``live`` offering (the GPT-Live voice deployment, PRP-0188 step 2) and at most one
+``decision`` offering (the Microsoft-Decision-1 deployment, PRP-0219).
 """
 
 from __future__ import annotations
@@ -61,7 +62,21 @@ from app.mcp.config import _strip_jsonc_comments
 logger = logging.getLogger(__name__)
 
 VALID_PROVIDERS = frozenset({"azure-openai", "anthropic", "openai", "foundry"})
-VALID_OPERATIONS = frozenset({"chat", "embeddings", "image", "live"})
+VALID_OPERATIONS = frozenset({"chat", "embeddings", "image", "live", "decision"})
+# Fields a decision offering may not carry (PRP-0219, UDR-0201 D1): it is not a chat
+# model (default / family / context_window / capabilities), it is not reached through an
+# OpenAI-compatible base URL or a dated api-version (the path is versioned), and it draws
+# nothing. Refused at load rather than ignored.
+DECISION_REFUSED_KEYS: tuple[str, ...] = (
+    "default",
+    "family",
+    "context_window",
+    "hosting",
+    "base_url",
+    "api_version",
+    "image_defaults",
+    "capabilities",
+)
 VALID_FAMILIES = frozenset({"openai-reasoning", "anthropic-adaptive", "bare"})
 
 # Which option-catalog families each provider can actually serve (PRP-0184,
@@ -343,6 +358,10 @@ class Offering:
     def is_live(self) -> bool:
         return "live" in self.operations
 
+    @property
+    def is_decision(self) -> bool:
+        return "decision" in self.operations
+
     def capability(self, name: str) -> bool | None:
         """Declared value of hosted-tool capability ``name``, or None when undeclared.
 
@@ -429,6 +448,9 @@ class Catalog:
 
     def live_offering(self) -> Offering | None:
         return next((o for o in self._offerings if o.is_live), None)
+
+    def decision_offering(self) -> Offering | None:
+        return next((o for o in self._offerings if o.is_decision), None)
 
 
 # ---- Loading + validation (UDR-0087 D1/D2/D3/D4) --------------------------
@@ -609,6 +631,19 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
             raise CatalogError(f"offering '{offering_id}': 'live' cannot be combined with other operations")
         if provider != "azure-openai":
             raise CatalogError(f"offering '{offering_id}': a 'live' offering must use the azure-openai provider")
+    # A decision offering is a Microsoft-Decision-1 deployment (PRP-0219, UDR-0201 D1): it
+    # serves no other operation, and the decision API lives on the Foundry resource reached
+    # through the shared Azure lane (api-key or Entra), i.e. the azure-openai provider.
+    if "decision" in operations:
+        if len(operations) > 1:
+            raise CatalogError(f"offering '{offering_id}': 'decision' cannot be combined with other operations")
+        if provider != "azure-openai":
+            raise CatalogError(f"offering '{offering_id}': a 'decision' offering must use the azure-openai provider")
+        for key in DECISION_REFUSED_KEYS:
+            # An absent key, `default: false` or an empty block says nothing; only a value
+            # the offering would actually carry is refused.
+            if entry.get(key) not in (None, False, {}):
+                raise CatalogError(f"offering '{offering_id}': '{key}' does not apply to a 'decision' offering")
 
     hosting = entry.get("hosting")
     if hosting is not None:
@@ -812,6 +847,8 @@ def parse_catalog(data: Any) -> Catalog:
         raise CatalogError("at most one 'image' offering is supported (v1)")
     if len([o for o in offerings if o.is_live]) > 1:
         raise CatalogError("at most one 'live' offering is supported")
+    if len([o for o in offerings if o.is_decision]) > 1:
+        raise CatalogError("at most one 'decision' offering is supported")
 
     return Catalog(offerings, roles=roles)
 
@@ -1053,6 +1090,21 @@ def image_config() -> ResolvedModelConfig | None:
     if catalog is None:
         return None
     return _resolved(catalog.image_offering())
+
+
+def decision_config() -> ResolvedModelConfig | None:
+    """Resolved config for the single decision (Microsoft-Decision-1) offering, or None.
+
+    PRP-0219 (UDR-0201 D1 / D3): the ``decision_evaluate`` tool exists only when the
+    catalog registers a decision offering (or DEMO_MODE) -- there is no environment gate.
+    ``deployment`` is the Foundry deployment name sent as the request's ``model``;
+    ``endpoint`` falls back to the shared ``AZURE_OPENAI_ENDPOINT`` and ``api_key`` to the
+    shared Azure credential lane (``app.azure_credential``) when the offering omits them.
+    """
+    catalog = active_catalog()
+    if catalog is None:
+        return None
+    return _resolved(catalog.decision_offering())
 
 
 def live_config() -> ResolvedModelConfig | None:

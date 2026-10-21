@@ -53,6 +53,11 @@ def _image_available() -> bool:
     return models_catalog.image_config() is not None or is_demo_mode()
 
 
+def _decision_available() -> bool:
+    # PRP-0219 / UDR-0201 D3: mirrors agent_factory -- a catalog decision offering, or demo.
+    return models_catalog.decision_config() is not None or is_demo_mode()
+
+
 def _computer_use_available() -> bool:
     from app.computer_use.availability import offered
 
@@ -79,6 +84,12 @@ BUILTIN_FUNCTION_TOOLS: tuple[BuiltinFunctionTool, ...] = (
     BuiltinFunctionTool("image_generate", "image", "Generate an image from a text prompt.", _image_available),
     BuiltinFunctionTool(
         "image_edit", "image", "Edit an image, optionally with a mask and references.", _image_available
+    ),
+    BuiltinFunctionTool(
+        "decision_evaluate",
+        "decision",
+        "Judge an input with typed questions (yes/no, choice, score) and return probabilities.",
+        _decision_available,
     ),
     BuiltinFunctionTool(
         "manage_user_memory", "memory", "Curate the durable user profile.", lambda: settings.user_profile_enabled

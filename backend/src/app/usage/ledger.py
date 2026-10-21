@@ -372,6 +372,47 @@ def append_helper_usage(
     append_record(record)
 
 
+def append_decision_usage(
+    *,
+    offering_id: str,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    thread_id: str | None = None,
+) -> None:
+    """Record one ``decision_evaluate`` call (PRP-0219, UDR-0201 D9).
+
+    A helper record -- lane ``helper``, kind ``helper``, purpose ``decision_evaluate`` --
+    because a decision model is not a chat model: its call is a separate frame from the
+    turn's own chat usage. Unlike :func:`append_helper_usage` the provider is NOT
+    resolved through ``providers.provider_for`` (that resolves CHAT offerings); a decision
+    offering is ``azure-openai`` by catalog rule (UDR-0201 D1). A Temporary Chat records
+    ``temporary: true`` with no thread, as every other lane does (UDR-0136 D9).
+    """
+    try:
+        from app.agent.temporary import in_temporary_run, is_temporary
+
+        temporary = bool(thread_id and is_temporary(thread_id)) or in_temporary_run()
+        usage: dict[str, int] = {"model_calls": 1}
+        if input_tokens is not None:
+            usage["uncached_input_token_count"] = int(input_tokens)
+        if output_tokens is not None:
+            usage["output_token_count"] = int(output_tokens)
+        record = build_record(
+            lane="helper",
+            kind="helper",
+            purpose="decision_evaluate",
+            model=offering_id,
+            provider="azure-openai",
+            turn=usage,
+            thread_id=thread_id,
+            temporary=temporary,
+        )
+    except Exception:
+        logger.warning("usage ledger decision record build failed", exc_info=True)
+        return
+    append_record(record)
+
+
 def _provider_name(model: str | None) -> str | None:
     """Resolve the owning provider's name for ``model``, or None.
 
@@ -391,6 +432,7 @@ def _provider_name(model: str | None) -> str | None:
 __all__ = [
     "LEDGER_FIELDS",
     "TOKEN_FIELDS",
+    "append_decision_usage",
     "append_helper_usage",
     "append_record",
     "append_turn_usage",

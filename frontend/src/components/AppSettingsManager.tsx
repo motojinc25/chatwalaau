@@ -72,7 +72,7 @@ import { cn } from '@/lib/utils'
  */
 
 type Provider = 'azure-openai' | 'anthropic' | 'openai' | 'foundry'
-type Operation = 'chat' | 'embeddings' | 'image' | 'live'
+type Operation = 'chat' | 'embeddings' | 'image' | 'live' | 'decision'
 type Hosting = 'direct' | 'foundry'
 type Family = 'openai-reasoning' | 'anthropic-adaptive' | 'bare'
 
@@ -198,7 +198,7 @@ type EditableOffering = Offering & { _key: string }
 const PROVIDERS: Provider[] = ['azure-openai', 'anthropic', 'openai', 'foundry']
 const FAMILIES: Family[] = ['openai-reasoning', 'anthropic-adaptive', 'bare']
 const HOSTINGS: Hosting[] = ['direct', 'foundry']
-const ALL_OPERATIONS: Operation[] = ['chat', 'embeddings', 'image', 'live']
+const ALL_OPERATIONS: Operation[] = ['chat', 'embeddings', 'image', 'live', 'decision']
 
 const IMAGE_DEFAULTS_HELP =
   'Operator defaults for image generation and editing. The model may override a field when the user asks for a specific value in the conversation. A field left on "Default" uses the product default shown in brackets. Output is always PNG.'
@@ -219,7 +219,7 @@ function cleanImageDefaults(d: ImageDefaults | undefined): ImageDefaults | undef
 const CATALOG_ITEM = {
   id: 'catalog',
   label: 'Model Offering Catalog',
-  description: 'Compose the chat, embeddings, image, and live model offerings and their auth references.',
+  description: 'Compose the chat, embeddings, image, live, and decision model offerings and their auth references.',
 } as const
 
 const SECTIONS: Array<{ op: Operation; title: string; hint: string }> = [
@@ -233,6 +233,13 @@ const SECTIONS: Array<{ op: Operation; title: string; hint: string }> = [
     op: 'live',
     title: 'Live',
     hint: 'Optional; at most one live offering -- the GPT-Live voice deployment (azure-openai, e.g. gpt-live-1). Registering it enables the Live conversation button.',
+  },
+  // PRP-0219 (UDR-0201 D1 / D3): registering this offering is what offers the
+  // decision_evaluate tool. Its bounds are the App Settings "Decision" group.
+  {
+    op: 'decision',
+    title: 'Decision',
+    hint: 'Optional; at most one decision offering -- the Microsoft-Decision-1 deployment (azure-openai; the Endpoint is the Foundry resource endpoint). Registering it offers the decision_evaluate tool.',
   },
 ]
 
@@ -346,12 +353,15 @@ function toWireOfferings(offerings: EditableOffering[]): Offering[] {
   return offerings.map(({ _key, ...o }) => {
     const ops = opsOf(o)
     const out: Offering = { id: o.id.trim(), provider: o.provider, model_ref: o.model_ref.trim(), operations: ops }
-    if (o.provider === 'anthropic' && o.hosting) out.hosting = o.hosting
-    if (o.family) out.family = o.family
-    if (o.context_window && o.context_window > 0) out.context_window = o.context_window
+    // A decision offering carries none of the chat / gateway fields (UDR-0201 D1: the
+    // catalog refuses them), so a value left over from another operation is dropped.
+    const decision = ops.includes('decision')
+    if (!decision && o.provider === 'anthropic' && o.hosting) out.hosting = o.hosting
+    if (!decision && o.family) out.family = o.family
+    if (!decision && o.context_window && o.context_window > 0) out.context_window = o.context_window
     if (o.endpoint?.trim()) out.endpoint = o.endpoint.trim()
-    if (o.base_url?.trim()) out.base_url = o.base_url.trim()
-    if (o.api_version?.trim()) out.api_version = o.api_version.trim()
+    if (!decision && o.base_url?.trim()) out.base_url = o.base_url.trim()
+    if (!decision && o.api_version?.trim()) out.api_version = o.api_version.trim()
     if (o.api_key_env?.trim()) out.api_key_env = o.api_key_env.trim()
     if (ops.includes('chat') && o.default) out.default = true
     if (ops.includes('image')) {
@@ -362,7 +372,8 @@ function toWireOfferings(offerings: EditableOffering[]): Offering[] {
     // touched serializes exactly as before these fields existed. Only explicitly
     // chosen booleans are emitted, one key at a time.
     const caps: OfferingCapabilities = {}
-    for (const key of CAPABILITY_KEYS) {
+    // A decision offering has no capability rows (it is not a chat model), so it emits none.
+    for (const key of decision ? [] : CAPABILITY_KEYS) {
       const v = o.capabilities?.[key]
       if (typeof v === 'boolean') caps[key] = v
     }
@@ -496,6 +507,9 @@ function OfferingCard({
   const ops = opsOf(offering)
   const isAnthropic = offering.provider === 'anthropic'
   const isImage = ops.includes('image')
+  // PRP-0219: a decision offering shows only id / provider / model ref / endpoint /
+  // key / operations -- the other fields are refused by the catalog (UDR-0201 D1).
+  const isDecision = ops.includes('decision')
   // '' = undeclared (provider decides). Never coerced to a boolean: the three states
   // are meaningfully different (UDR-0112 D2).
   const capabilityValue = (key: keyof OfferingCapabilities) =>
@@ -635,50 +649,56 @@ function OfferingCard({
             />
           </Field>
 
-          <Field label="Family" hint={FAMILY_HELP}>
-            <select
-              className={CONTROL_CLASS}
-              value={offering.family ?? ''}
-              disabled={readOnly}
-              onChange={(e) => onChange(index, { family: (e.target.value || undefined) as Family | undefined })}>
-              <option value="">Auto</option>
-              {FAMILIES.map((f) => (
-                <option key={f} value={f}>
-                  {f}
-                </option>
-              ))}
-            </select>
-          </Field>
+          {!isDecision && (
+            <Field label="Family" hint={FAMILY_HELP}>
+              <select
+                className={CONTROL_CLASS}
+                value={offering.family ?? ''}
+                disabled={readOnly}
+                onChange={(e) => onChange(index, { family: (e.target.value || undefined) as Family | undefined })}>
+                <option value="">Auto</option>
+                {FAMILIES.map((f) => (
+                  <option key={f} value={f}>
+                    {f}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
 
-          <Field label="Hosting" hint={HOSTING_HELP}>
-            <select
-              className={CONTROL_CLASS}
-              value={offering.hosting ?? ''}
-              disabled={readOnly || !isAnthropic}
-              title={isAnthropic ? undefined : 'Hosting applies to the anthropic provider only'}
-              onChange={(e) => onChange(index, { hosting: (e.target.value || undefined) as Hosting | undefined })}>
-              <option value="">{isAnthropic ? '(default)' : 'anthropic only'}</option>
-              {HOSTINGS.map((h) => (
-                <option key={h} value={h}>
-                  {h}
-                </option>
-              ))}
-            </select>
-          </Field>
+          {!isDecision && (
+            <Field label="Hosting" hint={HOSTING_HELP}>
+              <select
+                className={CONTROL_CLASS}
+                value={offering.hosting ?? ''}
+                disabled={readOnly || !isAnthropic}
+                title={isAnthropic ? undefined : 'Hosting applies to the anthropic provider only'}
+                onChange={(e) => onChange(index, { hosting: (e.target.value || undefined) as Hosting | undefined })}>
+                <option value="">{isAnthropic ? '(default)' : 'anthropic only'}</option>
+                {HOSTINGS.map((h) => (
+                  <option key={h} value={h}>
+                    {h}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
 
-          <Field label="Context window" hint="Positive integer token budget (optional).">
-            <Input
-              type="number"
-              min={1}
-              className="h-8 text-xs"
-              value={offering.context_window ?? ''}
-              disabled={readOnly}
-              placeholder="e.g. 128000"
-              onChange={(e) =>
-                onChange(index, { context_window: e.target.value ? Number.parseInt(e.target.value, 10) : undefined })
-              }
-            />
-          </Field>
+          {!isDecision && (
+            <Field label="Context window" hint="Positive integer token budget (optional).">
+              <Input
+                type="number"
+                min={1}
+                className="h-8 text-xs"
+                value={offering.context_window ?? ''}
+                disabled={readOnly}
+                placeholder="e.g. 128000"
+                onChange={(e) =>
+                  onChange(index, { context_window: e.target.value ? Number.parseInt(e.target.value, 10) : undefined })
+                }
+              />
+            </Field>
+          )}
 
           <Field label="Endpoint" hint={ENDPOINT_HELP}>
             <Input
@@ -690,25 +710,29 @@ function OfferingCard({
             />
           </Field>
 
-          <Field label="Base URL" hint={ENDPOINT_HELP}>
-            <Input
-              className="h-8 text-xs"
-              value={offering.base_url ?? ''}
-              disabled={readOnly}
-              placeholder="OpenAI-compatible gateway URL"
-              onChange={(e) => onChange(index, { base_url: e.target.value })}
-            />
-          </Field>
+          {!isDecision && (
+            <Field label="Base URL" hint={ENDPOINT_HELP}>
+              <Input
+                className="h-8 text-xs"
+                value={offering.base_url ?? ''}
+                disabled={readOnly}
+                placeholder="OpenAI-compatible gateway URL"
+                onChange={(e) => onChange(index, { base_url: e.target.value })}
+              />
+            </Field>
+          )}
 
-          <Field label="API version" hint="Azure API version (optional).">
-            <Input
-              className="h-8 text-xs"
-              value={offering.api_version ?? ''}
-              disabled={readOnly}
-              placeholder="e.g. 2024-10-21"
-              onChange={(e) => onChange(index, { api_version: e.target.value })}
-            />
-          </Field>
+          {!isDecision && (
+            <Field label="API version" hint="Azure API version (optional).">
+              <Input
+                className="h-8 text-xs"
+                value={offering.api_version ?? ''}
+                disabled={readOnly}
+                placeholder="e.g. 2024-10-21"
+                onChange={(e) => onChange(index, { api_version: e.target.value })}
+              />
+            </Field>
+          )}
 
           <Field label="API key env" hint={AUTH_HELP}>
             <Input
@@ -721,7 +745,7 @@ function OfferingCard({
           </Field>
 
           <Field label="Operations" hint="Which capabilities this offering serves.">
-            <div className="flex h-8 items-center gap-3">
+            <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1">
               {ALL_OPERATIONS.map((op) => (
                 <label key={op} className="flex items-center gap-1 text-[11px]">
                   <input
@@ -1136,8 +1160,9 @@ export function AppSettingsManager() {
       const fresh: EditableOffering = {
         _key: key,
         id: '',
-        // GPT-Live is reached on Azure OpenAI only (UDR-0170 D11).
-        provider: op === 'live' ? 'azure-openai' : 'openai',
+        // GPT-Live (UDR-0170 D11) and Microsoft-Decision-1 (UDR-0201 D1) are reached on
+        // the shared Azure lane only.
+        provider: op === 'live' || op === 'decision' ? 'azure-openai' : 'openai',
         model_ref: '',
         operations: [op],
         default: op === 'chat' && !hasChatDefault ? true : undefined,
@@ -1227,6 +1252,11 @@ export function AppSettingsManager() {
     if (live.length > 1) out.push('At most one live offering is allowed.')
     if (live.some((o) => opsOf(o).length > 1)) out.push('A live offering cannot serve other operations.')
     if (live.some((o) => o.provider !== 'azure-openai')) out.push('A live offering must use the azure-openai provider.')
+    const decision = offerings.filter((o) => opsOf(o).includes('decision'))
+    if (decision.length > 1) out.push('At most one decision offering is allowed.')
+    if (decision.some((o) => opsOf(o).length > 1)) out.push('A decision offering cannot serve other operations.')
+    if (decision.some((o) => o.provider !== 'azure-openai'))
+      out.push('A decision offering must use the azure-openai provider.')
     return out
   }, [offerings])
 

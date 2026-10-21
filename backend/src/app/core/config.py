@@ -455,6 +455,15 @@ class Settings(BaseSettings):
     codeact_max_duration_secs: int = 10
     codeact_max_memory_mb: int = 64
 
+    # Decision evaluation (PRP-0219, CTR-0248, UDR-0201 D5). App Settings keys (CTR-0198),
+    # group `decision`, all `runtime`: read by the decision_evaluate tool on every call.
+    # The defaults are the operator's approved bounds (Q1): 20 questions, 50 choice
+    # options, 11 score levels, 100,000 characters of state.
+    decision_max_questions: int = 20
+    decision_max_choice_options: int = 50
+    decision_max_score_levels: int = 11
+    decision_max_state_chars: int = 100_000
+
     # File Explorer (CTR-0006, CTR-0136/0137, PRP-0091, UDR-0069)
     # Human-facing file browse/edit over the coding workspace. OFF unless
     # FILE_EXPLORER_ENABLED; every file operation ADDITIONALLY requires

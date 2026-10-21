@@ -229,6 +229,10 @@ def _import_function_tool(name: str) -> Any | None:
             from app.image_gen import tools as image_tools
 
             return getattr(image_tools, name, None)
+        if name == "decision_evaluate":
+            from app.decision.tools import decision_evaluate
+
+            return decision_evaluate
         if name == "manage_user_memory":
             from app.agent.user_memory import manage_user_memory
 

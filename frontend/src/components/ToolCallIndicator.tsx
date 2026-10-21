@@ -22,6 +22,7 @@ import {
   OctagonX,
   Pencil,
   Plug,
+  Scale,
   ScanEye,
   Search,
   SquareCode,
@@ -65,6 +66,8 @@ const toolDisplayNames: Record<string, { label: string; doneLabel: string; icon:
   generate_image: { label: 'Generating image...', doneLabel: 'Generated image', icon: ImagePlus },
   edit_image: { label: 'Editing image...', doneLabel: 'Edited image', icon: Pencil },
   rag_search: { label: 'Searching documents...', doneLabel: 'Searched documents', icon: Search },
+  // PRP-0219 (CTR-0013 / CTR-0248): plural, one call answers several questions (operator Q4).
+  decision_evaluate: { label: 'Evaluating decisions...', doneLabel: 'Evaluated decisions', icon: Scale },
   // Skills tools (MAF SkillsProvider)
   load_skill: { label: 'Loading skill...', doneLabel: 'Loaded skill', icon: BookOpen },
   read_skill_resource: { label: 'Reading resource...', doneLabel: 'Read resource', icon: FileText },

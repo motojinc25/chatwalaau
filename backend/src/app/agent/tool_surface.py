@@ -85,6 +85,7 @@ _SETTINGS_DETAIL: dict[str, str] = {
     "rag_search": "CHROMA_DIR unset or no embeddings offering",
     "image_generate": "no image offering",
     "image_edit": "no image offering",
+    "decision_evaluate": "no decision offering",
     "manage_user_memory": "USER_PROFILE_ENABLED=false",
     "manage_memory": "AGENT_MEMORY_ENABLED=false",
     "manage_cron": "CRON_ENABLED=false",

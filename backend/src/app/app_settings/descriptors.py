@@ -211,6 +211,12 @@ GROUPS: tuple[SettingGroup, ...] = (
         "CodeAct",
         "A Python compute sandbox the agent can use for exact calculation and data shaping. No files, no network.",
     ),
+    # PRP-0219 (CTR-0198, UDR-0201 D5): the decision_evaluate tool's bounds.
+    SettingGroup(
+        "decision",
+        "Decision",
+        "Bounds for the decision_evaluate tool (Microsoft-Decision-1): questions, options, levels and input size.",
+    ),
 )
 
 
@@ -1468,6 +1474,53 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         parent="codeact_enabled",
         enabled_when=True,
         help="A snippet that allocates more is stopped and the agent gets a memory error.",
+    ),
+    # ---- Decision (runtime) -------------------------------------------------
+    # PRP-0219 / UDR-0201 D5: bounds the decision_evaluate tool checks BEFORE it sends a
+    # request, so an oversized call becomes a list of problems the agent can fix rather
+    # than a 400 from the service. `runtime`: the tool reads them on every call.
+    SettingDescriptor(
+        "decision_max_questions",
+        "Questions per call (max)",
+        "decision",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=100,
+        help="One decision_evaluate call may ask at most this many questions about the same input.",
+    ),
+    SettingDescriptor(
+        "decision_max_choice_options",
+        "Options per choice question (max)",
+        "decision",
+        "int",
+        SCOPE_RUNTIME,
+        min=2,
+        max=200,
+        help="A 'choice' question may list at most this many options (at least 2 are always required).",
+    ),
+    SettingDescriptor(
+        "decision_max_score_levels",
+        "Levels per score question (max)",
+        "decision",
+        "int",
+        SCOPE_RUNTIME,
+        min=2,
+        max=101,
+        help="A 'score' question may list at most this many levels, lowest first (at least 2 are always required).",
+    ),
+    SettingDescriptor(
+        "decision_max_state_chars",
+        "Input size per call (characters, max)",
+        "decision",
+        "int",
+        SCOPE_RUNTIME,
+        min=1_000,
+        max=1_000_000,
+        help=(
+            "The text or JSON the questions are about may hold at most this many characters "
+            "(JSON is counted as sent). A larger input is refused before any request."
+        ),
     ),
 )
 

@@ -28,7 +28,7 @@ _DEFAULT_API_KEY_ENV = {
     "foundry": "",  # Entra ID lane; no api key
 }
 _PROVIDERS = ("azure-openai", "anthropic", "openai", "foundry")
-_OPERATIONS = ("chat", "embeddings", "image", "live")
+_OPERATIONS = ("chat", "embeddings", "image", "live", "decision")
 _HOSTINGS = ("direct", "foundry")
 _FAMILIES = ("openai-reasoning", "anthropic-adaptive", "bare")
 

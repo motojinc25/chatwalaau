@@ -307,6 +307,38 @@ def _build_tools_and_instructions(
                 is_demo_mode(),
             )
 
+    # Typed decisions (CTR-0248, PRP-0219, UDR-0201 D3 / D10). Registered exactly when
+    # the catalog has a `decision` offering (Microsoft-Decision-1) or in DEMO_MODE (a
+    # deterministic placeholder). No `.env` gate and no capability key: any chat model
+    # may call it.
+    _decision_offering = models_catalog.decision_config()
+    if _decision_offering is not None or is_demo_mode():
+        from app.decision.tools import decision_evaluate
+
+        if _fn_ok(decision_evaluate.__name__):
+            tools.append(decision_evaluate)
+            guidance.append(
+                ToolGuidance(
+                    "decision",
+                    "You can judge an input with decision_evaluate when the user asks to classify, route, "
+                    "gate, rank or score something against FIXED options: 'noul' for yes/no, 'choice' for "
+                    "one of several labelled options, 'score' for an ordered scale (lowest level first). "
+                    "Put every question about the same input in ONE call, and call once per input. "
+                    "The result is probabilities without a reason: explain the outcome from them and say "
+                    "when the top probability is low (for example below 0.6). "
+                    "Never present the result as the sole basis of a consequential decision about a person "
+                    "(credit, employment, housing, healthcare, legal). "
+                    # UDR-0159 D2: a tool whose result the chat renders says so itself.
+                    "The answers are already shown to the user as a table in the chat: summarize what they "
+                    "mean instead of repeating every number.",
+                )
+            )
+            logger.info(
+                "Decision tool enabled (deployment=%s, demo=%s)",
+                (_decision_offering.deployment if _decision_offering is not None else "<demo>"),
+                is_demo_mode(),
+            )
+
     # MCP tools (CTR-0060, PRP-0031) -- excluded when include_mcp=False.
     # PRP-0086 / UDR-0064: the active MCP tool set is gated at runtime by the
     # in-memory override store. A fully-disabled server is OMITTED from this
