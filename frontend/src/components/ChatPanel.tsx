@@ -27,6 +27,7 @@ import { useMessageStepNav } from '@/hooks/useMessageStepNav'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useTTS } from '@/hooks/useTTS'
 import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
+import { NO_THREAD_NOTICE } from '@/lib/attachmentPolicy'
 import { isComputerUseTool } from '@/lib/computerUse'
 import { resolveContextOccupancy } from '@/lib/contextOccupancy'
 import { IMAGE_EDIT_TOOL } from '@/lib/imageTools'
@@ -277,8 +278,18 @@ export function ChatPanel({
     onPersistError: useCallback((message: string) => setNotification({ type: 'error', message }), []),
   })
 
-  const { attachments, addFiles, attachPaintImage, removeAttachment, clearAttachments, getImageRefs, isUploading } =
-    useImageAttachment()
+  const {
+    attachments,
+    addFiles,
+    attachPaintImage,
+    removeAttachment,
+    clearAttachments,
+    getImageRefs,
+    isUploading,
+    notice: attachmentNotice,
+    reportNotice,
+    dismissNotice,
+  } = useImageAttachment()
 
   // File Explorer attach bridge (CTR-0137, PRP-0116): the parent hands a File
   // sourced from an image/PDF preview; upload it to the active thread via the
@@ -738,11 +749,14 @@ export function ChatPanel({
     [retryTurn, scrollToBottom],
   )
 
+  // Picker and paste (CTR-0023 v2). /popup and /sidebar have no thread, so an
+  // attachment there is reported instead of being dropped silently (UDR-0211 D4).
   const handleAddFiles = useCallback(
-    (files: FileList) => {
-      if (threadId) addFiles(files, threadId)
+    (files: FileList | File[]) => {
+      if (threadId) void addFiles(files, threadId)
+      else reportNotice(NO_THREAD_NOTICE)
     },
-    [addFiles, threadId],
+    [addFiles, threadId, reportNotice],
   )
 
   const handleDragEnter = useCallback((e: DragEvent) => {
@@ -771,11 +785,9 @@ export function ChatPanel({
       dragCountRef.current = 0
       setIsDragging(false)
       const files = e.dataTransfer.files
-      if (files.length > 0 && threadId) {
-        addFiles(files, threadId)
-      }
+      if (files.length > 0) handleAddFiles(files)
     },
-    [addFiles, threadId],
+    [handleAddFiles],
   )
 
   return (
@@ -917,6 +929,8 @@ export function ChatPanel({
             attachments={attachments}
             onAddFiles={handleAddFiles}
             onRemoveAttachment={removeAttachment}
+            attachmentNotice={attachmentNotice}
+            onDismissNotice={dismissNotice}
             getImageRefs={getImageRefs}
             isUploading={isUploading}
             onOpenTemplates={handleOpenTemplates}
@@ -973,6 +987,8 @@ export function ChatPanel({
               attachments={attachments}
               onAddFiles={handleAddFiles}
               onRemoveAttachment={removeAttachment}
+              attachmentNotice={attachmentNotice}
+              onDismissNotice={dismissNotice}
               getImageRefs={getImageRefs}
               isUploading={isUploading}
               onOpenTemplates={show('attach.templates') ? handleOpenTemplates : undefined}
@@ -995,7 +1011,7 @@ export function ChatPanel({
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-xs">
           <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-primary p-12">
             <ImageIcon className="h-10 w-10 text-primary" />
-            <p className="text-sm font-medium text-primary">Drop images here to attach</p>
+            <p className="text-sm font-medium text-primary">Drop images or PDFs here to attach</p>
           </div>
         </div>
       )}

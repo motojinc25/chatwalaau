@@ -22,15 +22,17 @@ import {
   useRef,
   useState,
 } from 'react'
+import { AttachmentNotice } from '@/components/AttachmentNotice'
 import { ImageThumbnails } from '@/components/ImageThumbnails'
 import { LiveConversationBar } from '@/components/LiveConversationBar'
 import { PdfFileCard } from '@/components/PdfFileCard'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { WaveformVisualizer } from '@/components/WaveformVisualizer'
-import type { ImageAttachment } from '@/hooks/useImageAttachment'
+import type { AttachmentNoticeState, ImageAttachment } from '@/hooks/useImageAttachment'
 import type { LiveState } from '@/hooks/useLiveVoice'
 import { useVoiceInput } from '@/hooks/useVoiceInput'
+import { clipboardAttachmentFiles, IMAGE_ACCEPT, PDF_ACCEPT } from '@/lib/attachmentPolicy'
 import type { ContextLevel } from '@/lib/contextOccupancy'
 import { isCommandOfferedOnNarrow, useChatSurfaceTier } from '@/lib/narrowSurface'
 import {
@@ -74,8 +76,11 @@ interface ChatInputProps {
   onStop: () => void
   isLoading: boolean
   attachments?: ImageAttachment[]
-  onAddFiles?: (files: FileList) => void
+  onAddFiles?: (files: FileList | File[]) => void
   onRemoveAttachment?: (id: string) => void
+  /** Why the last attachment action did not attach a file (CTR-0023 v2, UDR-0211 D4). */
+  attachmentNotice?: AttachmentNoticeState | null
+  onDismissNotice?: () => void
   getImageRefs?: () => ImageRef[]
   isUploading?: boolean
   onOpenTemplates?: () => void
@@ -157,6 +162,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     attachments = [],
     onAddFiles,
     onRemoveAttachment,
+    attachmentNotice,
+    onDismissNotice,
     getImageRefs,
     isUploading,
     onOpenTemplates,
@@ -577,6 +584,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     pdfInputRef.current?.click()
   }
 
+  // Paste-to-attach (CTR-0023 v2, UDR-0211 D1/D2): only a clipboard holding files
+  // and no text is taken over; everything else pastes as text, as before. During
+  // Live the composer is text only (UDR-0170 D13), so the paste is left alone.
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!onAddFiles || liveActive) return
+    const files = clipboardAttachmentFiles(e.clipboardData)
+    if (!files) return
+    e.preventDefault()
+    onAddFiles(files)
+  }
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (files && files.length > 0 && onAddFiles) {
@@ -662,6 +680,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 ))}
               </div>
             )}
+            {attachmentNotice && onDismissNotice && (
+              <AttachmentNotice key={attachmentNotice.id} notice={attachmentNotice} onDismiss={onDismissNotice} />
+            )}
             {onRemoveAttachment && (
               <>
                 <ImageThumbnails
@@ -713,6 +734,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 value={value}
                 onChange={handleChange}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 onInput={handleInput}
                 onKeyUp={handleKeyUp}
                 onClick={() => void recompute()}
@@ -790,7 +812,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                       <input
                         ref={fileInputRef}
                         type="file"
-                        accept="image/jpeg,image/png,image/gif,image/webp"
+                        accept={IMAGE_ACCEPT}
                         multiple
                         onChange={handleFileChange}
                         className="hidden"
@@ -798,7 +820,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                       <input
                         ref={pdfInputRef}
                         type="file"
-                        accept="application/pdf"
+                        accept={PDF_ACCEPT}
                         multiple
                         onChange={handleFileChange}
                         className="hidden"

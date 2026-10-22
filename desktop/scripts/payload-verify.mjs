@@ -67,7 +67,8 @@ for (const line of lock.split(/\r?\n/)) {
   requirements++
   // A requirement whose marker excludes Windows has no wheel; pip skipped it at build time.
   const marker = t.includes(';') ? t.slice(t.indexOf(';')) : ''
-  const excludesWindows = /(sys_platform|platform_system|os_name)\s*(!=\s*['"](win32|Windows|nt)['"]|==\s*['"](linux|darwin|Linux|Darwin|posix)['"])/.test(marker)
+  // `== 'X'` for any X other than the Windows value excludes it too (e.g. httpx2-jsfetch: sys_platform == 'emscripten').
+  const excludesWindows = /(sys_platform|platform_system|os_name)\s*(!=\s*['"](win32|Windows|nt)['"]|==\s*['"](?!(win32|Windows|nt)['"])[^'"]+['"])/.test(marker)
   if (!wheelNames.has(norm(name)) && !excludesWindows) {
     errors.push(`no wheel for requirement ${name}`)
   }

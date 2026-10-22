@@ -1,13 +1,16 @@
 """File upload REST API (CTR-0022, CTR-0078).
 
 Provides endpoints for uploading images and PDFs, and serving uploaded files.
-Uploaded files are stored in {UPLOAD_DIR}/{thread_id}/{filename}.
+Uploaded files are stored in {UPLOAD_DIR}/{thread_id}/{filename}; an upload never
+replaces an existing file -- a taken name is stored as {stem}-N{suffix} (UDR-0211 D5).
 Validation policy is shared with CLI preflight checks via app.upload.validation.
 """
 
+from collections.abc import Iterator
 import logging
 import mimetypes
 from pathlib import Path
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -41,20 +44,63 @@ async def upload_file(thread_id: str, file: UploadFile) -> UploadResponse:
     except UploadValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Save to {UPLOAD_DIR}/{thread_id}/{filename}
+    # Save to {UPLOAD_DIR}/{thread_id}/{filename}; a taken name gets a -N suffix
+    # (UDR-0211 D5), so an upload never replaces an earlier file.
     dest_dir = _upload_dir() / thread_id
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / validated.safe_filename
-    dest_path.write_bytes(data)
+    dest_path = _store_unique(dest_dir, validated.safe_filename, data)
+    stored_name = dest_path.name
 
-    uri = f"/api/uploads/{thread_id}/{validated.safe_filename}"
-    logger.info("Uploaded %s (%d bytes) to %s", validated.safe_filename, len(data), dest_path)
+    uri = f"/api/uploads/{thread_id}/{stored_name}"
+    logger.info("Uploaded %s (%d bytes) to %s", stored_name, len(data), dest_path)
 
     return UploadResponse(
         uri=uri,
         media_type=validated.content_type,
-        filename=validated.safe_filename,
+        filename=stored_name,
     )
+
+
+_MAX_NAME_BYTES = 255
+_MAX_NUMBERED_SUFFIX = 999
+
+
+def _fit_name(stem: str, tag: str, suffix: str) -> str:
+    """Return ``{stem}{tag}{suffix}``, shortening the stem to stay within 255 UTF-8 bytes."""
+    budget = _MAX_NAME_BYTES - len(tag.encode("utf-8")) - len(suffix.encode("utf-8"))
+    encoded = stem.encode("utf-8")
+    if len(encoded) > budget:
+        stem = encoded[: max(budget, 1)].decode("utf-8", errors="ignore") or "file"
+    return f"{stem}{tag}{suffix}"
+
+
+def _candidate_names(safe_filename: str) -> Iterator[str]:
+    """Yield the validated name, then name-1 .. name-999, then name-{8 hex} (UDR-0211 D5)."""
+    yield safe_filename
+    path = Path(safe_filename)
+    stem, suffix = path.stem, path.suffix
+    for n in range(1, _MAX_NUMBERED_SUFFIX + 1):
+        yield _fit_name(stem, f"-{n}", suffix)
+    while True:
+        yield _fit_name(stem, f"-{uuid.uuid4().hex[:8]}", suffix)
+
+
+def _store_unique(dest_dir: Path, safe_filename: str, data: bytes) -> Path:
+    """Write ``data`` under the first free candidate name with an exclusive create.
+
+    ``open(path, "xb")`` is atomic, so two concurrent uploads of one name get two
+    files, and it follows the file system's own case rules (on NTFS ``Photo.png``
+    and ``photo.png`` collide).
+    """
+    for name in _candidate_names(safe_filename):
+        dest_path = dest_dir / name
+        try:
+            with dest_path.open("xb") as f:
+                f.write(data)
+        except FileExistsError:
+            continue
+        return dest_path
+    raise AssertionError("unreachable: candidate names are unbounded")
 
 
 @router.get("/api/uploads/{thread_id}/{filename}")

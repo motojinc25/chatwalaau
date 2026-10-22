@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react'
+import { classifyFile, type Rejection, rejectionNotice, uploadFailedNotice } from '@/lib/attachmentPolicy'
 
 export interface ImageAttachment {
   id: string
@@ -13,56 +14,95 @@ export interface ImageAttachment {
   filename?: string
 }
 
-const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
-const PDF_TYPE = 'application/pdf'
-const ALLOWED_TYPES = new Set([...IMAGE_TYPES, PDF_TYPE])
-const MAX_SIZE_IMAGE = 20 * 1024 * 1024 // 20MB
-const MAX_SIZE_PDF = 50 * 1024 * 1024 // 50MB
+/**
+ * An inline composer notice (CTR-0023 v2, UDR-0211 D4). `id` changes with every
+ * notice, so the same text reported twice still restarts its auto-hide timer.
+ */
+export interface AttachmentNoticeState {
+  id: number
+  text: string
+}
+
+async function uploadErrorDetail(res: Response): Promise<string> {
+  try {
+    const body = await res.json()
+    if (typeof body?.detail === 'string' && body.detail) return body.detail
+  } catch {
+    // not JSON: fall through to the status line
+  }
+  return `Upload failed (HTTP ${res.status}).`
+}
 
 export function useImageAttachment() {
   const [attachments, setAttachments] = useState<ImageAttachment[]>([])
+  const [notice, setNotice] = useState<AttachmentNoticeState | null>(null)
 
-  const addFiles = useCallback(async (files: FileList | File[], threadId: string) => {
-    const validFiles = Array.from(files).filter((f) => {
-      if (!ALLOWED_TYPES.has(f.type)) return false
-      const maxSize = f.type === PDF_TYPE ? MAX_SIZE_PDF : MAX_SIZE_IMAGE
-      return f.size <= maxSize
-    })
-    if (validFiles.length === 0) return
-
-    const newAttachments: ImageAttachment[] = validFiles.map((file) => ({
-      id: crypto.randomUUID(),
-      file,
-      previewUrl: URL.createObjectURL(file),
-      uploadedUri: null,
-      mediaType: file.type,
-      status: 'uploading' as const,
-    }))
-
-    setAttachments((prev) => [...prev, ...newAttachments])
-
-    for (const attachment of newAttachments) {
-      try {
-        const formData = new FormData()
-        formData.append('file', attachment.file)
-
-        const res = await fetch(`/api/upload/${threadId}`, {
-          method: 'POST',
-          body: formData,
-        })
-        if (!res.ok) throw new Error(`Upload failed: ${res.status}`)
-
-        const data = await res.json()
-        setAttachments((prev) =>
-          prev.map((a) =>
-            a.id === attachment.id ? { ...a, uploadedUri: data.uri as string, status: 'ready' as const } : a,
-          ),
-        )
-      } catch {
-        setAttachments((prev) => prev.map((a) => (a.id === attachment.id ? { ...a, status: 'error' as const } : a)))
-      }
-    }
+  /** Show a composer notice; a new notice replaces the current one. */
+  const reportNotice = useCallback((text: string) => {
+    setNotice((prev) => ({ id: (prev?.id ?? 0) + 1, text }))
   }, [])
+
+  const dismissNotice = useCallback(() => setNotice(null), [])
+
+  // Picker, drop and paste all arrive here (UDR-0211 D1/D3). Every file that is
+  // not attached is reported (D4); accepted files in the same action still attach.
+  const addFiles = useCallback(
+    async (files: FileList | File[], threadId: string) => {
+      const accepted: { file: File; mediaType: string }[] = []
+      const rejected: Rejection[] = []
+      for (const f of Array.from(files)) {
+        const c = classifyFile(f)
+        if (c.ok) accepted.push({ file: c.file, mediaType: c.mediaType })
+        else rejected.push(c)
+      }
+      const rejectedText = rejectionNotice(rejected)
+      if (rejectedText) reportNotice(rejectedText)
+      if (accepted.length === 0) return
+
+      const newAttachments: ImageAttachment[] = accepted.map(({ file, mediaType }) => ({
+        id: crypto.randomUUID(),
+        file,
+        previewUrl: URL.createObjectURL(file),
+        uploadedUri: null,
+        mediaType,
+        status: 'uploading' as const,
+      }))
+
+      setAttachments((prev) => [...prev, ...newAttachments])
+
+      for (const attachment of newAttachments) {
+        let failure: string | null = null
+        try {
+          const formData = new FormData()
+          formData.append('file', attachment.file)
+
+          const res = await fetch(`/api/upload/${threadId}`, {
+            method: 'POST',
+            body: formData,
+          })
+          if (res.ok) {
+            // The server may store the file under a -N suffixed name (CTR-0022 v5),
+            // so the response uri is the only reference to keep.
+            const data = await res.json()
+            setAttachments((prev) =>
+              prev.map((a) =>
+                a.id === attachment.id ? { ...a, uploadedUri: data.uri as string, status: 'ready' as const } : a,
+              ),
+            )
+          } else {
+            failure = await uploadErrorDetail(res)
+          }
+        } catch {
+          failure = 'Network error.'
+        }
+        if (failure !== null) {
+          setAttachments((prev) => prev.map((a) => (a.id === attachment.id ? { ...a, status: 'error' as const } : a)))
+          reportNotice(uploadFailedNotice(attachment.file.name, failure))
+        }
+      }
+    },
+    [reportNotice],
+  )
 
   // Paint image attachment (CTR-0160/CTR-0161, PRP-0099). Uploads the rendered
   // PNG through the existing CTR-0022 path, then persists the editable Fabric
@@ -143,6 +183,8 @@ export function useImageAttachment() {
       for (const a of prev) URL.revokeObjectURL(a.previewUrl)
       return []
     })
+    // A sent (or discarded) composer takes its notice with it (UDR-0211 D4).
+    setNotice(null)
   }, [])
 
   const getImageRefs = useCallback(() => {
@@ -154,6 +196,9 @@ export function useImageAttachment() {
   return {
     attachments,
     addFiles,
+    notice,
+    reportNotice,
+    dismissNotice,
     attachPaintImage,
     removeAttachment,
     clearAttachments,

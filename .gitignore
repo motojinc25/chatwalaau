@@ -121,3 +121,6 @@ batch-server.log
 
 # DEXPI toolkit : local run outputs
 dexpi/out/
+
+# HAZOP node toolkit : local run outputs (PRP-0227)
+hazop/out/
