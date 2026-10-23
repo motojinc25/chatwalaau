@@ -76,6 +76,8 @@ chatwalaau settings migrate --write
 
 Runtime settings previously stored in `.env` now belong in `app_settings.jsonc`, editable through **App Settings**. Credentials, endpoints, bootstrap paths, and feature enable-gates remain in `.env`.
 
+> **Upgrading to 0.197.0 or later is one-way.** Back up your data folder (`.sessions/`, `.usage/`, or the Desktop data folder) first: an earlier version must not be installed over it afterwards.
+
 Legacy model environment variables are no longer supported. Configure models in `model_offerings.jsonc` using `chatwalaau models add` or **App Settings**.
 
 See the [Configuration guide](https://www.chatwalaau.com/docs/getting-started/configuration) before migrating.
@@ -97,10 +99,10 @@ See the [Configuration guide](https://www.chatwalaau.com/docs/getting-started/co
 | **MCP** | Connect MCP servers using Claude Desktop-compatible configuration. Toggle servers and tools, reload connections, and render interactive MCP Apps in chat. |
 | **Memory** | Maintain agent identity, user preferences, and project knowledge in editable Markdown files with automatic backups. |
 | **Workspace** | Browse and edit files in a Monaco-based editor with tabs and split panes. Upload folders, download ZIPs, preview PDFs and images, and attach them to chat. Download or open files the assistant creates straight from its answer. |
-| **Agents & workflows** | Define agents in YAML or a GUI. Compose workflows in a visual DAG editor with branching, loops, tool calls, human input, and live execution views. Run in chat or as background jobs. |
+| **Agents & workflows** | Define agents in YAML or a GUI. Compose workflows in a visual DAG editor with branching, loops, tool calls, human input, and live execution views. Run in chat or as background jobs. Workflow HTTP calls are opt-in, limited to allowed hosts, and size-capped. |
 | **Harness agents** | Run autonomous coding agents on Azure OpenAI, Foundry, or Claude models with planning (plan approval optional), todo lists with a live task indicator, session memory, workspace-scoped file and shell access (including line-range reads), Skills, and context compaction whose summaries remember the steps already taken -- uninterrupted by approval prompts. |
 | **Automation & Teams** | Schedule workspace scripts, chat with agents in Microsoft Teams, and summarize meeting transcripts through Microsoft Graph webhooks or on demand. |
-| **API & usage** | Connect OpenAI-SDK applications through `/v1/responses`. See token usage on a built-in dashboard, by day, month, type, model, or chat, in your own time zone. Break down input, cache reads, cache writes, output, and reasoning, and export the raw records as CSV for BI. Token counts are not billing totals. |
+| **API & usage** | Connect OpenAI-SDK applications through `/v1/responses`. See token usage on a built-in dashboard, by day, month, type, model, or chat, in your own time zone. Break down input, cache reads, cache writes, output, and reasoning, and export the raw records as CSV for BI. Each model call is counted once, even across multi-step tool turns. Token counts are not billing totals. |
 | **Settings & diagnostics** | Manage models and runtime settings in the app, with clear notices about when changes take effect. Inspect prompts and tool availability with opt-in Prompt Dump. |
 | **Local-first storage & access** | Keep sessions, vectors, and uploads on your machine. Chat history is saved through one locked write path, so a brief file conflict never wipes a conversation, and branched chats keep their title, folder, and own copies of images. Use API-key authentication, optional web sign-in, session-protected images, and restart-persistent sign-in. |
 

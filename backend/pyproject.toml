@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.196.0"
+version = "0.197.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -35,7 +35,10 @@ dependencies = [
     # not take unasked, see [tool.uv] below) + stricter stateless reasoning replay +
     # a required `context` on SkillsProvider._run_skill_script,
     # 1.21.0 the Anthropic SDK MAJOR move 0.80 -> 1.x on httpx2 forced by the cohort
-    # bound + upstream drop of temperature / top_p / top_k on the Claude lane);
+    # bound + upstream drop of temperature / top_p / top_k on the Claude lane,
+    # 1.22.0 streamed `merge_mode` (#8886): `.done` events arrive as FULL-text
+    # `replace` contents and tool-loop usage as a CUMULATIVE `replace` -- folded in ONE
+    # place, app/agent/stream_merge.py (CTR-0266, UDR-0212 D3));
     # a version bump is a deliberate, PRP-reviewed act, never a routine refresh.
     #
     # 1.19.0's breaking change for THIS codebase is filed under "Fixed" (#8237):
@@ -47,19 +50,19 @@ dependencies = [
     #
     # The family does NOT share a version line (UDR-0109 D1, carried by UDR-0129 D1
     # and reaffirmed unamended by UDR-0131 D1, UDR-0139 D1, UDR-0162 D1, UDR-0164 D1
-    # UDR-0197 D1 and UDR-0198 D1): each package is pinned at the version published in
-    # the SAME release wave as `agent-framework==1.21.0` (2026-10-08), so the declared set and
+    # UDR-0197 D1, UDR-0198 D1 and UDR-0212 D1): each package is pinned at the version published in
+    # the SAME release wave as `agent-framework==1.22.0` (2026-10-15), so the declared set and
     # the resolved set are identical for uv.lock AND for a bare `pip install chatwalaau`.
     #
     # A package that published NO artifact in the target wave is HELD at its current
     # pin, and REJOINS at the first wave that does publish it -- at that wave's
-    # build, in ONE step, however many waves it missed. The 1.21.0 wave is the fourth
+    # build, in ONE step, however many waves it missed. The 1.22.0 wave is the fifth
     # FULL wave in a row: nothing is held.
     #
     # Transitive GA family packages are NOT declared (UDR-0109 D2) but are moved in
-    # uv.lock to their wave-consistent GA build (UDR-0162 D2, UDR-0198 D2):
-    # agent-framework-orchestrations 1.3.1, agent-framework-github-copilot 2.0.2 (both
-    # 1.21.0 wave). A fresh resolve of the whole lock is its own proposal (UDR-0162 D2.4).
+    # uv.lock to their wave-consistent GA build (UDR-0162 D2, UDR-0212 D2):
+    # agent-framework-orchestrations 1.3.2, agent-framework-github-copilot 2.1.0 (both
+    # 1.22.0 wave). A fresh resolve of the whole lock is its own proposal (UDR-0162 D2.4).
     #
     # 1.20.0 raises EVERY connector floor in core[all] to the wave, so the minimal lock
     # move is 86 packages (PRP-0215 M4), most under connectors app never imports. uv
@@ -71,8 +74,10 @@ dependencies = [
     # anthropic>=1.11,<2: the Anthropic SDK moves 0.80.0 -> 1.13.0 on `httpx2`, which
     # (with httpcore2 and truststore) joins the RUNTIME closure (UDR-0198 D3).
     # `anthropic` stays UNDECLARED -- held by the connector's range only.
-    "agent-framework==1.21.0",
-    "agent-framework-ag-ui==1.5.1",
+    # 1.22.0 moves 29 packages, all agent-framework-* (PRP-0229 M3): no SDK moves and no
+    # pull-back (it is the newest wave); anthropic stays 1.13.0, openai 2.54.0.
+    "agent-framework==1.22.0",
+    "agent-framework-ag-ui==1.6.0",
     # NOTE (PRP-0183, UDR-0165 D4): `agent-framework-devui` is deliberately NOT
     # declared. The DevUI integration is removed from the product, so nothing in
     # `app/` imports or subclasses it and UDR-0109 D2 no longer requires a
@@ -91,7 +96,9 @@ dependencies = [
     # more strictly; LocalShellTool.__init__ and resolve_shell are byte-identical
     # (PRP-0215 M5). 1.0.0b261008 (#9043) fixes PowerShell table output in PERSISTENT
     # sessions only -- the workspace shell is stateless (PRP-0216 F5 table).
-    "agent-framework-tools==1.0.0b261008",
+    # 1.0.0b261015 (#9047) recovers queued commands of PERSISTENT sessions only
+    # (PRP-0229 F10); still stateless here.
+    "agent-framework-tools==1.0.0b261015",
     # CodeAct compute sandbox (PRP-0193, UDR-0175 D10). DECLARED because ChatWalaʻau
     # SUBCLASSES it: app/agent/codeact `ChatWalaauCodeActProvider(MontyCodeActProvider)`
     # and `OffLoopExecuteCodeTool(MontyExecuteCodeTool)`, which overrides the private
@@ -102,7 +109,9 @@ dependencies = [
     # pydantic-monty <0.1, so pydantic-monty 1.x (GA 2026-09-25) cannot be adopted yet.
     # 1.0.0b261008 (#9175) warns when a tool added to the CodeAct surface carries FIDES
     # metadata; ChatWalaʻau adds none (PRP-0216 F10). Still pydantic-monty <0.1.
-    "agent-framework-monty==1.0.0b261008",
+    # 1.0.0b261015 (#9364) skips reparse points when capturing mounted files;
+    # CodeAct registers no mounts (PRP-0229 F10). `_run_code(*, code)` unchanged.
+    "agent-framework-monty==1.0.0b261015",
     # EXACT pin (UDR-0175 D10): app/agent/codeact/bridge.py drives the pydantic-monty
     # worker-pool API directly (off the event loop, D6), and that pre-1.0 API changed
     # incompatibly between 0.0.19 and 0.0.23.
@@ -135,7 +144,12 @@ dependencies = [
     # byte-identical (PRP-0215 M5).
     # 1.16.0 only adds "max" to the reasoning-effort type (#8857) -- ChatWalaʻau has
     # sent `max` since PRP-0184 (UDR-0166 D5) -- and keeps streamed logprobs (#8997).
-    "agent-framework-openai==1.16.0",
+    # 1.17.0 (#8886, BREAKING) emits every `.done` event (output text, refusal,
+    # reasoning, function-call arguments) as a FULL-value content with
+    # merge_mode="replace" and namespaces provider metadata under
+    # additional_properties["openai"] (legacy flat keys still written). Folded by
+    # CTR-0266 (UDR-0212 D3); the overridden private seams are unchanged (PRP-0229 M4).
+    "agent-framework-openai==1.17.0",
     # Anthropic (Claude) base-model provider, Direct + Foundry hostings
     # (PRP-0069, UDR-0045 D8). Already resolved transitively via
     # agent-framework-core[all]; declared explicitly to guarantee the capability.
@@ -162,7 +176,9 @@ dependencies = [
     # code-execution beta, and DROPS temperature / top_p / top_k with a WARNING
     # (UDR-0198 D3, D4). The Claude wire ChatWalaʻau builds is otherwise identical
     # (PRP-0216 M6); `_prepare_options` is unchanged.
-    "agent-framework-anthropic==1.0.0b261008",
+    # 1.0.0b261015 marks streamed text / usage / tool input merge_mode="append"
+    # (#8886); `_prepare_options(messages, options, request_state)` unchanged (M4).
+    "agent-framework-anthropic==1.0.0b261015",
     # Microsoft Foundry base-model provider (PRP-0106, UDR-0085 D1): the stable
     # FoundryChatClient connector (OpenAI Responses API via a Foundry project
     # endpoint, Entra ID credential only). Already resolved transitively via the
@@ -181,7 +197,10 @@ dependencies = [
     # (UDR-0197 D7); `_prepare_options` is unchanged (PRP-0215 M5).
     # 1.14.1 requires core >=1.21.0 and declares its service-owned session keys for
     # agents invoked as tools (#8853, not used here).
-    "agent-framework-foundry==1.14.1",
+    # 1.15.0 requires openai-ext >=1.17.0, namespaces its reasoning replay item under
+    # additional_properties["foundry"] (legacy key kept) and surfaces OAuth consent in
+    # non-streaming responses (#8976, not used); `_prepare_options` unchanged (M4).
+    "agent-framework-foundry==1.15.0",
     # Declarative agents (PRP-0094, FEAT-0051, UDR-0072): the MAF AgentFactory front
     # end (create_agent_from_yaml / create_agent_from_yaml_path) used to PARSE and
     # VALIDATE declarative agent YAML. The runtime agent is built by ChatWalaʻau
@@ -199,7 +218,9 @@ dependencies = [
     # relative URLs and normalizes them (#8588); PowerFx state is bounded (#8511);
     # SendActivity keeps expression results (#8509). Accepted (UDR-0197 D6).
     # 1.2.1 keeps falsy values returned by PowerFx Search() (#8974).
-    "agent-framework-declarative==1.2.1",
+    # 1.3.0 (#9358, BREAKING) bounds HTTP response bodies (10 MiB default, wire and
+    # decoded); the jail passes WORKFLOW_HTTP_MAX_RESPONSE_BYTES (UDR-0212 D6).
+    "agent-framework-declarative==1.3.0",
     # OpenAI SDK: pinned BELOW 3.x on purpose (PRP-0161 F3, UDR-0139 D3).
     # `agent-framework-openai==1.14.2` (#7967) widened its ceiling to SDK 3.x, and a
     # fresh resolve of this declared set takes openai 2.54.0 -> 3.9.0 -- a MAJOR move

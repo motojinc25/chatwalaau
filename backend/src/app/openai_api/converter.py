@@ -31,16 +31,29 @@ def openai_input_to_maf_messages(input_data: str | list[dict[str, Any]]) -> list
     return messages
 
 
+def api_usage(last_call: Any) -> dict[str, int]:
+    """The response's ``usage`` object: the LAST model call (CTR-0057 field semantics)."""
+    details = last_call or {}
+    input_tokens = details.get("input_token_count", 0) or 0
+    output_tokens = details.get("output_token_count", 0) or 0
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens, "total_tokens": input_tokens + output_tokens}
+
+
 def maf_contents_to_openai_output(contents: list[Any]) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Convert MAF response contents to OpenAI Responses API output items.
 
-    Returns (output_items, usage_dict).
+    Returns (output_items, usage_dict). The streamed contents are folded first
+    (CTR-0266, PRP-0229, UDR-0212 D3.6): since MAF 1.22.0 a finished text or argument
+    string is re-sent in full with ``merge_mode="replace"``, so concatenating contents
+    would repeat the answer and split one call into several items.
     """
+    from app.agent.stream_merge import fold_contents
+
+    folded = fold_contents(contents)
     output: list[dict[str, Any]] = []
     text_parts: list[str] = []
-    usage = {"input_tokens": 0, "output_tokens": 0}
 
-    for content in contents:
+    for content in folded.contents:
         content_type = getattr(content, "type", None)
 
         if content_type == "text":
@@ -84,15 +97,6 @@ def maf_contents_to_openai_output(contents: list[Any]) -> tuple[list[dict[str, A
                 }
             )
 
-        elif content_type == "usage":
-            usage_details = getattr(content, "usage_details", None) or {}
-            usage["input_tokens"] = getattr(usage_details, "input_token_count", 0) or usage_details.get(
-                "input_token_count", 0
-            )
-            usage["output_tokens"] = getattr(usage_details, "output_token_count", 0) or usage_details.get(
-                "output_token_count", 0
-            )
-
     # Add accumulated text as a message output item
     if text_parts:
         full_text = "".join(text_parts)
@@ -104,5 +108,4 @@ def maf_contents_to_openai_output(contents: list[Any]) -> tuple[list[dict[str, A
             }
         )
 
-    usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
-    return output, usage
+    return output, api_usage(folded.usage.last_call)

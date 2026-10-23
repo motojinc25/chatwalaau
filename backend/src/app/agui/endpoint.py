@@ -42,7 +42,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 from ag_ui.encoder import EventEncoder
-from agent_framework import AgentSession, Content, add_usage_details
+from agent_framework import AgentSession, Content
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -58,6 +58,7 @@ from app.agent.declarative import active_spec
 from app.agent.harness.progress import HARNESS_PROGRESS_EVENT, HarnessRunTracker, is_progress_tool
 from app.agent.identity import load_identity
 from app.agent.prompt_dump import dump_prompt
+from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, merge_mode
 from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_path
 from app.agent.user_memory import session_user_profile_snapshot
 from app.agui.agent_registry import AgentRegistry
@@ -1236,12 +1237,23 @@ async def _stream_with_reasoning(
     # Two-axis token measurement (PRP-0157, UDR-0135 D1/D2). A turn emits one MAF
     # usage content per MODEL CALL (the run below makes as many calls as its tool
     # loop needs), so these are declared HERE, once per turn, and are never reset
-    # mid-turn. `turn_usage` accumulates the billing axis with the public
-    # `add_usage_details`, NOT via `ResponseStream.get_final_response()`, which
+    # mid-turn. `turn_usage` accumulates the billing axis at this seam, NOT via
+    # `ResponseStream.get_final_response()`, which
     # covers a single round and, on a stream that was not fully consumed, drains the
     # remainder -- resuming and billing a run the operator stopped (UDR-0135 D2).
     # `last_usage` keeps the most recent call for the context axis, which is a
     # different quantity and cannot be recovered from the cumulative.
+    #
+    # PRP-0229 (UDR-0212 D3): since MAF 1.22.0 the stream carries `merge_mode`. The
+    # usage of every call after the first of a tool loop arrives as the loop's
+    # CUMULATIVE total (`replace`), and the OpenAI connector re-sends every finished
+    # text, reasoning summary and argument string in full (`replace`). The three
+    # values below are therefore READ from the CTR-0266 fold, which owns that rule;
+    # this endpoint never interprets `merge_mode` itself.
+    usage_fold = UsageFold()
+    text_fold = TextFold("text")
+    reasoning_fold = TextFold("reasoning")
+    argument_fold = ArgumentFold()
     turn_usage: dict[str, Any] | None = None
     last_usage: dict[str, Any] | None = None
     model_calls = 0
@@ -1605,6 +1617,8 @@ async def _stream_with_reasoning(
             # automatic retry. The helper yields a _RetryNotice so we can tell
             # the SPA a retry is happening (the run continues; no RUN_ERROR).
             if isinstance(update, _RetryNotice):
+                # A retry is a fresh run: its usage starts a new segment (UDR-0212 D3.3).
+                usage_fold.new_segment()
                 yield encoder.encode(
                     CustomEvent(
                         type=EventType.CUSTOM,
@@ -1624,6 +1638,10 @@ async def _stream_with_reasoning(
             # ends the open text message -- the next iteration starts a new paragraph --
             # and becomes a harness_progress event. The model's history keeps it.
             if harness_tracker is not None and harness_tracker.observe(update):
+                # The next loop iteration is a new function-invocation loop, whose
+                # cumulative usage restarts: close the segment (UDR-0212 D3.3).
+                usage_fold.new_segment()
+                text_fold.reset()
                 if msg_id is not None:
                     yield encoder.encode(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
                     msg_id = None
@@ -1639,7 +1657,11 @@ async def _stream_with_reasoning(
                 content_type = getattr(content, "type", None)
 
                 if content_type == "text_reasoning":
-                    text = getattr(content, "text", None)
+                    # UDR-0212 D3.1: a `replace` re-send of the summary emits only
+                    # what was not streamed yet (usually nothing).
+                    if reasoning_msg_id is None:
+                        reasoning_fold.reset()
+                    text = reasoning_fold.feed(getattr(content, "text", None), merge_mode(content))
                     if not text:
                         continue
                     if reasoning_msg_id is None:
@@ -1667,6 +1689,13 @@ async def _stream_with_reasoning(
                         # it only records that they arrived.
                         if getattr(content, "annotations", None):
                             annotations_seen = True
+                        continue
+                    # UDR-0212 D3.1: fold BEFORE the sanitizer, whose state must only
+                    # ever see each character once. A new message starts a new run.
+                    if msg_id is None:
+                        text_fold.reset()
+                    text = text_fold.feed(text, merge_mode(content))
+                    if not text:
                         continue
                     # UDR-0160 D1/D2: the markup never leaves the backend, so the SPA,
                     # the session file, the search index, the export and the title /
@@ -1704,6 +1733,10 @@ async def _stream_with_reasoning(
                     )
 
                 elif content_type == "function_call":
+                    # A tool call ends the text run: the next call's text is a new run
+                    # for the `replace` comparison (UDR-0212 D3.1), even inside one
+                    # AG-UI message.
+                    text_fold.reset()
                     # Close reasoning block before tool call
                     if reasoning_msg_id is not None:
                         yield encoder.encode(
@@ -1729,9 +1762,10 @@ async def _stream_with_reasoning(
                                 parent_message_id=msg_id,
                             )
                         )
-                    tc_args = getattr(content, "arguments", None)
-                    if tc_args:
-                        delta = tc_args if isinstance(tc_args, str) else json.dumps(tc_args)
+                    # UDR-0212 D3.2: the full-argument `replace` the OpenAI connector
+                    # sends after the deltas adds nothing to the card.
+                    delta = argument_fold.feed(tc_id, getattr(content, "arguments", None), merge_mode(content))
+                    if delta:
                         yield encoder.encode(
                             ToolCallArgsEvent(
                                 type=EventType.TOOL_CALL_ARGS,
@@ -1822,6 +1856,9 @@ async def _stream_with_reasoning(
                     break
 
                 elif content_type == "function_result":
+                    # The model call that asked for this tool is over (UDR-0212 D3.4).
+                    usage_fold.call_boundary()
+                    text_fold.reset()
                     tc_id = getattr(content, "call_id", None)
                     if tc_id:
                         yield encoder.encode(
@@ -1902,20 +1939,19 @@ async def _stream_with_reasoning(
                             msg_id = None
 
                 elif content_type == "usage":
-                    usage_details = getattr(content, "usage_details", None) or {}
-                    usage_value = dict(usage_details)
-                    # Two-axis accumulation (PRP-0157, UDR-0135 D1/D2). This
-                    # content is ONE model call; the billing axis is the sum of
-                    # every one of them in the turn, and the
-                    # context axis is this call alone when it turns out to be
-                    # the last. `add_usage_details` sums every integer key,
-                    # including the provider-prefixed extras, and is exactly
-                    # what `AgentResponse.from_updates` would have summed --
-                    # arithmetically identical, without the finalizer's
-                    # stream-draining behaviour.
-                    turn_usage = dict(add_usage_details(turn_usage, dict(usage_details)))
-                    last_usage = dict(usage_details)
-                    model_calls += 1
+                    usage_fold.observe(getattr(content, "usage_details", None), merge_mode(content))
+                    turn_usage = usage_fold.turn
+                    last_usage = usage_fold.last_call
+                    model_calls = usage_fold.calls
+                    usage_value = dict(last_usage or {})
+                    # Two-axis accumulation (PRP-0157, UDR-0135 D1/D2), folded by
+                    # CTR-0266 (PRP-0229, UDR-0212 D3.3-D3.5): the billing axis is
+                    # the turn total (segment totals summed, `replace` setting a
+                    # segment's cumulative), the context axis -- and every base key
+                    # of this event -- is the LAST model call, and `model_calls`
+                    # counts calls, not usage contents. Equal to what
+                    # `AgentResponse.from_updates` reports for one segment, without
+                    # the finalizer's stream-draining behaviour.
                     # PRP-0144 / UDR-0125 D5: attribute usage to the offering
                     # that actually SERVED the turn. `effective_model` resolves to
                     # the harness run-target's bound offering for a harness run and

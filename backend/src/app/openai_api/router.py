@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any
 
-from agent_framework import AgentSession, add_usage_details
+from agent_framework import AgentSession
 from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
@@ -19,11 +19,12 @@ from fastapi.responses import StreamingResponse
 from openai import NotFoundError as OpenAINotFoundError
 
 from app import providers
+from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, fold_contents, merge_mode
 from app.agent.temporary import new_temporary_thread_id, schedule_sweep, set_temporary_run
 from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key_strict
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
-from app.openai_api.converter import maf_contents_to_openai_output, openai_input_to_maf_messages
+from app.openai_api.converter import api_usage, maf_contents_to_openai_output, openai_input_to_maf_messages
 from app.openai_api.models import ResponsesRequest, ResponsesResponse, UsageInfo
 from app.openai_api.session import (
     create_api_session,
@@ -36,22 +37,16 @@ logger = logging.getLogger(__name__)
 
 
 def _accumulate_usage_contents(contents: Any) -> tuple[dict[str, Any] | None, int]:
-    """Sum every usage content in ``contents`` (CTR-0200, PRP-0158).
+    """The turn total and model-call count of ``contents`` (CTR-0200, PRP-0158).
 
     The non-streaming lane holds the whole content list, so the turn total is a
-    fold over it. `maf_contents_to_openai_output` deliberately keeps its own
-    last-call semantics for the API RESPONSE; this is the ledger's view of the same
-    contents.
+    fold over it -- the CTR-0266 fold (PRP-0229, UDR-0212 D3.3), because since MAF
+    1.22.0 the second and later calls of a tool loop report a CUMULATIVE `replace`.
+    `maf_contents_to_openai_output` deliberately keeps its own last-call semantics for
+    the API RESPONSE; this is the ledger's view of the same contents.
     """
-    turn_usage: dict[str, Any] | None = None
-    model_calls = 0
-    for content in contents or []:
-        if getattr(content, "type", None) != "usage":
-            continue
-        details = getattr(content, "usage_details", None) or {}
-        turn_usage = dict(add_usage_details(turn_usage, dict(details)))
-        model_calls += 1
-    return turn_usage, model_calls
+    usage = fold_contents(contents or []).usage
+    return usage.turn, usage.calls
 
 
 def _record_api_turn(
@@ -160,8 +155,13 @@ async def _stream_responses(
     # Select agent from registry based on model parameter (CTR-0070, PRP-0035)
     agent = agent_registry.get(request.model if request.model != "chatwalaau" else None)
 
-    # Token Usage Ledger accumulation (CTR-0200, PRP-0158), summed over every model
-    # call of the run below, so the total spans the whole turn.
+    # Token Usage Ledger accumulation (CTR-0200, PRP-0158) over every model call of the
+    # run below, so the total spans the whole turn. Folded by CTR-0266 (PRP-0229,
+    # UDR-0212 D3), like the deltas: MAF 1.22.0 streams `merge_mode`.
+    usage_fold = UsageFold()
+    text_fold = TextFold("text")
+    argument_fold = ArgumentFold()
+    call_items: dict[str, dict[str, Any]] = {}
     turn_usage: dict[str, Any] | None = None
     model_calls = 0
 
@@ -235,7 +235,7 @@ async def _stream_responses(
                     break
 
                 if content_type == "text":
-                    text = getattr(content, "text", "")
+                    text = text_fold.feed(getattr(content, "text", ""), merge_mode(content))
                     if not text:
                         continue
                     if not msg_started:
@@ -263,18 +263,23 @@ async def _stream_responses(
                     yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
 
                 elif content_type == "function_call":
+                    text_fold.reset()
                     call_id = getattr(content, "call_id", "")
                     name = getattr(content, "name", "")
-                    arguments = getattr(content, "arguments", "")
-                    if isinstance(arguments, dict):
-                        arguments = json.dumps(arguments)
-                    if name:
+                    # One item per call (UDR-0212 D3.2): later fragments -- argument
+                    # deltas and the full-argument `replace` -- complete its arguments.
+                    argument_fold.feed(call_id, getattr(content, "arguments", None), merge_mode(content))
+                    arguments = argument_fold.shown(call_id)
+                    if call_id in call_items:
+                        call_items[call_id]["arguments"] = arguments
+                    elif name:
                         fc_item = {
                             "type": "function_call",
                             "name": name,
                             "arguments": arguments or "",
                             "call_id": call_id,
                         }
+                        call_items[call_id] = fc_item
                         output_items.append(fc_item)
                         fc_added = {
                             "type": "response.output_item.added",
@@ -284,6 +289,8 @@ async def _stream_responses(
                         yield f"event: response.output_item.added\ndata: {json.dumps(fc_added)}\n\n"
 
                 elif content_type == "function_result":
+                    usage_fold.call_boundary()
+                    text_fold.reset()
                     call_id = getattr(content, "call_id", "")
                     result = getattr(content, "result", "")
                     if not isinstance(result, str):
@@ -298,21 +305,15 @@ async def _stream_responses(
                     yield f"event: response.output_item.added\ndata: {json.dumps(fr_added)}\n\n"
 
                 elif content_type == "usage":
-                    usage_details = getattr(content, "usage_details", None) or {}
                     # CTR-0200 (PRP-0158, UDR-0136 D5). The `usage` dict below keeps
                     # its existing last-call semantics -- changing this lane's
                     # RESPONSE shape is a wire change nobody approved -- so the
-                    # ledger gets its own turn accumulator, summed the same way
-                    # CTR-0009 sums it.
-                    turn_usage = dict(add_usage_details(turn_usage, dict(usage_details)))
-                    model_calls += 1
-                    usage["input_tokens"] = getattr(usage_details, "input_token_count", 0) or usage_details.get(
-                        "input_token_count", 0
-                    )
-                    usage["output_tokens"] = getattr(usage_details, "output_token_count", 0) or usage_details.get(
-                        "output_token_count", 0
-                    )
-                    usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+                    # ledger gets the turn total, folded the same way CTR-0009 folds
+                    # it (CTR-0266).
+                    usage_fold.observe(getattr(content, "usage_details", None), merge_mode(content))
+                    turn_usage = usage_fold.turn
+                    model_calls = usage_fold.calls
+                    usage = api_usage(usage_fold.last_call)
             if unexpected_approval_tool is not None:
                 break
 

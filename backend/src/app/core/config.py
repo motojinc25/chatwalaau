@@ -584,6 +584,11 @@ class Settings(BaseSettings):
     workflow_http_allowed_hosts: str = ""
     # Per-request timeout (ms) for HttpRequestAction.
     workflow_http_timeout_ms: int = 10000
+    # Response body limit (bytes) for HttpRequestAction, applied by the declarative
+    # handler to the wire body AND every decoding stage (PRP-0229, UDR-0212 D6; MAF
+    # declarative 1.3.0 #9358). An oversize body fails the action. Default = upstream's
+    # 10 MiB; a value <= 0 falls back to it with a WARNING.
+    workflow_http_max_response_bytes: int = 10 * 1024 * 1024
 
     # Prompt Templates (CTR-0046, PRP-0026)
     templates_dir: str = ".templates"

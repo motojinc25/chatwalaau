@@ -20,8 +20,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from agent_framework import add_usage_details
-
+from app.agent.stream_merge import TextFold, UsageFold, merge_mode
 from app.agui.sanitize import sanitize_text
 
 if TYPE_CHECKING:
@@ -153,8 +152,12 @@ async def run_turn(
     # Markdown below) AND can be sent to Teams as real data (UDR-0070 D9).
     generated_image_uris: list[str] = []
 
-    # Token Usage Ledger accumulation (CTR-0200, PRP-0158, UDR-0136 D5), summed over
-    # every model call of the run exactly as CTR-0009 does.
+    # Token Usage Ledger accumulation (CTR-0200, PRP-0158, UDR-0136 D5) over every
+    # model call of the run, folded exactly as CTR-0009 folds it: by CTR-0266 (PRP-0229,
+    # UDR-0212 D3), because MAF 1.22.0 streams `merge_mode` -- a finished text is re-sent
+    # in full and later tool-loop calls report a cumulative usage.
+    usage_fold = UsageFold()
+    text_fold = TextFold("text")
     turn_usage: dict[str, Any] | None = None
     model_calls = 0
     unexpected_approval_tool: str | None = None
@@ -165,17 +168,20 @@ async def run_turn(
         for content in getattr(update, "contents", None) or []:
             content_type = getattr(content, "type", None)
             if content_type == "text":
-                text = getattr(content, "text", None)
+                text = text_fold.feed(getattr(content, "text", None), merge_mode(content))
                 if text:
                     assistant_text_parts.append(text)
             elif content_type == "usage":
-                # One MAF usage content per MODEL CALL. Summed with the framework's
-                # own public helper, exactly as the AG-UI seam does, so both lanes
-                # report the same quantity (PRP-0158).
-                details = getattr(content, "usage_details", None) or {}
-                turn_usage = dict(add_usage_details(turn_usage, dict(details)))
-                model_calls += 1
+                # Folded exactly as the AG-UI seam folds it, so both lanes report the
+                # same quantity (PRP-0158; CTR-0266).
+                usage_fold.observe(getattr(content, "usage_details", None), merge_mode(content))
+                turn_usage = usage_fold.turn
+                model_calls = usage_fold.calls
+            elif content_type == "function_call":
+                text_fold.reset()
             elif content_type == "function_result":
+                usage_fold.call_boundary()
+                text_fold.reset()
                 _collect_generated_images(content, generated_image_uris)
             elif content_type == "function_approval_request":
                 # UDR-0161 D3: no tool is approval-gated, so this is a construction

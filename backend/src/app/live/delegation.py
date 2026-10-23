@@ -29,8 +29,7 @@ import re
 from typing import TYPE_CHECKING, Any
 import uuid
 
-from agent_framework import add_usage_details
-
+from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, merge_mode
 from app.agui.sanitize import sanitize_text
 
 if TYPE_CHECKING:
@@ -207,6 +206,12 @@ async def run_delegated_agent(
     calls: dict[str, dict[str, Any]] = {}
     activity: list[dict[str, Any]] = []
     current_call: str | None = None
+    # CTR-0266 (PRP-0229, UDR-0212 D3): MAF 1.22.0 streams `merge_mode` -- a finished
+    # text or argument string is re-sent in full and later tool-loop calls report a
+    # cumulative usage -- so text, arguments and usage are folded, as CTR-0009 does.
+    usage_fold = UsageFold()
+    text_fold = TextFold("text")
+    argument_fold = ArgumentFold()
     turn_usage: dict[str, Any] | None = None
     model_calls = 0
 
@@ -217,16 +222,17 @@ async def run_delegated_agent(
             for content in getattr(update, "contents", None) or []:
                 ctype = getattr(content, "type", None)
                 if ctype == "text":
-                    text = getattr(content, "text", None)
+                    text = text_fold.feed(getattr(content, "text", None), merge_mode(content))
                     if text:
                         text_parts.append(text)
                         if text_sink is not None:
                             text_sink.append(text)
                 elif ctype == "usage":
-                    details = getattr(content, "usage_details", None) or {}
-                    turn_usage = dict(add_usage_details(turn_usage, dict(details)))
-                    model_calls += 1
+                    usage_fold.observe(getattr(content, "usage_details", None), merge_mode(content))
+                    turn_usage = usage_fold.turn
+                    model_calls = usage_fold.calls
                 elif ctype == "function_call":
+                    text_fold.reset()
                     # Streamed like the AG-UI seam sees it: the first chunk names the
                     # tool, later chunks carry argument deltas for the current call.
                     call_id = getattr(content, "call_id", None)
@@ -237,10 +243,13 @@ async def run_delegated_agent(
                         activity.append({"type": "toolCall", "id": call_id})
                         current_call = call_id
                     target = calls.get(call_id) if call_id in calls else calls.get(current_call or "")
-                    args = _args_text(content)
-                    if target is not None and args:
-                        target["args"] = (target.get("args") or "") + args
+                    if target is not None:
+                        argument_fold.feed(target["id"], _args_text(content), merge_mode(content))
+                        if argument_fold.shown(target["id"]):
+                            target["args"] = argument_fold.shown(target["id"])
                 elif ctype == "function_result":
+                    usage_fold.call_boundary()
+                    text_fold.reset()
                     call_id = getattr(content, "call_id", None)
                     entry = calls.get(call_id) if call_id else None
                     if entry is not None:

@@ -43,6 +43,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Upstream's own default for DefaultHttpRequestHandler (agent-framework-declarative 1.3.0,
+# #9358); WORKFLOW_HTTP_MAX_RESPONSE_BYTES overrides it (UDR-0212 D6).
+DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # Opt-in state (CTR-0006)
@@ -138,7 +142,10 @@ class _JailedHttpRequestHandler:
         # handler and delegates to it only after every gate has passed. Subclassing
         # would risk inheriting an unjailed code path through a method this class
         # never thought to override.
-        self._default = DefaultHttpRequestHandler()
+        #
+        # The response limit (UDR-0212 D6) is upstream's own bound, configured -- not
+        # re-implemented: an oversize body fails with upstream's transport error.
+        self._default = DefaultHttpRequestHandler(max_response_body_bytes=max_response_bytes())
 
     async def send(self, info: HttpRequestInfo) -> HttpRequestResult:
         from agent_framework_declarative import HttpRequestResult
@@ -163,6 +170,19 @@ class _JailedHttpRequestHandler:
         if info.timeout_ms is None:
             info.timeout_ms = max(1, int(settings.workflow_http_timeout_ms or 10000))
         return await self._default.send(info)
+
+
+def max_response_bytes() -> int:
+    """WORKFLOW_HTTP_MAX_RESPONSE_BYTES, or the upstream default when not positive (D6)."""
+    value = settings.workflow_http_max_response_bytes
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        logger.warning(
+            "WORKFLOW_HTTP_MAX_RESPONSE_BYTES=%r is not a positive integer; using %d (UDR-0212 D6)",
+            value,
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+        return DEFAULT_MAX_RESPONSE_BYTES
+    return value
 
 
 def build_http_request_handler() -> _JailedHttpRequestHandler:
@@ -304,5 +324,6 @@ __all__ = [
     "build_http_request_handler",
     "build_mcp_tool_handler",
     "enabled_action_classes",
+    "max_response_bytes",
     "register_function_tools",
 ]
