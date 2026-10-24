@@ -99,6 +99,8 @@ interface ChatMessageItemProps {
   onEditUser?: (messageId: string, newContent: string) => void
   /** Re-send a user turn whose send failed before committing (CTR-0004 v2, PRP-0110). */
   onRetryTurn?: (messageId: string) => void
+  /** Re-send a turn whose reply was lost after committing (CTR-0004, PRP-0231, UDR-0214 D4). */
+  onRetryLostTurn?: (messageId: string) => void
   onEditAssistant?: (messageId: string, newContent: string) => void
   onRegenerateAssistant?: (messageId: string) => void
   onDelete?: (messageId: string) => void
@@ -356,6 +358,7 @@ function ChatMessageItemImpl({
   tts,
   onEditUser,
   onRetryTurn,
+  onRetryLostTurn,
   onEditAssistant,
   onRegenerateAssistant,
   onDelete,
@@ -714,7 +717,33 @@ function ChatMessageItemImpl({
                 </HeadingFoldContext.Provider>
               </div>
             ) : (
-              !isWaiting && !workflowState && <span className="inline-block h-4 w-1 animate-pulse bg-current" />
+              !isWaiting &&
+              !workflowState &&
+              !message.streamLost && <span className="inline-block h-4 w-1 animate-pulse bg-current" />
+            )}
+            {/*
+              Lost reply (CTR-0004, PRP-0231 / UDR-0214 D4). The stream ended after the turn
+              committed but before the run ended: the server cancelled the run and nothing
+              of the turn was saved. The text above is what arrived; Retry re-sends the
+              turn the way it was sent, only when the user clicks (UDR-0088 D6).
+            */}
+            {!isUser && message.streamLost && (
+              <div
+                className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-600"
+                data-testid="stream-lost-notice">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>{message.streamLost.message}</span>
+                {onRetryLostTurn && message.streamLost.retry && !isLoading && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => onRetryLostTurn(message.id)}>
+                    <RefreshCw className="mr-1 h-3 w-3" />
+                    Retry
+                  </Button>
+                )}
+              </div>
             )}
             {/* Unified in-progress indicator (PRP-0118 follow-up): while the turn is
                 still running -- and text has already arrived, so the top isWaiting
@@ -797,7 +826,9 @@ function ChatMessageItemImpl({
                 <FileTextIcon className="h-3 w-3" />
               </Button>
             )}
-            {!isUser && onRegenerateAssistant && (
+            {/* Not on a lost reply: its turn is unsaved, so a regenerate would save the new
+                reply without its user message (UDR-0214 D4) -- the notice's Retry is used. */}
+            {!isUser && onRegenerateAssistant && !message.streamLost && (
               <div className="relative flex items-center">
                 <Button
                   variant="ghost"

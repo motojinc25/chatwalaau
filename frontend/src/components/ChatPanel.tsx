@@ -241,6 +241,7 @@ export function ChatPanel({
     applyLiveDelegation,
     settleLiveDelegations,
     retryTurn,
+    retryLostTurn,
     stopGeneration,
     editUserMessage,
     regenerateAssistantMessage,
@@ -749,6 +750,15 @@ export function ChatPanel({
     [retryTurn, scrollToBottom],
   )
 
+  // PRP-0231 / UDR-0214 D4: re-send a turn whose reply was lost after it committed.
+  const handleRetryLostTurn = useCallback(
+    (messageId: string) => {
+      void retryLostTurn(messageId)
+      scrollToBottom()
+    },
+    [retryLostTurn, scrollToBottom],
+  )
+
   // Picker and paste (CTR-0023 v2). /popup and /sidebar have no thread, so an
   // attachment there is reported instead of being dropped silently (UDR-0211 D4).
   const handleAddFiles = useCallback(
@@ -832,6 +842,7 @@ export function ChatPanel({
                 tts={liveActive ? undefined : tts}
                 onEditUser={editUserMessage}
                 onRetryTurn={handleRetryTurn}
+                onRetryLostTurn={handleRetryLostTurn}
                 onEditAssistant={editAssistantMessage}
                 onRegenerateAssistant={regenerateAssistantMessage}
                 onDelete={deleteMessage}

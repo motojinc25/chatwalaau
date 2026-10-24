@@ -122,5 +122,10 @@ batch-server.log
 # DEXPI toolkit : local run outputs
 dexpi/out/
 
+# DEXPI viewer (PRP-0230): build output and Playwright results (the bundle is committed under dexpi/src)
+dexpi/viewer/dist/
+dexpi/viewer/test-results/
+dexpi/viewer/playwright-report/
+
 # HAZOP node toolkit : local run outputs (PRP-0227)
 hazop/out/

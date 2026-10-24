@@ -15,7 +15,7 @@ gone; a residual approval request ends the turn with a named error (D3).
 """
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterable
 import json
 import logging
 from pathlib import Path
@@ -1100,21 +1100,17 @@ async def _stream_with_reasoning(
         _wf_result: dict[str, Any] = {}
         _wf_temporary = bool((request_body.state or {}).get("temporary"))
         # PRP-0195 / UDR-0177 D1: a workflow node can be silent for many minutes (UDR-0176
-        # D4 forwards no model deltas), longer than the production front ends keep an idle
-        # connection open. Send an SSE comment after every silent 15 s -- this branch only
-        # (operator decision Q1); the Prompt and Harness lanes are unchanged.
-        from app.agui.keepalive import with_keepalive
-
-        async for _chunk in with_keepalive(
-            stream_workflow(
-                str(_workflow_id),
-                _wf_input,
-                encoder,
-                thread_id=thread_id,
-                result=_wf_result,
-                resume=_wf_resume,
-                temporary=_wf_temporary,
-            )
+        # D4 forwards no model deltas). The SSE keep-alive that covers that silence now wraps
+        # the WHOLE response in register_agui_endpoints (PRP-0231, UDR-0214 D1), so this
+        # branch is not wrapped a second time.
+        async for _chunk in stream_workflow(
+            str(_workflow_id),
+            _wf_input,
+            encoder,
+            thread_id=thread_id,
+            result=_wf_result,
+            resume=_wf_resume,
+            temporary=_wf_temporary,
         ):
             yield _chunk
         # Auto Session Title (PRP-0077, CTR-0109, UDR-0053 D17): the workflow branch
@@ -2256,6 +2252,61 @@ async def _stream_with_reasoning(
     )
 
 
+def _stream_lane(request_body: AGUIRequest) -> str:
+    """The lane a request runs on, for the dropped-stream log line (UDR-0214 D2)."""
+    state = request_body.state or {}
+    if state.get("workflow_id"):
+        return "workflow"
+    if state.get("harness_id"):
+        return "harness"
+    return "demo" if is_demo_mode() else "prompt"
+
+
+async def _log_dropped_stream(
+    source: AsyncIterable[Any],
+    *,
+    thread_id: str,
+    run_id: str,
+    lane: str,
+) -> AsyncGenerator[Any, None]:
+    """Pass ``source`` through; log ONE line when the client closes it early (UDR-0214 D2).
+
+    A dropped stream used to leave no trace: Starlette cancels the response on a disconnect,
+    the run's ``finally`` records usage as ``interrupted`` and logs nothing. This wrapper is
+    the one place that knows when the last real event left and how many keep-alives followed
+    -- the two numbers that tell a front end's idle cut (long ``silent_for``, no keep-alives)
+    from a Stop, a reload or a network change. The server cannot tell those apart, so the
+    line says only that the client closed the stream. Ids, lane and timings only: never
+    message text, prompts or tool data. Logged synchronously, so it also runs on
+    ``GeneratorExit``.
+    """
+    from app.agui.keepalive import KEEPALIVE_COMMENT
+
+    started = time.monotonic()
+    last_event = started
+    keepalives = 0
+    try:
+        async for chunk in source:
+            if chunk == KEEPALIVE_COMMENT:
+                keepalives += 1
+            else:
+                last_event = time.monotonic()
+            yield chunk
+    except (asyncio.CancelledError, GeneratorExit):
+        now = time.monotonic()
+        logger.warning(
+            "AG-UI stream closed by the client before the run ended: "
+            "thread=%s run=%s lane=%s elapsed=%.1fs silent_for=%.1fs keepalives=%d",
+            thread_id,
+            run_id,
+            lane,
+            now - started,
+            now - last_event,
+            keepalives,
+        )
+        raise
+
+
 def register_agui_endpoints(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
     """Register custom AG-UI endpoint with reasoning support (CTR-0009).
 
@@ -2268,8 +2319,20 @@ def register_agui_endpoints(app: FastAPI, *, agent_registry: AgentRegistry) -> N
     async def agui_endpoint(request_body: AGUIRequest, request: Request):
         # H7 (PRP-0189, UDR-0171 D1): the one place the caller's address is known.
         local_origin = is_client_loopback(request.client.host if request.client else None)
+        # PRP-0231 / UDR-0214 D1: the WHOLE response keeps itself alive -- every lane sends
+        # an SSE comment after each silent 15 s, so a turn busy on a slow tool or a long
+        # reasoning pass outlives the production front ends' ~4-minute idle cut (UDR-0177
+        # D2-D4 unchanged). D2: a stream the client closes early is logged once.
+        from app.agui.keepalive import with_keepalive
+
+        stream = with_keepalive(_stream_with_reasoning(agent_registry, request_body, local_origin=local_origin))
         return StreamingResponse(
-            _stream_with_reasoning(agent_registry, request_body, local_origin=local_origin),
+            _log_dropped_stream(
+                stream,
+                thread_id=request_body.thread_id or "-",
+                run_id=request_body.run_id or "-",
+                lane=_stream_lane(request_body),
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

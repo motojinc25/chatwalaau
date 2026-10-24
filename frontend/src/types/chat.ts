@@ -205,6 +205,13 @@ export interface McpAppEvent {
   call_id: string
 }
 
+/**
+ * How a lost reply's Retry re-sends its turn (UDR-0214 D4): `send` = the user text and
+ * images again (a send or an edit), `regenerate` = the regenerate path for the saved user
+ * message, `null` = no Retry (a workflow resume: the paused run was cancelled).
+ */
+export type LostReplyRetry = 'send' | 'regenerate' | null
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
@@ -253,6 +260,14 @@ export interface ChatMessage {
    * affordance. Ephemeral: never written to the session file.
    */
   failed?: boolean
+  /**
+   * PRP-0231 / CTR-0004 (UDR-0214 D4). Set on an ASSISTANT message whose stream ended
+   * after it committed but before RUN_FINISHED / RUN_ERROR (a front end's cut, sleep, a
+   * network change). The server cancelled the run and the turn was not saved; the text
+   * received so far stays, with an inline notice and a Retry that re-sends the turn the
+   * way it was sent. Ephemeral: never written to the session file.
+   */
+  streamLost?: { message: string; retry: LostReplyRetry }
   /**
    * Live voice conversation (CTR-0227, PRP-0188). `source: 'live'` marks a message that
    * came from a GPT-Live session: a transcribed user / assistant turn, or the full

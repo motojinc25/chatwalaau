@@ -6,6 +6,7 @@ import type {
   HarnessProgress,
   ImageRef,
   LiveMeta,
+  LostReplyRetry,
   McpAppEvent,
   PersistedWorkflowRun,
   ToolCall,
@@ -209,7 +210,14 @@ export const SAVE_RETRY_DELAYS_MS = [1000, 2000, 4000] as const
 export const WORKFLOW_CONNECTION_LOST_MESSAGE =
   'Connection to the server was lost before the workflow finished. The run was stopped on the server'
 export const WORKFLOW_STOPPED_MESSAGE = 'Stopped.'
-const WORKFLOW_STREAM_ENDED_EARLY = 'the stream ended before the workflow finished'
+/**
+ * Any turn whose stream ended before RUN_FINISHED / RUN_ERROR (PRP-0231, UDR-0214 D3/D4):
+ * the server cancelled the run with the connection and nothing of the turn was saved.
+ */
+export const CONNECTION_LOST_MESSAGE =
+  'Connection to the server was lost before the reply finished. The run was stopped on the server and this reply was not saved.'
+const NOT_SAVED_SUFFIX = ' and this reply was not saved.'
+const STREAM_ENDED_EARLY = 'the stream ended before the run finished'
 
 /** A save that is being retried: which retry is running, out of how many. */
 export interface SaveRetryStatus {
@@ -458,11 +466,20 @@ export function useChat(options?: UseChatOptions) {
       // indicator and the run canvas would keep showing a running step. The turn ends it
       // here with the two notices the server sends on a failure. No new event kind, no
       // retry (UDR-0088 D6), no watchdog (UDR-0088 D5).
+      // PRP-0231 / UDR-0214 D3: `runEnded` is lane-neutral -- any committed turn whose
+      // stream ends before RUN_FINISHED / RUN_ERROR is a lost reply, not only a workflow's.
       let workflowTurn = false
-      let workflowRunEnded = false
+      let runEnded = false
+      // How the lost reply's Retry re-sends this turn (UDR-0214 D4): a workflow resume
+      // cannot be retried (the paused run was cancelled with the connection).
+      const retryMode: LostReplyRetry = options?.workflowResume
+        ? null
+        : options?.skipUserMessage
+          ? 'regenerate'
+          : 'send'
       const endUnfinishedWorkflow = (message: string) => {
-        if (!workflowTurn || workflowRunEnded) return
-        workflowRunEnded = true
+        if (!workflowTurn || runEnded) return
+        runEnded = true
         onCustomEventRef.current?.('workflow_failed', { message })
         onWorkflowEventRef.current?.({ kind: 'run_error', message })
       }
@@ -810,7 +827,7 @@ export function useChat(options?: UseChatOptions) {
                   break
                 }
                 case 'RUN_FINISHED': {
-                  workflowRunEnded = true
+                  runEnded = true
                   // A workflow paused on human-in-the-loop ends the turn with an
                   // interrupt outcome (UDR-0106 D5); the canvas renders the input form
                   // and the answer is sent on the next request as state.workflow_resume.
@@ -820,7 +837,7 @@ export function useChat(options?: UseChatOptions) {
                   break
                 }
                 case 'RUN_ERROR': {
-                  workflowRunEnded = true
+                  runEnded = true
                   streamSuccess = false
                   onWorkflowEventRef.current?.({ kind: 'run_error', message: event.message ?? 'An error occurred' })
                   const errorMsg = event.message ?? 'An error occurred'
@@ -849,7 +866,7 @@ export function useChat(options?: UseChatOptions) {
                   // run state) reacts without duplicating SSE parsing.
                   onCustomEventRef.current?.(event.name, event.value)
                   if (event.name?.startsWith('workflow_')) workflowTurn = true
-                  if (event.name === 'workflow_completed' || event.name === 'workflow_failed') workflowRunEnded = true
+                  if (event.name === 'workflow_completed' || event.name === 'workflow_failed') runEnded = true
                   if (event.name === 'run_retry' && event.value) {
                     // v0.77.1 (CTR-0009): the backend hit a transient upstream
                     // 5xx before any output and is auto-resending. Surface a
@@ -947,8 +964,9 @@ export function useChat(options?: UseChatOptions) {
         }
 
         // A proxy can also close the stream CLEANLY: read() reports done, nothing throws, and
-        // the run's end event never came. That is the same lost connection (UDR-0177 D5).
-        if (workflowTurn && !workflowRunEnded) throw new Error(WORKFLOW_STREAM_ENDED_EARLY)
+        // the run's end event never came. That is the same lost connection on EVERY lane
+        // (UDR-0177 D5, UDR-0214 D3): a cut reply must not be saved as if it were complete.
+        if (committed && !runEnded) throw new Error(STREAM_ENDED_EARLY)
 
         // Save messages to session after stream completes. A declarative workflow that
         // produced no chat reply (workflowCompleted, no body) is ALSO saved so the turn
@@ -1046,12 +1064,26 @@ export function useChat(options?: UseChatOptions) {
         } else {
           streamSuccess = false
           const browserMessage = error instanceof Error ? error.message : 'An unexpected error occurred'
-          // A workflow turn that lost its stream says so (PRP-0195 Q2: workflow turns only);
-          // every other lane keeps the browser's own message.
-          const workflowLost = committed && workflowTurn && !workflowRunEnded
-          const errorContent = workflowLost ? `${WORKFLOW_CONNECTION_LOST_MESSAGE} (${browserMessage})` : browserMessage
-          if (workflowLost) endUnfinishedWorkflow(WORKFLOW_CONNECTION_LOST_MESSAGE)
-          if (!committed && !options?.skipUserMessage) {
+          // A committed turn without its run end lost its stream, on every lane (UDR-0214 D3).
+          // A workflow turn also ends its indicator and canvas locally (UDR-0177 D5).
+          const lost = committed && !runEnded
+          if (lost) endUnfinishedWorkflow(WORKFLOW_CONNECTION_LOST_MESSAGE)
+          if (lost) {
+            // UDR-0214 D4: keep what was received, say it was lost and not saved, and offer
+            // a Retry that re-sends the turn the way it was sent. In memory only -- the turn
+            // is not saved, so a reload shows the saved history. Never retried automatically
+            // (UDR-0088 D6).
+            const notice = workflowTurn
+              ? `${WORKFLOW_CONNECTION_LOST_MESSAGE}${NOT_SAVED_SUFFIX}`
+              : CONNECTION_LOST_MESSAGE
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantId
+                  ? { ...msg, streamLost: { message: `${notice} (${browserMessage})`, retry: retryMode } }
+                  : msg,
+              ),
+            )
+          } else if (!committed && !options?.skipUserMessage) {
             // Pre-commit failure (server down / restarting / 401 before the first
             // event). The turn never reached the agent, so drop the empty assistant
             // placeholder and flag the USER turn instead: it carries the text, an
@@ -1064,7 +1096,7 @@ export function useChat(options?: UseChatOptions) {
             )
           } else {
             setMessages((prev) =>
-              prev.map((msg) => (msg.id === assistantId ? { ...msg, content: `Error: ${errorContent}` } : msg)),
+              prev.map((msg) => (msg.id === assistantId ? { ...msg, content: `Error: ${browserMessage}` } : msg)),
             )
           }
         }
@@ -1238,6 +1270,30 @@ export function useChat(options?: UseChatOptions) {
       await streamResponse(userContent, truncated, { skipUserMessage: true })
     },
     [streamResponse, truncateSaved],
+  )
+
+  /**
+   * Re-send a turn whose reply was lost after it committed (PRP-0231, UDR-0214 D4). Only
+   * on the user's click -- never automatically (UDR-0088 D6). Nothing of the lost turn was
+   * saved, so it is re-sent the way it was sent: a send or an edit sends the user text and
+   * images again (and saves both); a regenerate runs the regenerate path again for the
+   * user message that is still saved. A workflow resume has no Retry.
+   */
+  const retryLostTurn = useCallback(
+    async (assistantId: string) => {
+      if (savingRef.current) return
+      const current = messagesRef.current
+      const idx = current.findIndex((m) => m.id === assistantId)
+      const retry = idx === -1 ? null : (current[idx].streamLost?.retry ?? null)
+      if (retry === 'regenerate') {
+        await regenerateAssistantMessage(assistantId)
+        return
+      }
+      const user = current[idx - 1]
+      if (retry !== 'send' || user?.role !== 'user') return
+      await streamResponse(user.content, current.slice(0, idx - 1), { images: user.images })
+    },
+    [streamResponse, regenerateAssistantMessage],
   )
 
   /*
@@ -1491,6 +1547,7 @@ export function useChat(options?: UseChatOptions) {
     applyLiveDelegation,
     settleLiveDelegations,
     retryTurn,
+    retryLostTurn,
     stopGeneration,
     clearMessages,
     editUserMessage,
