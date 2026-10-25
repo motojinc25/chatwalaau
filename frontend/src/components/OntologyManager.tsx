@@ -1654,6 +1654,8 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
   const [createCustomIri, setCreateCustomIri] = useState('')
   const [createUseCustom, setCreateUseCustom] = useState(false)
   const [creating, setCreating] = useState(false)
+  // A refused create (e.g. the IRI is already used) is shown in the dialog that caused it, not behind it.
+  const [createError, setCreateError] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<CatalogEntry | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [renameTarget, setRenameTarget] = useState<CatalogEntry | null>(null)
@@ -1930,6 +1932,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
 
   const createOntology = useCallback(async () => {
     setCreating(true)
+    setCreateError(null)
     setError(null)
     try {
       const res = await fetch('/api/ontology/catalog', {
@@ -1960,7 +1963,7 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       await fetchCatalog()
       await loadOntology(entry.id)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create the ontology')
+      setCreateError(err instanceof Error ? err.message : 'Failed to create the ontology')
     } finally {
       setCreating(false)
     }
@@ -3754,7 +3757,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
                     selectedId={selectedId}
                     importing={importing}
                     onSelect={(id) => guardDirty(() => void loadOntology(id))}
-                    onCreate={() => setCreateOpen(true)}
+                    onCreate={() => {
+                      setCreateError(null)
+                      setCreateOpen(true)
+                    }}
                     onImportClick={() => importInputRef.current?.click()}
                     onOpenTrash={() => setTrashOpen(true)}
                     onExport={(entry) => {
@@ -4215,7 +4221,13 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
       />
 
       {/* Create dialog */}
-      <Dialog open={createOpen} onOpenChange={(o) => !creating && setCreateOpen(o)}>
+      <Dialog
+        open={createOpen}
+        onOpenChange={(o) => {
+          if (creating) return
+          setCreateOpen(o)
+          setCreateError(null)
+        }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>New ontology</DialogTitle>
@@ -4229,7 +4241,10 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
               <Input
                 id="ontology-name"
                 value={createName}
-                onChange={(e) => setCreateName(e.target.value)}
+                onChange={(e) => {
+                  setCreateName(e.target.value)
+                  setCreateError(null)
+                }}
                 placeholder="e.g. Plant Asset Model"
               />
             </div>
@@ -4250,12 +4265,26 @@ export function OntologyManager({ open, onOpenChange }: { open: boolean; onOpenC
               base={iriBase}
               baseIsDefault={iriBaseIsDefault}
               shortName={createShortName}
-              onShortName={setCreateShortName}
+              onShortName={(v) => {
+                setCreateShortName(v)
+                setCreateError(null)
+              }}
               customIri={createCustomIri}
-              onCustomIri={setCreateCustomIri}
+              onCustomIri={(v) => {
+                setCreateCustomIri(v)
+                setCreateError(null)
+              }}
               useCustom={createUseCustom}
-              onUseCustom={setCreateUseCustom}
+              onUseCustom={(v) => {
+                setCreateUseCustom(v)
+                setCreateError(null)
+              }}
             />
+            {createError && (
+              <p className="text-xs text-red-600" role="alert" data-testid="create-ontology-error">
+                {createError}
+              </p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
