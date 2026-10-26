@@ -152,6 +152,11 @@ interface ChatInputProps {
     /** Step 3: text typed during Live. Resolves false when it was not accepted. */
     onSendText?: (text: string) => Promise<boolean>
   }
+  /**
+   * The textarea's hint when the composer does something else than send a chat turn -- an
+   * AI discussion waiting for the person's input (CTR-0276, PRP-0232). Absent: the default.
+   */
+  placeholder?: string
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
@@ -173,6 +178,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     onSlashHelp,
     onSlashCron,
     onSlashFiles,
+    placeholder,
     temporary = false,
     runTarget,
     context,
@@ -744,7 +750,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                     ? 'Type to add to the Live conversation'
                     : isTranscribing
                       ? 'Transcribing...'
-                      : 'Type a message...'
+                      : (placeholder ?? 'Type a message...')
                 }
                 rows={1}
                 className={cn(

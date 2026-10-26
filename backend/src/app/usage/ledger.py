@@ -413,6 +413,48 @@ def append_decision_usage(
     append_record(record)
 
 
+def append_discussion_usage(
+    *,
+    kind: str,
+    purpose: str,
+    turn: Mapping[str, Any] | None,
+    model: str | None,
+    thread_id: str | None,
+    run_id: str | None,
+    node: str | None,
+    agent: str | None,
+    provider: str | None = None,
+    outcome: str = "completed",
+) -> None:
+    """Record one AI Discussion model call (PRP-0232, UDR-0215 D9).
+
+    Lane ``discussion``. ``kind`` is ``turn`` for a participant or moderator turn and
+    ``helper`` for an advisory call; ``run_target`` is ``discussion``, ``agent`` the speaker id,
+    ``node`` the phase and ``run_id`` the discussion run id -- identifiers only, never content
+    (UDR-0136 D3). ``provider`` is passed for an advisory call, whose decision offering is not a
+    chat offering (the same rule as :func:`append_decision_usage`).
+    """
+    try:
+        record = build_record(
+            lane="discussion",
+            kind=kind,
+            purpose=purpose,
+            model=model,
+            provider=provider or _provider_name(model),
+            turn=turn,
+            thread_id=thread_id,
+            run_target="discussion",
+            node=node,
+            agent=agent,
+            run_id=run_id,
+            outcome=outcome,
+        )
+    except Exception:
+        logger.warning("usage ledger discussion record build failed", exc_info=True)
+        return
+    append_record(record)
+
+
 def _provider_name(model: str | None) -> str | None:
     """Resolve the owning provider's name for ``model``, or None.
 
@@ -433,6 +475,7 @@ __all__ = [
     "LEDGER_FIELDS",
     "TOKEN_FIELDS",
     "append_decision_usage",
+    "append_discussion_usage",
     "append_helper_usage",
     "append_record",
     "append_turn_usage",

@@ -217,6 +217,12 @@ GROUPS: tuple[SettingGroup, ...] = (
         "Decision",
         "Bounds for the decision_evaluate tool (Microsoft-Decision-1): questions, options, levels and input size.",
     ),
+    # PRP-0232 (CTR-0198, UDR-0215 D9): the AI discussion's rounds, seats and budget.
+    SettingGroup(
+        "discussion",
+        "AI Discussion",
+        "Limits of a human-led AI discussion: rounds, participants, tokens and time. A run keeps the values it started with.",
+    ),
 )
 
 
@@ -1520,6 +1526,101 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         help=(
             "The text or JSON the questions are about may hold at most this many characters "
             "(JSON is counted as sent). A larger input is refused before any request."
+        ),
+    ),
+    # ---- AI Discussion (PRP-0232, CTR-0274, UDR-0215 D9) -----------------------------
+    # `runtime`: read when a discussion run is created and frozen into it (D9), so a save
+    # reaches the next run without a restart and never changes a run that is under way.
+    SettingDescriptor(
+        "discussion_default_rounds",
+        "Default discussion rounds",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=10,
+        help=(
+            "Rounds preselected in the New AI discussion dialog. One round = every participant speaks "
+            "once. Never more than the maximum below."
+        ),
+    ),
+    SettingDescriptor(
+        "discussion_max_rounds",
+        "Discussion rounds (max)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=10,
+        help="The highest number of rounds a discussion can be started with.",
+    ),
+    SettingDescriptor(
+        "discussion_max_participants",
+        "Participants (max)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=2,
+        max=6,
+        help="How many AI participants one discussion may have (at least 2). The moderator is not counted.",
+    ),
+    SettingDescriptor(
+        "discussion_token_budget",
+        "Token budget per discussion",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=20_000,
+        max=5_000_000,
+        help=(
+            "Total tokens one discussion run may use, every participant, moderator and advisory call "
+            "included. When the next call would not fit, the discussion moves to its summary."
+        ),
+    ),
+    SettingDescriptor(
+        "discussion_summary_reserve_tokens",
+        "Tokens kept for the summary",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=5_000,
+        max=200_000,
+        help="Part of the budget that the discussion may not spend, so the final summary can always be written.",
+    ),
+    SettingDescriptor(
+        "discussion_turn_max_output_tokens",
+        "Reply length per turn (tokens)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=200,
+        max=8_000,
+        help=(
+            "How long one participant reply may be. Asked of the model and used for the budget check; "
+            "reasoning models get extra room for their reasoning on top."
+        ),
+    ),
+    SettingDescriptor(
+        "discussion_phase_timeout_seconds",
+        "Time per phase (seconds)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=60,
+        max=3_600,
+        help="Wall time of one phase (the opening, one round). When it runs out, the discussion moves to its summary.",
+    ),
+    SettingDescriptor(
+        "discussion_advisory_threshold_percent",
+        "Suggest-summarizing threshold (%)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=50,
+        max=95,
+        help=(
+            "When the decision model judges the points repeated or the goal covered with at least this "
+            "probability, the moderator suggests summarizing. It is only a suggestion."
         ),
     ),
 )

@@ -250,6 +250,24 @@ def _unavailable(exc: SessionUnavailableError) -> HTTPException:
     )
 
 
+def _refuse_open_discussion(data: dict[str, Any]) -> None:
+    """409 while the chat has an AI discussion that has not ended (PRP-0232, UDR-0215 D4).
+
+    Its messages carry deterministic ids and its run counts on them; cutting, deleting, branching
+    or exporting the chat in the middle of a run would leave the run and the history disagreeing.
+    """
+    from app.discussion.schema import has_open_run
+
+    if has_open_run(data):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "discussion_active",
+                "message": "This chat has an AI discussion under way. End or cancel it first.",
+            },
+        )
+
+
 def _read_session_or_404(thread_id: str) -> dict[str, Any]:
     """Read session JSON or raise HTTP errors."""
     try:
@@ -626,6 +644,7 @@ async def export_session(thread_id: str) -> Response:
     friendly, not behind the write gate). The bundle carries the session JSON
     plus its whole upload directory so images round-trip across instances.
     """
+    _refuse_open_discussion(_read_session_or_404(thread_id))
     try:
         zip_bytes, filename, filename_utf8 = build_export_bundle(thread_id)
     except FileNotFoundError as exc:
@@ -929,6 +948,7 @@ async def truncate_session(thread_id: str, body: TruncateRequest) -> dict[str, A
     """
 
     def truncate(data: dict[str, Any]) -> bool:
+        _refuse_open_discussion(data)
         messages = data.get("messages", [])
         if body.delete_from >= len(messages):
             return False
@@ -957,6 +977,7 @@ async def delete_message(thread_id: str, index: int) -> dict[str, Any]:
 
     def remove(data: dict[str, Any]) -> bool:
         nonlocal out_of_range
+        _refuse_open_discussion(data)
         messages = data.get("messages", [])
         if index < 0 or index >= len(messages):
             out_of_range = True
@@ -1002,6 +1023,7 @@ async def fork_session(thread_id: str, body: ForkRequest) -> dict[str, Any]:
     references -- so deleting the source no longer breaks the branch's images.
     """
     data = _read_session_or_404(thread_id)
+    _refuse_open_discussion(data)
 
     messages = data.get("messages", [])
     if body.up_to_index < 0 or body.up_to_index >= len(messages):

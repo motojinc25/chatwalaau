@@ -464,6 +464,20 @@ class Settings(BaseSettings):
     decision_max_score_levels: int = 11
     decision_max_state_chars: int = 100_000
 
+    # AI Discussion (PRP-0232, CTR-0274, UDR-0215 D9). App Settings keys (CTR-0198), group
+    # `discussion`, all `runtime`: read when a run is CREATED and frozen into its budget, so a
+    # change reaches new runs only. Defaults are the operator's approved values (Q5): two
+    # rounds, 300,000 tokens per run with 30,000 kept for the summary, 1,200 output tokens per
+    # turn, 600 s per phase. The advisory threshold is a percentage (the store has no float).
+    discussion_default_rounds: int = 2
+    discussion_max_rounds: int = 5
+    discussion_max_participants: int = 4
+    discussion_token_budget: int = 300_000
+    discussion_summary_reserve_tokens: int = 30_000
+    discussion_turn_max_output_tokens: int = 1_200
+    discussion_phase_timeout_seconds: int = 600
+    discussion_advisory_threshold_percent: int = 70
+
     # File Explorer (CTR-0006, CTR-0136/0137, PRP-0091, UDR-0069)
     # Human-facing file browse/edit over the coding workspace. OFF unless
     # FILE_EXPLORER_ENABLED; every file operation ADDITIONALLY requires

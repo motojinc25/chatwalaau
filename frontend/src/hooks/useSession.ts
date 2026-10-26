@@ -5,6 +5,7 @@ import {
   type ActivityEntry,
   type ChatMessage,
   DEFAULT_FOLDER_COLOR,
+  type DiscussionMessageMeta,
   FOLDER_COLORS,
   type FolderColor,
   type ImageRef,
@@ -198,6 +199,10 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
       // Live voice turns (CTR-0227, PRP-0188): keep the marker so the chip survives reload.
       ...(msg.source === 'live' ? { source: 'live' as const } : {}),
       ...(msg.live && typeof msg.live === 'object' ? { live: msg.live as LiveMeta } : {}),
+      // AI Discussion attribution (CTR-0271, PRP-0232): who spoke, in which phase.
+      ...(msg.discussion && typeof msg.discussion === 'object'
+        ? { discussion: { ...(msg.discussion as DiscussionMessageMeta), status: 'completed' as const } }
+        : {}),
     })
   }
   return result

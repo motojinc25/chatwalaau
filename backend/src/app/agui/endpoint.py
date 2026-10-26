@@ -1079,6 +1079,23 @@ async def _stream_with_reasoning(
     encoder = EventEncoder()
     thread_id = request_body.thread_id or _generate_id()
     run_id = request_body.run_id or _generate_id()
+    # PRP-0232 / UDR-0215 D11: while a phase of this chat's AI discussion runs, a turn on the
+    # thread is refused before any model call, on every lane -- the phase and the turn would
+    # both write the chat and the turn's history would miss the phase's messages.
+    from app.discussion.controller import phase_running
+
+    if request_body.thread_id and phase_running(thread_id):
+        yield encoder.encode(RunStartedEvent(type=EventType.RUN_STARTED, run_id=run_id, thread_id=thread_id))
+        yield encoder.encode(
+            RunErrorEvent(
+                type=EventType.RUN_ERROR,
+                message="An AI discussion is running in this chat. Pause it or wait until it waits for you.",
+                code="discussion_active",
+            )
+        )
+        yield encoder.encode(RunFinishedEvent(type=EventType.RUN_FINISHED, run_id=run_id, thread_id=thread_id))
+        return
+
     # Auto Session Title gate (CTR-0109, PRP-0174 D5): read once, before anything runs.
     is_first_turn = _is_first_assistant_turn(thread_id)
 

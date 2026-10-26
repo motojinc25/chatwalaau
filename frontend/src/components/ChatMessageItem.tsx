@@ -21,6 +21,7 @@ import {
 import { type KeyboardEvent, memo, useCallback, useEffect, useRef, useState } from 'react'
 import { AuthedImage } from '@/components/AuthedImage'
 import { DecisionResults } from '@/components/DecisionResults'
+import { DiscussionSpeakerTag, speakerColor } from '@/components/DiscussionParts'
 import { HarnessProgressPanel } from '@/components/HarnessProgressPanel'
 import { ImageGenerationResults } from '@/components/ImageGenerationResult'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
@@ -524,8 +525,19 @@ function ChatMessageItemImpl({
       data-message-role={message.role}
       className={cn('group/msg flex gap-3', compact ? 'px-3 py-1' : 'px-4 py-1')}>
       <Avatar className={cn('mt-0.5 shrink-0', compact ? 'h-6 w-6' : 'h-7 w-7')}>
-        <AvatarFallback className={cn(isUser ? 'bg-primary text-primary-foreground' : 'bg-muted')}>
-          {isUser ? (
+        <AvatarFallback
+          className={cn(
+            isUser ? 'bg-primary text-primary-foreground' : 'bg-muted',
+            // An AI Discussion speaker wears its colour and initial (CTR-0276, PRP-0232).
+            !isUser &&
+              message.discussion &&
+              cn(speakerColor(message.discussion.color).soft, 'border', speakerColor(message.discussion.color).ring),
+          )}>
+          {!isUser && message.discussion ? (
+            <span className={cn('text-[11px] font-semibold', speakerColor(message.discussion.color).text)}>
+              {message.discussion.display_name.slice(0, 1).toUpperCase()}
+            </span>
+          ) : isUser ? (
             <User className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
           ) : (
             <Bot className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
@@ -533,6 +545,7 @@ function ChatMessageItemImpl({
         </AvatarFallback>
       </Avatar>
       <div className={cn('min-w-0 flex-1 text-sm leading-relaxed')}>
+        {message.discussion && <DiscussionSpeakerTag meta={message.discussion} />}
         {isUser ? (
           <div>
             {message.images && message.images.length > 0 && (
@@ -708,7 +721,18 @@ function ChatMessageItemImpl({
               // Structured output (CTR-0012 v11, PRP-0082, UDR-0058 D5): render the
               // JSON answer as a `json` code block (reuses CodeBlock copy/download)
               // instead of Markdown. Streaming partial JSON shows as it arrives.
-              <div className={cn(message.live?.provisional && 'opacity-60')}>
+              <div
+                className={cn(
+                  message.live?.provisional && 'opacity-60',
+                  // The moderator's points and summary read as a card (CTR-0276).
+                  message.discussion?.kind === 'moderator' &&
+                    cn(
+                      'rounded-lg border px-3 py-2',
+                      speakerColor(message.discussion.color).ring,
+                      speakerColor(message.discussion.color).soft,
+                    ),
+                  message.discussion?.status === 'interrupted' && 'opacity-60',
+                )}>
                 <HeadingFoldContext.Provider value={foldHeadings ? fold : null}>
                   <MarkdownRenderer
                     content={message.structured ? toJsonCodeFence(message.content) : message.content}

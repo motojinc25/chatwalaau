@@ -5,6 +5,7 @@ import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ComputerUseBanner } from '@/components/ComputerUseBanner'
 import { ComputerUseCaptureView } from '@/components/ComputerUseCaptureView'
 import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
+import { DiscussionBar } from '@/components/DiscussionBar'
 import { HelpPortal } from '@/components/HelpPortal'
 import { LiveDelegationMarker } from '@/components/LiveDelegationMarker'
 import { type ImageEditSubmission, MaskEditorDialog } from '@/components/MaskEditorDialog'
@@ -19,6 +20,7 @@ import { WorkflowRunCanvas } from '@/components/WorkflowRunCanvas'
 import { useActiveModel } from '@/hooks/useActiveModel'
 import { useChat } from '@/hooks/useChat'
 import { useChatScroll } from '@/hooks/useChatScroll'
+import { useDiscussion } from '@/hooks/useDiscussion'
 import { type ImageAttachment, useImageAttachment } from '@/hooks/useImageAttachment'
 import { useLiveVoice } from '@/hooks/useLiveVoice'
 import { useMemoryCuration } from '@/hooks/useMemoryCuration'
@@ -75,6 +77,11 @@ interface ChatPanelProps {
    * component and do not offer Live (operator answer Q3).
    */
   liveCapable?: boolean
+  /**
+   * AI Discussion controls (CTR-0276, PRP-0232). Only the full-page /chat surface passes it;
+   * /popup and /sidebar show a discussion chat read-only.
+   */
+  discussionCapable?: boolean
 }
 
 function buildStreamingKey(messages: ChatMessage[], isLoading: boolean): string {
@@ -121,6 +128,7 @@ export function ChatPanel({
   onAttachConsumed,
   temporary = false,
   liveCapable = false,
+  discussionCapable = false,
 }: ChatPanelProps) {
   const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null)
   // Which model answers is the RUN-TARGET's business since PRP-0184 (UDR-0166 D1):
@@ -247,6 +255,7 @@ export function ChatPanel({
     regenerateAssistantMessage,
     editAssistantMessage,
     deleteMessage,
+    upsertMessage,
   } = useChat({
     threadId,
     initialMessages,
@@ -278,6 +287,23 @@ export function ChatPanel({
     // PRP-0174 / UDR-0156 D4: a reply / edit / delete that could not be saved.
     onPersistError: useCallback((message: string) => setNotification({ type: 'error', message }), []),
   })
+
+  // AI Discussion (CTR-0276, PRP-0232). A discussion chat routes the composer to the
+  // discussion while it waits for the person and turns Stop into Pause while a phase runs; an
+  // ordinary post outside those states is a normal turn (operator Q3). The discussion's
+  // messages are written by the backend and only shown here (UDR-0215 D4).
+  const discussion = useDiscussion({
+    threadId,
+    enabled: discussionCapable && !temporary,
+    messages,
+    upsertMessage,
+    onChanged: onStreamComplete,
+  })
+  const discussionDrives = discussionCapable && discussion.active
+  const discussionPhaseRunning =
+    discussionDrives &&
+    (discussion.streaming || discussion.latest?.status === 'running' || discussion.latest?.status === 'summarizing')
+  const discussionWaiting = discussionDrives && discussion.waiting
 
   const {
     attachments,
@@ -710,6 +736,12 @@ export function ChatPanel({
 
   const handleSend = useCallback(
     async (content: string, images?: ImageRef[]) => {
+      // The person's input to a waiting discussion (CTR-0276): text only.
+      if (discussionWaiting) {
+        clearAttachments()
+        scrollToBottom()
+        return await discussion.respond('answer', content)
+      }
       // Kick off the send, then clear/scroll immediately -- the commit flag is
       // awaited afterwards so ChatInput can restore the text on a pre-commit
       // failure (CTR-0004 v2, PRP-0110).
@@ -725,8 +757,20 @@ export function ChatPanel({
       scrollToBottom()
       return await pending
     },
-    [sendMessage, clearAttachments, scrollToBottom, selectedWorkflowId, wfTarget?.name, canvas],
+    [
+      sendMessage,
+      clearAttachments,
+      scrollToBottom,
+      selectedWorkflowId,
+      wfTarget?.name,
+      canvas,
+      discussionWaiting,
+      discussion.respond,
+    ],
   )
+  const composerBusy = isLoading || discussionPhaseRunning
+  const composerStop = discussionPhaseRunning ? () => void discussion.pause() : stopGeneration
+  const composerPlaceholder = discussionWaiting ? 'Add your input to the discussion...' : undefined
 
   // Human-in-the-loop answers (CTR-0187 -> CTR-0009 v19, UDR-0106 D5). The paused run
   // continues on a NEW turn carrying state.workflow_resume and no user message; the
@@ -840,12 +884,14 @@ export function ChatPanel({
                 isLoading={isLoading && i === messages.length - 1}
                 // TTS is withdrawn while Live speaks (CTR-0040, PRP-0188).
                 tts={liveActive ? undefined : tts}
-                onEditUser={editUserMessage}
+                // A discussion message belongs to its run: no edit, regenerate or delete
+                // (CTR-0276, PRP-0232 2.7).
+                onEditUser={msg.discussion ? undefined : editUserMessage}
                 onRetryTurn={handleRetryTurn}
                 onRetryLostTurn={handleRetryLostTurn}
-                onEditAssistant={editAssistantMessage}
-                onRegenerateAssistant={regenerateAssistantMessage}
-                onDelete={deleteMessage}
+                onEditAssistant={msg.discussion ? undefined : editAssistantMessage}
+                onRegenerateAssistant={msg.discussion ? undefined : regenerateAssistantMessage}
+                onDelete={msg.discussion ? undefined : deleteMessage}
                 onBranch={onBranchFromMessage}
                 onSaveAsTemplate={show('message.saveAsTemplate') ? handleSaveAsTemplate : undefined}
                 onMaskEdit={show('message.maskEdit') ? handleMaskEdit : undefined}
@@ -923,6 +969,7 @@ export function ChatPanel({
 
       {compact ? (
         <div ref={inputRef}>
+          {discussion.active && <DiscussionBar discussion={discussion} compact />}
           <ComputerUseBanner active={computerUseActive} />
           {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE.
               PRP-0184 took the model / options / structured controls off the composer
@@ -935,8 +982,8 @@ export function ChatPanel({
           <ChatInput
             ref={chatInputRef}
             onSend={handleSend}
-            onStop={stopGeneration}
-            isLoading={isLoading}
+            onStop={composerStop}
+            isLoading={composerBusy}
             attachments={attachments}
             onAddFiles={handleAddFiles}
             onRemoveAttachment={removeAttachment}
@@ -955,6 +1002,7 @@ export function ChatPanel({
             runTarget={composerRunTarget}
             context={contextOccupancy ?? undefined}
             live={composerLive}
+            placeholder={composerPlaceholder}
           />
         </div>
       ) : (
@@ -984,6 +1032,11 @@ export function ChatPanel({
               viewport, which already ends above Safari's toolbar, so an inset added the
               home-indicator height a second time (most visibly on iPad). */}
           <div className="relative bg-background">
+            {discussion.active && (
+              <div className="px-4">
+                <DiscussionBar discussion={discussion} compact={!discussionCapable} />
+              </div>
+            )}
             <ComputerUseBanner active={computerUseActive} />
             {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE; see
                 the compact branch for why. Both of its survivors moved into the
@@ -993,8 +1046,8 @@ export function ChatPanel({
             <ChatInput
               ref={chatInputRef}
               onSend={handleSend}
-              onStop={stopGeneration}
-              isLoading={isLoading}
+              onStop={composerStop}
+              isLoading={composerBusy}
               attachments={attachments}
               onAddFiles={handleAddFiles}
               onRemoveAttachment={removeAttachment}
@@ -1013,6 +1066,7 @@ export function ChatPanel({
               runTarget={composerRunTarget}
               context={contextOccupancy ?? undefined}
               live={composerLive}
+              placeholder={composerPlaceholder}
             />
           </div>
         </div>

@@ -51,6 +51,7 @@ import {
   SquarePen,
   Trash2,
   Upload,
+  Users,
   Webhook,
   Workflow,
   X,
@@ -143,6 +144,11 @@ interface SessionSidebarProps {
   onArchive: (threadId: string) => Promise<SessionActionResult>
   onPin: (threadId: string, pinned: boolean) => void
   onCreate: () => void
+  /**
+   * "New AI discussion" (PRP-0232, CTR-0016, operator Q6): the New menu's second item opens the
+   * discussion setup dialog. Absent: the New button starts a chat directly, as before.
+   */
+  onCreateDiscussion?: () => void
   /**
    * "New chat in folder" (PRP-0196, CTR-0016): start a new chat that is created inside
    * this folder on its first send. Disabled while `temporaryActive` (UDR-0178 D8).
@@ -477,6 +483,12 @@ const SessionRow = memo(function SessionRow({
               {session.source === 'teams' && (
                 <span className="inline-block shrink-0 rounded bg-indigo-100 px-1 py-0.5 text-[10px] font-medium leading-none text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300">
                   Teams
+                </span>
+              )}
+              {/* An AI Discussion chat (PRP-0232, CTR-0016): a classification like API / Teams. */}
+              {session.has_discussion && (
+                <span className="inline-block shrink-0 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium leading-none text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                  Discussion
                 </span>
               )}
               <span
@@ -881,6 +893,7 @@ export function SessionSidebar({
   onArchive,
   onPin,
   onCreate,
+  onCreateDiscussion,
   onCreateInFolder,
   temporaryActive = false,
   revealFolderRequest,
@@ -1395,9 +1408,30 @@ export function SessionSidebar({
             aria-label="Search sessions">
             <Search className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="icon" className={headerControl} onClick={onCreate} aria-label="New session">
-            <Plus className="h-4 w-4" />
-          </Button>
+          {onCreateDiscussion ? (
+            // PRP-0232 (operator Q6): New opens a menu -- a chat, or an AI discussion.
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className={headerControl} aria-label="New session">
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={onCreate}>
+                  <SquarePen className="mr-2 h-3.5 w-3.5" />
+                  New Chat
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={onCreateDiscussion} disabled={temporaryActive}>
+                  <Users className="mr-2 h-3.5 w-3.5" />
+                  New AI discussion
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <Button variant="ghost" size="icon" className={headerControl} onClick={onCreate} aria-label="New session">
+              <Plus className="h-4 w-4" />
+            </Button>
+          )}
           {showLogout && (
             <Button
               variant="ghost"

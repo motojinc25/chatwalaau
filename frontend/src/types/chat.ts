@@ -275,6 +275,103 @@ export interface ChatMessage {
    */
   source?: 'live'
   live?: LiveMeta
+  /**
+   * AI Discussion attribution (CTR-0271, PRP-0232). Set on a message written by a discussion
+   * run: who spoke, in which phase. Saved by the backend only -- the SPA never saves these.
+   */
+  discussion?: DiscussionMessageMeta
+}
+
+/** The `discussion` field of a discussion message (CTR-0271). */
+export interface DiscussionMessageMeta {
+  run_id: string
+  speaker_id: string
+  role: string
+  display_name: string
+  phase: string
+  round: number
+  sequence?: number
+  kind: 'participant' | 'moderator' | 'human' | 'brief'
+  color?: string
+  /** Render-time only: 'generating' while it streams, 'interrupted' when the stream stopped. */
+  status: 'generating' | 'completed' | 'interrupted'
+}
+
+export type DiscussionStatus =
+  | 'created'
+  | 'running'
+  | 'waiting_human'
+  | 'paused'
+  | 'summarizing'
+  | 'completed'
+  | 'cancelled'
+  | 'failed'
+
+export interface DiscussionParticipant {
+  id: string
+  role: string
+  display_name: string
+  charter: string
+  color: string
+  model: string
+  /** The reasoning effort the seat runs at; null for a model without reasoning. */
+  effort: string | null
+  source: 'preset' | 'agent'
+  preset?: string
+  agent_id?: string
+}
+
+export interface DiscussionState {
+  common: string[]
+  conflicts: string[]
+  missing: string[]
+  questions_for_human: string[]
+  suggest_finish: { value: boolean; reason: string }
+}
+
+export interface DiscussionFinal {
+  recommendation: string
+  agreements: string[]
+  dissent: string[]
+  open_issues: string[]
+  next_actions: string[]
+}
+
+/** One DiscussionRun (CTR-0271) as `/api/discussions` returns it. */
+export interface DiscussionRun {
+  id: string
+  flow_version: number
+  status: DiscussionStatus
+  phase: string
+  round: number
+  rounds: number
+  brief: { topic: string; goal: string; constraints: string }
+  participants: DiscussionParticipant[]
+  moderator: { id: string; display_name: string; color: string; model: string }
+  context_revision: number
+  pending_request: { id: string; phase: string; question: string; options: string[] } | null
+  budget: {
+    token_budget: number
+    summary_reserve: number
+    turn_max_output_tokens: number
+    phase_timeout_seconds: number
+    used_tokens: number
+  }
+  state: DiscussionState | null
+  advisory: { suggest?: boolean; reason?: string; source?: string } | null
+  final: DiscussionFinal | null
+  termination_reason: string | null
+  pause_reason: string | null
+  error: string | null
+  human_decision: {
+    verdict: 'adopt' | 'hold' | 'rediscuss'
+    note: string
+    decided_at: string
+    decided_by: string
+  } | null
+  parent_run_id: string | null
+  created_at: string
+  updated_at: string
 }
 
 /** The `live` object of a Live message (CTR-0227). */
@@ -356,6 +453,8 @@ export interface SessionSummary {
    * the CTR-0110 `session_title` WebSocket push or on the next list refresh.
    */
   auto_title_pending?: boolean
+  /** The chat holds an AI discussion (PRP-0232, CTR-0016): the sidebar shows a Discussion tag. */
+  has_discussion?: boolean
   /**
    * Non-fatal import notices (CTR-0015 v1.17). Present on an imported session
    * summary when some attachment was carried with a caveat or skipped; empty

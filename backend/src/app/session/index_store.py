@@ -137,6 +137,8 @@ def read_session_metadata(path: Path) -> dict[str, Any] | None:
         # Auto Session Title pending state (PRP-0077, CTR-0109): drives the
         # sidebar spinner until the background title task finalizes.
         "auto_title_pending": bool(data.get("auto_title_pending", False)),
+        # AI Discussion chat (PRP-0232, CTR-0014): drives the sidebar's Discussion tag.
+        "has_discussion": bool(data.get("discussion_runs")),
     }
 
 

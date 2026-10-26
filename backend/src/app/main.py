@@ -556,6 +556,12 @@ app.include_router(memory_editor_router)
 # Session management API (CTR-0015)
 app.include_router(session_router)
 
+# AI Discussion API and phase stream (CTR-0272 / CTR-0273, PRP-0232, UDR-0215). Always mounted:
+# a discussion needs a chat model like any chat, and every endpoint consumes CTR-0083.
+from app.discussion.router import router as discussion_router
+
+app.include_router(discussion_router)
+
 # Prompt Templates API (CTR-0047)
 app.include_router(templates_router)
 

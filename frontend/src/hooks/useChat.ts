@@ -1536,6 +1536,22 @@ export function useChat(options?: UseChatOptions) {
     setMessages([])
   }, [])
 
+  /**
+   * AI Discussion messages (CTR-0276, PRP-0232). The backend writes them; the SPA only shows
+   * them, so this updates the list in place by id and never saves anything (UDR-0215 D4).
+   */
+  const upsertMessage = useCallback((id: string, update: (current: ChatMessage | undefined) => ChatMessage | null) => {
+    setMessages((prev) => {
+      const index = prev.findIndex((m) => m.id === id)
+      const next = update(index === -1 ? undefined : prev[index])
+      if (next === null) return index === -1 ? prev : prev.filter((m) => m.id !== id)
+      if (index === -1) return [...prev, next]
+      const copy = prev.slice()
+      copy[index] = next
+      return copy
+    })
+  }, [])
+
   return {
     messages,
     isLoading,
@@ -1550,6 +1566,7 @@ export function useChat(options?: UseChatOptions) {
     retryLostTurn,
     stopGeneration,
     clearMessages,
+    upsertMessage,
     editUserMessage,
     regenerateAssistantMessage,
     editAssistantMessage,

@@ -165,8 +165,14 @@ class FileHistoryProvider(HistoryProvider):
         # Strip frontend-only fields before Message.from_dict(); MAF Message doesn't accept them
         # `source` / `live` mark a Live voice turn (CTR-0227, PRP-0188); the model sees
         # only its text, like any other message.
-        _frontend_keys = {"tool_calls", "usage", "activity_log", "source", "live"}
-        messages = [Message.from_dict({k: v for k, v in m.items() if k not in _frontend_keys}) for m in raw_messages]
+        # `discussion` marks a message written by an AI discussion run (CTR-0271, PRP-0232): the
+        # model sees it as text labelled with its speaker, so a later ordinary turn can refer to
+        # the discussion (UDR-0215 D11) without mistaking the participants for itself.
+        _frontend_keys = {"tool_calls", "usage", "activity_log", "source", "live", "discussion"}
+        messages = [
+            Message.from_dict({k: v for k, v in self._project_discussion(m).items() if k not in _frontend_keys})
+            for m in raw_messages
+        ]
         self._resolve_image_contents(messages, raw_messages)
         # Reasoning is a per-turn scratchpad persisted only for frontend display
         # (UDR-0001); replaying it to the model as input history is never valid,
@@ -185,6 +191,25 @@ class FileHistoryProvider(HistoryProvider):
         messages = self._strip_reasoning_contents(messages)
         context.extend_messages(self, messages)
         logger.info("Loaded %d messages from session %s", len(messages), thread_id)
+
+    @staticmethod
+    def _project_discussion(raw: dict[str, Any]) -> dict[str, Any]:
+        """A discussion speaker's message with its speaker and phase in front (PRP-0232).
+
+        Returns ``raw`` itself for every other message; never mutates the stored record.
+        """
+        meta = raw.get("discussion")
+        if not isinstance(meta, dict) or raw.get("role") != "assistant":
+            return raw
+        phase = str(meta.get("phase") or "")
+        label = phase.replace("round:", "Round ").replace("ask:", "Answer ").replace(":", " ").title()
+        prefix = f"[AI discussion -- {meta.get('display_name') or meta.get('speaker_id') or 'participant'}, {label}] "
+        contents = [dict(c) if isinstance(c, dict) else c for c in raw.get("contents") or []]
+        for content in contents:
+            if isinstance(content, dict) and content.get("type") in ("text", "text_content"):
+                content["text"] = prefix + str(content.get("text") or "")
+                break
+        return {**raw, "contents": contents}
 
     @staticmethod
     def _strip_reasoning_contents(messages: list[Message]) -> list[Message]:

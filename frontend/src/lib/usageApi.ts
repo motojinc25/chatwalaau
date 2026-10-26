@@ -73,6 +73,8 @@ export const LANES = [
   'openai-api',
   // Agent runs started from a Live voice conversation (PRP-0188, UDR-0170 D10).
   'live',
+  // AI Discussion participant / moderator turns and advisory calls (PRP-0232, UDR-0215 D9).
+  'discussion',
   'helper',
 ] as const
 

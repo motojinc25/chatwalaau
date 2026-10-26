@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { ChatPanel } from '@/components/ChatPanel'
 import { CronManager } from '@/components/CronManager'
 import { DeclarativeAgentManager } from '@/components/DeclarativeAgentManager'
+import { DiscussionSetupDialog } from '@/components/DiscussionSetupDialog'
 import { FolderBadge, FolderGlow } from '@/components/FolderCue'
 import { PipelineManager } from '@/components/PipelineManager'
 import { PrivacyScreenToggle } from '@/components/PrivacyScreenToggle'
@@ -166,6 +167,11 @@ export function ChatPage() {
   // always mounted, so the launcher needs no probe.
   const [usageOpen, setUsageOpen] = useState(false)
 
+  // New AI discussion (CTR-0276, PRP-0232, operator Q6): opened from the sidebar's New menu.
+  // The dialog creates the discussion chat on the server; the page then opens it, and the
+  // panel starts its opening phase.
+  const [discussionSetupOpen, setDiscussionSetupOpen] = useState(false)
+
   const handleStreamComplete = useCallback(() => {
     // Temporary chats are never listed and never exposed in the URL (UDR-0052
     // D5): skip the history refresh + ?session= navigation entirely.
@@ -237,6 +243,15 @@ export function ChatPage() {
     createSession()
   }, [temp, createSession])
 
+  const handleDiscussionCreated = useCallback(
+    async (createdThreadId: string) => {
+      temp.exit()
+      await refreshSessions()
+      await switchSession(createdThreadId)
+    },
+    [temp, refreshSessions, switchSession],
+  )
+
   // "New chat in folder" (PRP-0196). The menu item is disabled during a Temporary Chat
   // (UDR-0178 D8), so this never has to exit one.
   const handleCreateInFolder = useCallback(
@@ -272,6 +287,7 @@ export function ChatPage() {
       onArchive={archiveSession}
       onPin={pinSession}
       onCreate={handleCreate}
+      onCreateDiscussion={() => setDiscussionSetupOpen(true)}
       onCreateInFolder={handleCreateInFolder}
       temporaryActive={temp.isTemporary}
       revealFolderRequest={revealFolderRequest}
@@ -441,6 +457,8 @@ export function ChatPage() {
                 temporary={temp.isTemporary}
                 // Live voice is offered on the full-page chat only (PRP-0188, Q3).
                 liveCapable
+                // AI Discussion controls: the full-page chat only (PRP-0232 2.7).
+                discussionCapable
               />
             )}
           </div>
@@ -457,6 +475,11 @@ export function ChatPage() {
             every conditional, so no layout state can unmount its open listener
             (UDR-0115 D1, UDR-0158 D7). */}
           <RunTargetSheet />
+          <DiscussionSetupDialog
+            open={discussionSetupOpen}
+            onOpenChange={setDiscussionSetupOpen}
+            onCreated={(id) => void handleDiscussionCreated(id)}
+          />
         </div>
       </WorkspaceLinkProvider>
     </ChatSurfaceTierContext.Provider>
