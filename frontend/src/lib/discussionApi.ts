@@ -50,6 +50,15 @@ export interface CreateDiscussionRequest {
   folder_id?: string | null
 }
 
+/** Continue discussion (PRP-0233): omitted fields keep the server defaults (1 round, opening
+ *  skipped when a conclusion is carried, the same seats). */
+export interface ContinueDiscussionRequest {
+  focus: string
+  rounds?: number
+  skip_opening?: boolean
+  participants?: SeatRequest[]
+}
+
 /** A stored message as the input endpoint echoes it (CTR-0014 shape + `discussion`). */
 export interface StoredDiscussionMessage {
   message_id: string
@@ -121,10 +130,10 @@ export const discussionApi = {
       method: 'POST',
       body: JSON.stringify({ verdict, note }),
     }),
-  continueRun: (threadId: string, runId: string, focus = '') =>
+  continueRun: (threadId: string, runId: string, body: ContinueDiscussionRequest) =>
     call<{ run: DiscussionRun; messages: StoredDiscussionMessage[] }>(`${base(threadId, runId)}/continue`, {
       method: 'POST',
-      body: JSON.stringify({ focus }),
+      body: JSON.stringify(body),
     }),
 }
 

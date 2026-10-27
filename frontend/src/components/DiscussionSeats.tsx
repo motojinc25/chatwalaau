@@ -1,0 +1,215 @@
+// The seat editor of the AI discussion dialogs (CTR-0276): the New AI discussion dialog (PRP-0232)
+// and the Continue dialog (PRP-0233, UDR-0216 D4) use the same component, so a seat follows the same
+// rules in both: a role seat has a model and a reasoning effort, a Prompt agent seat uses the agent's own.
+import { Plus, Trash2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { speakerColor } from '@/components/DiscussionParts'
+import { Button } from '@/components/ui/button'
+import { type DiscussionOptions, discussionApi, type SeatRequest } from '@/lib/discussionApi'
+import { cn } from '@/lib/utils'
+import type { DiscussionParticipant } from '@/types/chat'
+
+export interface PromptAgentRow {
+  id: string
+  name: string
+  display_name?: string
+  source: 'core' | 'custom'
+  loaded: boolean
+  error?: string | null
+  warnings?: string[]
+}
+
+export interface Seat {
+  key: string
+  /** `preset:<id>` or `agent:<id>` */
+  choice: string
+  /** A role seat's model and reasoning ('' = default); an agent seat uses the agent's own. */
+  model: string
+  effort: string
+}
+
+/** The discussion options and the usable Prompt agents, loaded while a dialog is open. */
+export function useSeatOptions(open: boolean) {
+  const [options, setOptions] = useState<DiscussionOptions | null>(null)
+  const [agents, setAgents] = useState<PromptAgentRow[]>([])
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setError(null)
+    Promise.all([
+      discussionApi.options(),
+      fetch('/api/agents')
+        .then((r) => (r.ok ? r.json() : { agents: [] }))
+        .catch(() => ({ agents: [] })),
+    ])
+      .then(([opts, inventory]) => {
+        if (cancelled) return
+        setOptions(opts)
+        setAgents(
+          ((inventory.agents ?? []) as PromptAgentRow[]).filter(
+            (a) => a.source === 'custom' && a.loaded && !a.error && !(a.warnings && a.warnings.length > 0),
+          ),
+        )
+      })
+      .catch((err) => !cancelled && setError(err instanceof Error ? err.message : 'Could not load the options'))
+    return () => {
+      cancelled = true
+    }
+  }, [open])
+
+  return { options, agents, error }
+}
+
+/** The seats of a run, as the editor shows them (a continuation starts from the source run's seats). */
+export function seatsFromParticipants(participants: DiscussionParticipant[]): Seat[] {
+  return participants.map((p, i) =>
+    p.source === 'agent' && p.agent_id
+      ? { key: `s${i}`, choice: `agent:${p.agent_id}`, model: '', effort: '' }
+      : { key: `s${i}`, choice: `preset:${p.preset ?? p.role}`, model: p.model ?? '', effort: p.effort ?? '' },
+  )
+}
+
+/** The request body for the seats. */
+export function seatRequests(seats: Seat[]): SeatRequest[] {
+  return seats.map((s) => {
+    const [kind, id] = s.choice.split(/:(.*)/s)
+    // A Prompt agent seat sends neither: the server uses the agent's own model and reasoning.
+    if (kind === 'agent') return { kind: 'agent', agent_id: id }
+    return { kind: 'preset', preset: id, model: s.model || undefined, effort: s.effort || undefined }
+  })
+}
+
+interface EditorProps {
+  options: DiscussionOptions | null
+  agents: PromptAgentRow[]
+  seats: Seat[]
+  onChange: (seats: Seat[]) => void
+}
+
+export function SeatEditor({ options, agents, seats, onChange }: EditorProps) {
+  const maxSeats = options?.limits.max_participants ?? 4
+
+  const updateSeat = (key: string, patch: Partial<Seat>) =>
+    onChange(seats.map((s) => (s.key === key ? { ...s, ...patch } : s)))
+
+  /** Reasoning efforts the seat's model offers (empty: the model has no reasoning setting). */
+  const effortsOf = (seat: Seat): string[] => options?.reasoning?.[seat.model || options.default_model]?.allowed ?? []
+  /** What "Default" means for a role seat: the role default when the model offers it. */
+  const defaultEffortOf = (seat: Seat): string => {
+    const allowed = effortsOf(seat)
+    const roleDefault = options?.role_default_effort ?? 'low'
+    if (allowed.includes(roleDefault)) return roleDefault
+    return options?.reasoning?.[seat.model || options.default_model]?.default ?? ''
+  }
+
+  return (
+    <div className="space-y-1.5 text-sm">
+      <div className="flex items-center justify-between">
+        <span className="font-medium">Participants</span>
+        <span className="text-xs text-muted-foreground">
+          {seats.length} of at most {maxSeats}
+        </span>
+      </div>
+      {seats.map((seat, index) => {
+        const preset = seat.choice.startsWith('preset:')
+          ? options?.presets.find((p) => `preset:${p.id}` === seat.choice)
+          : undefined
+        return (
+          <div key={seat.key} className="flex flex-wrap items-center gap-2 rounded-md border px-2 py-1.5">
+            <span
+              className={cn('inline-block h-2 w-2 shrink-0 rounded-full', speakerColor(preset?.color).dot)}
+              aria-hidden="true"
+            />
+            <select
+              aria-label={`Participant ${index + 1}`}
+              className="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 text-sm"
+              value={seat.choice}
+              onChange={(e) =>
+                updateSeat(seat.key, {
+                  choice: e.target.value,
+                  ...(e.target.value.startsWith('agent:') ? { model: '', effort: '' } : {}),
+                })
+              }>
+              <optgroup label="Roles">
+                {options?.presets.map((p) => (
+                  <option key={p.id} value={`preset:${p.id}`}>
+                    {p.display_name}
+                  </option>
+                ))}
+              </optgroup>
+              {agents.length > 0 && (
+                <optgroup label="Prompt agents">
+                  {agents.map((a) => (
+                    <option key={a.id} value={`agent:${a.id}`}>
+                      {a.display_name || a.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+            {preset ? (
+              <>
+                <select
+                  aria-label={`Model of participant ${index + 1}`}
+                  className="h-8 w-40 min-w-0 rounded-md border bg-background px-2 text-sm"
+                  value={seat.model}
+                  onChange={(e) => {
+                    const model = e.target.value
+                    const allowed = options?.reasoning?.[model || options.default_model]?.allowed ?? []
+                    updateSeat(seat.key, { model, ...(allowed.includes(seat.effort) ? {} : { effort: '' }) })
+                  }}>
+                  <option value="">Default model</option>
+                  {options?.models.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label={`Reasoning of participant ${index + 1}`}
+                  className="h-8 w-32 min-w-0 rounded-md border bg-background px-2 text-sm"
+                  value={seat.effort}
+                  disabled={effortsOf(seat).length === 0}
+                  title={effortsOf(seat).length === 0 ? 'This model has no reasoning setting' : 'Reasoning effort'}
+                  onChange={(e) => updateSeat(seat.key, { effort: e.target.value })}>
+                  <option value="">
+                    {effortsOf(seat).length === 0 ? 'No reasoning' : `Default (${defaultEffortOf(seat)})`}
+                  </option>
+                  {effortsOf(seat).map((level) => (
+                    <option key={level} value={level}>
+                      {level}
+                    </option>
+                  ))}
+                </select>
+              </>
+            ) : (
+              <span className="text-xs text-muted-foreground">Uses the agent&apos;s model and reasoning</span>
+            )}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              disabled={seats.length <= 2}
+              onClick={() => onChange(seats.filter((s) => s.key !== seat.key))}
+              aria-label={`Remove participant ${index + 1}`}>
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+            {preset && <p className="basis-full pl-4 text-xs text-muted-foreground">{preset.charter}</p>}
+          </div>
+        )
+      })}
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={seats.length >= maxSeats || !options}
+        onClick={() =>
+          onChange([...seats, { key: `s${Date.now()}`, choice: 'preset:user_advocate', model: '', effort: '' }])
+        }>
+        <Plus className="mr-1 h-3.5 w-3.5" />
+        Add participant
+      </Button>
+    </div>
+  )
+}

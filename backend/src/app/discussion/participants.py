@@ -266,6 +266,13 @@ def _brief_block(run: dict[str, Any]) -> str:
         lines.append(f"Wanted outcome: {brief['goal'].strip()}")
     if (brief.get("constraints") or "").strip():
         lines.append(f"Constraints and assumptions: {brief['constraints'].strip()}")
+    focus = str(run.get("focus") or "").strip()
+    if focus:
+        # PRP-0233 (UDR-0216 D2): the continuation's focus ranks above the carried conclusion and the brief.
+        lines.append(
+            "Focus of this continuation (highest priority; where it conflicts with the previous "
+            f"conclusion or the brief above, the focus wins): {focus}"
+        )
     inputs = [h for h in run.get("human_inputs") or [] if (h.get("text") or "").strip() and h.get("action") != "ask"]
     if inputs:
         lines.append("What the person added (newest last; the newest wins on any conflict):")
@@ -288,6 +295,25 @@ def _state_block(state: dict[str, Any] | None) -> str:
     return "\n\n".join(parts)
 
 
+def _carried_sections(run: dict[str, Any]) -> list[str]:
+    """The previous run's conclusion, in every turn of a continuation (UDR-0216 D1)."""
+    carried = _state_block(run.get("carried"))
+    return [f"The previous discussion's conclusion (carried over):\n{carried}"] if carried else []
+
+
+def _state_is_carried(run: dict[str, Any]) -> bool:
+    """True while this run's state is still the carried seed (no moderator summary of its own yet)."""
+    carried = run.get("carried")
+    state = run.get("state")
+    return (
+        bool(carried)
+        and isinstance(state, dict)
+        and all(
+            list(state.get(key) or []) == list(carried.get(key) or []) for key in ("common", "conflicts", "missing")
+        )
+    )
+
+
 def _log_block(entries: list[dict[str, str]]) -> str:
     if not entries:
         return "<discussion_log>\n(nothing yet)\n</discussion_log>"
@@ -305,6 +331,12 @@ def participant_task(phase: str, run: dict[str, Any], question: str | None = Non
         return f"The person asks you directly: {question or ''}\nAnswer that question from your role."
     n = schema.phase_round(phase) or 0
     total = run.get("rounds") or n
+    if n == 1 and run.get("skip_opening"):
+        return (
+            f"This is round 1 of {total} of a continued discussion. Start from the previous "
+            "conclusion and the focus: improve or correct it from your role, give reasons, and name "
+            "what remains. Do not restate what was already agreed."
+        )
     return (
         f"This is round {n} of {total}. Consider the other views and what the person added. Do not "
         "restate what was already said: improve or correct the options, give reasons, and name the "
@@ -326,8 +358,10 @@ def participant_messages(
         f"{RULES}\n\nYour id: {participant['id']}\nYour role: {participant['display_name']}\n"
         f"Your remit: {participant['charter']}"
     )
-    sections = [_brief_block(run)]
-    state = _state_block(run.get("state")) if phase != schema.OPENING else ""
+    sections = [_brief_block(run), *_carried_sections(run)]
+    # The opening hides this run's moderator state (D7); in a continuation the carried
+    # conclusion above is the same for every seat, so the snapshot stays one (UDR-0216 D1).
+    state = _state_block(run.get("state")) if phase != schema.OPENING and not _state_is_carried(run) else ""
     if state:
         sections.append(f"The moderator's summary so far:\n{state}")
     sections.append(_log_block(log))
@@ -373,8 +407,8 @@ FINAL_SCHEMA: dict[str, Any] = {
 
 
 def moderator_messages(*, run: dict[str, Any], log: list[dict[str, str]], final: bool) -> list[tuple[str, str]]:
-    sections = [_brief_block(run)]
-    state = _state_block(run.get("state"))
+    sections = [_brief_block(run), *_carried_sections(run)]
+    state = "" if _state_is_carried(run) else _state_block(run.get("state"))
     if state:
         sections.append(f"Your previous summary:\n{state}")
     sections.append(_log_block(log))

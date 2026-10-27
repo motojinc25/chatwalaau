@@ -3,6 +3,7 @@
 // person's decision is shown apart from the AI's recommendation (UDR-0215 D10).
 import { Check, CircleHelp, Lightbulb, Loader2, Pause, Play, Repeat, Square, Users, X } from 'lucide-react'
 import { useState } from 'react'
+import { DiscussionContinueDialog } from '@/components/DiscussionContinueDialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import type { DiscussionController } from '@/hooks/useDiscussion'
@@ -39,7 +40,13 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
   const run = discussion.latest
   const [askTarget, setAskTarget] = useState('')
   const [askText, setAskText] = useState('')
+  const [continueOpen, setContinueOpen] = useState(false)
   if (!run) return null
+
+  // Hold and Re-discuss lead straight to the Continue dialog (PRP-0233, UDR-0216 D5).
+  const decideThenContinue = async (verdict: 'hold' | 'rediscuss') => {
+    if (await discussion.decide(verdict)) setContinueOpen(true)
+  }
 
   const status = discussion.streaming && run.status !== 'summarizing' ? 'running' : run.status
   const used = run.budget.used_tokens
@@ -242,7 +249,7 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
                   size="sm"
                   variant="outline"
                   className="h-7"
-                  onClick={() => void discussion.decide('hold')}
+                  onClick={() => void decideThenContinue('hold')}
                   disabled={disabled}>
                   Hold
                 </Button>
@@ -250,7 +257,7 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
                   size="sm"
                   variant="outline"
                   className="h-7"
-                  onClick={() => void discussion.decide('rediscuss')}
+                  onClick={() => void decideThenContinue('rediscuss')}
                   disabled={disabled}>
                   Re-discuss
                 </Button>
@@ -262,17 +269,22 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
 
       {!readOnly && !discussion.streaming && !discussion.open && (
         <div className="mt-2 flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7"
-            onClick={() => void discussion.continueDiscussion()}
-            disabled={disabled}>
+          <Button size="sm" variant="outline" className="h-7" onClick={() => setContinueOpen(true)} disabled={disabled}>
             <Repeat className="mr-1 h-3 w-3" />
             Continue discussion
           </Button>
-          <span className="text-xs text-muted-foreground">Starts a new discussion with the same participants.</span>
+          <span className="text-xs text-muted-foreground">Starts a new discussion from this conclusion.</span>
         </div>
+      )}
+
+      {!readOnly && (
+        <DiscussionContinueDialog
+          open={continueOpen}
+          onOpenChange={setContinueOpen}
+          run={run}
+          error={discussion.error}
+          onContinue={(body) => discussion.continueDiscussion(body)}
+        />
       )}
 
       {readOnly && discussion.open && (

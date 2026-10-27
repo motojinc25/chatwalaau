@@ -370,6 +370,11 @@ export interface DiscussionRun {
     decided_by: string
   } | null
   parent_run_id: string | null
+  /** A continuation (PRP-0233): the previous conclusion every turn sees, the focus, and whether
+   *  the run started with the mutual review. Absent on first runs and on v0.198.0 runs. */
+  carried?: DiscussionState | null
+  focus?: string
+  skip_opening?: boolean
   created_at: string
   updated_at: string
 }

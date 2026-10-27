@@ -120,14 +120,21 @@ def new_run(
     initiated_by: str,
     parent_run_id: str | None = None,
     seed_state: dict[str, Any] | None = None,
+    focus: str = "",
+    skip_opening: bool = False,
 ) -> dict[str, Any]:
-    """A run record in status ``created`` (CTR-0271)."""
+    """A run record in status ``created`` (CTR-0271).
+
+    A continuation (PRP-0233, UDR-0216) keeps the seed twice: ``state`` is the moderator's
+    working state, which round summaries replace, and ``carried`` is the previous conclusion,
+    which every turn of the run sees. ``skip_opening`` creates the run at ``round:1``.
+    """
     now = now_iso()
-    return {
+    run: dict[str, Any] = {
         "id": new_run_id(),
         "flow_version": FLOW_VERSION,
         "status": CREATED,
-        "phase": OPENING,
+        "phase": round_phase(1) if skip_opening else OPENING,
         "round": 0,
         "rounds": rounds,
         "brief": dict(brief),
@@ -152,6 +159,11 @@ def new_run(
         "created_at": now,
         "updated_at": now,
     }
+    if parent_run_id is not None:
+        run["carried"] = dict(seed_state) if seed_state else None
+        run["focus"] = focus
+        run["skip_opening"] = skip_opening
+    return run
 
 
 def runs_of(data: dict[str, Any]) -> list[dict[str, Any]]:

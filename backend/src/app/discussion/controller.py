@@ -229,8 +229,29 @@ def _brief_text(run: dict[str, Any], *, continued: bool = False) -> str:
         lines.append(f"Wanted outcome: {brief['goal']}")
     if brief.get("constraints"):
         lines.append(f"Constraints: {brief['constraints']}")
-    lines.append(f"Participants: {names} -- Rounds: {run['rounds']}")
+    tail = ""
+    if continued:
+        if run.get("focus"):
+            lines.append(f"Focus: {run['focus']}")
+        carried = run.get("carried")
+        if carried:
+            counts = (
+                _count(carried.get("common"), "common point"),
+                _count(carried.get("conflicts"), "conflict"),
+                _count(carried.get("missing"), "open issue"),
+            )
+            lines.append(f"Carried over: {', '.join(counts)}")
+        else:
+            lines.append("Carried over: nothing (the previous run left no conclusion)")
+        if run.get("skip_opening"):
+            tail = " -- Opening skipped"
+    lines.append(f"Participants: {names} -- Rounds: {run['rounds']}{tail}")
     return "\n".join(lines)
+
+
+def _count(items: Any, noun: str) -> str:
+    n = len(items) if isinstance(items, list) else 0
+    return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
 # ---------------------------------------------------------------------------
@@ -460,18 +481,40 @@ def record_decision(thread_id: str, run_id: str, *, verdict: str, note: str, act
     return schema.public_run(run)
 
 
+#: Rounds of a continuation when the request names none (UDR-0216 D4).
+CONTINUE_DEFAULT_ROUNDS = 1
+
+
 def continue_discussion(
-    thread_id: str, run_id: str, *, focus: str, rounds: int | None, actor: str
+    thread_id: str,
+    run_id: str,
+    *,
+    focus: str,
+    rounds: int | None,
+    actor: str,
+    skip_opening: bool | None = None,
+    seat_requests: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """A NEW run seeded with this run's final state (D11). Never from an ordinary post.
 
-    Returns the new run and its stored brief message.
+    PRP-0233 (UDR-0216): the focus is the run's own field, the previous conclusion is carried
+    into every turn, the run is 1 round unless asked otherwise, it starts at round 1 when a
+    conclusion is carried (unless ``skip_opening`` is False), and ``seat_requests`` may replace
+    the seats under the create rules. Returns the new run and its stored brief message.
     """
-    default_rounds, max_rounds = round_limits()
-    rounds = default_rounds if rounds is None else rounds
+    from app.core.config import settings
+
+    _default_rounds, max_rounds = round_limits()
+    rounds = min(CONTINUE_DEFAULT_ROUNDS, max_rounds) if rounds is None else rounds
     if not 1 <= rounds <= max_rounds:
         raise DiscussionError("invalid_request", f"rounds must be between 1 and {max_rounds}", 422)
     focus = (focus or "").strip()
+    new_seats: list[dict[str, Any]] | None = None
+    if seat_requests is not None:
+        try:
+            new_seats = seats.resolve_seats(seat_requests, max_seats=int(settings.discussion_max_participants))
+        except seats.SeatError as exc:
+            raise DiscussionError("invalid_request", str(exc), 422) from exc
     box: dict[str, Any] = {}
 
     def mutate(data: dict[str, Any]) -> bool | None:
@@ -498,29 +541,27 @@ def continue_discussion(
                 "questions_for_human": [],
                 "suggest_finish": {"value": False, "reason": ""},
             }
+        carried = seed is not None and any(seed[key] for key in ("common", "conflicts", "missing"))
+        skip = carried if skip_opening is None else bool(skip_opening)
+        if skip and not carried:
+            box["error"] = DiscussionError(
+                "invalid_request", "there is no previous conclusion to start the mutual review from", 422
+            )
+            return False
         run = schema.new_run(
             brief=dict(source["brief"]),
-            participants=[dict(p) for p in source["participants"]],
+            participants=new_seats if new_seats is not None else [dict(p) for p in source["participants"]],
             moderator=dict(source["moderator"]),
             rounds=rounds,
             budget=budget_from_settings(),
             initiated_by=actor,
             parent_run_id=source["id"],
-            seed_state=seed,
+            seed_state=seed if carried else None,
+            focus=focus,
+            skip_opening=skip,
         )
-        if focus:
-            run["human_inputs"].append(
-                {
-                    "request_id": "continue",
-                    "action": schema.ACTION_ANSWER,
-                    "text": focus,
-                    "at": schema.now_iso(),
-                    "by": actor,
-                    "revision": 0,
-                }
-            )
         schema.runs_of(data).append(run)
-        text = _brief_text(run, continued=True) + (f"\nFocus: {focus}" if focus else "")
+        text = _brief_text(run, continued=True)
         brief = _human_message(run, text=text, phase="brief", kind=schema.KIND_BRIEF, msg_id=f"{run['id']}:brief")
         _append_messages(data, [brief])
         box["run"] = dict(run)

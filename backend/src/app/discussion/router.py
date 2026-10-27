@@ -62,7 +62,10 @@ class DecisionBody(BaseModel):
 
 class ContinueBody(BaseModel):
     focus: str = Field("", max_length=4000)
+    # Omitted: 1 round; the opening is skipped when a conclusion is carried; the seats are kept (UDR-0216).
     rounds: int | None = Field(None, ge=1, le=10)
+    skip_opening: bool | None = None
+    participants: list[SeatBody] | None = Field(None, min_length=2, max_length=6)
 
 
 def _error(exc: Exception) -> HTTPException:
@@ -191,6 +194,8 @@ async def continue_discussion(
         focus=body.focus,
         rounds=body.rounds,
         actor=identity.subject,
+        skip_opening=body.skip_opening,
+        seat_requests=None if body.participants is None else [s.model_dump() for s in body.participants],
     )
     return {"run": run, "messages": messages}
 

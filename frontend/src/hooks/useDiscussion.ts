@@ -6,6 +6,7 @@
 // (D6) -- nothing continues in the background and nothing is retried automatically.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  type ContinueDiscussionRequest,
   DiscussionApiError,
   type DiscussionStreamEvent,
   discussionApi,
@@ -282,10 +283,10 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
   )
 
   const continueDiscussion = useCallback(
-    (focus = '') =>
+    (body: ContinueDiscussionRequest) =>
       act(async () => {
         if (!threadId || !latest) return
-        const res = await discussionApi.continueRun(threadId, latest.id, focus)
+        const res = await discussionApi.continueRun(threadId, latest.id, body)
         replaceRun(res.run)
         // The brief of the new run is a saved message; show it, then the run starts itself.
         for (const message of res.messages) upsertMessage(message.message_id, () => storedToChat(message))
