@@ -5,7 +5,7 @@ import { Plus, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { speakerColor } from '@/components/DiscussionParts'
 import { Button } from '@/components/ui/button'
-import { type DiscussionOptions, discussionApi, type SeatRequest } from '@/lib/discussionApi'
+import { type DiscussionOptions, type DiscussionToolId, discussionApi, type SeatRequest } from '@/lib/discussionApi'
 import { cn } from '@/lib/utils'
 import type { DiscussionParticipant } from '@/types/chat'
 
@@ -26,6 +26,8 @@ export interface Seat {
   /** A role seat's model and reasoning ('' = default); an agent seat uses the agent's own. */
   model: string
   effort: string
+  /** Research tools of the seat (PRP-0234, UDR-0217 D1). */
+  tools: DiscussionToolId[]
 }
 
 /** The discussion options and the usable Prompt agents, loaded while a dialog is open. */
@@ -66,19 +68,78 @@ export function useSeatOptions(open: boolean) {
 export function seatsFromParticipants(participants: DiscussionParticipant[]): Seat[] {
   return participants.map((p, i) =>
     p.source === 'agent' && p.agent_id
-      ? { key: `s${i}`, choice: `agent:${p.agent_id}`, model: '', effort: '' }
-      : { key: `s${i}`, choice: `preset:${p.preset ?? p.role}`, model: p.model ?? '', effort: p.effort ?? '' },
+      ? { key: `s${i}`, choice: `agent:${p.agent_id}`, model: '', effort: '', tools: toolsOf(p.tools) }
+      : {
+          key: `s${i}`,
+          choice: `preset:${p.preset ?? p.role}`,
+          model: p.model ?? '',
+          effort: p.effort ?? '',
+          tools: toolsOf(p.tools),
+        },
   )
 }
 
+const toolsOf = (tools: string[] | undefined): DiscussionToolId[] => (tools ?? []) as DiscussionToolId[]
+
+/** The seat's tools that its model can run (web search depends on the model). */
+export function usableTools(seat: Seat, options: DiscussionOptions | null): DiscussionToolId[] {
+  return seat.tools.filter((t) => toolUsable(t, seat, options))
+}
+
+function toolUsable(tool: DiscussionToolId, seat: Seat, options: DiscussionOptions | null): boolean {
+  const entry = options?.tools?.find((t) => t.id === tool)
+  if (!entry?.available) return false
+  if (tool !== 'web_search') return true
+  // An agent seat's model is the agent's own (unknown here); the server checks it on create.
+  if (seat.choice.startsWith('agent:')) return true
+  return (options?.web_search_models ?? []).includes(seat.model || (options?.default_model ?? ''))
+}
+
 /** The request body for the seats. */
-export function seatRequests(seats: Seat[]): SeatRequest[] {
+export function seatRequests(seats: Seat[], options: DiscussionOptions | null): SeatRequest[] {
   return seats.map((s) => {
     const [kind, id] = s.choice.split(/:(.*)/s)
-    // A Prompt agent seat sends neither: the server uses the agent's own model and reasoning.
-    if (kind === 'agent') return { kind: 'agent', agent_id: id }
-    return { kind: 'preset', preset: id, model: s.model || undefined, effort: s.effort || undefined }
+    // Only the tools the seat's model can run: a model change may have left web search behind.
+    const usable = usableTools(s, options)
+    const tools = usable.length > 0 ? usable : undefined
+    // A Prompt agent seat sends neither model nor effort: the server uses the agent's own.
+    if (kind === 'agent') return { kind: 'agent', agent_id: id, tools }
+    return { kind: 'preset', preset: id, model: s.model || undefined, effort: s.effort || undefined, tools }
   })
+}
+
+interface RunOptionProps {
+  auto: boolean
+  report: boolean
+  onAuto: (auto: boolean) => void
+  onReport: (report: boolean) => void
+}
+
+/** Auto mode and the full report (PRP-0234, UDR-0217 D4 / D5), the same in both dialogs. */
+export function RunOptionToggles({ auto, report, onAuto, onReport }: RunOptionProps) {
+  return (
+    <div className="space-y-1 text-sm">
+      <label className="flex items-start gap-2">
+        <input type="checkbox" className="mt-1" checked={auto} onChange={(e) => onAuto(e.target.checked)} />
+        <span>
+          Run the rounds without asking
+          <span className="block text-xs text-muted-foreground">
+            The opening, the rounds and the summary run one after another without waiting. A moderator suggestion to
+            summarize is only shown; Pause hands control back to you.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2">
+        <input type="checkbox" className="mt-1" checked={report} onChange={(e) => onReport(e.target.checked)} />
+        <span>
+          Write a full report with the summary
+          <span className="block text-xs text-muted-foreground">
+            Background, positions, disagreements, options and risks, after the summary card. One more model call.
+          </span>
+        </span>
+      </label>
+    </div>
+  )
 }
 
 interface EditorProps {
@@ -197,6 +258,38 @@ export function SeatEditor({ options, agents, seats, onChange }: EditorProps) {
               <Trash2 className="h-3.5 w-3.5" />
             </Button>
             {preset && <p className="basis-full pl-4 text-xs text-muted-foreground">{preset.charter}</p>}
+            {(options?.tools ?? []).some((t) => t.available) && (
+              <fieldset className="flex basis-full flex-wrap items-center gap-x-3 gap-y-1 pl-4 text-xs">
+                <legend className="sr-only">Tools of participant {index + 1}</legend>
+                <span className="text-muted-foreground">Tools:</span>
+                {(options?.tools ?? [])
+                  .filter((t) => t.available)
+                  .map((t) => {
+                    const usable = toolUsable(t.id, seat, options)
+                    return (
+                      <label
+                        key={t.id}
+                        className={cn('flex items-center gap-1', !usable && 'opacity-50')}
+                        title={usable ? undefined : "This participant's model has no web search"}>
+                        <input
+                          type="checkbox"
+                          aria-label={`${t.label} for participant ${index + 1}`}
+                          disabled={!usable}
+                          checked={usable && seat.tools.includes(t.id)}
+                          onChange={(e) =>
+                            updateSeat(seat.key, {
+                              tools: e.target.checked
+                                ? [...seat.tools.filter((x) => x !== t.id), t.id]
+                                : seat.tools.filter((x) => x !== t.id),
+                            })
+                          }
+                        />
+                        {t.label}
+                      </label>
+                    )
+                  })}
+              </fieldset>
+            )}
           </div>
         )
       })}
@@ -205,7 +298,10 @@ export function SeatEditor({ options, agents, seats, onChange }: EditorProps) {
         size="sm"
         disabled={seats.length >= maxSeats || !options}
         onClick={() =>
-          onChange([...seats, { key: `s${Date.now()}`, choice: 'preset:user_advocate', model: '', effort: '' }])
+          onChange([
+            ...seats,
+            { key: `s${Date.now()}`, choice: 'preset:user_advocate', model: '', effort: '', tools: [] },
+          ])
         }>
         <Plus className="mr-1 h-3.5 w-3.5" />
         Add participant

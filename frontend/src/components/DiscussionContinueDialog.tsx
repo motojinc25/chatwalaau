@@ -1,10 +1,12 @@
 // Continue the discussion (CTR-0276, PRP-0233, UDR-0216). A continuation starts from the previous
 // conclusion and changes something: the person gives a focus (required after "Summarize and finish"
 // or a decision, D5), the rounds (1 by default), whether to start with the mutual review (on when a
-// conclusion is carried) and the seats (the setup dialog's editor, D4).
+// conclusion is carried) and the seats (the setup dialog's editor, D4). PRP-0234: auto mode and the
+// full report, as in the setup dialog (the copied seats keep their research tools).
 import { Loader2, Repeat } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import {
+  RunOptionToggles,
   type Seat,
   SeatEditor,
   seatRequests,
@@ -66,6 +68,8 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
   const [skipOpening, setSkipOpening] = useState(true)
   const [seats, setSeats] = useState<Seat[]>(initialSeats)
   const [showCarried, setShowCarried] = useState(false)
+  const [auto, setAuto] = useState(false)
+  const [report, setReport] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   // A request error is shown only after this dialog's own submit, not an older one from the bar.
   const [submitted, setSubmitted] = useState(false)
@@ -77,6 +81,8 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
     setSkipOpening(hasCarried)
     setSeats(initialSeats)
     setShowCarried(false)
+    setAuto(false)
+    setReport(true)
     setSubmitted(false)
   }, [open, hasCarried, initialSeats])
 
@@ -96,8 +102,10 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
         focus: focus.trim(),
         rounds,
         skip_opening: hasCarried && skipOpening,
+        auto,
+        report,
         // Unchanged seats are not sent: the new run copies the source seats as they were.
-        ...(seatsChanged ? { participants: seatRequests(seats) } : {}),
+        ...(seatsChanged ? { participants: seatRequests(seats, options) } : {}),
       })
       if (ok) onOpenChange(false)
     } finally {
@@ -213,6 +221,7 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
             )}
           </div>
           <SeatEditor options={options} agents={agents} seats={seats} onChange={setSeats} />
+          <RunOptionToggles auto={auto} report={report} onAuto={setAuto} onReport={setReport} />
           {(optionsError || (submitted && error)) && (
             <p role="alert" className="text-xs text-red-600">
               {optionsError || error}

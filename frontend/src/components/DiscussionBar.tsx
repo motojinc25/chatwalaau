@@ -1,13 +1,15 @@
 // AI Discussion bar (CTR-0276, PRP-0232 2.7): status, round and budget of the chat's latest
 // run, the moderator's question while it waits, and only the actions its status allows. The
 // person's decision is shown apart from the AI's recommendation (UDR-0215 D10).
-import { Check, CircleHelp, Lightbulb, Loader2, Pause, Play, Repeat, Square, Users, X } from 'lucide-react'
+import { Check, CircleHelp, FastForward, Lightbulb, Loader2, Pause, Play, Repeat, Square, Users, X } from 'lucide-react'
 import { useState } from 'react'
 import { DiscussionContinueDialog } from '@/components/DiscussionContinueDialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import type { DiscussionController } from '@/hooks/useDiscussion'
 import { cn } from '@/lib/utils'
+
+const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'failed'])
 
 const STATUS_LABELS: Record<string, string> = {
   created: 'Starting',
@@ -34,6 +36,16 @@ const PAUSE_REASONS: Record<string, string> = {
   error: 'It stopped on an error.',
 }
 
+// Why auto mode handed control back (PRP-0234, UDR-0217 D4).
+const AUTO_STOPPED: Record<string, string> = {
+  paused: 'Auto mode stopped by Pause.',
+}
+
+const REPORT_SKIPPED: Record<string, string> = {
+  budget: 'The full report was skipped: the token budget could not hold it.',
+  failed: 'The full report could not be written.',
+}
+
 const VERDICT_LABELS = { adopt: 'Adopted', hold: 'On hold', rediscuss: 'To be discussed again' } as const
 
 export function DiscussionBar({ discussion, compact }: { discussion: DiscussionController; compact?: boolean }) {
@@ -58,6 +70,12 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
   const disabled = discussion.busy
   // A read-only surface (/popup, /sidebar) shows the state but offers no action (PRP-0232 2.7).
   const readOnly = Boolean(compact)
+  // In auto mode a finish suggestion is only shown; the rounds go on (PRP-0234, UDR-0217 D4).
+  const autoSuggestion = run.advisory?.suggest
+    ? { reason: run.advisory.reason }
+    : run.state?.suggest_finish?.value
+      ? { reason: run.state.suggest_finish.reason }
+      : null
 
   return (
     <section
@@ -87,6 +105,15 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
         <span className="text-xs text-muted-foreground">
           Round {Math.min(roundShown, run.rounds)} / {run.rounds}
         </span>
+        {run.auto && !TERMINAL_STATUSES.has(run.status) && (
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2 py-px text-[11px] font-medium text-blue-700 dark:text-blue-300"
+            title="The rounds run without asking; Pause hands control back"
+            data-testid="discussion-auto">
+            <FastForward className="h-3 w-3" aria-hidden="true" />
+            Auto
+          </span>
+        )}
         <div
           className="ml-auto flex items-center gap-2 text-[11px] text-muted-foreground"
           title={`${used.toLocaleString()} of ${total.toLocaleString()} tokens used; ${reserve.toLocaleString()} kept for the summary`}>
@@ -110,7 +137,11 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
       {!readOnly && (status === 'running' || status === 'summarizing') && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">
-            {status === 'summarizing' ? 'The moderator writes the summary.' : 'The participants are speaking.'}
+            {status === 'summarizing'
+              ? 'The moderator writes the summary.'
+              : run.auto
+                ? 'The rounds run without asking. Pause to step in.'
+                : 'The participants are speaking.'}
           </span>
           <Button
             size="sm"
@@ -121,6 +152,15 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
             <Pause className="mr-1 h-3 w-3" />
             Pause
           </Button>
+          {run.auto && status === 'running' && autoSuggestion && (
+            <p
+              className="flex w-full items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300"
+              data-testid="discussion-auto-suggestion">
+              <Lightbulb className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+              The moderator suggests summarizing{autoSuggestion.reason ? `: ${autoSuggestion.reason}` : '.'} Auto mode
+              keeps to the rounds; Pause to step in.
+            </p>
+          )}
         </div>
       )}
 
@@ -133,6 +173,11 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
               {run.pending_request.question}
             </span>
           </p>
+          {run.auto_stopped && AUTO_STOPPED[run.auto_stopped] && (
+            <p className="text-xs text-blue-700 dark:text-blue-300" data-testid="discussion-auto-stopped">
+              {AUTO_STOPPED[run.auto_stopped]}
+            </p>
+          )}
           {run.advisory?.suggest && (
             <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300">
               <Lightbulb className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
@@ -144,6 +189,16 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
             <Button size="sm" className="h-7" onClick={() => void discussion.respond('continue')} disabled={disabled}>
               <Play className="mr-1 h-3 w-3" />
               Continue
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7"
+              title="Continue, then run the remaining rounds without asking"
+              onClick={() => void discussion.respond('auto')}
+              disabled={disabled}>
+              <FastForward className="mr-1 h-3 w-3" />
+              Run the rest automatically
             </Button>
             <Button
               size="sm"
@@ -232,6 +287,7 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
           <p className="text-xs text-muted-foreground">
             Ended because {REASONS[run.termination_reason ?? ''] ?? 'it finished'}. The summary above is the AI&apos;s
             recommendation; the decision is yours.
+            {run.report_skipped && REPORT_SKIPPED[run.report_skipped] ? ` ${REPORT_SKIPPED[run.report_skipped]}` : ''}
           </p>
           {run.human_decision ? (
             <p className="flex items-center gap-1.5 text-sm" data-testid="discussion-decision">

@@ -1623,6 +1623,40 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
             "probability, the moderator suggests summarizing. It is only a suggestion."
         ),
     ),
+    # PRP-0234 (UDR-0217 D2 / D5): research tool bounds and the full report.
+    SettingDescriptor(
+        "discussion_tool_calls_per_turn",
+        "Tool calls per turn",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=10,
+        help=(
+            "How many research tool calls (web search, documents, ontology) one participant turn may make. "
+            "0 turns the tools off."
+        ),
+    ),
+    SettingDescriptor(
+        "discussion_tool_result_max_chars",
+        "Tool result length (characters)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=1_000,
+        max=50_000,
+        help="How much of one document or ontology result the participant sees; longer results are cut.",
+    ),
+    SettingDescriptor(
+        "discussion_report_max_output_tokens",
+        "Full report length (tokens)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=1_000,
+        max=32_000,
+        help="How long the full report written after the summary may be.",
+    ),
 )
 
 

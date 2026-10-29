@@ -28,8 +28,16 @@ export interface DiscussionOptions {
     summary_reserve: number
     turn_max_output_tokens: number
     phase_timeout_seconds: number
+    tool_calls_per_turn?: number
+    tool_result_max_chars?: number
+    report_max_output_tokens?: number
   }
+  /** Research tools a seat may have (PRP-0234); web search depends on the seat's model. */
+  tools?: { id: DiscussionToolId; label: string; available: boolean }[]
+  web_search_models?: string[]
 }
+
+export type DiscussionToolId = 'web_search' | 'rag_search' | 'ontology_query'
 
 /** A role seat carries its model and reasoning; an agent seat uses the agent's own (none sent). */
 export interface SeatRequest {
@@ -38,6 +46,8 @@ export interface SeatRequest {
   agent_id?: string
   model?: string
   effort?: string
+  /** Research tools for this seat (PRP-0234, UDR-0217 D1). */
+  tools?: DiscussionToolId[]
 }
 
 export interface CreateDiscussionRequest {
@@ -48,6 +58,10 @@ export interface CreateDiscussionRequest {
   rounds: number
   moderator_model?: string
   folder_id?: string | null
+  /** No wait after a round, the first check kept (PRP-0234). */
+  auto?: boolean
+  /** The full report after the summary (default true). */
+  report?: boolean
 }
 
 /** Continue discussion (PRP-0233): omitted fields keep the server defaults (1 round, opening
@@ -57,6 +71,8 @@ export interface ContinueDiscussionRequest {
   rounds?: number
   skip_opening?: boolean
   participants?: SeatRequest[]
+  auto?: boolean
+  report?: boolean
 }
 
 /** A stored message as the input endpoint echoes it (CTR-0014 shape + `discussion`). */
@@ -115,7 +131,12 @@ export const discussionApi = {
   input: (
     threadId: string,
     runId: string,
-    body: { request_id: string; action: 'answer' | 'continue' | 'ask' | 'finish'; text?: string; speaker_id?: string },
+    body: {
+      request_id: string
+      action: 'answer' | 'continue' | 'ask' | 'finish' | 'auto'
+      text?: string
+      speaker_id?: string
+    },
   ) =>
     call<{ run: DiscussionRun; already_applied: boolean; messages: StoredDiscussionMessage[] }>(
       `${base(threadId, runId)}/input`,

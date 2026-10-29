@@ -291,8 +291,10 @@ export interface DiscussionMessageMeta {
   phase: string
   round: number
   sequence?: number
-  kind: 'participant' | 'moderator' | 'human' | 'brief'
+  kind: 'participant' | 'moderator' | 'human' | 'brief' | 'report'
   color?: string
+  /** What a participant turn used (PRP-0234): tool name and query, never the result. */
+  tools?: { name: string; query: string }[]
   /** Render-time only: 'generating' while it streams, 'interrupted' when the stream stopped. */
   status: 'generating' | 'completed' | 'interrupted'
 }
@@ -319,6 +321,8 @@ export interface DiscussionParticipant {
   source: 'preset' | 'agent'
   preset?: string
   agent_id?: string
+  /** Research tools of the seat (PRP-0234); absent = none. */
+  tools?: string[]
 }
 
 export interface DiscussionState {
@@ -375,6 +379,12 @@ export interface DiscussionRun {
   carried?: DiscussionState | null
   focus?: string
   skip_opening?: boolean
+  /** PRP-0234: no wait after a round (the first check kept); why auto mode was turned off. */
+  auto?: boolean
+  auto_stopped?: 'paused' | null
+  /** PRP-0234: the full report after the summary; why it was not written. */
+  report?: boolean
+  report_skipped?: 'budget' | 'failed' | null
   created_at: string
   updated_at: string
 }

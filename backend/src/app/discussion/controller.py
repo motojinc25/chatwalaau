@@ -9,7 +9,10 @@ The code decides; the models only write (UDR-0215 D8). This module owns:
   announced, skipping speakers whose message is already stored (D4);
 - human input applied once by ``request_id`` (D5);
 - the budget, with the summary's share reserved (D9);
-- disconnect = interrupt: the phase lives in its request, a close pauses the run (D6).
+- disconnect = interrupt: the phase lives in its request, a close pauses the run (D6);
+- PRP-0234 (UDR-0217): research tools per seat (bounded, charged), auto mode (no wait after the
+  framing or a round, a finish suggestion is only shown; Pause hands control back) and the full
+  report after the stored final summary.
 
 Every write goes through ``update_session_json`` / ``create_session_json`` (UDR-0156 D1).
 """
@@ -120,6 +123,9 @@ def budget_from_settings() -> dict[str, int]:
         "turn_max_output_tokens": int(settings.discussion_turn_max_output_tokens),
         "phase_timeout_seconds": int(settings.discussion_phase_timeout_seconds),
         "advisory_threshold_percent": int(settings.discussion_advisory_threshold_percent),
+        "tool_calls_per_turn": int(settings.discussion_tool_calls_per_turn),
+        "tool_result_max_chars": int(settings.discussion_tool_result_max_chars),
+        "report_max_output_tokens": int(settings.discussion_report_max_output_tokens),
     }
 
 
@@ -275,6 +281,8 @@ def create_discussion(
     rounds: int | None,
     folder_id: str | None,
     initiated_by: str,
+    auto: bool = False,
+    report: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     """A new discussion chat with its first run (status ``created``)."""
     from app.core.config import settings
@@ -296,6 +304,8 @@ def create_discussion(
         rounds=rounds,
         budget=budget_from_settings(),
         initiated_by=initiated_by,
+        auto=auto,
+        report=report,
     )
     thread_id = str(uuid.uuid4())
     data = empty_session_record(thread_id)
@@ -414,6 +424,9 @@ def apply_input(
             run["termination_reason"] = schema.HUMAN_FINISHED
         else:
             _transition(run, schema.RUNNING)
+            if action == schema.ACTION_AUTO:
+                run["auto"] = True
+                run["auto_stopped"] = None
             if action == schema.ACTION_ASK:
                 run["asks"] = int(run.get("asks") or 0) + 1
                 run["ask"] = {"speaker_id": speaker_id, "text": text, "request_id": request_id, "n": run["asks"]}
@@ -446,10 +459,18 @@ def request_stop(thread_id: str, run_id: str, kind: str) -> dict[str, Any]:
                 raise DiscussionError("invalid_transition", f"a {status} discussion cannot be paused")
             _transition(run, schema.PAUSED)
             run["pause_reason"] = schema.PAUSE_USER
+            _auto_off(run, schema.AUTO_STOPPED_PAUSED)
         return None
 
     run, _ = _mutate_run(thread_id, run_id, change)
     return schema.public_run(run)
+
+
+def _auto_off(run: dict[str, Any], reason: str) -> None:
+    """Hand control back to the person (UDR-0217 D4): the run waits after its rounds again."""
+    if run.get("auto"):
+        run["auto"] = False
+        run["auto_stopped"] = reason
 
 
 def _cancel(run: dict[str, Any]) -> None:
@@ -494,6 +515,8 @@ def continue_discussion(
     actor: str,
     skip_opening: bool | None = None,
     seat_requests: list[dict[str, Any]] | None = None,
+    auto: bool = False,
+    report: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """A NEW run seeded with this run's final state (D11). Never from an ordinary post.
 
@@ -559,6 +582,8 @@ def continue_discussion(
             seed_state=seed if carried else None,
             focus=focus,
             skip_opening=skip,
+            auto=auto,
+            report=report,
         )
         schema.runs_of(data).append(run)
         text = _brief_text(run, continued=True)
@@ -726,9 +751,12 @@ class _Runner:
             if not task.done():
                 task.cancel()
 
-    def _check_budget(self, run: dict[str, Any], messages: list[tuple[str, str]], *, summary: bool) -> None:
+    def _check_budget(
+        self, run: dict[str, Any], messages: list[tuple[str, str]], *, summary: bool, allowance: int = 0
+    ) -> None:
         budget = run["budget"]
-        estimate = speakers.estimate_tokens(messages, int(budget["turn_max_output_tokens"]))
+        # ``allowance``: the tool results a tool-enabled turn may add (UDR-0217 D2).
+        estimate = speakers.estimate_tokens(messages, int(budget["turn_max_output_tokens"])) + allowance
         reserve = 0 if summary else int(budget["summary_reserve"])
         if not summary and int(budget.get("used_tokens") or 0) + estimate + reserve > int(budget["token_budget"]):
             raise _BudgetExhausted()
@@ -745,9 +773,18 @@ class _Runner:
         """One participant turn: announce, stream, COMMIT, then say it is committed (D4)."""
         from ag_ui.core import EventType, TextMessageContentEvent, TextMessageEndEvent, TextMessageStartEvent
 
+        from app.discussion.tools import TurnTools
+
         msg_id = schema.message_id(run["id"], phase, participant["id"])
         messages = seats.participant_messages(run=run, participant=participant, phase=phase, log=log, question=question)
-        self._check_budget(run, messages, summary=False)
+        budget = run["budget"]
+        turn_tools = TurnTools(
+            list(participant.get("tools") or []),
+            model=participant["model"],
+            calls_per_turn=int(budget.get("tool_calls_per_turn") or 0),
+            result_max_chars=int(budget.get("tool_result_max_chars") or 10_000),
+        )
+        self._check_budget(run, messages, summary=False, allowance=turn_tools.allowance_tokens())
         revision = int(run.get("context_revision") or 0)
         round_no = schema.phase_round(phase) or int(run.get("round") or 0)
         speaker = {
@@ -775,6 +812,7 @@ class _Runner:
                 max_output_tokens=max_out,
                 result=result,
                 effort=participant.get("effort"),
+                **({"turn_tools": turn_tools} if turn_tools.enabled else {}),
             )
         async for delta in self._stream(source):
             yield _encode(
@@ -783,6 +821,7 @@ class _Runner:
             )
         yield _encode(self.encoder, TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
         text = result.text.strip() or "_(no reply)_"
+        used = turn_tools.record() or list(result.extra.get("tools") or [])
 
         def commit(data: dict[str, Any], current: dict[str, Any]) -> None:
             if int(current.get("context_revision") or 0) != revision:
@@ -801,6 +840,7 @@ class _Runner:
                 kind=schema.KIND_PARTICIPANT,
                 color=participant.get("color"),
                 usage=_usage_echo(participant["model"], result),
+                tools=used,
             )
             if _append_messages(data, [message]):
                 current["budget"]["used_tokens"] = int(current["budget"].get("used_tokens") or 0) + result.tokens
@@ -808,7 +848,10 @@ class _Runner:
         committed = self.write(commit)
         run.update(committed)
         _ledger(self.adv.thread_id, run["id"], phase, participant["id"], participant["model"], result, "participant")
-        yield self.custom("discussion_message_committed", {"message_id": msg_id, "budget": committed["budget"]})
+        done: dict[str, Any] = {"message_id": msg_id, "budget": committed["budget"]}
+        if used:
+            done["tools"] = used
+        yield self.custom("discussion_message_committed", done)
 
     async def moderate(
         self, run: dict[str, Any], *, phase: str, log: list[dict[str, str]], final: bool
@@ -900,6 +943,102 @@ class _Runner:
         run.update(committed)
         yield self.custom("discussion_moderator", {"message_id": msg_id, ("final" if final else "state"): parsed})
         yield self.custom("discussion_message_committed", {"message_id": msg_id, "budget": committed["budget"]})
+
+    async def write_report(self, run: dict[str, Any], log: list[dict[str, str]]) -> AsyncIterator[str]:
+        """The full report after the stored final summary (UDR-0217 D5).
+
+        Its own call and output cap; skipped when the remaining budget cannot hold it; a failure
+        is logged and skipped. Neither ever changes the stored final summary or the completion.
+        A Pause or a closed stream propagates, so Continue runs only the report.
+        """
+        from ag_ui.core import EventType, TextMessageContentEvent, TextMessageEndEvent, TextMessageStartEvent
+
+        msg_id = schema.message_id(run["id"], schema.SUMMARY, schema.REPORT_ID)
+        moderator = run["moderator"]
+        budget = run["budget"]
+        max_out = int(budget.get("report_max_output_tokens") or 10_000)
+        messages = seats.report_messages(run=run, log=log)
+        estimate = speakers.estimate_tokens(messages, max_out)
+        if int(budget.get("used_tokens") or 0) + estimate > int(budget["token_budget"]):
+            self._skip_report(run, schema.REPORT_SKIPPED_BUDGET)
+            return
+        yield self.custom(
+            "discussion_speaker",
+            {
+                "message_id": msg_id,
+                "speaker_id": schema.MODERATOR_ID,
+                "role": schema.MODERATOR_ID,
+                "display_name": moderator["display_name"],
+                "color": moderator.get("color"),
+                "phase": schema.SUMMARY,
+                "round": int(run.get("round") or 0),
+                "kind": schema.KIND_REPORT,
+            },
+        )
+        yield _encode(
+            self.encoder, TextMessageStartEvent(type=EventType.TEXT_MESSAGE_START, message_id=msg_id, role="assistant")
+        )
+        result = speakers.TurnResult()
+        if speakers.use_scripted_replies():
+            source = speakers.scripted_turn(participant=None, phase=schema.SUMMARY, log=log, result=result, report=True)
+        else:
+            source = speakers.model_turn(
+                model=moderator["model"], messages=messages, max_output_tokens=max_out, result=result
+            )
+        self._start_deadline(run)
+        try:
+            async for delta in self._stream(source):
+                yield _encode(
+                    self.encoder,
+                    TextMessageContentEvent(type=EventType.TEXT_MESSAGE_CONTENT, message_id=msg_id, delta=delta),
+                )
+        except (_Stop, _LeaseLost):
+            raise
+        except Exception as exc:
+            yield _encode(self.encoder, TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
+            logger.warning(
+                "AI discussion %s: the full report was skipped (%s)", run["id"], type(exc).__name__, exc_info=True
+            )
+            _ledger(
+                self.adv.thread_id, run["id"], schema.SUMMARY, schema.REPORT_ID, moderator["model"], result, "report"
+            )
+            self._skip_report(run, schema.REPORT_SKIPPED_FAILED)
+            return
+        yield _encode(self.encoder, TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
+        text = result.text.strip()
+        if not text:
+            self._skip_report(run, schema.REPORT_SKIPPED_FAILED)
+            return
+
+        def commit(data: dict[str, Any], current: dict[str, Any]) -> None:
+            message = schema.build_message(
+                msg_id=msg_id,
+                role="assistant",
+                text=text,
+                run_id=current["id"],
+                speaker_id=schema.MODERATOR_ID,
+                speaker_role=schema.MODERATOR_ID,
+                display_name=moderator["display_name"],
+                phase=schema.SUMMARY,
+                round_no=int(current.get("round") or 0),
+                sequence=_next_sequence(current),
+                kind=schema.KIND_REPORT,
+                color=moderator.get("color"),
+                usage=_usage_echo(moderator["model"], result),
+            )
+            if _append_messages(data, [message]):
+                current["budget"]["used_tokens"] = int(current["budget"].get("used_tokens") or 0) + result.tokens
+
+        committed = self.write(commit)
+        run.update(committed)
+        _ledger(self.adv.thread_id, run["id"], schema.SUMMARY, schema.REPORT_ID, moderator["model"], result, "report")
+        yield self.custom("discussion_message_committed", {"message_id": msg_id, "budget": committed["budget"]})
+
+    def _skip_report(self, run: dict[str, Any], reason: str) -> None:
+        def change(_data: dict[str, Any], current: dict[str, Any]) -> None:
+            current["report_skipped"] = reason
+
+        run.update(self.write(change))
 
     async def advise(self, run: dict[str, Any], log: list[dict[str, str]]) -> AsyncIterator[str]:
         """Advisory signals only -- they never change the status (D2/D8)."""
@@ -1035,8 +1174,17 @@ class _Runner:
                     run["id"],
                     phases={schema.OPENING, *(schema.round_phase(n) for n in range(1, int(run["rounds"]) + 1))},
                 )
-                async for chunk in self.moderate(run, phase=schema.SUMMARY, log=log, final=True):
-                    yield chunk
+                if not run.get("final"):
+                    async for chunk in self.moderate(run, phase=schema.SUMMARY, log=log, final=True):
+                        yield chunk
+                report_id = schema.message_id(run["id"], schema.SUMMARY, schema.REPORT_ID)
+                if (
+                    run.get("report")
+                    and not run.get("report_skipped")
+                    and report_id not in schema.stored_message_ids(self.load()[0])
+                ):
+                    async for chunk in self.write_report(run, log):
+                        yield chunk
 
                 def done(_data: dict[str, Any], current: dict[str, Any]) -> None:
                     _transition(current, schema.COMPLETED)
@@ -1084,6 +1232,9 @@ class _Runner:
                         yield chunk
                     async for chunk in self.advise(run, log):
                         yield chunk
+                    if run.get("auto"):
+                        self._set_phase(run, schema.round_phase(1))
+                        continue
                     self._wait(run, next_phase=schema.round_phase(1))
                     yield self.state_event(run)
                     yield self.custom("discussion_request", run["pending_request"])
@@ -1109,6 +1260,10 @@ class _Runner:
                 if n >= int(run["rounds"]):
                     self._set_phase(run, phase, n)
                     self._to_summary(run, schema.MAX_ROUNDS)
+                    continue
+                if run.get("auto"):
+                    # A finish suggestion is only shown; the run keeps to its rounds (UDR-0217 D4).
+                    self._set_phase(run, schema.round_phase(n + 1), n)
                     continue
                 self._set_phase(run, phase, n)
                 self._wait(run, next_phase=schema.round_phase(n + 1))
@@ -1193,6 +1348,8 @@ def _finish_interrupted(adv: Advance, *, reason: str, error: str | None = None) 
         if run.get("status") in schema.ACTIVE:
             _transition(run, schema.PAUSED)
             run["pause_reason"] = schema.PAUSE_USER if requested == "pause" else reason
+            if requested == "pause":
+                _auto_off(run, schema.AUTO_STOPPED_PAUSED)
             if error:
                 run["error"] = error[:500]
         run["lease"] = None

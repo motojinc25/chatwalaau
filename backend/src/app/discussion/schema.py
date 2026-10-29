@@ -79,7 +79,14 @@ ACTION_ANSWER = "answer"
 ACTION_CONTINUE = "continue"
 ACTION_ASK = "ask"
 ACTION_FINISH = "finish"
-ACTIONS: tuple[str, ...] = (ACTION_ANSWER, ACTION_CONTINUE, ACTION_ASK, ACTION_FINISH)
+#: PRP-0234 (UDR-0217 D4): continue, then run the remaining rounds without waiting.
+ACTION_AUTO = "auto"
+ACTIONS: tuple[str, ...] = (ACTION_ANSWER, ACTION_CONTINUE, ACTION_ASK, ACTION_FINISH, ACTION_AUTO)
+
+# ---- auto mode stop (Pause) and report skips (UDR-0217 D4 / D5) --------------------------------
+AUTO_STOPPED_PAUSED = "paused"
+REPORT_SKIPPED_BUDGET = "budget"
+REPORT_SKIPPED_FAILED = "failed"
 
 VERDICTS: tuple[str, ...] = ("adopt", "hold", "rediscuss")
 
@@ -88,6 +95,9 @@ KIND_PARTICIPANT = "participant"
 KIND_MODERATOR = "moderator"
 KIND_HUMAN = "human"
 KIND_BRIEF = "brief"
+#: The full report after the final summary (UDR-0217 D5); stored under REPORT_ID in the summary phase.
+KIND_REPORT = "report"
+REPORT_ID = "report"
 
 MODERATOR_ID = "moderator"
 HUMAN_ID = "human"
@@ -122,12 +132,17 @@ def new_run(
     seed_state: dict[str, Any] | None = None,
     focus: str = "",
     skip_opening: bool = False,
+    auto: bool = False,
+    report: bool = False,
 ) -> dict[str, Any]:
     """A run record in status ``created`` (CTR-0271).
 
     A continuation (PRP-0233, UDR-0216) keeps the seed twice: ``state`` is the moderator's
     working state, which round summaries replace, and ``carried`` is the previous conclusion,
     which every turn of the run sees. ``skip_opening`` creates the run at ``round:1``.
+
+    PRP-0234 (UDR-0217 D4 / D5): ``auto`` skips the waits after rounds, ``report`` asks for the
+    full report after the final summary.
     """
     now = now_iso()
     run: dict[str, Any] = {
@@ -155,6 +170,10 @@ def new_run(
         "error": None,
         "human_decision": None,
         "parent_run_id": parent_run_id,
+        "auto": bool(auto),
+        "auto_stopped": None,
+        "report": bool(report),
+        "report_skipped": None,
         "initiated_by": initiated_by,
         "created_at": now,
         "updated_at": now,
@@ -209,8 +228,12 @@ def build_message(
     kind: str,
     color: str | None = None,
     usage: dict[str, Any] | None = None,
+    tools: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """A stored message in the CTR-0014 shape plus the CTR-0271 ``discussion`` field."""
+    """A stored message in the CTR-0014 shape plus the CTR-0271 ``discussion`` field.
+
+    ``tools`` is what a participant turn used (name and query, never the result; UDR-0217 D3).
+    """
     from app.session.provider import MESSAGE_TYPE_ID
 
     attribution: dict[str, Any] = {
@@ -226,6 +249,8 @@ def build_message(
     }
     if color:
         attribution["color"] = color
+    if tools:
+        attribution["tools"] = [dict(t) for t in tools]
     msg: dict[str, Any] = {
         "type": MESSAGE_TYPE_ID,
         "role": role,

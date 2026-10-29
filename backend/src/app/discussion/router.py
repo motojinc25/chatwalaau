@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import Identity, verify_api_key
 from app.discussion import controller, participants, schema
+from app.discussion import tools as research
 from app.session.storage import SessionCorruptError, SessionUnavailableError
 
 if TYPE_CHECKING:
@@ -36,6 +37,8 @@ class SeatBody(BaseModel):
     model: str | None = Field(None, max_length=256)
     effort: str | None = Field(None, max_length=16)
     display_name: str | None = Field(None, max_length=60)
+    # Research tools from the discussion allowlist (PRP-0234, UDR-0217 D1); omitted = none.
+    tools: list[str] | None = Field(None, max_length=3)
 
 
 class CreateBody(BaseModel):
@@ -46,6 +49,9 @@ class CreateBody(BaseModel):
     moderator_model: str | None = Field(None, max_length=256)
     rounds: int | None = Field(None, ge=1, le=10)
     folder_id: str | None = Field(None, max_length=128)
+    # PRP-0234 (UDR-0217 D4 / D5): no wait after a round; the full report after the summary.
+    auto: bool = False
+    report: bool = True
 
 
 class InputBody(BaseModel):
@@ -66,6 +72,8 @@ class ContinueBody(BaseModel):
     rounds: int | None = Field(None, ge=1, le=10)
     skip_opening: bool | None = None
     participants: list[SeatBody] | None = Field(None, min_length=2, max_length=6)
+    auto: bool = False
+    report: bool = True
 
 
 def _error(exc: Exception) -> HTTPException:
@@ -114,6 +122,9 @@ async def discussion_options() -> dict[str, Any]:
         "reasoning": {model: participants.reasoning_options(model) for model in models},
         "role_default_effort": participants.ROLE_DEFAULT_EFFORT,
         "limits": controller.limits(),
+        # PRP-0234: the research tools a seat may have, and the models with hosted web search.
+        "tools": research.catalog(),
+        "web_search_models": research.web_search_models(models),
     }
 
 
@@ -127,6 +138,8 @@ async def create_discussion(body: CreateBody, identity: Identity = Depends(verif
         rounds=body.rounds,
         folder_id=body.folder_id,
         initiated_by=identity.subject,
+        auto=body.auto,
+        report=body.report,
     )
     return {"thread_id": thread_id, "run": schema.public_run(run)}
 
@@ -196,6 +209,8 @@ async def continue_discussion(
         actor=identity.subject,
         skip_opening=body.skip_opening,
         seat_requests=None if body.participants is None else [s.model_dump() for s in body.participants],
+        auto=body.auto,
+        report=body.report,
     )
     return {"run": run, "messages": messages}
 

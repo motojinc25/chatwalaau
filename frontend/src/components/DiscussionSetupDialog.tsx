@@ -3,7 +3,7 @@
 // chat page then runs its opening.
 import { Loader2, Users } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { type Seat, SeatEditor, seatRequests, useSeatOptions } from '@/components/DiscussionSeats'
+import { RunOptionToggles, type Seat, SeatEditor, seatRequests, useSeatOptions } from '@/components/DiscussionSeats'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -34,6 +34,8 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
   const [constraints, setConstraints] = useState('')
   const [rounds, setRounds] = useState(2)
   const [seats, setSeats] = useState<Seat[]>([])
+  const [auto, setAuto] = useState(false)
+  const [report, setReport] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -42,7 +44,15 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
     setError(null)
     if (!options) return
     setRounds(options.limits.default_rounds)
-    setSeats(options.default_seats.map((id, i) => ({ key: `s${i}`, choice: `preset:${id}`, model: '', effort: '' })))
+    setSeats(
+      options.default_seats.map((id, i) => ({
+        key: `s${i}`,
+        choice: `preset:${id}`,
+        model: '',
+        effort: '',
+        tools: [],
+      })),
+    )
   }, [open, options])
 
   const roundsChoices = useMemo(
@@ -57,7 +67,7 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
     setSubmitting(true)
     setError(null)
     try {
-      const participants = seatRequests(seats)
+      const participants = seatRequests(seats, options)
       const { thread_id } = await discussionApi.create({
         topic: topic.trim(),
         goal: goal.trim(),
@@ -65,6 +75,8 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
         participants,
         rounds,
         folder_id: folderId ?? null,
+        auto,
+        report,
       })
       onOpenChange(false)
       setTopic('')
@@ -87,8 +99,8 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
             New AI discussion
           </DialogTitle>
           <DialogDescription>
-            AI participants discuss your topic for a few rounds. They have no tools. You confirm after each step and
-            decide at the end.
+            AI participants discuss your topic for a few rounds. A participant may look things up with the research
+            tools you give it; nothing is changed. You confirm after each step (or only once) and decide at the end.
           </DialogDescription>
         </DialogHeader>
         {/* The gutter is reserved whether or not the scrollbar shows, so the width never changes, and
@@ -147,6 +159,7 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
               Budget {options ? options.limits.token_budget.toLocaleString() : '-'} tokens per discussion
             </span>
           </label>
+          <RunOptionToggles auto={auto} report={report} onAuto={setAuto} onReport={setReport} />
           {noModel && (
             <p role="alert" className="text-xs text-red-600">
               No chat model is configured. Add a model in Model Settings first.

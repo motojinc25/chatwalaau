@@ -1,7 +1,8 @@
 """One AI Discussion model turn (CTR-0275, PRP-0232, UDR-0215 D1/D7/D9).
 
-A turn is ONE stateless MAF ``Agent.run`` over messages the context builder made: no tools, no
-context providers, no history provider, no Identity (D7). The client comes from the provider
+A turn is ONE stateless MAF ``Agent.run`` over messages the context builder made: no context
+providers, no history provider, no Identity (D7), and no tools unless the seat has research tools
+from the ``app.discussion.tools`` allowlist (PRP-0234, UDR-0217 D1); the moderator never has any. The client comes from the provider
 factory (CTR-0102), the same seam every lane uses. Streamed content is folded by CTR-0266, so a
 ``replace`` update never doubles the text or the usage.
 
@@ -105,8 +106,13 @@ async def model_turn(
     result: TurnResult,
     schema: dict[str, Any] | None = None,
     effort: str | None = None,
+    turn_tools: Any = None,
 ) -> AsyncIterator[str]:
-    """Stream one turn's text deltas; ``result`` holds the whole text and usage at the end."""
+    """Stream one turn's text deltas; ``result`` holds the whole text and usage at the end.
+
+    ``turn_tools`` (a ``tools.TurnTools``) mounts the seat's research tools; MAF runs the tool
+    loop inside this one ``Agent.run``, and every model call of it is in the folded usage.
+    """
     from agent_framework import Agent, Message
 
     from app import providers
@@ -114,10 +120,11 @@ async def model_turn(
     from app.agui.token_usage import turn_summary
 
     client = providers.build_chat_client(model)
+    mounted = turn_tools.build() if turn_tools is not None else []
     agent = Agent(
         name="ChatWalaau-Discussion",
         client=client,
-        tools=None,
+        tools=mounted or None,
         context_providers=None,
         default_options=_options(model, max_output_tokens, schema, effort) or None,
     )
@@ -135,6 +142,8 @@ async def model_turn(
                     yield delta
             elif kind == "usage":
                 usage_fold.observe(getattr(content, "usage_details", None), merge_mode(content))
+            elif kind == "function_call" and turn_tools is not None and getattr(content, "name", "") == "web_search":
+                turn_tools.note_hosted("web_search", str(getattr(content, "call_id", "") or ""))
     result.text = "".join(parts)
     result.model_calls = usage_fold.calls
     if usage_fold.turn:
@@ -189,6 +198,16 @@ def _scripted_moderator(log: list[dict[str, str]], final: bool) -> str:
     )
 
 
+def _scripted_report(log: list[dict[str, str]]) -> str:
+    speakers = sorted({e["speaker"] for e in log})
+    positions = "\n".join(f"- **{name}**: keeps a short, bounded first version." for name in speakers)
+    return (
+        "# Report\n\n## Background and question\n\nA scripted discussion.\n\n"
+        f"## Positions\n\n{positions or '- (none)'}\n\n"
+        "## Recommendation and next actions\n\nStart with the small guided version and review it after first use."
+    )
+
+
 async def scripted_turn(
     *,
     participant: dict[str, Any] | None,
@@ -196,9 +215,22 @@ async def scripted_turn(
     log: list[dict[str, str]],
     result: TurnResult,
     final: bool = False,
+    report: bool = False,
 ) -> AsyncIterator[str]:
     """A deterministic reply, streamed in chunks (no request, no ledger record)."""
-    text = _scripted_moderator(log, final) if participant is None else _scripted_participant(participant, phase)
+    if report:
+        text = _scripted_report(log)
+    elif participant is None:
+        text = _scripted_moderator(log, final)
+    else:
+        text = _scripted_participant(participant, phase)
+    if participant is not None and participant.get("tools"):
+        # A scripted seat "uses" each of its tools once, so the record and the UI are exercised.
+        from app.discussion.tools import TOOL_LABELS
+
+        used = list(participant["tools"])
+        result.extra["tools"] = [{"name": t, "query": "scripted"} for t in used]
+        text += "\n\nSources: " + ", ".join(TOOL_LABELS.get(t, t) for t in used) + " (scripted)"
     result.scripted = True
     result.model_calls = 1
     for start in range(0, len(text), SCRIPTED_CHUNK_CHARS):

@@ -477,6 +477,11 @@ class Settings(BaseSettings):
     discussion_turn_max_output_tokens: int = 1_200
     discussion_phase_timeout_seconds: int = 600
     discussion_advisory_threshold_percent: int = 70
+    # PRP-0234 (UDR-0217 D2 / D5), operator Q5: per-turn research tool calls and the length of
+    # one tool result kept for the model; the length of the full report after the summary.
+    discussion_tool_calls_per_turn: int = 3
+    discussion_tool_result_max_chars: int = 10_000
+    discussion_report_max_output_tokens: int = 10_000
 
     # File Explorer (CTR-0006, CTR-0136/0137, PRP-0091, UDR-0069)
     # Human-facing file browse/edit over the coding workspace. OFF unless

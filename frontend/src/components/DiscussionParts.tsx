@@ -1,6 +1,7 @@
 // Shared pieces of the AI Discussion UI (CTR-0276, PRP-0232): speaker colours and the
-// attribution line on a discussion message.
-import { Gavel, Loader2, MessageSquareQuote, User } from 'lucide-react'
+// attribution line on a discussion message (with the research tools a turn used and the full
+// report's label, PRP-0234).
+import { FileText, Gavel, Loader2, MessageSquareQuote, Search, User } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { DiscussionMessageMeta } from '@/types/chat'
 
@@ -53,6 +54,19 @@ export function phaseLabel(phase: string): string {
   return phase
 }
 
+const TOOL_LABELS: Record<string, string> = {
+  web_search: 'Web search',
+  rag_search: 'Documents',
+  ontology_query: 'Ontology',
+}
+
+/** "Web search x2, Documents" -- what a participant turn looked up (never the results, UDR-0217 D3). */
+export function toolsUsedLabel(tools: { name: string }[] | undefined): string {
+  const counts = new Map<string, number>()
+  for (const t of tools ?? []) counts.set(t.name, (counts.get(t.name) ?? 0) + 1)
+  return [...counts].map(([name, n]) => `${TOOL_LABELS[name] ?? name}${n > 1 ? ` x${n}` : ''}`).join(', ')
+}
+
 /** Who spoke, in which phase -- always visible, because it changes how the text is read. */
 export function DiscussionSpeakerTag({ meta }: { meta: DiscussionMessageMeta }) {
   const color = speakerColor(meta.color)
@@ -63,17 +77,27 @@ export function DiscussionSpeakerTag({ meta }: { meta: DiscussionMessageMeta }) 
         <User className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
       ) : meta.kind === 'moderator' ? (
         <Gavel className={cn('h-3 w-3', color.text)} aria-hidden="true" />
+      ) : meta.kind === 'report' ? (
+        <FileText className={cn('h-3 w-3', color.text)} aria-hidden="true" />
       ) : (
         <span className={cn('inline-block h-2 w-2 rounded-full', color.dot)} aria-hidden="true" />
       )}
       <span className={cn('font-semibold', human ? 'text-muted-foreground' : color.text)}>
         {meta.kind === 'brief' ? 'AI discussion' : meta.display_name}
       </span>
-      <span className="rounded-full border px-1.5 py-px text-muted-foreground">{phaseLabel(meta.phase)}</span>
+      <span className="rounded-full border px-1.5 py-px text-muted-foreground">
+        {meta.kind === 'report' ? 'Report' : phaseLabel(meta.phase)}
+      </span>
+      {meta.tools && meta.tools.length > 0 && (
+        <span className="inline-flex items-center gap-1 text-muted-foreground" data-testid="discussion-tools-used">
+          <Search className="h-3 w-3" aria-hidden="true" />
+          Used: {toolsUsedLabel(meta.tools)}
+        </span>
+      )}
       {meta.status === 'generating' && (
         <span className="inline-flex items-center gap-1 text-muted-foreground">
           <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
-          {meta.kind === 'moderator' ? 'organizing...' : 'speaking...'}
+          {meta.kind === 'moderator' ? 'organizing...' : meta.kind === 'report' ? 'writing...' : 'speaking...'}
         </span>
       )}
       {meta.status === 'interrupted' && (

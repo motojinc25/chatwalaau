@@ -105,7 +105,7 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
               display_name: String(value.display_name),
               phase: String(value.phase),
               round: Number(value.round ?? 0),
-              kind: value.kind === 'moderator' ? 'moderator' : 'participant',
+              kind: value.kind === 'moderator' ? 'moderator' : value.kind === 'report' ? 'report' : 'participant',
               color: typeof value.color === 'string' ? value.color : undefined,
               status: 'generating',
             }
@@ -118,9 +118,14 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
             }))
           } else if (event.name === 'discussion_message_committed') {
             const id = String(value.message_id)
+            // The research tools the turn used (PRP-0234): name and query only.
+            const tools = Array.isArray(value.tools) ? (value.tools as { name: string; query: string }[]) : undefined
             upsertMessage(id, (current) =>
               current?.discussion
-                ? { ...current, discussion: { ...current.discussion, status: 'completed' } }
+                ? {
+                    ...current,
+                    discussion: { ...current.discussion, status: 'completed', ...(tools ? { tools } : {}) },
+                  }
                 : (current ?? null),
             )
             const budget = value.budget as DiscussionRun['budget'] | undefined
@@ -229,7 +234,7 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
   }, [])
 
   const respond = useCallback(
-    async (action: 'answer' | 'continue' | 'ask' | 'finish', text = '', speakerId?: string) => {
+    async (action: 'answer' | 'continue' | 'ask' | 'finish' | 'auto', text = '', speakerId?: string) => {
       if (!threadId || !latest?.pending_request) return false
       const runId = latest.id
       const requestId = latest.pending_request.id
