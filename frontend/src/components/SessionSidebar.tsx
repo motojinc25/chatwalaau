@@ -34,6 +34,7 @@ import {
   GripVertical,
   Image as ImageIcon,
   Info,
+  ListChecks,
   Loader2,
   LogOut,
   MessageSquare,
@@ -70,6 +71,7 @@ import {
 import { AboutDialog } from '@/components/AboutDialog'
 import { AppSettingsManager } from '@/components/AppSettingsManager'
 import { DeclarativeAgentManagerTrigger } from '@/components/DeclarativeAgentManager'
+import { DiscussionDecisionLog } from '@/components/DiscussionDecisionLog'
 import { McpToolManager } from '@/components/McpToolManager'
 import { SessionSearchDialog } from '@/components/SessionSearchDialog'
 import { SidebarFooterActions } from '@/components/SidebarFooterActions'
@@ -1751,6 +1753,18 @@ export function SessionSidebar({
                         <Brain className="h-4 w-4" />
                       </Button>
                     ),
+                  },
+                ]
+              : []),
+            // 9b. Decision log (CTR-0276, PRP-0235): every finished AI discussion across chats,
+            // read from the session index; a row opens its chat.
+            ...(show('sidebar.decisions')
+              ? [
+                  {
+                    id: 'decisions',
+                    label: 'Decision log',
+                    icon: <ListChecks className="h-4 w-4" />,
+                    node: <DiscussionDecisionLog onOpenChat={onSwitch} />,
                   },
                 ]
               : []),

@@ -258,27 +258,63 @@ ADVISORY_QUESTIONS: dict[str, dict[str, Any]] = {
 }
 
 
-async def advisory(state_text: str) -> dict[str, Any] | None:
-    """``{repeating, sufficient, source}`` probabilities, or None when no decision model answers."""
+#: Scripted seat scores (DEMO_MODE, browser tests): the implementer and the user advocate fall below
+#: the default threshold, so a scripted decision-mode run leaves a seat out and brings it back.
+_SCRIPTED_SEAT_SCORES: dict[str, float] = {
+    "proposer": 0.82,
+    "critic": 0.74,
+    "implementer": 0.31,
+    "user_advocate": 0.22,
+}
+
+
+def decision_available() -> bool:
+    """True when a decision offering answers (or turns are scripted): speaker selection is offered."""
     if use_scripted_replies():
-        return {"repeating": 0.2, "sufficient": 0.3, "source": "demo"}
+        return True
+    try:
+        from app.decision import client
+
+        return client.resolve_target() is not None
+    except Exception:  # an unreadable catalog: no selection, never an error
+        return False
+
+
+async def advisory(state_text: str, seats: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """``{repeating, sufficient, source}`` probabilities, or None when no decision model answers.
+
+    PRP-0235 (UDR-0218 D4): with ``seats`` the same call also scores each seat for the next
+    round; the scores come back as ``seat_scores`` ``{seat_id: probability | None}``.
+    """
+    from app.discussion import selection
+
+    if use_scripted_replies():
+        out: dict[str, Any] = {"repeating": 0.2, "sufficient": 0.3, "source": "demo"}
+        if seats:
+            out["seat_scores"] = {p["id"]: _SCRIPTED_SEAT_SCORES.get(str(p.get("role")), 0.5) for p in seats}
+        return out
     from app.decision import client
     from app.decision.schema import read_answers, read_usage
 
     target = client.resolve_target()
     if target is None:
         return None
+    questions = dict(ADVISORY_QUESTIONS)
+    if seats:
+        questions.update(selection.seat_questions(seats))
     try:
-        data = await client.evaluate(target, state_text[:90_000], ADVISORY_QUESTIONS)
+        data = await client.evaluate(target, state_text[:90_000], questions)
     except Exception as exc:  # advisory only: never fail a phase
         logger.info("discussion advisory skipped: %s", getattr(exc, "code", type(exc).__name__))
         return None
-    answers = read_answers(data.get("answers"), ADVISORY_QUESTIONS)
+    answers = read_answers(data.get("answers"), questions)
     usage = read_usage(data.get("usage"))
-    out: dict[str, Any] = {"source": "decision", "offering": target.offering_id}
+    out = {"source": "decision", "offering": target.offering_id}
     for name in ADVISORY_QUESTIONS:
         p = answers.get(name, {}).get("probability")
         out[name] = float(p) if isinstance(p, (int, float)) else None
+    if seats:
+        out["seat_scores"] = selection.scores_from_answers(seats, answers)
     out["usage"] = {
         "uncached_input_token_count": usage.get("input_tokens"),
         "output_token_count": usage.get("output_tokens"),
@@ -290,6 +326,7 @@ __all__ = [
     "REASONING_HEADROOM_TOKENS",
     "TurnResult",
     "advisory",
+    "decision_available",
     "estimate_tokens",
     "model_turn",
     "scripted_turn",

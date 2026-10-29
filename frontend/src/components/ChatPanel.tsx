@@ -1,11 +1,22 @@
 import { Bot, Hammer, ImageIcon, Loader2, Workflow as WorkflowIcon } from 'lucide-react'
-import { type DragEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type DragEvent,
+  Fragment,
+  type ReactNode,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { ChatInput, type ChatInputHandle } from '@/components/ChatInput'
 import { ChatMessageItem } from '@/components/ChatMessageItem'
 import { ComputerUseBanner } from '@/components/ComputerUseBanner'
 import { ComputerUseCaptureView } from '@/components/ComputerUseCaptureView'
 import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { DiscussionBar } from '@/components/DiscussionBar'
+import { DiscussionSelectionTrace } from '@/components/DiscussionParts'
 import { HelpPortal } from '@/components/HelpPortal'
 import { LiveDelegationMarker } from '@/components/LiveDelegationMarker'
 import { type ImageEditSubmission, MaskEditorDialog } from '@/components/MaskEditorDialog'
@@ -304,6 +315,26 @@ export function ChatPanel({
     discussionDrives &&
     (discussion.streaming || discussion.latest?.status === 'running' || discussion.latest?.status === 'summarizing')
   const discussionWaiting = discussionDrives && discussion.waiting
+  // PRP-0235 (UDR-0218 D5): the speaker-selection trace sits before each round's first message.
+  const selectionTraces = useMemo(() => {
+    const rows = new Map<string, ReactNode>()
+    if (!discussion.active) return rows
+    const seen = new Set<string>()
+    for (const m of messages) {
+      const meta = m.discussion
+      if (meta?.kind !== 'participant' || !meta.phase.startsWith('round:')) continue
+      // A message still streaming has no run id yet: it belongs to the latest run.
+      const run = meta.run_id ? discussion.runs.find((r) => r.id === meta.run_id) : discussion.latest
+      if (run?.speaker_selection !== 'decision') continue
+      const round = meta.phase.slice(6)
+      const key = `${run.id}:${round}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const record = run.selections?.[round]
+      if (record) rows.set(m.id, <DiscussionSelectionTrace record={record} participants={run.participants} />)
+    }
+    return rows
+  }, [messages, discussion.active, discussion.runs, discussion.latest])
 
   const {
     attachments,
@@ -876,45 +907,52 @@ export function ChatPanel({
               )
             }
             return (
-              <ChatMessageItem
-                key={msg.id}
-                message={msg}
-                messageIndex={i}
-                compact={compact}
-                isLoading={isLoading && i === messages.length - 1}
-                // TTS is withdrawn while Live speaks (CTR-0040, PRP-0188).
-                tts={liveActive ? undefined : tts}
-                // A discussion message belongs to its run: no edit, regenerate or delete
-                // (CTR-0276, PRP-0232 2.7).
-                onEditUser={msg.discussion ? undefined : editUserMessage}
-                onRetryTurn={handleRetryTurn}
-                onRetryLostTurn={handleRetryLostTurn}
-                onEditAssistant={msg.discussion ? undefined : editAssistantMessage}
-                onRegenerateAssistant={msg.discussion ? undefined : regenerateAssistantMessage}
-                onDelete={msg.discussion ? undefined : deleteMessage}
-                onBranch={onBranchFromMessage}
-                onSaveAsTemplate={show('message.saveAsTemplate') ? handleSaveAsTemplate : undefined}
-                onMaskEdit={show('message.maskEdit') ? handleMaskEdit : undefined}
-                onPaintEdit={show('message.paintEdit') ? handlePaintEditFromHistory : undefined}
-                onToggleMemoryLike={turn ? handleToggleMemoryLike : undefined}
-                memoryLikeStatus={turn ? memory.states[turn.turnKey] : undefined}
-                workflowRun={
-                  selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant' ? workflowRun : undefined
-                }
-                onOpenWorkflowCanvas={
-                  // Live run: re-open the canvas for the latest run (closing only hides it).
-                  // Reloaded chat: rebuild the canvas from the run persisted with THAT message,
-                  // so any past workflow turn can be inspected again (v0.117.1).
-                  // Narrow viewport: no "Diagram" entry; the text progress stays (PRP-0171).
-                  !show('message.workflowDiagram')
-                    ? undefined
-                    : selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant' && canvas.hasCurrent()
-                      ? canvas.openCurrent
-                      : msg.workflowRun
-                        ? () => canvas.openRestored(msg.workflowRun as PersistedWorkflowRun)
-                        : undefined
-                }
-              />
+              <Fragment key={msg.id}>
+                {selectionTraces.get(msg.id)}
+                <ChatMessageItem
+                  message={msg}
+                  messageIndex={i}
+                  compact={compact}
+                  isLoading={isLoading && i === messages.length - 1}
+                  // TTS is withdrawn while Live speaks (CTR-0040, PRP-0188).
+                  tts={liveActive ? undefined : tts}
+                  // A discussion message belongs to its run: no edit, regenerate or delete
+                  // (CTR-0276, PRP-0232 2.7).
+                  onEditUser={msg.discussion ? undefined : editUserMessage}
+                  onRetryTurn={handleRetryTurn}
+                  onRetryLostTurn={handleRetryLostTurn}
+                  onEditAssistant={msg.discussion ? undefined : editAssistantMessage}
+                  onRegenerateAssistant={msg.discussion ? undefined : regenerateAssistantMessage}
+                  onDelete={msg.discussion ? undefined : deleteMessage}
+                  onBranch={onBranchFromMessage}
+                  onSaveAsTemplate={show('message.saveAsTemplate') ? handleSaveAsTemplate : undefined}
+                  onMaskEdit={show('message.maskEdit') ? handleMaskEdit : undefined}
+                  onPaintEdit={show('message.paintEdit') ? handlePaintEditFromHistory : undefined}
+                  onToggleMemoryLike={turn ? handleToggleMemoryLike : undefined}
+                  memoryLikeStatus={turn ? memory.states[turn.turnKey] : undefined}
+                  workflowRun={
+                    selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant'
+                      ? workflowRun
+                      : undefined
+                  }
+                  onOpenWorkflowCanvas={
+                    // Live run: re-open the canvas for the latest run (closing only hides it).
+                    // Reloaded chat: rebuild the canvas from the run persisted with THAT message,
+                    // so any past workflow turn can be inspected again (v0.117.1).
+                    // Narrow viewport: no "Diagram" entry; the text progress stays (PRP-0171).
+                    !show('message.workflowDiagram')
+                      ? undefined
+                      : selectedWorkflowId &&
+                          i === messages.length - 1 &&
+                          msg.role === 'assistant' &&
+                          canvas.hasCurrent()
+                        ? canvas.openCurrent
+                        : msg.workflowRun
+                          ? () => canvas.openRestored(msg.workflowRun as PersistedWorkflowRun)
+                          : undefined
+                  }
+                />
+              </Fragment>
             )
           })}
           {/* CTR-0092 bottom spacer: keeps the final message visible above the floating ChatInput. */}

@@ -55,6 +55,39 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
 
   const isDiscussionChat = useMemo(() => messages.some((m) => m.discussion), [messages])
   const latest = runs.at(-1)
+  // The person's own choice of the next round's speakers (decision mode, PRP-0235), kept until
+  // the waiting request is answered -- by a button or by the composer.
+  const [nextSpeakers, setNextSpeakers] = useState<string[] | null>(null)
+  const pendingId = latest?.pending_request?.id
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new waiting request starts from the computed selection
+  useEffect(() => setNextSpeakers(null), [pendingId])
+
+  /** Per seat of the latest run: rounds spoken / held, messages (code-computed, PRP-0235). */
+  const participation = useMemo(() => {
+    if (!latest) return []
+    const held = new Set<string>()
+    const spoken = new Map<string, Set<string>>()
+    const counts = new Map<string, number>()
+    for (const m of messages) {
+      const meta = m.discussion
+      if (!meta || (meta.run_id && meta.run_id !== latest.id)) continue
+      if (meta.phase.startsWith('round:')) held.add(meta.phase)
+      if (meta.kind !== 'participant') continue
+      counts.set(meta.speaker_id, (counts.get(meta.speaker_id) ?? 0) + 1)
+      if (meta.phase.startsWith('round:')) {
+        const set = spoken.get(meta.speaker_id) ?? new Set<string>()
+        set.add(meta.phase)
+        spoken.set(meta.speaker_id, set)
+      }
+    }
+    return latest.participants.map((p) => ({
+      id: p.id,
+      display_name: p.display_name,
+      rounds_spoken: spoken.get(p.id)?.size ?? 0,
+      rounds_held: held.size,
+      messages: counts.get(p.id) ?? 0,
+    }))
+  }, [latest, messages])
 
   const replaceRun = useCallback((run: DiscussionRun) => {
     setRuns((prev) => {
@@ -130,6 +163,16 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
             )
             const budget = value.budget as DiscussionRun['budget'] | undefined
             if (budget) setRuns((prev) => prev.map((r, i) => (i === prev.length - 1 ? { ...r, budget } : r)))
+          } else if (event.name === 'discussion_selection') {
+            // Who speaks in the round and why (PRP-0235, UDR-0218 D5).
+            const record = value as unknown as NonNullable<DiscussionRun['selections']>[string]
+            setRuns((prev) =>
+              prev.map((r, i) =>
+                i === prev.length - 1
+                  ? { ...r, selections: { ...(r.selections ?? {}), [String(record.round)]: record } }
+                  : r,
+              ),
+            )
           } else if (event.name === 'discussion_advisory') {
             setRuns((prev) =>
               prev.map((r, i) => (i === prev.length - 1 ? { ...r, advisory: value as DiscussionRun['advisory'] } : r)),
@@ -234,7 +277,12 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
   }, [])
 
   const respond = useCallback(
-    async (action: 'answer' | 'continue' | 'ask' | 'finish' | 'auto', text = '', speakerId?: string) => {
+    async (
+      action: 'answer' | 'continue' | 'ask' | 'finish' | 'auto',
+      text = '',
+      speakerId?: string,
+      speakersNext?: string[],
+    ) => {
       if (!threadId || !latest?.pending_request) return false
       const runId = latest.id
       const requestId = latest.pending_request.id
@@ -244,6 +292,9 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
           action: action === 'answer' && !text.trim() ? 'continue' : action,
           text,
           ...(speakerId ? { speaker_id: speakerId } : {}),
+          ...((speakersNext ?? nextSpeakers) && action !== 'ask' && action !== 'finish'
+            ? { speakers: speakersNext ?? nextSpeakers ?? undefined }
+            : {}),
         })
         replaceRun(res.run)
         for (const message of res.messages) upsertMessage(message.message_id, () => storedToChat(message))
@@ -251,7 +302,7 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
       if (ok) void advance(runId)
       return ok
     },
-    [act, threadId, latest, replaceRun, upsertMessage, advance],
+    [act, threadId, latest, replaceRun, upsertMessage, advance, nextSpeakers],
   )
 
   const pause = useCallback(
@@ -316,6 +367,11 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
     cancel,
     decide,
     continueDiscussion,
+    /** The next round's speakers as the person changed them, or null for the computed selection. */
+    nextSpeakers,
+    setNextSpeakers,
+    participation,
+    threadId,
   }
 }
 

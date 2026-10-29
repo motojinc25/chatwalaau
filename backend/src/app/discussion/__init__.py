@@ -8,4 +8,6 @@ session file (UDR-0215 D1); no MAF Workflow, GroupChat or checkpoint is involved
 - ``speakers``     -- one model turn: the provider client, or scripted replies (CTR-0275)
 - ``controller``   -- transitions, lease, budget, persistence, the phase runner (CTR-0274)
 - ``router``       -- ``/api/discussions`` and the phase stream (CTR-0272 / CTR-0273)
+- ``selection``    -- who speaks in a round in the decision mode (CTR-0274, PRP-0235)
+- ``export``       -- the Markdown export of a run (CTR-0272, PRP-0235)
 """

@@ -12,7 +12,10 @@ The code decides; the models only write (UDR-0215 D8). This module owns:
 - disconnect = interrupt: the phase lives in its request, a close pauses the run (D6);
 - PRP-0234 (UDR-0217): research tools per seat (bounded, charged), auto mode (no wait after the
   framing or a round, a finish suggestion is only shown; Pause hands control back) and the full
-  report after the stored final summary.
+  report after the stored final summary;
+- PRP-0235 (UDR-0218 D4 / D5): speaker selection -- in the decision mode the decision model scores
+  the seats with the advisory call and ``selection.choose`` picks a round's speakers; every
+  selection is stored, streamed and logged.
 
 Every write goes through ``update_session_json`` / ``create_session_json`` (UDR-0156 D1).
 """
@@ -28,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 import uuid
 
 from app.discussion import participants as seats
-from app.discussion import schema, speakers
+from app.discussion import schema, selection, speakers
 from app.session.storage import (
     SessionUnavailableError,
     create_session_json,
@@ -126,6 +129,10 @@ def budget_from_settings() -> dict[str, int]:
         "tool_calls_per_turn": int(settings.discussion_tool_calls_per_turn),
         "tool_result_max_chars": int(settings.discussion_tool_result_max_chars),
         "report_max_output_tokens": int(settings.discussion_report_max_output_tokens),
+        # PRP-0235 (UDR-0218 D4): the speaker selection rule's limits.
+        "selection_threshold_percent": int(settings.discussion_selection_threshold_percent),
+        "selection_min_speakers": int(settings.discussion_selection_min_speakers),
+        "selection_max_skipped_rounds": int(settings.discussion_selection_max_skipped_rounds),
     }
 
 
@@ -265,6 +272,16 @@ def _count(items: Any, noun: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _check_selection_mode(mode: str | None) -> str:
+    """``all`` or ``decision``; the decision mode needs a decision offering (UDR-0218 D4)."""
+    mode = mode or selection.MODE_ALL
+    if mode not in selection.MODES:
+        raise DiscussionError("invalid_request", f"speaker_selection must be one of {', '.join(selection.MODES)}", 422)
+    if mode == selection.MODE_DECISION and not speakers.decision_available():
+        raise DiscussionError("invalid_request", "speaker selection needs a decision model in the catalog", 422)
+    return mode
+
+
 def _initial_folder(folder_id: str | None) -> str | None:
     if not folder_id:
         return None
@@ -283,10 +300,12 @@ def create_discussion(
     initiated_by: str,
     auto: bool = False,
     report: bool = True,
+    speaker_selection: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """A new discussion chat with its first run (status ``created``)."""
     from app.core.config import settings
 
+    mode = _check_selection_mode(speaker_selection)
     default_rounds, max_rounds = round_limits()
     rounds = default_rounds if rounds is None else rounds
     if not 1 <= rounds <= max_rounds:
@@ -306,6 +325,7 @@ def create_discussion(
         initiated_by=initiated_by,
         auto=auto,
         report=report,
+        speaker_selection=mode,
     )
     thread_id = str(uuid.uuid4())
     data = empty_session_record(thread_id)
@@ -345,6 +365,60 @@ def get_run(thread_id: str, run_id: str) -> dict[str, Any]:
     return schema.public_run(run)
 
 
+def export_run(thread_id: str, run_id: str, *, include_log: bool = False) -> tuple[str, str]:
+    """``(file name, Markdown)`` of one run, built by code from what is stored (UDR-0218 D1)."""
+    from app.discussion import export
+
+    data = _read(thread_id)
+    run = schema.find_run(data, run_id)
+    if run is None:
+        raise DiscussionError("not_found", "discussion not found", 404)
+    return export.run_markdown(data, run, include_log=include_log)
+
+
+#: Verdict filters of the decision log; ``undecided`` = a completed run nobody has decided yet.
+DECISION_FILTERS: tuple[str, ...] = ("all", *schema.VERDICTS, "undecided")
+DECISIONS_MAX_LIMIT = 200
+
+
+async def list_decisions(*, verdict: str = "all", q: str = "", limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """The decision log across chats (CTR-0272, UDR-0218 D3): completed runs from the session index.
+
+    Reads only the index (whose rows reconcile against the files), newest first by the decision
+    time, else the run's last change; ``q`` matches topic, recommendation and note.
+    """
+    from app.session import index_store
+
+    if verdict not in DECISION_FILTERS:
+        raise DiscussionError("invalid_request", f"verdict must be one of {', '.join(DECISION_FILTERS)}", 422)
+    needle = (q or "").strip().casefold()
+    items: list[dict[str, Any]] = []
+    for meta in await index_store.list_session_metadata():
+        for row in meta.get("discussions") or []:
+            if not isinstance(row, dict) or row.get("status") != schema.COMPLETED:
+                continue
+            if verdict == "undecided" and row.get("verdict"):
+                continue
+            if verdict not in ("all", "undecided") and row.get("verdict") != verdict:
+                continue
+            if needle and not any(
+                needle in str(row.get(k) or "").casefold() for k in ("topic", "recommendation", "note")
+            ):
+                continue
+            items.append(
+                {
+                    **row,
+                    "thread_id": meta.get("thread_id"),
+                    "title": meta.get("title", ""),
+                    "folder_id": meta.get("folder_id"),
+                }
+            )
+    items.sort(key=lambda r: str(r.get("decided_at") or r.get("updated_at") or ""), reverse=True)
+    start = max(0, int(offset))
+    size = min(max(int(limit), 1), DECISIONS_MAX_LIMIT)
+    return {"items": items[start : start + size], "total": len(items)}
+
+
 def phase_running(thread_id: str) -> bool:
     """True while a phase of this chat's discussion runs (for the ``/ag-ui/`` refusal, D11)."""
     try:
@@ -373,8 +447,13 @@ def apply_input(
     text: str,
     speaker_id: str | None,
     actor: str,
+    speakers_next: list[str] | None = None,
 ) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
-    """Apply one answer to the pending request, once. Returns (run, already_applied, messages)."""
+    """Apply one answer to the pending request, once. Returns (run, already_applied, messages).
+
+    ``speakers_next`` (PRP-0235, UDR-0218 D4): in the decision mode the person's own choice of
+    the next round's speakers, with ``answer``, ``continue`` or ``auto``.
+    """
     if action not in schema.ACTIONS:
         raise DiscussionError("invalid_request", f"unknown action {action!r}", 422)
     text = (text or "").strip()
@@ -391,6 +470,17 @@ def apply_input(
                 raise DiscussionError("invalid_request", "a question needs text", 422)
             if not any(p["id"] == speaker_id for p in run["participants"]):
                 raise DiscussionError("invalid_request", "unknown participant", 422)
+        next_round = schema.phase_round(str(pending.get("phase") or ""))
+        if speakers_next is not None:
+            if selection.mode_of(run) != selection.MODE_DECISION:
+                raise DiscussionError("invalid_request", "speakers can be chosen only in the decision mode", 422)
+            if action not in (schema.ACTION_ANSWER, schema.ACTION_CONTINUE, schema.ACTION_AUTO) or next_round is None:
+                raise DiscussionError(
+                    "invalid_request", "speakers go with answer, continue or auto before a round", 422
+                )
+            known = {p["id"] for p in run["participants"]}
+            if not speakers_next or any(s not in known for s in speakers_next):
+                raise DiscussionError("invalid_request", "speakers must be 1 or more of the participants", 422)
         run["context_revision"] = int(run.get("context_revision") or 0) + 1
         run.setdefault("human_inputs", []).append(
             {
@@ -404,6 +494,10 @@ def apply_input(
             }
         )
         run["pending_request"] = None
+        if speakers_next is not None and next_round is not None:
+            record = selection.by_person(run, next_round, speakers_next)
+            run.setdefault("selections", {})[str(next_round)] = record
+            _log_selection(thread_id, run, record)
         if text:
             shown = text
             if action == schema.ACTION_ASK:
@@ -466,6 +560,19 @@ def request_stop(thread_id: str, run_id: str, kind: str) -> dict[str, Any]:
     return schema.public_run(run)
 
 
+def _log_selection(thread_id: str, run: dict[str, Any], record: dict[str, Any]) -> None:
+    """One INFO line per round's selection: ids only, never content (UDR-0218 D5)."""
+    logger.info(
+        "AI discussion selection: thread=%s run=%s round=%s source=%s speakers=%s skipped=%s",
+        thread_id,
+        run.get("id"),
+        record.get("round"),
+        record.get("source"),
+        ",".join(record.get("speakers") or []),
+        ",".join(record.get("skipped") or []),
+    )
+
+
 def _auto_off(run: dict[str, Any], reason: str) -> None:
     """Hand control back to the person (UDR-0217 D4): the run waits after its rounds again."""
     if run.get("auto"):
@@ -517,6 +624,7 @@ def continue_discussion(
     seat_requests: list[dict[str, Any]] | None = None,
     auto: bool = False,
     report: bool = True,
+    speaker_selection: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """A NEW run seeded with this run's final state (D11). Never from an ordinary post.
 
@@ -524,8 +632,12 @@ def continue_discussion(
     into every turn, the run is 1 round unless asked otherwise, it starts at round 1 when a
     conclusion is carried (unless ``skip_opening`` is False), and ``seat_requests`` may replace
     the seats under the create rules. Returns the new run and its stored brief message.
+    PRP-0235: ``speaker_selection`` omitted keeps the source run's mode.
     """
     from app.core.config import settings
+
+    if speaker_selection is not None:
+        _check_selection_mode(speaker_selection)
 
     _default_rounds, max_rounds = round_limits()
     rounds = min(CONTINUE_DEFAULT_ROUNDS, max_rounds) if rounds is None else rounds
@@ -571,6 +683,9 @@ def continue_discussion(
                 "invalid_request", "there is no previous conclusion to start the mutual review from", 422
             )
             return False
+        mode = speaker_selection or selection.mode_of(source)
+        if speaker_selection is None and mode == selection.MODE_DECISION and not speakers.decision_available():
+            mode = selection.MODE_ALL  # the source's decision model is gone: everyone speaks
         run = schema.new_run(
             brief=dict(source["brief"]),
             participants=new_seats if new_seats is not None else [dict(p) for p in source["participants"]],
@@ -584,6 +699,7 @@ def continue_discussion(
             skip_opening=skip,
             auto=auto,
             report=report,
+            speaker_selection=mode,
         )
         schema.runs_of(data).append(run)
         text = _brief_text(run, continued=True)
@@ -1040,12 +1156,31 @@ class _Runner:
 
         run.update(self.write(change))
 
-    async def advise(self, run: dict[str, Any], log: list[dict[str, str]]) -> AsyncIterator[str]:
-        """Advisory signals only -- they never change the status (D2/D8)."""
+    def _decision_text(self, run: dict[str, Any], log: list[dict[str, str]]) -> str:
+        state = run.get("state") or {}
+        return seats.state_markdown(state) + "\n\n" + "\n\n".join(f"[{e['speaker']}] {e['text']}" for e in log)
+
+    def _selection_text(self, run: dict[str, Any], log: list[dict[str, str]]) -> str:
+        """What the seat scores see: the brief (focus, the person's inputs), the seats, the state, the log."""
+        roster = "\n".join(f"- {p['display_name']}: {p.get('charter') or ''}" for p in run["participants"])
+        return f"{seats.brief_block(run)}\n\nParticipants:\n{roster}\n\n{self._decision_text(run, log)}"
+
+    async def advise(
+        self, run: dict[str, Any], log: list[dict[str, str]], *, next_round: int | None = None
+    ) -> AsyncIterator[str]:
+        """Advisory signals only -- they never change the status (D2/D8).
+
+        PRP-0235 (UDR-0218 D4): in the decision mode, with ``next_round``, the same decision call
+        scores the seats and the selection of that round is stored and streamed.
+        """
         threshold = int(run["budget"].get("advisory_threshold_percent") or 70) / 100
         state = run.get("state") or {}
-        text = seats.state_markdown(state) + "\n\n" + "\n\n".join(f"[{e['speaker']}] {e['text']}" for e in log)
-        signals = await speakers.advisory(text)
+        selecting = next_round is not None and selection.mode_of(run) == selection.MODE_DECISION
+        if selecting:
+            signals = await speakers.advisory(self._selection_text(run, log), seats=run["participants"])
+        else:
+            signals = await speakers.advisory(self._decision_text(run, log))
+        scores = signals.pop("seat_scores", None) if isinstance(signals, dict) else None
         if signals is None:
             finish = state.get("suggest_finish") or {}
             signals = {"source": "moderator", "suggest": bool(finish.get("value")), "reason": finish.get("reason", "")}
@@ -1082,6 +1217,52 @@ class _Runner:
 
         run.update(self.write(store))
         yield self.custom("discussion_advisory", signals)
+        if selecting and next_round is not None:
+            async for chunk in self._store_selection(run, next_round, scores):
+                yield chunk
+
+    async def _store_selection(
+        self, run: dict[str, Any], round_no: int, scores: dict[str, float | None] | None
+    ) -> AsyncIterator[str]:
+        record = selection.choose(run, round_no, scores)
+
+        def store(_data: dict[str, Any], current: dict[str, Any]) -> None:
+            current.setdefault("selections", {})[str(round_no)] = record
+
+        run.update(self.write(store))
+        _log_selection(self.adv.thread_id, run, record)
+        yield self.custom("discussion_selection", record)
+
+    async def _ensure_selection(
+        self, run: dict[str, Any], round_no: int, log: list[dict[str, str]]
+    ) -> AsyncIterator[str]:
+        """A decision-mode round without a stored selection (a continuation that starts at round 1,
+        a resumed run) scores the seats now; a stored one is streamed again before the round."""
+        if selection.mode_of(run) != selection.MODE_DECISION:
+            return
+        record = (run.get("selections") or {}).get(str(round_no))
+        if isinstance(record, dict):
+            yield self.custom("discussion_selection", record)
+            return
+        signals = await speakers.advisory(self._selection_text(run, log), seats=run["participants"])
+        scores = signals.get("seat_scores") if isinstance(signals, dict) else None
+        usage = signals.get("usage") if isinstance(signals, dict) else None
+        if usage and signals.get("source") == "decision":
+            from app.usage.ledger import append_discussion_usage
+
+            append_discussion_usage(
+                kind="helper",
+                purpose="discussion_speaker_selection",
+                turn={**usage, "model_calls": 1},
+                model=signals.get("offering"),
+                provider="azure-openai",
+                thread_id=self.adv.thread_id,
+                run_id=run["id"],
+                node=run.get("phase"),
+                agent=schema.MODERATOR_ID,
+            )
+        async for chunk in self._store_selection(run, round_no, scores):
+            yield chunk
 
     # ---- the phases ----------------------------------------------------------
 
@@ -1111,13 +1292,18 @@ class _Runner:
     def _start_deadline(self, run: dict[str, Any]) -> None:
         self.deadline = time.monotonic() + int(run["budget"]["phase_timeout_seconds"])
 
-    async def _speakers(self, run: dict[str, Any], phase: str, base_log: list[dict[str, str]]) -> AsyncIterator[str]:
+    async def _speakers(
+        self, run: dict[str, Any], phase: str, base_log: list[dict[str, str]], only: list[str] | None = None
+    ) -> AsyncIterator[str]:
         """Every participant in the fixed order; one already stored in this phase is skipped (D4/D6).
 
         The opening gives everyone the SAME snapshot without the others' replies (D7); a round
-        gives each speaker the previous phase plus this round's earlier speakers.
+        gives each speaker the previous phase plus this round's earlier speakers. ``only`` (the
+        round's selection, UDR-0218 D4) leaves the other seats out, still in seat order.
         """
         for participant in run["participants"]:
+            if only is not None and participant["id"] not in only:
+                continue
             fresh, current = self.load()
             if schema.message_id(current["id"], phase, participant["id"]) in schema.stored_message_ids(fresh):
                 continue
@@ -1230,7 +1416,7 @@ class _Runner:
                     log = self._phase_messages(data, run["id"], phases={schema.OPENING})
                     async for chunk in self.moderate(run, phase=schema.FRAMING, log=log, final=False):
                         yield chunk
-                    async for chunk in self.advise(run, log):
+                    async for chunk in self.advise(run, log, next_round=1):
                         yield chunk
                     if run.get("auto"):
                         self._set_phase(run, schema.round_phase(1))
@@ -1248,14 +1434,17 @@ class _Runner:
                 prev = _previous_phase(phase)
                 since = self._first_sequence(data, run["id"], prev)
                 base_log = self._phase_messages(data, run["id"], phases={prev}, since=since)
-                async for chunk in self._speakers(run, phase, base_log):
+                async for chunk in self._ensure_selection(run, n, base_log):
+                    yield chunk
+                async for chunk in self._speakers(run, phase, base_log, only=selection.speakers_of(run, n)):
                     yield chunk
                 fresh, run = self.load()
                 log = self._phase_messages(fresh, run["id"], phases={phase})
                 if schema.message_id(run["id"], phase, schema.MODERATOR_ID) not in schema.stored_message_ids(fresh):
                     async for chunk in self.moderate(run, phase=phase, log=log, final=False):
                         yield chunk
-                    async for chunk in self.advise(run, log):
+                    upcoming = n + 1 if n < int(run["rounds"]) else None
+                    async for chunk in self.advise(run, log, next_round=upcoming):
                         yield chunk
                 if n >= int(run["rounds"]):
                     self._set_phase(run, phase, n)
@@ -1476,10 +1665,12 @@ __all__ = [
     "begin_advance",
     "continue_discussion",
     "create_discussion",
+    "export_run",
     "get_run",
     "heal",
     "lease_valid",
     "limits",
+    "list_decisions",
     "list_runs",
     "phase_running",
     "record_decision",

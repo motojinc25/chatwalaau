@@ -492,7 +492,8 @@ async def list_sessions(
     elif folder_id is not None:
         sessions = [s for s in sessions if s.get("folder_id") == folder_id]
 
-    sessions = sort_sessions(sessions)
+    # PRP-0235: index-only rows (the decision log's) never reach the sidebar payload.
+    sessions = [{k: v for k, v in s.items() if k not in index_store.INDEX_ONLY_KEYS} for s in sort_sessions(sessions)]
 
     # Total BEFORE slicing, so the client knows whether more pages exist.
     response.headers["X-Total-Count"] = str(len(sessions))

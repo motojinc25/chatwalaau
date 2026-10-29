@@ -54,7 +54,11 @@ logger = logging.getLogger(__name__)
 
 # Bump when the shape of an entry changes; a mismatch discards the file and
 # triggers a full rebuild (cheap, and safer than guessing at an old shape).
-INDEX_VERSION = 1
+# 2: PRP-0235 (UDR-0218 D3) -- a discussion chat's entry carries ``discussions`` (one row per run).
+INDEX_VERSION = 2
+
+#: Index-only keys the session list response leaves out (the sidebar never needs them).
+INDEX_ONLY_KEYS: frozenset[str] = frozenset({"discussions"})
 
 # Internal-only key: the source file's mtime_ns at the time the entry was built.
 # Stripped before an entry is handed to a caller.
@@ -124,7 +128,7 @@ def read_session_metadata(path: Path) -> dict[str, Any] | None:
     if not isinstance(image_count, int):
         image_count = _count_images(messages)
 
-    return {
+    meta: dict[str, Any] = {
         "thread_id": data.get("thread_id", path.stem),
         "title": data.get("title", ""),
         "created_at": data.get("created_at", ""),
@@ -140,6 +144,12 @@ def read_session_metadata(path: Path) -> dict[str, Any] | None:
         # AI Discussion chat (PRP-0232, CTR-0014): drives the sidebar's Discussion tag.
         "has_discussion": bool(data.get("discussion_runs")),
     }
+    if meta["has_discussion"]:
+        # PRP-0235 (UDR-0218 D3): the decision log reads these rows, never the session files.
+        from app.discussion.schema import index_rows
+
+        meta["discussions"] = index_rows(data)
+    return meta
 
 
 def _load_index() -> dict[str, dict[str, Any]]:

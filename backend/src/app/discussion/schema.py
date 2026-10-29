@@ -134,6 +134,7 @@ def new_run(
     skip_opening: bool = False,
     auto: bool = False,
     report: bool = False,
+    speaker_selection: str = "all",
 ) -> dict[str, Any]:
     """A run record in status ``created`` (CTR-0271).
 
@@ -143,6 +144,9 @@ def new_run(
 
     PRP-0234 (UDR-0217 D4 / D5): ``auto`` skips the waits after rounds, ``report`` asks for the
     full report after the final summary.
+
+    PRP-0235 (UDR-0218 D4 / D5): ``speaker_selection`` is ``all`` or ``decision``; ``selections``
+    holds one record per round of who speaks and why.
     """
     now = now_iso()
     run: dict[str, Any] = {
@@ -174,6 +178,8 @@ def new_run(
         "auto_stopped": None,
         "report": bool(report),
         "report_skipped": None,
+        "speaker_selection": speaker_selection,
+        "selections": {},
         "initiated_by": initiated_by,
         "created_at": now,
         "updated_at": now,
@@ -267,6 +273,43 @@ def stored_message_ids(data: dict[str, Any]) -> set[str]:
     return {str(m.get("message_id")) for m in data.get("messages") or [] if isinstance(m, dict) and m.get("message_id")}
 
 
+def _clip(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
+
+
+def index_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """One compact row per run for the session index (CTR-0014, PRP-0235 / UDR-0218 D3).
+
+    The decision log reads only these; the index reconciles them against the file, so a
+    deleted chat or a changed decision is never shown stale.
+    """
+    rows: list[dict[str, Any]] = []
+    for run in data.get(RUNS_KEY) or []:
+        if not isinstance(run, dict) or not run.get("id"):
+            continue
+        final = run.get("final") if isinstance(run.get("final"), dict) else {}
+        decision = run.get("human_decision") if isinstance(run.get("human_decision"), dict) else {}
+        rows.append(
+            {
+                "run_id": run["id"],
+                "parent_run_id": run.get("parent_run_id"),
+                "topic": _clip((run.get("brief") or {}).get("topic"), 200),
+                "status": run.get("status"),
+                "termination_reason": run.get("termination_reason"),
+                "rounds": run.get("rounds"),
+                "recommendation": _clip(final.get("recommendation"), 300),
+                "verdict": decision.get("verdict"),
+                "note": _clip(decision.get("note"), 300),
+                "decided_at": decision.get("decided_at"),
+                "decided_by": decision.get("decided_by"),
+                "created_at": run.get("created_at"),
+                "updated_at": run.get("updated_at"),
+            }
+        )
+    return rows
+
+
 def public_run(run: dict[str, Any]) -> dict[str, Any]:
     """The run as the API returns it: the lease owner is internal and never leaves."""
     out = dict(run)
@@ -288,6 +331,7 @@ __all__ = [
     "build_message",
     "find_run",
     "has_open_run",
+    "index_rows",
     "message_id",
     "new_run",
     "open_run",

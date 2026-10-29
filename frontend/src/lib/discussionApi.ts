@@ -35,7 +35,33 @@ export interface DiscussionOptions {
   /** Research tools a seat may have (PRP-0234); web search depends on the seat's model. */
   tools?: { id: DiscussionToolId; label: string; available: boolean }[]
   web_search_models?: string[]
+  /** PRP-0235: whether the decision model can choose who speaks in a round. */
+  speaker_selection_available?: boolean
 }
+
+export type SpeakerSelectionMode = 'all' | 'decision'
+
+/** One row of the decision log (PRP-0235, UDR-0218 D3): a completed run from the session index. */
+export interface DecisionLogItem {
+  thread_id: string
+  title: string
+  folder_id: string | null
+  run_id: string
+  parent_run_id: string | null
+  topic: string
+  status: string
+  termination_reason: string | null
+  rounds: number
+  recommendation: string
+  verdict: 'adopt' | 'hold' | 'rediscuss' | null
+  note: string
+  decided_at: string | null
+  decided_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type DecisionFilter = 'all' | 'adopt' | 'hold' | 'rediscuss' | 'undecided'
 
 export type DiscussionToolId = 'web_search' | 'rag_search' | 'ontology_query'
 
@@ -62,6 +88,8 @@ export interface CreateDiscussionRequest {
   auto?: boolean
   /** The full report after the summary (default true). */
   report?: boolean
+  /** Who speaks in a round (PRP-0235): everyone (default) or chosen by the decision model. */
+  speaker_selection?: SpeakerSelectionMode
 }
 
 /** Continue discussion (PRP-0233): omitted fields keep the server defaults (1 round, opening
@@ -73,6 +101,7 @@ export interface ContinueDiscussionRequest {
   participants?: SeatRequest[]
   auto?: boolean
   report?: boolean
+  speaker_selection?: SpeakerSelectionMode
 }
 
 /** A stored message as the input endpoint echoes it (CTR-0014 shape + `discussion`). */
@@ -136,6 +165,8 @@ export const discussionApi = {
       action: 'answer' | 'continue' | 'ask' | 'finish' | 'auto'
       text?: string
       speaker_id?: string
+      /** The next round's speakers, chosen by the person (decision mode, PRP-0235). */
+      speakers?: string[]
     },
   ) =>
     call<{ run: DiscussionRun; already_applied: boolean; messages: StoredDiscussionMessage[] }>(
@@ -156,7 +187,40 @@ export const discussionApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /** The decision log across chats (PRP-0235): completed runs, newest first. */
+  decisions: (params: { verdict?: DecisionFilter; q?: string; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams()
+    if (params.verdict && params.verdict !== 'all') query.set('verdict', params.verdict)
+    if (params.q?.trim()) query.set('q', params.q.trim())
+    if (params.limit) query.set('limit', String(params.limit))
+    if (params.offset) query.set('offset', String(params.offset))
+    const suffix = query.toString()
+    return call<{ items: DecisionLogItem[]; total: number }>(`/api/discussions/decisions${suffix ? `?${suffix}` : ''}`)
+  },
+  /** The run as Markdown (PRP-0235): the file name from Content-Disposition and the text. */
+  exportRun: async (threadId: string, runId: string, includeLog = false) => {
+    const res = await fetch(`${base(threadId, runId)}/export${includeLog ? '?log=true' : ''}`)
+    if (!res.ok) throw new DiscussionApiError(`HTTP ${res.status}`, res.status)
+    const disposition = res.headers.get('Content-Disposition') ?? ''
+    const name = /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'discussion.md'
+    return { name, text: await res.text() }
+  },
 }
+
+/** Hand a Markdown export to the browser as a download. */
+export function downloadMarkdown(name: string, text: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
+/** Workspace folder an export is saved to (PRP-0235, via the File Explorer, CTR-0136). */
+export const EXPORT_FOLDER = 'discussions'
 
 export interface DiscussionStreamEvent {
   type: string

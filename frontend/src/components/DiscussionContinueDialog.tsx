@@ -9,6 +9,7 @@ import {
   RunOptionToggles,
   type Seat,
   SeatEditor,
+  SpeakerSelectionOption,
   seatRequests,
   seatsFromParticipants,
   useSeatOptions,
@@ -70,6 +71,7 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
   const [showCarried, setShowCarried] = useState(false)
   const [auto, setAuto] = useState(false)
   const [report, setReport] = useState(true)
+  const [selectionMode, setSelectionMode] = useState<'all' | 'decision'>(run.speaker_selection ?? 'all')
   const [submitting, setSubmitting] = useState(false)
   // A request error is shown only after this dialog's own submit, not an older one from the bar.
   const [submitted, setSubmitted] = useState(false)
@@ -83,8 +85,9 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
     setShowCarried(false)
     setAuto(false)
     setReport(true)
+    setSelectionMode(run.speaker_selection ?? 'all')
     setSubmitted(false)
-  }, [open, hasCarried, initialSeats])
+  }, [open, hasCarried, initialSeats, run.speaker_selection])
 
   const roundsChoices = useMemo(
     () => Array.from({ length: options?.limits.max_rounds ?? 5 }, (_, i) => i + 1),
@@ -104,6 +107,7 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
         skip_opening: hasCarried && skipOpening,
         auto,
         report,
+        speaker_selection: options?.speaker_selection_available ? selectionMode : 'all',
         // Unchanged seats are not sent: the new run copies the source seats as they were.
         ...(seatsChanged ? { participants: seatRequests(seats, options) } : {}),
       })
@@ -221,6 +225,11 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
             )}
           </div>
           <SeatEditor options={options} agents={agents} seats={seats} onChange={setSeats} />
+          <SpeakerSelectionOption
+            value={options?.speaker_selection_available ? selectionMode : 'all'}
+            available={Boolean(options?.speaker_selection_available)}
+            onChange={setSelectionMode}
+          />
           <RunOptionToggles auto={auto} report={report} onAuto={setAuto} onReport={setReport} />
           {(optionsError || (submitted && error)) && (
             <p role="alert" className="text-xs text-red-600">

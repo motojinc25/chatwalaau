@@ -1,9 +1,9 @@
 // Shared pieces of the AI Discussion UI (CTR-0276, PRP-0232): speaker colours and the
 // attribution line on a discussion message (with the research tools a turn used and the full
-// report's label, PRP-0234).
-import { FileText, Gavel, Loader2, MessageSquareQuote, Search, User } from 'lucide-react'
+// report's label, PRP-0234) and the trace of a round's speaker selection (PRP-0235).
+import { FileText, Filter, Gavel, Loader2, MessageSquareQuote, Search, User } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { DiscussionMessageMeta } from '@/types/chat'
+import type { DiscussionMessageMeta, DiscussionParticipant, DiscussionSelection } from '@/types/chat'
 
 // Full class strings, so Tailwind's scanner sees every one of them.
 export const SPEAKER_COLOR_CLASSES: Record<string, { dot: string; text: string; ring: string; soft: string }> = {
@@ -106,6 +106,56 @@ export function DiscussionSpeakerTag({ meta }: { meta: DiscussionMessageMeta }) 
           interrupted -- not saved
         </span>
       )}
+    </div>
+  )
+}
+
+/** "Critic 0.82 (forced: left out last round)" for one seat of a selection record. */
+function selectionLabel(record: DiscussionSelection, id: string, names: Record<string, string>): string {
+  const tags: string[] = []
+  const score = record.scores?.[id]
+  if (typeof score === 'number') tags.push(score.toFixed(2))
+  if (record.forced?.includes(id)) tags.push('forced: left out last round')
+  if (record.filled?.includes(id)) tags.push('added to reach the minimum')
+  if (record.unread?.includes(id)) tags.push('score unreadable')
+  return `${names[id] ?? id}${tags.length ? ` (${tags.join(', ')})` : ''}`
+}
+
+const SELECTION_SOURCE: Record<DiscussionSelection['source'], string> = {
+  decision: 'chosen by the decision model',
+  person: 'chosen by you',
+  fallback: 'everyone',
+}
+
+/**
+ * The trace of one round's speaker selection (PRP-0235, UDR-0218 D5): who speaks, who sits this
+ * round out, the scores and why -- shown before the round's messages and in the bar.
+ */
+export function DiscussionSelectionTrace({
+  record,
+  participants,
+  label,
+}: {
+  record: DiscussionSelection
+  participants: DiscussionParticipant[]
+  label?: string
+}) {
+  const names = Object.fromEntries(participants.map((p) => [p.id, p.display_name]))
+  return (
+    <div
+      className="mx-auto my-1 flex w-full max-w-3xl items-start gap-1.5 rounded-md border border-dashed px-2 py-1 text-[11px] text-muted-foreground"
+      data-testid="discussion-selection-trace">
+      <Filter className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+      <span>
+        <span className="font-medium text-foreground">
+          {label ?? `Round ${record.round}`} -- {SELECTION_SOURCE[record.source] ?? record.source}:
+        </span>{' '}
+        {record.speakers.map((id) => selectionLabel(record, id, names)).join(', ')}
+        {record.skipped.length > 0 && (
+          <>. Not this round: {record.skipped.map((id) => selectionLabel(record, id, names)).join(', ')}</>
+        )}
+        {record.fallback_reason ? `. ${record.fallback_reason}` : ''}
+      </span>
     </div>
   )
 }

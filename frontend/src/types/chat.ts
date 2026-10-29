@@ -341,6 +341,22 @@ export interface DiscussionFinal {
   next_actions: string[]
 }
 
+/** Who speaks in one round and why (CTR-0271 `selections[n]`, PRP-0235 / UDR-0218 D5). */
+export interface DiscussionSelection {
+  round: number
+  source: 'decision' | 'person' | 'fallback'
+  speakers: string[]
+  skipped: string[]
+  /** Seat id -> the decision model's score (null = unreadable). */
+  scores: Record<string, number | null>
+  forced: string[]
+  filled: string[]
+  unread?: string[]
+  fallback_reason: string | null
+  threshold_percent: number
+  at: string
+}
+
 /** One DiscussionRun (CTR-0271) as `/api/discussions` returns it. */
 export interface DiscussionRun {
   id: string
@@ -385,6 +401,9 @@ export interface DiscussionRun {
   /** PRP-0234: the full report after the summary; why it was not written. */
   report?: boolean
   report_skipped?: 'budget' | 'failed' | null
+  /** PRP-0235: who speaks in a round ('all' when absent) and each round's selection record. */
+  speaker_selection?: 'all' | 'decision'
+  selections?: Record<string, DiscussionSelection>
   created_at: string
   updated_at: string
 }

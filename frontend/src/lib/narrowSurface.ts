@@ -27,6 +27,7 @@ export type EntryId =
   | 'sidebar.about'
   | 'sidebar.ontology'
   | 'sidebar.usage'
+  | 'sidebar.decisions'
   | 'sidebar.agents'
   | 'sidebar.webhook'
   | 'sidebar.pipeline'
@@ -81,6 +82,8 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   'sidebar.ontology': 'wide-only',
   // Token Usage Dashboard (PRP-0173): a ~90% modal, an out-of-scope screen on a phone.
   'sidebar.usage': 'wide-only',
+  // Decision log (PRP-0235): a large table dialog, like the Token Usage Dashboard.
+  'sidebar.decisions': 'wide-only',
   'sidebar.agents': 'wide-only',
   'sidebar.webhook': 'wide-only',
   'sidebar.pipeline': 'wide-only',

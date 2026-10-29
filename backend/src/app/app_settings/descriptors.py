@@ -1657,6 +1657,42 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         max=32_000,
         help="How long the full report written after the summary may be.",
     ),
+    # PRP-0235 (UDR-0218 D4): speaker selection when a discussion lets the decision model choose.
+    SettingDescriptor(
+        "discussion_selection_threshold_percent",
+        "Speaker selection threshold (%)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=99,
+        help=(
+            "In a discussion where the decision model chooses the speakers, the score a participant needs "
+            "to speak in a round."
+        ),
+    ),
+    SettingDescriptor(
+        "discussion_selection_min_speakers",
+        "Fewest speakers per round",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=6,
+        help=(
+            "The fewest participants who speak in a round when the decision model chooses; the best-scored are added."
+        ),
+    ),
+    SettingDescriptor(
+        "discussion_selection_max_skipped_rounds",
+        "Rounds a participant may sit out",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=5,
+        help="How many rounds in a row a participant may be left out before it is brought back to speak.",
+    ),
 )
 
 

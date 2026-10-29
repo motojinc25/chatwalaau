@@ -4,6 +4,8 @@
 import { Check, CircleHelp, FastForward, Lightbulb, Loader2, Pause, Play, Repeat, Square, Users, X } from 'lucide-react'
 import { useState } from 'react'
 import { DiscussionContinueDialog } from '@/components/DiscussionContinueDialog'
+import { DiscussionExportActions } from '@/components/DiscussionExport'
+import { DiscussionSelectionTrace } from '@/components/DiscussionParts'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import type { DiscussionController } from '@/hooks/useDiscussion'
@@ -53,6 +55,7 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
   const [askTarget, setAskTarget] = useState('')
   const [askText, setAskText] = useState('')
   const [continueOpen, setContinueOpen] = useState(false)
+  const [changingSpeakers, setChangingSpeakers] = useState(false)
   if (!run) return null
 
   // Hold and Re-discuss lead straight to the Continue dialog (PRP-0233, UDR-0216 D5).
@@ -76,6 +79,17 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
     : run.state?.suggest_finish?.value
       ? { reason: run.state.suggest_finish.reason }
       : null
+  // Speaker selection (PRP-0235, UDR-0218 D4 / D5): this round's and the next round's choice.
+  const selecting = run.speaker_selection === 'decision'
+  const currentRound = run.phase.startsWith('round:') ? run.phase.slice(6) : null
+  const currentSelection = selecting && currentRound ? run.selections?.[currentRound] : undefined
+  const nextRound = run.pending_request?.phase.startsWith('round:') ? run.pending_request.phase.slice(6) : null
+  const nextSelection = selecting && nextRound ? run.selections?.[nextRound] : undefined
+  const chosenNext = discussion.nextSpeakers ?? nextSelection?.speakers ?? []
+  const toggleNext = (id: string) => {
+    const next = chosenNext.includes(id) ? chosenNext.filter((s) => s !== id) : [...chosenNext, id]
+    if (next.length > 0) discussion.setNextSpeakers(run.participants.map((p) => p.id).filter((s) => next.includes(s)))
+  }
 
   return (
     <section
@@ -152,6 +166,15 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
             <Pause className="mr-1 h-3 w-3" />
             Pause
           </Button>
+          {status === 'running' && currentSelection && (
+            <div className="w-full">
+              <DiscussionSelectionTrace
+                record={currentSelection}
+                participants={run.participants}
+                label={`This round (${currentSelection.round})`}
+              />
+            </div>
+          )}
           {run.auto && status === 'running' && autoSuggestion && (
             <p
               className="flex w-full items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300"
@@ -183,6 +206,50 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
               <Lightbulb className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
               The moderator suggests summarizing{run.advisory.reason ? `: ${run.advisory.reason}` : '.'}
             </p>
+          )}
+          {selecting && nextRound && (
+            <div className="space-y-1" data-testid="discussion-next-speakers">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="font-medium">Next round:</span>
+                <span>
+                  {run.participants
+                    .filter((p) => chosenNext.includes(p.id))
+                    .map((p) => p.display_name)
+                    .join(', ') || 'everyone'}
+                  {discussion.nextSpeakers ? ' (chosen by you)' : ''}
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-xs"
+                  onClick={() => setChangingSpeakers((v) => !v)}
+                  disabled={disabled}>
+                  {changingSpeakers ? 'Done' : 'Change'}
+                </Button>
+              </div>
+              {changingSpeakers && (
+                <div className="flex flex-wrap items-center gap-3 text-xs">
+                  {run.participants.map((p) => (
+                    <label key={p.id} className="flex items-center gap-1">
+                      <input
+                        type="checkbox"
+                        aria-label={`${p.display_name} speaks next round`}
+                        checked={chosenNext.includes(p.id)}
+                        onChange={() => toggleNext(p.id)}
+                      />
+                      {p.display_name}
+                    </label>
+                  ))}
+                </div>
+              )}
+              {nextSelection && !discussion.nextSpeakers && (
+                <DiscussionSelectionTrace
+                  record={nextSelection}
+                  participants={run.participants}
+                  label={`Round ${nextSelection.round}`}
+                />
+              )}
+            </div>
           )}
           <p className="text-xs text-muted-foreground">Type your input in the box below, or:</p>
           <div className="flex flex-wrap items-center gap-2">
@@ -289,6 +356,14 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
             recommendation; the decision is yours.
             {run.report_skipped && REPORT_SKIPPED[run.report_skipped] ? ` ${REPORT_SKIPPED[run.report_skipped]}` : ''}
           </p>
+          {selecting && discussion.participation.length > 0 && (
+            <p className="text-xs text-muted-foreground" data-testid="discussion-participation">
+              Rounds spoken:{' '}
+              {discussion.participation
+                .map((p) => `${p.display_name} ${p.rounds_spoken} / ${p.rounds_held}`)
+                .join(', ')}
+            </p>
+          )}
           {run.human_decision ? (
             <p className="flex items-center gap-1.5 text-sm" data-testid="discussion-decision">
               <Check className="h-3.5 w-3.5 text-green-600" aria-hidden="true" />
@@ -320,6 +395,12 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
               </div>
             )
           )}
+        </div>
+      )}
+
+      {!readOnly && !discussion.streaming && !discussion.open && discussion.threadId && (
+        <div className="mt-2">
+          <DiscussionExportActions threadId={discussion.threadId} runId={run.id} />
         </div>
       )}
 

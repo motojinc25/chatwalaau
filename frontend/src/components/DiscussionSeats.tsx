@@ -5,7 +5,13 @@ import { Plus, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { speakerColor } from '@/components/DiscussionParts'
 import { Button } from '@/components/ui/button'
-import { type DiscussionOptions, type DiscussionToolId, discussionApi, type SeatRequest } from '@/lib/discussionApi'
+import {
+  type DiscussionOptions,
+  type DiscussionToolId,
+  discussionApi,
+  type SeatRequest,
+  type SpeakerSelectionMode,
+} from '@/lib/discussionApi'
 import { cn } from '@/lib/utils'
 import type { DiscussionParticipant } from '@/types/chat'
 
@@ -81,6 +87,12 @@ export function seatsFromParticipants(participants: DiscussionParticipant[]): Se
 
 const toolsOf = (tools: string[] | undefined): DiscussionToolId[] => (tools ?? []) as DiscussionToolId[]
 
+/** A new seat's tools: every available research tool (operator default, PRP-0235). A tool the seat's
+ *  model cannot run (web search) stays off on screen and is never sent (see `usableTools`). */
+export function defaultTools(options: DiscussionOptions | null): DiscussionToolId[] {
+  return (options?.tools ?? []).filter((t) => t.available).map((t) => t.id)
+}
+
 /** The seat's tools that its model can run (web search depends on the model). */
 export function usableTools(seat: Seat, options: DiscussionOptions | null): DiscussionToolId[] {
   return seat.tools.filter((t) => toolUsable(t, seat, options))
@@ -139,6 +151,49 @@ export function RunOptionToggles({ auto, report, onAuto, onReport }: RunOptionPr
         </span>
       </label>
     </div>
+  )
+}
+
+interface SelectionProps {
+  value: SpeakerSelectionMode
+  available: boolean
+  onChange: (mode: SpeakerSelectionMode) => void
+}
+
+/** Who speaks in a round (PRP-0235, UDR-0218 D4), the same in both dialogs. */
+export function SpeakerSelectionOption({ value, available, onChange }: SelectionProps) {
+  return (
+    <fieldset className="space-y-1 text-sm" data-testid="discussion-speaker-selection">
+      <legend className="font-medium">Who speaks in a round</legend>
+      <label className="flex items-start gap-2">
+        <input
+          type="radio"
+          name="speaker-selection"
+          className="mt-1"
+          checked={value === 'all'}
+          onChange={() => onChange('all')}
+        />
+        <span>Everyone</span>
+      </label>
+      <label className={cn('flex items-start gap-2', !available && 'opacity-50')}>
+        <input
+          type="radio"
+          name="speaker-selection"
+          className="mt-1"
+          checked={value === 'decision'}
+          disabled={!available}
+          onChange={() => onChange('decision')}
+        />
+        <span>
+          Chosen by the decision model
+          <span className="block text-xs text-muted-foreground">
+            {available
+              ? 'The decision model scores each participant; the best-suited speak, in seat order. Everyone gives an opening view, a participant left out is brought back, and every choice is shown.'
+              : 'Needs a decision model in the model catalog.'}
+          </span>
+        </span>
+      </label>
+    </fieldset>
   )
 }
 
@@ -300,7 +355,13 @@ export function SeatEditor({ options, agents, seats, onChange }: EditorProps) {
         onClick={() =>
           onChange([
             ...seats,
-            { key: `s${Date.now()}`, choice: 'preset:user_advocate', model: '', effort: '', tools: [] },
+            {
+              key: `s${Date.now()}`,
+              choice: 'preset:user_advocate',
+              model: '',
+              effort: '',
+              tools: defaultTools(options),
+            },
           ])
         }>
         <Plus className="mr-1 h-3.5 w-3.5" />

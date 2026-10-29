@@ -482,6 +482,13 @@ class Settings(BaseSettings):
     discussion_tool_calls_per_turn: int = 3
     discussion_tool_result_max_chars: int = 10_000
     discussion_report_max_output_tokens: int = 10_000
+    # PRP-0235 (UDR-0218 D4): speaker selection in the decision mode -- the score at which a seat
+    # speaks (percent), the fewest speakers in a round, and how many rounds in a row a seat may be
+    # left out before it is brought back. The threshold is 40 (operator, 2026-10-24): the real decision
+    # model scored seats about 0.2-0.5, so 50 left the choice almost always to the minimum.
+    discussion_selection_threshold_percent: int = 40
+    discussion_selection_min_speakers: int = 2
+    discussion_selection_max_skipped_rounds: int = 1
 
     # File Explorer (CTR-0006, CTR-0136/0137, PRP-0091, UDR-0069)
     # Human-facing file browse/edit over the coding workspace. OFF unless

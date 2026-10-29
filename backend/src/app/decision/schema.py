@@ -220,7 +220,9 @@ def validate_request(
 # ---- Answers: wire -> normalized (UDR-0201 D7) ---------------------------------
 
 # The one mapping table for the wire fields the documentation does not name (R1).
-_PROBABILITY_KEYS = ("probability", "p", "value", "true")
+# "noul": the service's measured shape (2026-10-24) is {"type": "noul", "noul": 0.37} -- the probability
+# under the question type's own name (PRP-0235 found every advisory and seat score read as raw without it).
+_PROBABILITY_KEYS = ("probability", "noul", "p", "value", "true")
 _DISTRIBUTION_KEYS = ("probabilities", "scores", "distribution", "options", "levels")
 _SCORE_KEYS = ("score", "value", "expected")
 _LABEL_KEYS = ("label", "option", "name", "choice", "key")

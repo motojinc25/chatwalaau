@@ -276,7 +276,7 @@ not decide. You never choose who speaks next and never end the discussion.
 - Answer with ONE JSON object and nothing else."""
 
 
-def _brief_block(run: dict[str, Any]) -> str:
+def brief_block(run: dict[str, Any]) -> str:
     brief = run.get("brief") or {}
     lines = [f"Topic: {brief.get('topic', '').strip()}"]
     if (brief.get("goal") or "").strip():
@@ -386,7 +386,7 @@ def participant_messages(
         from app.discussion.tools import TOOL_LABELS
 
         system += "\nYour research tools: " + ", ".join(TOOL_LABELS.get(t, t) for t in tool_ids)
-    sections = [_brief_block(run), *_carried_sections(run)]
+    sections = [brief_block(run), *_carried_sections(run)]
     # The opening hides this run's moderator state (D7); in a continuation the carried
     # conclusion above is the same for every seat, so the snapshot stays one (UDR-0216 D1).
     state = _state_block(run.get("state")) if phase != schema.OPENING and not _state_is_carried(run) else ""
@@ -435,7 +435,7 @@ FINAL_SCHEMA: dict[str, Any] = {
 
 
 def moderator_messages(*, run: dict[str, Any], log: list[dict[str, str]], final: bool) -> list[tuple[str, str]]:
-    sections = [_brief_block(run), *_carried_sections(run)]
+    sections = [brief_block(run), *_carried_sections(run)]
     state = "" if _state_is_carried(run) else _state_block(run.get("state"))
     if state:
         sections.append(f"Your previous summary:\n{state}")
@@ -492,7 +492,7 @@ def report_messages(*, run: dict[str, Any], log: list[dict[str, str]]) -> list[t
     """The full report's prompt (UDR-0217 D5): the summary's input plus the stored final JSON."""
     max_tokens = int((run.get("budget") or {}).get("report_max_output_tokens") or 10_000)
     topic = str((run.get("brief") or {}).get("topic") or "").strip()
-    sections = [_brief_block(run), *_carried_sections(run), _log_block(log)]
+    sections = [brief_block(run), *_carried_sections(run), _log_block(log)]
     sections.append("The final summary (JSON):\n" + json.dumps(run.get("final") or {}, ensure_ascii=False))
     headings = "\n".join(f"## {title}" for title in REPORT_SECTIONS)
     sections.append(

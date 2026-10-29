@@ -13,11 +13,11 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.auth import Identity, verify_api_key
-from app.discussion import controller, participants, schema
+from app.discussion import controller, participants, schema, speakers
 from app.discussion import tools as research
 from app.session.storage import SessionCorruptError, SessionUnavailableError
 
@@ -52,6 +52,8 @@ class CreateBody(BaseModel):
     # PRP-0234 (UDR-0217 D4 / D5): no wait after a round; the full report after the summary.
     auto: bool = False
     report: bool = True
+    # PRP-0235 (UDR-0218 D4): "all" (default) or "decision" (the decision model scores the seats).
+    speaker_selection: str = Field("all", max_length=16)
 
 
 class InputBody(BaseModel):
@@ -59,6 +61,8 @@ class InputBody(BaseModel):
     action: str = Field(..., max_length=16)
     text: str = Field("", max_length=8000)
     speaker_id: str | None = Field(None, max_length=128)
+    # PRP-0235 (UDR-0218 D4): the person's choice of the next round's speakers (decision mode).
+    speakers: list[str] | None = Field(None, min_length=1, max_length=6)
 
 
 class DecisionBody(BaseModel):
@@ -74,6 +78,8 @@ class ContinueBody(BaseModel):
     participants: list[SeatBody] | None = Field(None, min_length=2, max_length=6)
     auto: bool = False
     report: bool = True
+    # Omitted: the source run's mode.
+    speaker_selection: str | None = Field(None, max_length=16)
 
 
 def _error(exc: Exception) -> HTTPException:
@@ -125,7 +131,18 @@ async def discussion_options() -> dict[str, Any]:
         # PRP-0234: the research tools a seat may have, and the models with hosted web search.
         "tools": research.catalog(),
         "web_search_models": research.web_search_models(models),
+        # PRP-0235: whether the decision model can choose the speakers.
+        "speaker_selection_available": speakers.decision_available(),
     }
+
+
+@router.get("/decisions")
+async def list_decisions(verdict: str = "all", q: str = "", limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    """The decision log across chats (PRP-0235, UDR-0218 D3); reads the session index only."""
+    try:
+        return await controller.list_decisions(verdict=verdict, q=q[:200], limit=limit, offset=offset)
+    except controller.DiscussionError as exc:
+        raise _error(exc) from exc
 
 
 @router.post("")
@@ -140,6 +157,7 @@ async def create_discussion(body: CreateBody, identity: Identity = Depends(verif
         initiated_by=identity.subject,
         auto=body.auto,
         report=body.report,
+        speaker_selection=body.speaker_selection,
     )
     return {"thread_id": thread_id, "run": schema.public_run(run)}
 
@@ -152,6 +170,17 @@ async def list_runs(thread_id: str) -> dict[str, Any]:
 @router.get("/{thread_id}/runs/{run_id}")
 async def get_run(thread_id: str, run_id: str) -> dict[str, Any]:
     return {"run": _call(controller.get_run, _thread(thread_id), run_id)}
+
+
+@router.get("/{thread_id}/runs/{run_id}/export")
+async def export_run(thread_id: str, run_id: str, log: bool = False) -> Response:
+    """The run as a Markdown file (PRP-0235, UDR-0218 D1): built by code, no model call."""
+    name, text = _call(controller.export_run, _thread(thread_id), run_id, include_log=log)
+    return Response(
+        content=text.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"},
+    )
 
 
 @router.post("/{thread_id}/runs/{run_id}/input")
@@ -167,6 +196,7 @@ async def post_input(
         text=body.text,
         speaker_id=body.speaker_id,
         actor=identity.subject,
+        speakers_next=body.speakers,
     )
     return {"run": run, "already_applied": already, "messages": messages}
 
@@ -211,6 +241,7 @@ async def continue_discussion(
         seat_requests=None if body.participants is None else [s.model_dump() for s in body.participants],
         auto=body.auto,
         report=body.report,
+        speaker_selection=body.speaker_selection,
     )
     return {"run": run, "messages": messages}
 

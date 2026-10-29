@@ -3,7 +3,15 @@
 // chat page then runs its opening.
 import { Loader2, Users } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { RunOptionToggles, type Seat, SeatEditor, seatRequests, useSeatOptions } from '@/components/DiscussionSeats'
+import {
+  defaultTools,
+  RunOptionToggles,
+  type Seat,
+  SeatEditor,
+  SpeakerSelectionOption,
+  seatRequests,
+  useSeatOptions,
+} from '@/components/DiscussionSeats'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -36,6 +44,7 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
   const [seats, setSeats] = useState<Seat[]>([])
   const [auto, setAuto] = useState(false)
   const [report, setReport] = useState(true)
+  const [selectionMode, setSelectionMode] = useState<'all' | 'decision'>('all')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -44,13 +53,16 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
     setError(null)
     if (!options) return
     setRounds(options.limits.default_rounds)
+    // Operator defaults (PRP-0235): the decision model chooses the speakers when it is available, and
+    // every seat starts with all the research tools.
+    setSelectionMode(options.speaker_selection_available ? 'decision' : 'all')
     setSeats(
       options.default_seats.map((id, i) => ({
         key: `s${i}`,
         choice: `preset:${id}`,
         model: '',
         effort: '',
-        tools: [],
+        tools: defaultTools(options),
       })),
     )
   }, [open, options])
@@ -77,6 +89,7 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
         folder_id: folderId ?? null,
         auto,
         report,
+        speaker_selection: options?.speaker_selection_available ? selectionMode : 'all',
       })
       onOpenChange(false)
       setTopic('')
@@ -159,6 +172,11 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
               Budget {options ? options.limits.token_budget.toLocaleString() : '-'} tokens per discussion
             </span>
           </label>
+          <SpeakerSelectionOption
+            value={options?.speaker_selection_available ? selectionMode : 'all'}
+            available={Boolean(options?.speaker_selection_available)}
+            onChange={setSelectionMode}
+          />
           <RunOptionToggles auto={auto} report={report} onAuto={setAuto} onReport={setReport} />
           {noModel && (
             <p role="alert" className="text-xs text-red-600">
