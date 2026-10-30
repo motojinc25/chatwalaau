@@ -133,6 +133,11 @@ def budget_from_settings() -> dict[str, int]:
         "selection_threshold_percent": int(settings.discussion_selection_threshold_percent),
         "selection_min_speakers": int(settings.discussion_selection_min_speakers),
         "selection_max_skipped_rounds": int(settings.discussion_selection_max_skipped_rounds),
+        # PRP-0236 (UDR-0219 D2-D4): the code map's sizes and the Code tool's run-wide read limit.
+        "code_map_max_tokens": int(settings.discussion_code_map_max_tokens),
+        "code_map_summary_tokens": int(settings.discussion_code_map_summary_tokens),
+        "code_map_max_files": int(settings.discussion_code_map_max_files),
+        "code_read_max_chars": int(settings.discussion_code_read_max_chars),
     }
 
 
@@ -258,6 +263,8 @@ def _brief_text(run: dict[str, Any], *, continued: bool = False) -> str:
             lines.append("Carried over: nothing (the previous run left no conclusion)")
         if run.get("skip_opening"):
             tail = " -- Opening skipped"
+    if run.get("code_folder") is not None:
+        lines.append(f"Code folder: {run['code_folder'] or '(workspace)'}")
     lines.append(f"Participants: {names} -- Rounds: {run['rounds']}{tail}")
     return "\n".join(lines)
 
@@ -282,6 +289,22 @@ def _check_selection_mode(mode: str | None) -> str:
     return mode
 
 
+def _check_code(code_folder: str | None, participants: list[dict[str, Any]]) -> str | None:
+    """The run's code folder, workspace-relative (UDR-0219 D1); a Code seat needs one (D4)."""
+    from app.discussion import codemap
+    from app.discussion.tools import CODE
+
+    if code_folder is None:
+        if any(CODE in (p.get("tools") or []) for p in participants):
+            raise DiscussionError("invalid_request", "the Code tool needs a code folder", 422)
+        return None
+    try:
+        _abs, rel = codemap.resolve_folder(code_folder)
+    except codemap.CodeError as exc:
+        raise DiscussionError("invalid_request", str(exc), 422) from exc
+    return rel
+
+
 def _initial_folder(folder_id: str | None) -> str | None:
     if not folder_id:
         return None
@@ -301,8 +324,12 @@ def create_discussion(
     auto: bool = False,
     report: bool = True,
     speaker_selection: str | None = None,
+    code_folder: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """A new discussion chat with its first run (status ``created``)."""
+    """A new discussion chat with its first run (status ``created``).
+
+    PRP-0236: ``code_folder`` (workspace-relative) is the folder the run analyses.
+    """
     from app.core.config import settings
 
     mode = _check_selection_mode(speaker_selection)
@@ -315,6 +342,7 @@ def create_discussion(
         moderator = seats.resolve_moderator(moderator_model)
     except seats.SeatError as exc:
         raise DiscussionError("invalid_request", str(exc), 422) from exc
+    folder = _check_code(code_folder, participants)
 
     run = schema.new_run(
         brief=brief,
@@ -326,6 +354,7 @@ def create_discussion(
         auto=auto,
         report=report,
         speaker_selection=mode,
+        code_folder=folder,
     )
     thread_id = str(uuid.uuid4())
     data = empty_session_record(thread_id)
@@ -611,6 +640,8 @@ def record_decision(thread_id: str, run_id: str, *, verdict: str, note: str, act
 
 #: Rounds of a continuation when the request names none (UDR-0216 D4).
 CONTINUE_DEFAULT_ROUNDS = 1
+#: ``continue_discussion(code_folder=KEEP_CODE_FOLDER)``: the source run's folder (PRP-0236).
+KEEP_CODE_FOLDER = "\0keep"
 
 
 def continue_discussion(
@@ -625,6 +656,7 @@ def continue_discussion(
     auto: bool = False,
     report: bool = True,
     speaker_selection: str | None = None,
+    code_folder: str | None = KEEP_CODE_FOLDER,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """A NEW run seeded with this run's final state (D11). Never from an ordinary post.
 
@@ -633,6 +665,8 @@ def continue_discussion(
     conclusion is carried (unless ``skip_opening`` is False), and ``seat_requests`` may replace
     the seats under the create rules. Returns the new run and its stored brief message.
     PRP-0235: ``speaker_selection`` omitted keeps the source run's mode.
+    PRP-0236: ``code_folder`` omitted keeps the source run's folder; ``None`` drops it. The map is
+    built again when the new run starts.
     """
     from app.core.config import settings
 
@@ -686,9 +720,16 @@ def continue_discussion(
         mode = speaker_selection or selection.mode_of(source)
         if speaker_selection is None and mode == selection.MODE_DECISION and not speakers.decision_available():
             mode = selection.MODE_ALL  # the source's decision model is gone: everyone speaks
+        chosen = new_seats if new_seats is not None else [dict(p) for p in source["participants"]]
+        wanted = source.get("code_folder") if code_folder == KEEP_CODE_FOLDER else code_folder
+        try:
+            folder = _check_code(wanted, chosen)
+        except DiscussionError as exc:
+            box["error"] = exc
+            return False
         run = schema.new_run(
             brief=dict(source["brief"]),
-            participants=new_seats if new_seats is not None else [dict(p) for p in source["participants"]],
+            participants=chosen,
             moderator=dict(source["moderator"]),
             rounds=rounds,
             budget=budget_from_settings(),
@@ -700,6 +741,7 @@ def continue_discussion(
             auto=auto,
             report=report,
             speaker_selection=mode,
+            code_folder=folder,
         )
         schema.runs_of(data).append(run)
         text = _brief_text(run, continued=True)
@@ -894,11 +936,16 @@ class _Runner:
         msg_id = schema.message_id(run["id"], phase, participant["id"])
         messages = seats.participant_messages(run=run, participant=participant, phase=phase, log=log, question=question)
         budget = run["budget"]
+        code = run.get("code") if isinstance(run.get("code"), dict) else {}
+        code_folder = run.get("code_folder")
         turn_tools = TurnTools(
             list(participant.get("tools") or []),
             model=participant["model"],
             calls_per_turn=int(budget.get("tool_calls_per_turn") or 0),
             result_max_chars=int(budget.get("tool_result_max_chars") or 10_000),
+            # PRP-0236 (UDR-0219 D4): the run's folder and what is left of its read limit.
+            code_folder=code_folder,
+            code_read_left=int(budget.get("code_read_max_chars") or 0) - int(code.get("read_chars") or 0),
         )
         self._check_budget(run, messages, summary=False, allowance=turn_tools.allowance_tokens())
         revision = int(run.get("context_revision") or 0)
@@ -920,7 +967,14 @@ class _Runner:
         result = speakers.TurnResult()
         max_out = int(run["budget"]["turn_max_output_tokens"])
         if speakers.use_scripted_replies():
-            source = speakers.scripted_turn(participant=participant, phase=phase, log=log, result=result)
+            hint = None
+            if code_folder is not None and "code" in (participant.get("tools") or []):
+                from app.discussion import codemap
+
+                hint = await asyncio.to_thread(codemap.sample_citation, code_folder)
+            source = speakers.scripted_turn(
+                participant=participant, phase=phase, log=log, result=result, code_hint=hint
+            )
         else:
             source = speakers.model_turn(
                 model=participant["model"],
@@ -938,6 +992,13 @@ class _Runner:
         yield _encode(self.encoder, TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
         text = result.text.strip() or "_(no reply)_"
         used = turn_tools.record() or list(result.extra.get("tools") or [])
+        citations: list[dict[str, Any]] = []
+        if code_folder is not None:
+            from app.discussion import codemap
+
+            # UDR-0219 D6: checked by code against the folder; the reply text is never changed.
+            citations = await asyncio.to_thread(codemap.check_citations, text, code_folder)
+        code_chars = turn_tools.code_chars
 
         def commit(data: dict[str, Any], current: dict[str, Any]) -> None:
             if int(current.get("context_revision") or 0) != revision:
@@ -957,9 +1018,12 @@ class _Runner:
                 color=participant.get("color"),
                 usage=_usage_echo(participant["model"], result),
                 tools=used,
+                citations=citations,
             )
             if _append_messages(data, [message]):
                 current["budget"]["used_tokens"] = int(current["budget"].get("used_tokens") or 0) + result.tokens
+                if code_chars and isinstance(current.get("code"), dict):
+                    current["code"]["read_chars"] = int(current["code"].get("read_chars") or 0) + code_chars
 
         committed = self.write(commit)
         run.update(committed)
@@ -967,6 +1031,10 @@ class _Runner:
         done: dict[str, Any] = {"message_id": msg_id, "budget": committed["budget"]}
         if used:
             done["tools"] = used
+        if citations:
+            done["citations"] = citations
+        if code_chars and isinstance(committed.get("code"), dict):
+            done["code_read_chars"] = int(committed["code"].get("read_chars") or 0)
         yield self.custom("discussion_message_committed", done)
 
     async def moderate(
@@ -1346,9 +1414,43 @@ class _Runner:
 
         run.update(self.write(change))
 
+    async def _ensure_code_map(self) -> AsyncIterator[str]:
+        """Build the run's code map once, before its first phase (UDR-0219 D2 / D7).
+
+        Built by code in a worker thread; stored on the run, so a resumed run reuses the same text
+        (a stable prompt prefix). A failure is recorded and shown; it never stops the run.
+        """
+        from app.discussion import codemap
+
+        data, run = self.load()
+        folder = run.get("code_folder")
+        if folder is None or isinstance(run.get("code"), dict):
+            return
+        parent = schema.find_run(data, str(run.get("parent_run_id") or "")) if run.get("parent_run_id") else None
+        parent_code = (parent or {}).get("code")
+        parent_digest = parent_code.get("digest") if isinstance(parent_code, dict) else None
+        budget = run["budget"]
+        yield self.custom("discussion_code_map", {"folder": folder, "building": True})
+        record = await asyncio.to_thread(
+            codemap.build,
+            folder,
+            max_files=int(budget.get("code_map_max_files") or 5000),
+            map_tokens=int(budget.get("code_map_max_tokens") or 8000),
+            summary_tokens=int(budget.get("code_map_summary_tokens") or 0),
+            parent_digest=parent_digest,
+        )
+
+        def store(_data: dict[str, Any], current: dict[str, Any]) -> None:
+            current["code"] = record
+
+        stored = self.write(store)
+        yield self.custom("discussion_code_map", stored.get("code") and schema.public_run(stored)["code"])
+
     async def run(self) -> AsyncIterator[str]:
         """Run phases until the run waits, ends or pauses; returns the outcome via ``self.outcome``."""
         self.outcome = schema.PAUSED
+        async for chunk in self._ensure_code_map():
+            yield chunk
         while True:
             data, run = self.load()
             yield self.state_event(run)

@@ -16,7 +16,7 @@ import { ComputerUseBanner } from '@/components/ComputerUseBanner'
 import { ComputerUseCaptureView } from '@/components/ComputerUseCaptureView'
 import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { DiscussionBar } from '@/components/DiscussionBar'
-import { DiscussionSelectionTrace } from '@/components/DiscussionParts'
+import { DiscussionCodeMapRow, DiscussionSelectionTrace } from '@/components/DiscussionParts'
 import { HelpPortal } from '@/components/HelpPortal'
 import { LiveDelegationMarker } from '@/components/LiveDelegationMarker'
 import { type ImageEditSubmission, MaskEditorDialog } from '@/components/MaskEditorDialog'
@@ -335,6 +335,19 @@ export function ChatPanel({
     }
     return rows
   }, [messages, discussion.active, discussion.runs, discussion.latest])
+  // PRP-0236 (UDR-0219 D7): the code map row sits under the run's topic message.
+  const codeMapRows = useMemo(() => {
+    const rows = new Map<string, ReactNode>()
+    if (!discussion.active) return rows
+    for (const m of messages) {
+      const meta = m.discussion
+      if (meta?.kind !== 'brief') continue
+      const run = discussion.runs.find((r) => r.id === meta.run_id)
+      if (run?.code_folder == null) continue
+      rows.set(m.id, <DiscussionCodeMapRow code={run.code ?? { folder: run.code_folder, building: true }} />)
+    }
+    return rows
+  }, [messages, discussion.active, discussion.runs])
 
   const {
     attachments,
@@ -952,6 +965,7 @@ export function ChatPanel({
                           : undefined
                   }
                 />
+                {codeMapRows.get(msg.id)}
               </Fragment>
             )
           })}

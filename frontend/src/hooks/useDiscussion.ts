@@ -13,7 +13,13 @@ import {
   type StoredDiscussionMessage,
   streamAdvance,
 } from '@/lib/discussionApi'
-import type { ChatMessage, DiscussionMessageMeta, DiscussionRun } from '@/types/chat'
+import type {
+  ChatMessage,
+  DiscussionCitation,
+  DiscussionCode,
+  DiscussionMessageMeta,
+  DiscussionRun,
+} from '@/types/chat'
 
 const TERMINAL = new Set(['completed', 'cancelled', 'failed'])
 
@@ -153,16 +159,39 @@ export function useDiscussion({ threadId, enabled, messages, upsertMessage, onCh
             const id = String(value.message_id)
             // The research tools the turn used (PRP-0234): name and query only.
             const tools = Array.isArray(value.tools) ? (value.tools as { name: string; query: string }[]) : undefined
+            // The reply's checked code references (PRP-0236, UDR-0219 D6).
+            const citations = Array.isArray(value.citations) ? (value.citations as DiscussionCitation[]) : undefined
             upsertMessage(id, (current) =>
               current?.discussion
                 ? {
                     ...current,
-                    discussion: { ...current.discussion, status: 'completed', ...(tools ? { tools } : {}) },
+                    discussion: {
+                      ...current.discussion,
+                      status: 'completed',
+                      ...(tools ? { tools } : {}),
+                      ...(citations ? { citations } : {}),
+                    },
                   }
                 : (current ?? null),
             )
             const budget = value.budget as DiscussionRun['budget'] | undefined
-            if (budget) setRuns((prev) => prev.map((r, i) => (i === prev.length - 1 ? { ...r, budget } : r)))
+            const readChars = typeof value.code_read_chars === 'number' ? value.code_read_chars : undefined
+            if (budget || readChars !== undefined)
+              setRuns((prev) =>
+                prev.map((r, i) =>
+                  i === prev.length - 1
+                    ? {
+                        ...r,
+                        ...(budget ? { budget } : {}),
+                        ...(readChars !== undefined && r.code ? { code: { ...r.code, read_chars: readChars } } : {}),
+                      }
+                    : r,
+                ),
+              )
+          } else if (event.name === 'discussion_code_map') {
+            // The code map of the run's folder (PRP-0236, UDR-0219 D7): building, then its counts.
+            const code = value as unknown as DiscussionCode
+            setRuns((prev) => prev.map((r, i) => (i === prev.length - 1 ? { ...r, code } : r)))
           } else if (event.name === 'discussion_selection') {
             // Who speaks in the round and why (PRP-0235, UDR-0218 D5).
             const record = value as unknown as NonNullable<DiscussionRun['selections']>[string]

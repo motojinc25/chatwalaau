@@ -61,6 +61,37 @@ def _cell(value: Any) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ").strip()
 
 
+def _code_lines(run: dict[str, Any], messages: list[dict[str, Any]]) -> list[str]:
+    """The Code section (PRP-0236, UDR-0219 D7): which code state the discussion saw. Never the map."""
+    code = run.get("code") if isinstance(run.get("code"), dict) else {}
+    lines = [f"- Folder: {run.get('code_folder') or '(workspace)'}"]
+    if code.get("error"):
+        lines.append(f"- Code map: not built ({code['error']})")
+    elif code.get("digest"):
+        languages = ", ".join(f"{k} {v}" for k, v in (code.get("languages") or {}).items()) or "-"
+        lines += [
+            f"- Digest: {code['digest']}",
+            f"- Files: {int(code.get('files') or 0):,}; symbols: {int(code.get('symbols') or 0):,} ({languages})",
+            f"- Built at: {code.get('built_at') or ''}" + (" (cut to its size limit)" if code.get("truncated") else ""),
+        ]
+        if code.get("changed_since_parent") is not None:
+            lines.append(
+                "- The code changed since the previous discussion"
+                if code["changed_since_parent"]
+                else "- The code is unchanged since the previous discussion"
+            )
+    else:
+        lines.append("- Code map: not built yet")
+    budget = run.get("budget") or {}
+    lines.append(
+        f"- Code read: {int(code.get('read_chars') or 0):,} of {int(budget.get('code_read_max_chars') or 0):,} characters"
+    )
+    citations = [c for m in messages for c in (m.get(schema.MESSAGE_KEY) or {}).get("citations") or []]
+    unverified = sum(1 for c in citations if not c.get("ok"))
+    lines.append(f"- Citations checked: {len(citations)}, unverified: {unverified}")
+    return lines
+
+
 def run_markdown(data: dict[str, Any], run: dict[str, Any], *, include_log: bool = False) -> tuple[str, str]:
     """``(file name, Markdown)`` of one run."""
     brief = run.get("brief") or {}
@@ -111,6 +142,9 @@ def run_markdown(data: dict[str, Any], run: dict[str, Any], *, include_log: bool
             f"{_cell(p.get('effort') or '-')} | {_cell(', '.join(p.get('tools') or []) or '-')} |"
         )
     lines.append("")
+
+    if run.get("code_folder") is not None:
+        lines += ["## Code", "", *_code_lines(run, messages), ""]
 
     final = run.get("final")
     lines += ["## AI conclusion (recommendation)", ""]

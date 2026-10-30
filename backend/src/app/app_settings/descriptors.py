@@ -1693,6 +1693,50 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         max=5,
         help="How many rounds in a row a participant may be left out before it is brought back to speak.",
     ),
+    # PRP-0236 (UDR-0219 D2-D4): code analysis of a workspace folder.
+    SettingDescriptor(
+        "discussion_code_map_max_tokens",
+        "Code map size (tokens)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=1000,
+        max=30000,
+        help="Size of the full code map that a participant with the Code tool gets. A larger map is cut.",
+    ),
+    SettingDescriptor(
+        "discussion_code_map_summary_tokens",
+        "Short code map size (tokens)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=8000,
+        help="Size of the short code map that the other participants and the moderator get. 0 = no map for them.",
+    ),
+    SettingDescriptor(
+        "discussion_code_map_max_files",
+        "Files in the code map",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=100,
+        max=50000,
+        help="How many files of the code folder are listed in the code map at most.",
+    ),
+    SettingDescriptor(
+        "discussion_code_read_max_chars",
+        "Code read per discussion (characters)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=10000,
+        max=2000000,
+        help=(
+            "Characters the Code tool may return in one discussion. When they are used up, the "
+            "tool says so and the participants answer with what they have."
+        ),
+    ),
 )
 
 

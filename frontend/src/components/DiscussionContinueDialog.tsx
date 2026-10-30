@@ -6,6 +6,7 @@
 import { Loader2, Repeat } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import {
+  CodeFolderOption,
   RunOptionToggles,
   type Seat,
   SeatEditor,
@@ -13,6 +14,7 @@ import {
   seatRequests,
   seatsFromParticipants,
   useSeatOptions,
+  withCodeAnalyst,
 } from '@/components/DiscussionSeats'
 import { Button } from '@/components/ui/button'
 import {
@@ -72,6 +74,10 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
   const [auto, setAuto] = useState(false)
   const [report, setReport] = useState(true)
   const [selectionMode, setSelectionMode] = useState<'all' | 'decision'>(run.speaker_selection ?? 'all')
+  // PRP-0236: the code folder starts as the source run's.
+  const sourceFolder = run.code_folder ?? null
+  const [codeFolder, setCodeFolder] = useState<string | null>(sourceFolder)
+  const [seatsFull, setSeatsFull] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   // A request error is shown only after this dialog's own submit, not an older one from the bar.
   const [submitted, setSubmitted] = useState(false)
@@ -86,14 +92,28 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
     setAuto(false)
     setReport(true)
     setSelectionMode(run.speaker_selection ?? 'all')
+    setCodeFolder(sourceFolder)
+    setSeatsFull(false)
     setSubmitted(false)
-  }, [open, hasCarried, initialSeats, run.speaker_selection])
+  }, [open, hasCarried, initialSeats, run.speaker_selection, sourceFolder])
 
   const roundsChoices = useMemo(
     () => Array.from({ length: options?.limits.max_rounds ?? 5 }, (_, i) => i + 1),
     [options],
   )
-  const seatsChanged = JSON.stringify(seats) !== JSON.stringify(initialSeats)
+  const seatsChanged = JSON.stringify(seats) !== JSON.stringify(initialSeats) || codeFolder !== sourceFolder
+
+  // Choosing a folder adds the Code analyst with the Code tool (PRP-0236 Q6).
+  const chooseFolder = (folder: string | null) => {
+    setCodeFolder(folder)
+    if (folder === null) {
+      setSeatsFull(false)
+      return
+    }
+    const next = withCodeAnalyst(seats, options)
+    setSeats(next.seats)
+    setSeatsFull(next.full)
+  }
   const canContinue = (!required || focus.trim().length > 0) && seats.length >= 2 && !submitting
 
   const submit = async () => {
@@ -108,8 +128,9 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
         auto,
         report,
         speaker_selection: options?.speaker_selection_available ? selectionMode : 'all',
+        code_folder: codeFolder,
         // Unchanged seats are not sent: the new run copies the source seats as they were.
-        ...(seatsChanged ? { participants: seatRequests(seats, options) } : {}),
+        ...(seatsChanged ? { participants: seatRequests(seats, options, codeFolder) } : {}),
       })
       if (ok) onOpenChange(false)
     } finally {
@@ -224,7 +245,8 @@ export function DiscussionContinueDialog({ open, onOpenChange, run, error, onCon
               </label>
             )}
           </div>
-          <SeatEditor options={options} agents={agents} seats={seats} onChange={setSeats} />
+          {options?.code_available && <CodeFolderOption value={codeFolder} onChange={chooseFolder} full={seatsFull} />}
+          <SeatEditor options={options} agents={agents} seats={seats} onChange={setSeats} codeFolder={codeFolder} />
           <SpeakerSelectionOption
             value={options?.speaker_selection_available ? selectionMode : 'all'}
             available={Boolean(options?.speaker_selection_available)}

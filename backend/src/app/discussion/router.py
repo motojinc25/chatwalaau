@@ -17,7 +17,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.auth import Identity, verify_api_key
-from app.discussion import controller, participants, schema, speakers
+from app.discussion import codemap, controller, participants, schema, speakers
 from app.discussion import tools as research
 from app.session.storage import SessionCorruptError, SessionUnavailableError
 
@@ -37,8 +37,8 @@ class SeatBody(BaseModel):
     model: str | None = Field(None, max_length=256)
     effort: str | None = Field(None, max_length=16)
     display_name: str | None = Field(None, max_length=60)
-    # Research tools from the discussion allowlist (PRP-0234, UDR-0217 D1); omitted = none.
-    tools: list[str] | None = Field(None, max_length=3)
+    # Research tools from the discussion allowlist (PRP-0234, UDR-0217 D1; "code" PRP-0236); omitted = none.
+    tools: list[str] | None = Field(None, max_length=4)
 
 
 class CreateBody(BaseModel):
@@ -54,6 +54,8 @@ class CreateBody(BaseModel):
     report: bool = True
     # PRP-0235 (UDR-0218 D4): "all" (default) or "decision" (the decision model scores the seats).
     speaker_selection: str = Field("all", max_length=16)
+    # PRP-0236 (UDR-0219 D1): the workspace folder the discussion analyses ("" = the workspace).
+    code_folder: str | None = Field(None, max_length=1024)
 
 
 class InputBody(BaseModel):
@@ -80,6 +82,8 @@ class ContinueBody(BaseModel):
     report: bool = True
     # Omitted: the source run's mode.
     speaker_selection: str | None = Field(None, max_length=16)
+    # Omitted: the source run's code folder; null: no code folder (PRP-0236).
+    code_folder: str | None = Field(None, max_length=1024)
 
 
 def _error(exc: Exception) -> HTTPException:
@@ -133,7 +137,22 @@ async def discussion_options() -> dict[str, Any]:
         "web_search_models": research.web_search_models(models),
         # PRP-0235: whether the decision model can choose the speakers.
         "speaker_selection_available": speakers.decision_available(),
+        # PRP-0236: whether a code folder can be chosen (the coding workspace), and the preset
+        # the dialog adds for it.
+        "code_available": codemap.available(),
+        "code_analyst_preset": participants.CODE_ANALYST,
     }
+
+
+@router.get("/code/folders")
+async def code_folders(dir: str = "") -> dict[str, Any]:
+    """One level of sub-directories of the coding workspace (PRP-0236, UDR-0219 D1): never files."""
+    if not codemap.available():
+        raise HTTPException(status_code=404, detail={"error": "code_unavailable", "message": "code analysis is off"})
+    try:
+        return codemap.list_folders(dir[:1024])
+    except codemap.CodeError as exc:
+        raise HTTPException(status_code=400, detail={"error": "invalid_request", "message": str(exc)}) from exc
 
 
 @router.get("/decisions")
@@ -158,6 +177,7 @@ async def create_discussion(body: CreateBody, identity: Identity = Depends(verif
         auto=body.auto,
         report=body.report,
         speaker_selection=body.speaker_selection,
+        code_folder=body.code_folder,
     )
     return {"thread_id": thread_id, "run": schema.public_run(run)}
 
@@ -242,6 +262,7 @@ async def continue_discussion(
         auto=body.auto,
         report=body.report,
         speaker_selection=body.speaker_selection,
+        code_folder=body.code_folder if "code_folder" in body.model_fields_set else controller.KEEP_CODE_FOLDER,
     )
     return {"run": run, "messages": messages}
 

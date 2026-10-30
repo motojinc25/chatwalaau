@@ -295,6 +295,8 @@ export interface DiscussionMessageMeta {
   color?: string
   /** What a participant turn used (PRP-0234): tool name and query, never the result. */
   tools?: { name: string; query: string }[]
+  /** `path:line` references of the reply checked against the code folder (PRP-0236, UDR-0219 D6). */
+  citations?: DiscussionCitation[]
   /** Render-time only: 'generating' while it streams, 'interrupted' when the stream stopped. */
   status: 'generating' | 'completed' | 'interrupted'
 }
@@ -357,6 +359,31 @@ export interface DiscussionSelection {
   at: string
 }
 
+/** One checked code reference of a reply (PRP-0236): `ok` false = no such file or line. */
+export interface DiscussionCitation {
+  path: string
+  line: number
+  ok: boolean
+}
+
+/** The run's code map record (CTR-0271 `code`, PRP-0236 / UDR-0219 D7), without the map texts. */
+export interface DiscussionCode {
+  folder: string
+  /** Render-time only: the map is being built (the `discussion_code_map` start event). */
+  building?: boolean
+  digest?: string | null
+  files?: number
+  symbols?: number
+  languages?: Record<string, number>
+  truncated?: boolean
+  map_chars?: number
+  summary_chars?: number
+  built_at?: string | null
+  changed_since_parent?: boolean | null
+  error?: string | null
+  read_chars?: number
+}
+
 /** One DiscussionRun (CTR-0271) as `/api/discussions` returns it. */
 export interface DiscussionRun {
   id: string
@@ -376,6 +403,8 @@ export interface DiscussionRun {
     turn_max_output_tokens: number
     phase_timeout_seconds: number
     used_tokens: number
+    /** PRP-0236: characters the Code tool may return in the run. */
+    code_read_max_chars?: number
   }
   state: DiscussionState | null
   advisory: { suggest?: boolean; reason?: string; source?: string } | null
@@ -404,6 +433,9 @@ export interface DiscussionRun {
   /** PRP-0235: who speaks in a round ('all' when absent) and each round's selection record. */
   speaker_selection?: 'all' | 'decision'
   selections?: Record<string, DiscussionSelection>
+  /** PRP-0236: the workspace folder the run analyses (absent / null = none) and its code map. */
+  code_folder?: string | null
+  code?: DiscussionCode | null
   created_at: string
   updated_at: string
 }

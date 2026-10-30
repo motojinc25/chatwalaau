@@ -9,6 +9,7 @@ the FastAPI async event loop during long-running operations.
 """
 
 import asyncio
+from collections.abc import Callable, Iterable
 import json
 import logging
 from pathlib import Path
@@ -29,15 +30,18 @@ _MAX_GLOB_RESULTS = 200
 _MAX_GREP_RESULTS = 100
 
 
-def _file_read_sync(path: str, offset: int, limit: int, max_bytes: int) -> str:
+def _file_read_sync(path: str, offset: int, limit: int, max_bytes: int, *, root: str | None = None) -> str:
     """Synchronous file read implementation with byte-bounded safety (PRP-0047).
 
     Reads up to ``max_bytes`` from the file. If the file is larger, a
     ``[TRUNCATED: ...]`` marker is appended so the agent can tell the
     output was clipped and decide whether to paginate via ``offset``
     or narrow the read target.
+
+    ``root`` (PRP-0236): another jail root inside the workspace (the AI discussion's code
+    folder); omitted = the workspace, as for the main agent.
     """
-    workspace = settings.coding_workspace_dir
+    workspace = root or settings.coding_workspace_dir
     try:
         safe_path = resolve_safe_path(workspace, path)
     except ValueError as e:
@@ -188,9 +192,15 @@ def _bash_execute_sync(command: str, cwd: str) -> str:
         return f"Error executing command: {type(e).__name__}: {e}"
 
 
-def _file_glob_sync(pattern: str, path: str) -> str:
-    """Synchronous file glob implementation."""
-    workspace = settings.coding_workspace_dir
+def _file_glob_sync(
+    pattern: str, path: str, *, root: str | None = None, lister: Callable[[Path, str], Iterable[Path]] | None = None
+) -> str:
+    """Synchronous file glob implementation.
+
+    ``root`` / ``lister`` (PRP-0236): the AI discussion's code folder and its own file walk (which
+    applies its exclusions); omitted = the workspace and ``Path.glob``, as for the main agent.
+    """
+    workspace = root or settings.coding_workspace_dir
 
     if path:
         try:
@@ -206,7 +216,7 @@ def _file_glob_sync(pattern: str, path: str) -> str:
     base_path = Path(base)
     matches = []
     workspace_path = Path(workspace)
-    for match in base_path.glob(pattern):
+    for match in lister(base_path, pattern) if lister else base_path.glob(pattern):
         if match.is_file():
             try:
                 rel = match.relative_to(workspace_path)
@@ -219,9 +229,16 @@ def _file_glob_sync(pattern: str, path: str) -> str:
     return json.dumps(matches)
 
 
-def _file_grep_sync(pattern: str, path: str, include: str) -> str:
-    """Synchronous file grep implementation."""
-    workspace = settings.coding_workspace_dir
+def _file_grep_sync(
+    pattern: str,
+    path: str,
+    include: str,
+    *,
+    root: str | None = None,
+    lister: Callable[[Path, str], Iterable[Path]] | None = None,
+) -> str:
+    """Synchronous file grep implementation (``root`` / ``lister`` as in ``_file_glob_sync``)."""
+    workspace = root or settings.coding_workspace_dir
 
     if path:
         try:
@@ -244,7 +261,7 @@ def _file_grep_sync(pattern: str, path: str, include: str) -> str:
     base_path = Path(base)
     glob_pattern = include or "**/*"
 
-    for file_path in base_path.glob(glob_pattern):
+    for file_path in lister(base_path, glob_pattern) if lister else base_path.glob(glob_pattern):
         if not file_path.is_file():
             continue
         try:

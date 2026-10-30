@@ -4,6 +4,7 @@
 import { Loader2, Users } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import {
+  CodeFolderOption,
   defaultTools,
   RunOptionToggles,
   type Seat,
@@ -11,6 +12,7 @@ import {
   SpeakerSelectionOption,
   seatRequests,
   useSeatOptions,
+  withCodeAnalyst,
 } from '@/components/DiscussionSeats'
 import { Button } from '@/components/ui/button'
 import {
@@ -45,12 +47,17 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
   const [auto, setAuto] = useState(false)
   const [report, setReport] = useState(true)
   const [selectionMode, setSelectionMode] = useState<'all' | 'decision'>('all')
+  // PRP-0236 (UDR-0219 D1): the workspace folder whose code the discussion analyses (null = none).
+  const [codeFolder, setCodeFolder] = useState<string | null>(null)
+  const [seatsFull, setSeatsFull] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
     setError(null)
+    setCodeFolder(null)
+    setSeatsFull(false)
     if (!options) return
     setRounds(options.limits.default_rounds)
     // Operator defaults (PRP-0235): the decision model chooses the speakers when it is available, and
@@ -74,12 +81,24 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
   const noModel = options !== null && options.models.length === 0
   const canStart = topic.trim().length > 0 && seats.length >= 2 && !submitting && !noModel
 
+  // Choosing a folder adds the Code analyst with the Code tool (PRP-0236 Q6).
+  const chooseFolder = (folder: string | null) => {
+    setCodeFolder(folder)
+    if (folder === null) {
+      setSeatsFull(false)
+      return
+    }
+    const next = withCodeAnalyst(seats, options)
+    setSeats(next.seats)
+    setSeatsFull(next.full)
+  }
+
   const start = async () => {
     if (!canStart) return
     setSubmitting(true)
     setError(null)
     try {
-      const participants = seatRequests(seats, options)
+      const participants = seatRequests(seats, options, codeFolder)
       const { thread_id } = await discussionApi.create({
         topic: topic.trim(),
         goal: goal.trim(),
@@ -90,6 +109,7 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
         auto,
         report,
         speaker_selection: options?.speaker_selection_available ? selectionMode : 'all',
+        ...(codeFolder !== null ? { code_folder: codeFolder } : {}),
       })
       onOpenChange(false)
       setTopic('')
@@ -154,7 +174,8 @@ export function DiscussionSetupDialog({ open, onOpenChange, folderId, onCreated 
               maxLength={4000}
             />
           </label>
-          <SeatEditor options={options} agents={agents} seats={seats} onChange={setSeats} />
+          {options?.code_available && <CodeFolderOption value={codeFolder} onChange={chooseFolder} full={seatsFull} />}
+          <SeatEditor options={options} agents={agents} seats={seats} onChange={setSeats} codeFolder={codeFolder} />
           <label className="flex items-center gap-2 text-sm">
             <span className="font-medium">Rounds</span>
             <select

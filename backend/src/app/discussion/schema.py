@@ -135,6 +135,7 @@ def new_run(
     auto: bool = False,
     report: bool = False,
     speaker_selection: str = "all",
+    code_folder: str | None = None,
 ) -> dict[str, Any]:
     """A run record in status ``created`` (CTR-0271).
 
@@ -147,6 +148,9 @@ def new_run(
 
     PRP-0235 (UDR-0218 D4 / D5): ``speaker_selection`` is ``all`` or ``decision``; ``selections``
     holds one record per round of who speaks and why.
+
+    PRP-0236 (UDR-0219 D1 / D2): ``code_folder`` is the workspace folder the run analyses (None =
+    no code); ``code`` is its code map record, built when the run starts.
     """
     now = now_iso()
     run: dict[str, Any] = {
@@ -180,6 +184,8 @@ def new_run(
         "report_skipped": None,
         "speaker_selection": speaker_selection,
         "selections": {},
+        "code_folder": code_folder,
+        "code": None,
         "initiated_by": initiated_by,
         "created_at": now,
         "updated_at": now,
@@ -235,10 +241,13 @@ def build_message(
     color: str | None = None,
     usage: dict[str, Any] | None = None,
     tools: list[dict[str, str]] | None = None,
+    citations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """A stored message in the CTR-0014 shape plus the CTR-0271 ``discussion`` field.
 
     ``tools`` is what a participant turn used (name and query, never the result; UDR-0217 D3).
+    ``citations`` are the reply's ``path:line`` references checked against the code folder
+    (``{path, line, ok}``, UDR-0219 D6).
     """
     from app.session.provider import MESSAGE_TYPE_ID
 
@@ -257,6 +266,8 @@ def build_message(
         attribution["color"] = color
     if tools:
         attribution["tools"] = [dict(t) for t in tools]
+    if citations:
+        attribution["citations"] = [dict(c) for c in citations]
     msg: dict[str, Any] = {
         "type": MESSAGE_TYPE_ID,
         "role": role,
@@ -311,10 +322,17 @@ def index_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def public_run(run: dict[str, Any]) -> dict[str, Any]:
-    """The run as the API returns it: the lease owner is internal and never leaves."""
+    """The run as the API returns it: the lease owner is internal and never leaves.
+
+    The code map texts (PRP-0236) stay in the session file too: the API returns the code record's
+    counts, digest and folder only, so a state event never carries the map.
+    """
     out = dict(run)
     lease = run.get("lease")
     out["lease"] = {"expires_at": lease.get("expires_at")} if isinstance(lease, dict) else None
+    code = run.get("code")
+    if isinstance(code, dict):
+        out["code"] = {k: v for k, v in code.items() if k not in ("map", "summary")}
     return out
 
 

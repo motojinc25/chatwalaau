@@ -163,7 +163,10 @@ _SCRIPTED_VIEWS: dict[str, str] = {
     "critic": "The main risk is cost and noise: cap the rounds and keep every reply short.",
     "implementer": "Build it on the existing chat: store the run with the session and reuse the stream.",
     "user_advocate": "Keep the controls few and obvious: pause, continue and summarize.",
+    "code_analyst": "The code already has the pieces; the change touches one module.",
 }
+#: A reference a scripted Code seat adds that never resolves, so the "unverified" mark is exercised.
+SCRIPTED_MISSING_CITATION = "missing_module.py:12"
 
 
 def _scripted_participant(participant: dict[str, Any], phase: str) -> str:
@@ -216,14 +219,21 @@ async def scripted_turn(
     result: TurnResult,
     final: bool = False,
     report: bool = False,
+    code_hint: str | None = None,
 ) -> AsyncIterator[str]:
-    """A deterministic reply, streamed in chunks (no request, no ledger record)."""
+    """A deterministic reply, streamed in chunks (no request, no ledger record).
+
+    ``code_hint`` (PRP-0236): a real ``path:line`` of the code folder that a Code seat cites,
+    next to one that does not resolve.
+    """
     if report:
         text = _scripted_report(log)
     elif participant is None:
         text = _scripted_moderator(log, final)
     else:
         text = _scripted_participant(participant, phase)
+        if code_hint:
+            text += f"\n- The entry point is `{code_hint}`.\n- An old note points at `{SCRIPTED_MISSING_CITATION}`."
     if participant is not None and participant.get("tools"):
         # A scripted seat "uses" each of its tools once, so the record and the UI are exercised.
         from app.discussion.tools import TOOL_LABELS

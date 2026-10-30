@@ -37,6 +37,17 @@ export interface DiscussionOptions {
   web_search_models?: string[]
   /** PRP-0235: whether the decision model can choose who speaks in a round. */
   speaker_selection_available?: boolean
+  /** PRP-0236: whether a code folder can be chosen, and the preset added for it (Code analyst). */
+  code_available?: boolean
+  code_analyst_preset?: string
+}
+
+/** One level of the coding workspace's folders (PRP-0236): directories only, never files. */
+export interface CodeFolderListing {
+  dir: string
+  parent: string | null
+  dirs: string[]
+  truncated: boolean
 }
 
 export type SpeakerSelectionMode = 'all' | 'decision'
@@ -63,7 +74,7 @@ export interface DecisionLogItem {
 
 export type DecisionFilter = 'all' | 'adopt' | 'hold' | 'rediscuss' | 'undecided'
 
-export type DiscussionToolId = 'web_search' | 'rag_search' | 'ontology_query'
+export type DiscussionToolId = 'web_search' | 'rag_search' | 'ontology_query' | 'code'
 
 /** A role seat carries its model and reasoning; an agent seat uses the agent's own (none sent). */
 export interface SeatRequest {
@@ -90,6 +101,8 @@ export interface CreateDiscussionRequest {
   report?: boolean
   /** Who speaks in a round (PRP-0235): everyone (default) or chosen by the decision model. */
   speaker_selection?: SpeakerSelectionMode
+  /** The workspace folder the discussion analyses (PRP-0236); omitted = no code. */
+  code_folder?: string | null
 }
 
 /** Continue discussion (PRP-0233): omitted fields keep the server defaults (1 round, opening
@@ -102,6 +115,8 @@ export interface ContinueDiscussionRequest {
   auto?: boolean
   report?: boolean
   speaker_selection?: SpeakerSelectionMode
+  /** Omitted: the source run's folder; null: no code folder (PRP-0236). */
+  code_folder?: string | null
 }
 
 /** A stored message as the input endpoint echoes it (CTR-0014 shape + `discussion`). */
@@ -187,6 +202,9 @@ export const discussionApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /** Sub-folders of the coding workspace for the code folder picker (PRP-0236). */
+  codeFolders: (dir = '') =>
+    call<CodeFolderListing>(`/api/discussions/code/folders${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`),
   /** The decision log across chats (PRP-0235): completed runs, newest first. */
   decisions: (params: { verdict?: DecisionFilter; q?: string; limit?: number; offset?: number } = {}) => {
     const query = new URLSearchParams()

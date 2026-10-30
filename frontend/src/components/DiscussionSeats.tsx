@@ -1,11 +1,12 @@
 // The seat editor of the AI discussion dialogs (CTR-0276): the New AI discussion dialog (PRP-0232)
 // and the Continue dialog (PRP-0233, UDR-0216 D4) use the same component, so a seat follows the same
 // rules in both: a role seat has a model and a reasoning effort, a Prompt agent seat uses the agent's own.
-import { Plus, Trash2 } from 'lucide-react'
+import { ChevronUp, Folder, FolderOpen, Plus, Trash2, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { speakerColor } from '@/components/DiscussionParts'
 import { Button } from '@/components/ui/button'
 import {
+  type CodeFolderListing,
   type DiscussionOptions,
   type DiscussionToolId,
   discussionApi,
@@ -87,20 +88,31 @@ export function seatsFromParticipants(participants: DiscussionParticipant[]): Se
 
 const toolsOf = (tools: string[] | undefined): DiscussionToolId[] => (tools ?? []) as DiscussionToolId[]
 
-/** A new seat's tools: every available research tool (operator default, PRP-0235). A tool the seat's
- *  model cannot run (web search) stays off on screen and is never sent (see `usableTools`). */
+/** A new seat's tools: every available research tool (operator default, PRP-0235) except Code,
+ *  which only the Code analyst gets by default (PRP-0236, UDR-0219 D3). A tool the seat's model
+ *  cannot run (web search) stays off on screen and is never sent (see `usableTools`). */
 export function defaultTools(options: DiscussionOptions | null): DiscussionToolId[] {
-  return (options?.tools ?? []).filter((t) => t.available).map((t) => t.id)
+  return (options?.tools ?? []).filter((t) => t.available && t.id !== 'code').map((t) => t.id)
 }
 
-/** The seat's tools that its model can run (web search depends on the model). */
-export function usableTools(seat: Seat, options: DiscussionOptions | null): DiscussionToolId[] {
-  return seat.tools.filter((t) => toolUsable(t, seat, options))
+/** The seat's tools that it can run (web search depends on the model, Code on a code folder). */
+export function usableTools(
+  seat: Seat,
+  options: DiscussionOptions | null,
+  codeFolder?: string | null,
+): DiscussionToolId[] {
+  return seat.tools.filter((t) => toolUsable(t, seat, options, codeFolder))
 }
 
-function toolUsable(tool: DiscussionToolId, seat: Seat, options: DiscussionOptions | null): boolean {
+function toolUsable(
+  tool: DiscussionToolId,
+  seat: Seat,
+  options: DiscussionOptions | null,
+  codeFolder?: string | null,
+): boolean {
   const entry = options?.tools?.find((t) => t.id === tool)
   if (!entry?.available) return false
+  if (tool === 'code') return codeFolder != null
   if (tool !== 'web_search') return true
   // An agent seat's model is the agent's own (unknown here); the server checks it on create.
   if (seat.choice.startsWith('agent:')) return true
@@ -108,16 +120,153 @@ function toolUsable(tool: DiscussionToolId, seat: Seat, options: DiscussionOptio
 }
 
 /** The request body for the seats. */
-export function seatRequests(seats: Seat[], options: DiscussionOptions | null): SeatRequest[] {
+export function seatRequests(
+  seats: Seat[],
+  options: DiscussionOptions | null,
+  codeFolder?: string | null,
+): SeatRequest[] {
   return seats.map((s) => {
     const [kind, id] = s.choice.split(/:(.*)/s)
-    // Only the tools the seat's model can run: a model change may have left web search behind.
-    const usable = usableTools(s, options)
+    // Only the tools the seat can run: a model change may have left web search behind, a cleared
+    // code folder the Code tool.
+    const usable = usableTools(s, options, codeFolder)
     const tools = usable.length > 0 ? usable : undefined
     // A Prompt agent seat sends neither model nor effort: the server uses the agent's own.
     if (kind === 'agent') return { kind: 'agent', agent_id: id, tools }
     return { kind: 'preset', preset: id, model: s.model || undefined, effort: s.effort || undefined, tools }
   })
+}
+
+/** The seats with a Code analyst reading the code folder (PRP-0236 Q6): added when none is there and a
+ *  seat is free; an existing one gets the Code tool. `full` = no seat was free. */
+export function withCodeAnalyst(seats: Seat[], options: DiscussionOptions | null): { seats: Seat[]; full: boolean } {
+  const choice = `preset:${options?.code_analyst_preset ?? 'code_analyst'}`
+  if (seats.some((s) => s.choice === choice)) {
+    return {
+      seats: seats.map((s) =>
+        s.choice === choice && !s.tools.includes('code') ? { ...s, tools: [...s.tools, 'code'] } : s,
+      ),
+      full: false,
+    }
+  }
+  if (seats.length >= (options?.limits.max_participants ?? 4)) return { seats, full: true }
+  return { seats: [...seats, { key: `s${Date.now()}`, choice, model: '', effort: '', tools: ['code'] }], full: false }
+}
+
+interface CodeFolderProps {
+  value: string | null
+  onChange: (folder: string | null) => void
+  /** No seat was free for the Code analyst. */
+  full?: boolean
+}
+
+/** The code folder of a discussion (PRP-0236, UDR-0219 D1): a folder of the coding workspace, picked
+ *  one level at a time (folders only). Shown only when the coding workspace is on. */
+export function CodeFolderOption({ value, onChange, full }: CodeFolderProps) {
+  const [browsing, setBrowsing] = useState(false)
+  const [listing, setListing] = useState<CodeFolderListing | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const open = (dir: string) => {
+    setError(null)
+    discussionApi
+      .codeFolders(dir)
+      .then(setListing)
+      .catch((err) => setError(err instanceof Error ? err.message : 'Could not list the folders'))
+  }
+
+  return (
+    <div className="space-y-1 text-sm" data-testid="discussion-code-folder">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">Code folder</span>
+        <span
+          className="min-w-0 truncate rounded-md border px-2 py-0.5 font-mono text-xs"
+          data-testid="discussion-code-folder-value">
+          {value === null ? 'none' : value || '(workspace)'}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7"
+          onClick={() => {
+            setBrowsing(true)
+            open(value ?? '')
+          }}>
+          <FolderOpen className="mr-1 h-3.5 w-3.5" />
+          Choose...
+        </Button>
+        {value !== null && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            aria-label="No code folder"
+            onClick={() => onChange(null)}>
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {value === null
+          ? 'Choose a folder of the workspace to discuss its code. A Code analyst reads it; the others get a short map of it.'
+          : 'The Code analyst reads this folder (read-only; secrets and build output are left out); the others get a short map of it.'}
+      </p>
+      {full && value !== null && (
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          No seat is free: replace a participant with the Code analyst, or tick Code for a participant.
+        </p>
+      )}
+      {browsing && (
+        <div className="space-y-1 rounded-md border p-2" data-testid="discussion-code-folder-picker">
+          <div className="flex items-center gap-2 text-xs">
+            <span className="min-w-0 flex-1 truncate font-mono">{listing ? listing.dir || '(workspace)' : '...'}</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2"
+              disabled={!listing || listing.parent === null}
+              onClick={() => listing && listing.parent !== null && open(listing.parent)}>
+              <ChevronUp className="mr-1 h-3 w-3" />
+              Up
+            </Button>
+            <Button
+              size="sm"
+              className="h-6 px-2"
+              disabled={!listing}
+              onClick={() => {
+                if (!listing) return
+                onChange(listing.dir)
+                setBrowsing(false)
+              }}>
+              Use this folder
+            </Button>
+            <Button variant="ghost" size="sm" className="h-6 px-2" onClick={() => setBrowsing(false)}>
+              Cancel
+            </Button>
+          </div>
+          {error && (
+            <p role="alert" className="text-xs text-red-600">
+              {error}
+            </p>
+          )}
+          <ul className="max-h-40 overflow-y-auto text-xs">
+            {listing?.dirs.map((name) => (
+              <li key={name}>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-muted"
+                  onClick={() => open(listing.dir ? `${listing.dir}/${name}` : name)}>
+                  <Folder className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  {name}
+                </button>
+              </li>
+            ))}
+            {listing && listing.dirs.length === 0 && <li className="px-1 text-muted-foreground">No sub-folders</li>}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
 }
 
 interface RunOptionProps {
@@ -202,9 +351,11 @@ interface EditorProps {
   agents: PromptAgentRow[]
   seats: Seat[]
   onChange: (seats: Seat[]) => void
+  /** The discussion's code folder (PRP-0236): the Code tool is usable only with one. */
+  codeFolder?: string | null
 }
 
-export function SeatEditor({ options, agents, seats, onChange }: EditorProps) {
+export function SeatEditor({ options, agents, seats, onChange, codeFolder }: EditorProps) {
   const maxSeats = options?.limits.max_participants ?? 4
 
   const updateSeat = (key: string, patch: Partial<Seat>) =>
@@ -320,12 +471,18 @@ export function SeatEditor({ options, agents, seats, onChange }: EditorProps) {
                 {(options?.tools ?? [])
                   .filter((t) => t.available)
                   .map((t) => {
-                    const usable = toolUsable(t.id, seat, options)
+                    const usable = toolUsable(t.id, seat, options, codeFolder)
                     return (
                       <label
                         key={t.id}
                         className={cn('flex items-center gap-1', !usable && 'opacity-50')}
-                        title={usable ? undefined : "This participant's model has no web search"}>
+                        title={
+                          usable
+                            ? undefined
+                            : t.id === 'code'
+                              ? 'Choose a code folder first'
+                              : "This participant's model has no web search"
+                        }>
                         <input
                           type="checkbox"
                           aria-label={`${t.label} for participant ${index + 1}`}

@@ -1,9 +1,10 @@
 """AI Discussion research tools (CTR-0275, PRP-0234, UDR-0217 D1-D3).
 
 A participant seat may use read-only research tools from ONE code allowlist: hosted web search,
-the document search (RAG) and the ontology query tool. Nothing else can be mounted -- no MCP,
-coding, memory, automation, image, decision or Computer Use tool, and no context provider (D1).
-The moderator never gets a tool.
+the document search (RAG), the ontology query tool and -- PRP-0236 (UDR-0219 D4) -- the Code tool,
+four read-only functions rooted at the run's code folder (``codemap.tool_functions``). Nothing else
+can be mounted -- no MCP, no writing or shell coding tool, no memory, automation, image, decision or
+Computer Use tool, and no context provider (D1). The moderator never gets a tool.
 
 Each turn builds its own ``TurnTools``: the function tools are wrapped so that a turn makes at
 most ``calls_per_turn`` calls and every result is cut to ``result_max_chars`` (D2). What the
@@ -23,9 +24,16 @@ logger = logging.getLogger(__name__)
 WEB_SEARCH = "web_search"
 RAG_SEARCH = "rag_search"
 ONTOLOGY_QUERY = "ontology_query"
+#: PRP-0236 (UDR-0219 D4): read-only code analysis of the run's code folder.
+CODE = "code"
 #: The allowlist (D1). An invariant pins it; add nothing that writes or has side effects.
-TOOL_IDS: tuple[str, ...] = (WEB_SEARCH, RAG_SEARCH, ONTOLOGY_QUERY)
-TOOL_LABELS: dict[str, str] = {WEB_SEARCH: "Web search", RAG_SEARCH: "Documents", ONTOLOGY_QUERY: "Ontology"}
+TOOL_IDS: tuple[str, ...] = (WEB_SEARCH, RAG_SEARCH, ONTOLOGY_QUERY, CODE)
+TOOL_LABELS: dict[str, str] = {
+    WEB_SEARCH: "Web search",
+    RAG_SEARCH: "Documents",
+    ONTOLOGY_QUERY: "Ontology",
+    CODE: "Code",
+}
 
 LIMIT_REACHED = "Tool limit reached for this turn; answer with what you have."
 TRUNCATED = "\n[truncated]"
@@ -44,6 +52,10 @@ def _scripted() -> bool:
 
 
 def _function_available(tool_id: str) -> bool:
+    if tool_id == CODE:
+        from app.discussion import codemap
+
+        return codemap.available()  # the coding workspace, also for scripted turns (UDR-0219 D1)
     if _scripted():
         return True  # scripted turns never call a tool; the browser tests need the choice
     from app.agent.declarative.tool_inventory import BUILTIN_FUNCTION_TOOLS
@@ -113,13 +125,26 @@ def _query_of(tool_id: str, kwargs: dict[str, Any]) -> str:
 class TurnTools:
     """The tools of ONE participant turn, with its call counter and its record (D2 / D3)."""
 
-    def __init__(self, tool_ids: list[str], *, model: str, calls_per_turn: int, result_max_chars: int) -> None:
-        self.tool_ids = [t for t in tool_ids if t in TOOL_IDS]
+    def __init__(
+        self,
+        tool_ids: list[str],
+        *,
+        model: str,
+        calls_per_turn: int,
+        result_max_chars: int,
+        code_folder: str | None = None,
+        code_read_left: int | None = None,
+    ) -> None:
+        self.tool_ids = [t for t in tool_ids if t in TOOL_IDS and (t != CODE or code_folder is not None)]
         self.model = model
         self.calls_per_turn = max(int(calls_per_turn), 0)
         self.result_max_chars = max(int(result_max_chars), 1)
         self.calls = 0
         self.used: list[dict[str, str]] = []
+        # PRP-0236 (UDR-0219 D4): the run's code folder and what is left of its run-wide read limit.
+        self.code_folder = code_folder
+        self.code_read_left = None if code_read_left is None else max(int(code_read_left), 0)
+        self.code_chars = 0
 
     @property
     def enabled(self) -> bool:
@@ -136,14 +161,30 @@ class TurnTools:
         async def bounded(*args: Any, **kwargs: Any) -> str:
             if self.calls >= self.calls_per_turn:
                 return LIMIT_REACHED
+            code = tool_id == CODE
+            if code and self.code_read_left is not None and self.code_chars >= self.code_read_left:
+                from app.discussion.codemap import CODE_LIMIT_REACHED
+
+                return CODE_LIMIT_REACHED
             self.calls += 1
-            self.used.append({"name": tool_id, "query": _query_of(tool_id, kwargs)})
+            if code:
+                from app.discussion.codemap import query_of
+
+                query = query_of(kwargs, getattr(fn, "__name__", "code"))[:QUERY_CHARS]
+            else:
+                query = _query_of(tool_id, kwargs)
+            self.used.append({"name": tool_id, "query": query})
             value = fn(*args, **kwargs)
             if inspect.isawaitable(value):
                 value = await value
             text = value if isinstance(value, str) else str(value)
-            if len(text) > self.result_max_chars:
-                text = text[: self.result_max_chars] + TRUNCATED
+            limit = self.result_max_chars
+            if code and self.code_read_left is not None:
+                limit = min(limit, self.code_read_left - self.code_chars)
+            if len(text) > limit:
+                text = text[: max(limit, 0)] + TRUNCATED
+            if code:
+                self.code_chars += len(text)
             return text
 
         return tool(bounded, approval_mode="never_require")
@@ -159,6 +200,11 @@ class TurnTools:
                     hosted = _hosted_web_search(self.model, self.calls_per_turn)
                     if hosted is not None:
                         out.append(hosted)
+                    continue
+                if tool_id == CODE:
+                    from app.discussion.codemap import tool_functions
+
+                    out.extend(self._wrap(CODE, fn) for fn in tool_functions(self.code_folder or ""))
                     continue
                 out.append(self._wrap(tool_id, _import(tool_id)))
             except Exception:

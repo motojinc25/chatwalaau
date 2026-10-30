@@ -1,9 +1,26 @@
 // Shared pieces of the AI Discussion UI (CTR-0276, PRP-0232): speaker colours and the
 // attribution line on a discussion message (with the research tools a turn used and the full
-// report's label, PRP-0234) and the trace of a round's speaker selection (PRP-0235).
-import { FileText, Filter, Gavel, Loader2, MessageSquareQuote, Search, User } from 'lucide-react'
+// report's label, PRP-0234), the trace of a round's speaker selection (PRP-0235), and the code map
+// row and checked code references (PRP-0236).
+import {
+  AlertTriangle,
+  FileCode2,
+  FileText,
+  Filter,
+  Gavel,
+  Loader2,
+  MessageSquareQuote,
+  Search,
+  User,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { DiscussionMessageMeta, DiscussionParticipant, DiscussionSelection } from '@/types/chat'
+import type {
+  DiscussionCitation,
+  DiscussionCode,
+  DiscussionMessageMeta,
+  DiscussionParticipant,
+  DiscussionSelection,
+} from '@/types/chat'
 
 // Full class strings, so Tailwind's scanner sees every one of them.
 export const SPEAKER_COLOR_CLASSES: Record<string, { dot: string; text: string; ring: string; soft: string }> = {
@@ -58,6 +75,7 @@ const TOOL_LABELS: Record<string, string> = {
   web_search: 'Web search',
   rag_search: 'Documents',
   ontology_query: 'Ontology',
+  code: 'Code',
 }
 
 /** "Web search x2, Documents" -- what a participant turn looked up (never the results, UDR-0217 D3). */
@@ -94,6 +112,7 @@ export function DiscussionSpeakerTag({ meta }: { meta: DiscussionMessageMeta }) 
           Used: {toolsUsedLabel(meta.tools)}
         </span>
       )}
+      {meta.citations && meta.citations.length > 0 && <DiscussionCitations citations={meta.citations} />}
       {meta.status === 'generating' && (
         <span className="inline-flex items-center gap-1 text-muted-foreground">
           <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
@@ -156,6 +175,69 @@ export function DiscussionSelectionTrace({
         )}
         {record.fallback_reason ? `. ${record.fallback_reason}` : ''}
       </span>
+    </div>
+  )
+}
+
+/** "Citations: 7, 1 unverified" -- the reply's code references checked by the application
+ *  (PRP-0236, UDR-0219 D6); an unverified one names a file or line the folder does not have. */
+export function DiscussionCitations({ citations }: { citations: DiscussionCitation[] }) {
+  const unverified = citations.filter((c) => !c.ok)
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1',
+        unverified.length > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground',
+      )}
+      title={unverified.map((c) => `${c.path}:${c.line}`).join(', ') || undefined}
+      data-testid="discussion-citations">
+      {unverified.length > 0 ? (
+        <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+      ) : (
+        <FileCode2 className="h-3 w-3" aria-hidden="true" />
+      )}
+      Citations: {citations.length}
+      {unverified.length > 0 && (
+        <>
+          , {unverified.length} unverified ({unverified.map((c) => `${c.path}:${c.line}`).join(', ')})
+        </>
+      )}
+    </span>
+  )
+}
+
+function languagesLabel(languages: Record<string, number> | undefined): string {
+  return Object.keys(languages ?? {})
+    .slice(0, 3)
+    .join(', ')
+}
+
+/** The code map row before a run's first turn (PRP-0236, UDR-0219 D7): which code the discussion sees. */
+export function DiscussionCodeMapRow({ code }: { code: DiscussionCode }) {
+  const folder = code.folder || '(workspace)'
+  let text: string
+  if (code.building) text = `Building the code map of ${folder}...`
+  else if (code.error) text = `No code map for ${folder}: ${code.error}`
+  else {
+    const tokens = Math.round((code.map_chars ?? 0) / 3)
+    const langs = languagesLabel(code.languages)
+    text =
+      `Code map: ${folder} -- ${(code.files ?? 0).toLocaleString()} files, ` +
+      `${(code.symbols ?? 0).toLocaleString()} symbols, about ${tokens.toLocaleString()} tokens` +
+      (langs ? ` (${langs})` : '') +
+      (code.truncated ? ', cut to its size limit' : '') +
+      (code.changed_since_parent ? '. The code changed since the previous discussion' : '')
+  }
+  return (
+    <div
+      className="mx-auto my-1 flex w-full max-w-3xl items-start gap-1.5 rounded-md border border-dashed px-2 py-1 text-[11px] text-muted-foreground"
+      data-testid="discussion-code-map">
+      {code.building ? (
+        <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+      ) : (
+        <FileCode2 className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+      )}
+      <span>{text}</span>
     </div>
   )
 }

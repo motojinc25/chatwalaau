@@ -489,6 +489,14 @@ class Settings(BaseSettings):
     discussion_selection_threshold_percent: int = 40
     discussion_selection_min_speakers: int = 2
     discussion_selection_max_skipped_rounds: int = 1
+    # PRP-0236 (UDR-0219 D2-D4), operator Q5: the code map's sizes (tokens = chars / 3) -- the full
+    # map for a seat with the Code tool, the short map for the others (0 = none) -- the files walked
+    # for it, and the characters the Code tool may return in one discussion. The per-turn calls are
+    # the shared discussion_tool_calls_per_turn (operator Q4).
+    discussion_code_map_max_tokens: int = 8_000
+    discussion_code_map_summary_tokens: int = 2_000
+    discussion_code_map_max_files: int = 5_000
+    discussion_code_read_max_chars: int = 200_000
 
     # File Explorer (CTR-0006, CTR-0136/0137, PRP-0091, UDR-0069)
     # Human-facing file browse/edit over the coding workspace. OFF unless
