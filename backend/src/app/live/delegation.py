@@ -29,7 +29,7 @@ import re
 from typing import TYPE_CHECKING, Any
 import uuid
 
-from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, merge_mode
+from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, is_refusal, merge_mode
 from app.agui.sanitize import sanitize_text
 
 if TYPE_CHECKING:
@@ -222,7 +222,9 @@ async def run_delegated_agent(
             for content in getattr(update, "contents", None) or []:
                 ctype = getattr(content, "type", None)
                 if ctype == "text":
-                    text = text_fold.feed(getattr(content, "text", None), merge_mode(content))
+                    text = text_fold.feed(
+                        getattr(content, "text", None), merge_mode(content), refusal=is_refusal(content)
+                    )
                     if text:
                         text_parts.append(text)
                         if text_sink is not None:

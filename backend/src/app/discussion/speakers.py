@@ -116,7 +116,7 @@ async def model_turn(
     from agent_framework import Agent, Message
 
     from app import providers
-    from app.agent.stream_merge import TextFold, UsageFold, merge_mode
+    from app.agent.stream_merge import TextFold, UsageFold, is_refusal, merge_mode
     from app.agui.token_usage import turn_summary
 
     client = providers.build_chat_client(model)
@@ -136,7 +136,7 @@ async def model_turn(
         for content in getattr(update, "contents", None) or []:
             kind = getattr(content, "type", None)
             if kind == "text":
-                delta = text_fold.feed(getattr(content, "text", None), merge_mode(content))
+                delta = text_fold.feed(getattr(content, "text", None), merge_mode(content), refusal=is_refusal(content))
                 if delta:
                     parts.append(delta)
                     yield delta

@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app.auth import verify_api_key
+from app.mcp import connection
 from app.mcp_apps.manager import read_app_html
 
 logger = logging.getLogger(__name__)
@@ -47,36 +48,28 @@ async def rpc_proxy(server_name: str, request: RpcRequest):
     if tool is None:
         raise HTTPException(status_code=404, detail=f"MCP server not found: {server_name}")
 
-    # Access the underlying MCP session for direct server communication.
-    # MAF's call_tool() expects (tool_name, **kwargs) not dict, and has no
-    # read_resource(). Using session directly is correct for RPC proxying.
-    session = getattr(tool, "session", None)
-    if session is None:
-        raise HTTPException(status_code=502, detail=f"MCP server not connected: {server_name}")
-
+    # Direct server communication through the MCP connection adapter (UDR-0221 D3):
+    # MAF's function layer has no read_resource() and returns parsed contents, while a
+    # View needs the protocol result. to_wire() emits the protocol's camelCase keys.
     try:
         if request.method == "tools/call":
             name = request.params.get("name", "")
             arguments = request.params.get("arguments", {})
-            result = await session.call_tool(name, arguments=arguments)
-            # exclude_none removes null fields (e.g. annotations: None)
-            # that the View SDK's strict Zod validation rejects
-            result_data = result.model_dump(exclude_none=True) if hasattr(result, "model_dump") else result
-            return {"result": result_data}
+            result = await connection.call_tool(tool, name, arguments)
+            return {"result": connection.to_wire(result)}
 
         elif request.method == "resources/read":
             uri = request.params.get("uri", "")
-            from pydantic import AnyUrl
-
-            result = await session.read_resource(AnyUrl(uri))
-            result_data = result.model_dump(exclude_none=True) if hasattr(result, "model_dump") else result
-            return {"result": result_data}
+            result = await connection.read_resource(tool, uri)
+            return {"result": connection.to_wire(result)}
 
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported RPC method: {request.method}")
 
     except HTTPException:
         raise
+    except connection.McpConnectionUnavailable as e:
+        raise HTTPException(status_code=502, detail=f"MCP server not connected: {server_name}") from e
     except Exception as e:
         logger.exception("RPC proxy error for %s", server_name)
         raise HTTPException(status_code=502, detail=f"MCP server error: {e!s}") from e

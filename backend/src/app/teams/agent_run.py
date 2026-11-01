@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from app.agent.stream_merge import TextFold, UsageFold, merge_mode
+from app.agent.stream_merge import TextFold, UsageFold, is_refusal, merge_mode
 from app.agui.sanitize import sanitize_text
 
 if TYPE_CHECKING:
@@ -168,7 +168,7 @@ async def run_turn(
         for content in getattr(update, "contents", None) or []:
             content_type = getattr(content, "type", None)
             if content_type == "text":
-                text = text_fold.feed(getattr(content, "text", None), merge_mode(content))
+                text = text_fold.feed(getattr(content, "text", None), merge_mode(content), refusal=is_refusal(content))
                 if text:
                     assistant_text_parts.append(text)
             elif content_type == "usage":

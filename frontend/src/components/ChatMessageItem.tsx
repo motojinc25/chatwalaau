@@ -743,7 +743,8 @@ function ChatMessageItemImpl({
             ) : (
               !isWaiting &&
               !workflowState &&
-              !message.streamLost && <span className="inline-block h-4 w-1 animate-pulse bg-current" />
+              !message.streamLost &&
+              !message.modelRefusal && <span className="inline-block h-4 w-1 animate-pulse bg-current" />
             )}
             {/*
               Lost reply (CTR-0004, PRP-0231 / UDR-0214 D4). The stream ended after the turn
@@ -758,6 +759,30 @@ function ChatMessageItemImpl({
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                 <span>{message.streamLost.message}</span>
                 {onRetryLostTurn && message.streamLost.retry && !isLoading && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => onRetryLostTurn(message.id)}>
+                    <RefreshCw className="mr-1 h-3 w-3" />
+                    Retry
+                  </Button>
+                )}
+              </div>
+            )}
+            {/*
+              Refused reply (CTR-0004, PRP-0237 / UDR-0220 D4). The run ended with the model's
+              own refusal: the text above is what it answered before, the refusal is quoted
+              here and is not answer text, and the turn was not saved. Retry is the lost-reply
+              Retry, only when the user clicks (UDR-0220 D5).
+            */}
+            {!isUser && message.modelRefusal && (
+              <div
+                className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                data-testid="model-refusal-notice">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>{message.modelRefusal.message}</span>
+                {onRetryLostTurn && message.modelRefusal.retry && !isLoading && (
                   <Button
                     variant="outline"
                     size="sm"
@@ -850,9 +875,10 @@ function ChatMessageItemImpl({
                 <FileTextIcon className="h-3 w-3" />
               </Button>
             )}
-            {/* Not on a lost reply: its turn is unsaved, so a regenerate would save the new
-                reply without its user message (UDR-0214 D4) -- the notice's Retry is used. */}
-            {!isUser && onRegenerateAssistant && !message.streamLost && (
+            {/* Not on a lost or refused reply: its turn is unsaved, so a regenerate would save
+                the new reply without its user message (UDR-0214 D4, UDR-0220 D4) -- the
+                notice's Retry is used. */}
+            {!isUser && onRegenerateAssistant && !message.streamLost && !message.modelRefusal && (
               <div className="relative flex items-center">
                 <Button
                   variant="ghost"

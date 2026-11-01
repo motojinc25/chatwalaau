@@ -40,6 +40,23 @@ def merge_mode(content: Any) -> str | None:
     return mode if isinstance(mode, str) else None
 
 
+def is_refusal(content: Any) -> bool:
+    """True for a text content the provider marked as the model's REFUSAL (PRP-0237, UDR-0220 D1).
+
+    The OpenAI connectors deliver a Responses ``refusal`` part (and a Chat Completions
+    ``refusal``) as a ``text`` content whose ``additional_properties`` say
+    ``core.model_output_kind == "refusal"`` (legacy form: the same key at the top level).
+    It is a separate content part from the answer text, with its own deltas and its own
+    ``replace``.
+    """
+    props = getattr(content, "additional_properties", None)
+    if not isinstance(props, dict):
+        return False
+    core = props.get("core")
+    kind = core.get("model_output_kind") if isinstance(core, dict) else None
+    return (kind or props.get("model_output_kind")) == "refusal"
+
+
 def arguments_text(arguments: Any) -> str:
     """A function call's arguments as the string the wire carries (dicts JSON-encoded)."""
     if arguments is None:
@@ -59,17 +76,31 @@ class TextFold:
     nothing; one that extends it emits only the missing suffix; anything else emits
     nothing, keeps the shown text (an append-only stream cannot retract) and logs one
     WARNING -- the operator decision PRP-0229 Q3.
+
+    A refusal part (``refusal=True``, see ``is_refusal``) is its OWN run (UDR-0220 D1): its
+    ``replace`` is compared with the refusal deltas only, never with the answer text before
+    it. ``refusal`` collects every refusal character of the fold and is never reset.
     """
 
     def __init__(self, label: str = "text") -> None:
         self.label = label
         self.shown = ""
         self.diverged = 0
+        self.refusal = ""
+        self._refusal_run: TextFold | None = None
 
     def reset(self) -> None:
         self.shown = ""
+        if self._refusal_run is not None:
+            self._refusal_run.reset()
 
-    def feed(self, text: str | None, mode: str | None) -> str:
+    def feed(self, text: str | None, mode: str | None, *, refusal: bool = False) -> str:
+        if refusal:
+            if self._refusal_run is None:
+                self._refusal_run = TextFold(f"{self.label} refusal")
+            delta = self._refusal_run.feed(text, mode)
+            self.refusal += delta
+            return delta
         if not text:
             return ""
         if mode != REPLACE:
@@ -208,7 +239,7 @@ def fold_contents(contents: Iterable[Any]) -> FoldResult:
         mode = merge_mode(content)
         if kind == "text":
             reasoning.reset()
-            delta = text.feed(getattr(content, "text", None), mode)
+            delta = text.feed(getattr(content, "text", None), mode, refusal=is_refusal(content))
             if delta:
                 out.append(Content.from_text(text=delta))
             elif getattr(content, "annotations", None) and not getattr(content, "text", None):

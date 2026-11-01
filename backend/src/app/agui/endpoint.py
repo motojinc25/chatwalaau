@@ -58,7 +58,7 @@ from app.agent.declarative import active_spec
 from app.agent.harness.progress import HARNESS_PROGRESS_EVENT, HarnessRunTracker, is_progress_tool
 from app.agent.identity import load_identity
 from app.agent.prompt_dump import dump_prompt
-from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, merge_mode
+from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, is_refusal, merge_mode
 from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_path
 from app.agent.user_memory import session_user_profile_snapshot
 from app.agui.agent_registry import AgentRegistry
@@ -77,6 +77,9 @@ logger = logging.getLogger(__name__)
 
 # How many marker payloads travel in the report (UDR-0160 D3); the count is exact.
 CITATION_MARKER_REPORT_LIMIT = 10
+
+# The model's own refusal, reported once per turn after the run (CTR-0009, UDR-0220 D2).
+MODEL_REFUSAL_EVENT = "model_refusal"
 
 # ag-ui-protocol changed ReasoningMessageStartEvent.role from
 # Literal["assistant"] (<= 0.1.13) to Literal["reasoning"] (newer releases).
@@ -1703,6 +1706,13 @@ async def _stream_with_reasoning(
                         if getattr(content, "annotations", None):
                             annotations_seen = True
                         continue
+                    # PRP-0237 (UDR-0220 D2): the model's refusal part is NOT answer text. It
+                    # folds in its own run (D1) and reaches the SPA once, after the run, as
+                    # the model_refusal event -- never as TEXT_MESSAGE_CONTENT, so it is not
+                    # shown, saved or replayed as if the model had answered with it.
+                    if is_refusal(content):
+                        text_fold.feed(text, merge_mode(content), refusal=True)
+                        continue
                     # UDR-0212 D3.1: fold BEFORE the sanitizer, whose state must only
                     # ever see each character once. A new message starts a new run.
                     if msg_id is None:
@@ -2183,6 +2193,27 @@ async def _stream_with_reasoning(
                     "annotations_present": annotations_seen,
                     "run_id": run_id,
                 },
+            )
+        )
+
+    # PRP-0237 (UDR-0220 D2/D3): a refusal is reported, never silent and never answer
+    # text -- one additive CUSTOM event for the SPA's notice, and one log line with the
+    # same run_id. Lengths only: the refusal can quote the request.
+    if text_fold.refusal:
+        logger.warning(
+            "Model refusal: thread=%s run=%s model=%s refusal_chars=%d answer_chars=%d; "
+            "sent as model_refusal, not as answer text (UDR-0220 D2)",
+            thread_id,
+            run_id,
+            effective_model,
+            len(text_fold.refusal),
+            len("".join(assistant_text_parts)),
+        )
+        yield encoder.encode(
+            CustomEvent(
+                type=EventType.CUSTOM,
+                name=MODEL_REFUSAL_EVENT,
+                value={"text": text_fold.refusal, "run_id": run_id},
             )
         )
 

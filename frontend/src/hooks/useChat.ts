@@ -216,6 +216,13 @@ export const WORKFLOW_STOPPED_MESSAGE = 'Stopped.'
  */
 export const CONNECTION_LOST_MESSAGE =
   'Connection to the server was lost before the reply finished. The run was stopped on the server and this reply was not saved.'
+/**
+ * A turn the model itself refused (PRP-0237, UDR-0220 D4): the model's safety system stopped
+ * the reply. The refusal is quoted in the notice, never added to the answer, and the turn is
+ * not saved, so neither the cut answer nor the refusal is sent back to the model next turn.
+ */
+export const MODEL_REFUSAL_MESSAGE =
+  "The model's safety system stopped this reply, and this reply was not saved. The model said:"
 const NOT_SAVED_SUFFIX = ' and this reply was not saved.'
 const STREAM_ENDED_EARLY = 'the stream ended before the run finished'
 
@@ -622,6 +629,10 @@ export function useChat(options?: UseChatOptions) {
         // turn's Todo list / mode / loop iteration. Kept on the message live, and the last
         // one is persisted as usage.harness_run (UDR-0163 D5).
         let harnessProgress: HarnessProgress | null = null
+        // The model's own refusal (PRP-0237, CTR-0009 model_refusal, UDR-0220 D4): sent once,
+        // after the run, never as answer text. A refused turn is shown with a notice and is
+        // not saved.
+        let refusalText = ''
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
@@ -878,6 +889,10 @@ export function useChat(options?: UseChatOptions) {
                     const counter = attempt && max ? ` (${attempt}/${max})` : ''
                     onNoticeRef.current?.(`Temporary server error -- retrying${counter}...`)
                   }
+                  if (event.name === 'model_refusal' && event.value) {
+                    const refusal = (event.value as Record<string, unknown>).text
+                    refusalText = typeof refusal === 'string' ? refusal : ''
+                  }
                   if (event.name === 'workflow_completed') {
                     workflowCompleted = true
                     const steps = (event.value as Record<string, unknown> | undefined)?.steps
@@ -967,6 +982,22 @@ export function useChat(options?: UseChatOptions) {
         // the run's end event never came. That is the same lost connection on EVERY lane
         // (UDR-0177 D5, UDR-0214 D3): a cut reply must not be saved as if it were complete.
         if (committed && !runEnded) throw new Error(STREAM_ENDED_EARLY)
+
+        // A refused turn (UDR-0220 D4) keeps the text answered before the refusal and shows
+        // the refusal as a notice with the lost-reply Retry. It is NOT saved: a cut answer
+        // saved as complete -- or the refusal saved as answer text -- would be replayed to
+        // the model as if it had answered that way. Never retried automatically (D5).
+        if (refusalText) {
+          streamSuccess = false
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantId
+                ? { ...msg, modelRefusal: { message: `${MODEL_REFUSAL_MESSAGE} ${refusalText}`, retry: retryMode } }
+                : msg,
+            ),
+          )
+          return { committed, success: streamSuccess }
+        }
 
         // Save messages to session after stream completes. A declarative workflow that
         // produced no chat reply (workflowCompleted, no body) is ALSO saved so the turn
@@ -1277,14 +1308,15 @@ export function useChat(options?: UseChatOptions) {
    * on the user's click -- never automatically (UDR-0088 D6). Nothing of the lost turn was
    * saved, so it is re-sent the way it was sent: a send or an edit sends the user text and
    * images again (and saves both); a regenerate runs the regenerate path again for the
-   * user message that is still saved. A workflow resume has no Retry.
+   * user message that is still saved. A workflow resume has no Retry. A turn the model
+   * refused is not saved either and takes the same Retry (PRP-0237, UDR-0220 D4).
    */
   const retryLostTurn = useCallback(
     async (assistantId: string) => {
       if (savingRef.current) return
       const current = messagesRef.current
       const idx = current.findIndex((m) => m.id === assistantId)
-      const retry = idx === -1 ? null : (current[idx].streamLost?.retry ?? null)
+      const retry = idx === -1 ? null : (current[idx].streamLost?.retry ?? current[idx].modelRefusal?.retry ?? null)
       if (retry === 'regenerate') {
         await regenerateAssistantMessage(assistantId)
         return

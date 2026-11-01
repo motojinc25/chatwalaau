@@ -39,7 +39,6 @@ import collections
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
 import contextlib
-from datetime import timedelta
 import json
 import logging
 from pathlib import Path
@@ -64,6 +63,7 @@ from app.computer_use.backend import (
     WindowInfo,
 )
 from app.computer_use.engine import OpError
+from app.mcp.connection import is_error, structured_content
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -200,7 +200,9 @@ class _Link:
         if session is None or self.dead:
             raise ConnectionError("the provider session is closed")
         return asyncio.run_coroutine_threadsafe(
-            session.call_tool(name, args, read_timeout_seconds=timedelta(seconds=timeout)), self.loop
+            # MCP 2: timeouts are float seconds (UDR-0221 D4).
+            session.call_tool(name, args, read_timeout_seconds=float(timeout)),
+            self.loop,
         )
 
     def call(self, name: str, args: dict[str, Any], timeout: float) -> Any:
@@ -309,7 +311,7 @@ class McpDesktopBackend:
         protocol = str(described.get("protocol") or "")
         # The host does no image processing: the frame features are required here (Q3).
         missing = sorted((REQUIRED_FEATURES | PROTOCOL_FEATURES) - declared)
-        if getattr(result, "isError", False) or protocol.split("/")[0] != PROTOCOL.split("/")[0] or missing:
+        if is_error(result) or protocol.split("/")[0] != PROTOCOL.split("/")[0] or missing:
             link.close()
             self.state = "stopped"
             self.failure = f"incompatible: protocol {protocol or '?'}, missing {missing}"
@@ -366,7 +368,7 @@ class McpDesktopBackend:
             reason = "timeout" if "timed out" in str(exc).lower() else "lost"
             self._lost(reason, f"{name}: {type(exc).__name__}")
         body = _structured(result)
-        if getattr(result, "isError", False):
+        if is_error(result):
             raise ProviderCallError(str(body.get("error") or "internal"), str(body.get("message") or ""))
         return body, _image(result)
 
@@ -609,7 +611,7 @@ class McpDesktopBackend:
         finally:
             self._path_in_flight = False
         body = _structured(result)
-        if getattr(result, "isError", False):
+        if is_error(result):
             code, message = str(body.get("error") or "internal"), str(body.get("message") or "")
             if code == "input_blocked":
                 raise OSError(message or "input blocked")
@@ -677,7 +679,7 @@ class McpDesktopBackend:
 
 
 def _structured(result: Any) -> dict[str, Any]:
-    structured = getattr(result, "structuredContent", None)
+    structured = structured_content(result)
     if isinstance(structured, dict):
         return structured
     for item in getattr(result, "content", None) or []:

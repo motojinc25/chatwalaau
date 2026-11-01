@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 
 from app.core.config import settings
+from app.mcp import connection
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +89,8 @@ async def discover_ui_tools(mcp_tools: list, server_configs: list) -> None:
     Called after activate_mcp() when MCP server connections are established.
 
     MAF's load_tools() converts MCP tools to FunctionTool instances but discards
-    the _meta field. We must call session.list_tools() directly on the underlying
-    MCP session to retrieve the full tool definitions including _meta.ui.
+    the _meta field, so the full definitions are listed again through the MCP
+    connection adapter (app/mcp/connection.py, UDR-0221 D3).
     """
     _ui_tools.clear()
     _html_cache.clear()
@@ -98,60 +99,19 @@ async def discover_ui_tools(mcp_tools: list, server_configs: list) -> None:
         server_name = server_configs[i]["name"] if i < len(server_configs) else f"server_{i}"
 
         try:
-            # Access the underlying MCP session to list tools with full metadata.
-            # MAF MCPStdioTool/MCPStreamableHTTPTool store the MCP ClientSession
-            # as self.session after activation (connect -> __aenter__).
-            session = getattr(tool, "session", None)
-            if session is None:
-                logger.debug("No MCP session found for %s, skipping UI discovery", server_name)
-                continue
-
-            list_tools_fn = getattr(session, "list_tools", None)
-            if not callable(list_tools_fn):
-                logger.debug("MCP session for %s has no list_tools method", server_name)
-                continue
-
-            tool_list_result = await list_tools_fn()
-            tools_list = getattr(tool_list_result, "tools", [])
-
-            for td in tools_list:
-                name = getattr(td, "name", "")
-                if not name:
-                    continue
-
-                # _meta can be in two locations depending on MCP SDK version:
-                # 1. tool.annotations._meta (FastMCP annotations parameter)
-                # 2. tool.meta (direct meta field on Tool object)
-                meta = None
-
-                # Check annotations._meta first (FastMCP pattern)
-                annotations = getattr(td, "annotations", None)
-                if annotations is not None:
-                    meta_raw = getattr(annotations, "_meta", None)
-                    if meta_raw is not None:
-                        if isinstance(meta_raw, dict):
-                            meta = meta_raw
-                        elif hasattr(meta_raw, "model_dump"):
-                            meta = meta_raw.model_dump()
-                        elif hasattr(meta_raw, "__dict__"):
-                            meta = dict(meta_raw.__dict__)
-
-                # Fallback: check tool.meta directly
-                if meta is None:
-                    meta_raw = getattr(td, "meta", None)
-                    if meta_raw is not None:
-                        if isinstance(meta_raw, dict):
-                            meta = meta_raw
-                        elif hasattr(meta_raw, "model_dump"):
-                            meta = meta_raw.model_dump()
-                        elif hasattr(meta_raw, "__dict__"):
-                            meta = dict(meta_raw.__dict__)
-
-                if meta:
-                    register_ui_tool(server_name, name, meta)
-
+            definitions = await connection.list_tools(tool)
+        except connection.McpConnectionUnavailable as exc:
+            logger.debug("No MCP connection for %s (%s), skipping UI discovery", server_name, exc)
+            continue
         except Exception:
-            logger.debug("Error discovering UI tools for %s", server_name, exc_info=True)
+            logger.warning("Error discovering UI tools for %s", server_name, exc_info=True)
+            continue
+
+        for td in definitions:
+            name = getattr(td, "name", "")
+            meta = connection.meta(td)
+            if name and meta:
+                register_ui_tool(server_name, name, meta)
 
     if _ui_tools:
         logger.info("MCP Apps: %d UI-enabled tool(s) discovered", len(_ui_tools))
@@ -162,7 +122,7 @@ async def discover_ui_tools(mcp_tools: list, server_configs: list) -> None:
 async def fetch_ui_resource(tool: object, resource_uri: str) -> UiResourceData | None:
     """Fetch UI Resource HTML from an MCP server.
 
-    Uses the MCP tool's underlying connection to read the UI resource.
+    Reads through the MCP connection adapter (UDR-0221 D3).
     Returns None if the resource cannot be fetched.
     """
     # Check cache first
@@ -175,22 +135,7 @@ async def fetch_ui_resource(tool: object, resource_uri: str) -> UiResourceData |
         )
 
     try:
-        # Access the underlying MCP session to read the UI resource.
-        # MAF tools store the MCP ClientSession as self.session after activation.
-        session = getattr(tool, "session", None)
-        if session is None:
-            logger.warning("Cannot read UI resource: no MCP session on tool")
-            return None
-
-        read_resource_fn = getattr(session, "read_resource", None)
-        if not callable(read_resource_fn):
-            logger.warning("Cannot read UI resource: MCP session has no read_resource method")
-            return None
-
-        # MCP SDK's read_resource takes a single AnyUrl argument
-        from pydantic import AnyUrl
-
-        result = await read_resource_fn(AnyUrl(resource_uri))
+        result = await connection.read_resource(tool, resource_uri)
 
         if not result:
             logger.warning("UI resource not found: %s", resource_uri)
@@ -203,8 +148,7 @@ async def fetch_ui_resource(tool: object, resource_uri: str) -> UiResourceData |
             return None
 
         content = contents[0]
-        # MCP SDK uses both camelCase and snake_case depending on version
-        mime_type = getattr(content, "mimeType", None) or getattr(content, "mime_type", "")
+        mime_type = getattr(content, "mime_type", None) or ""
 
         if mime_type != RESOURCE_MIME_TYPE:
             logger.warning(
@@ -229,13 +173,8 @@ async def fetch_ui_resource(tool: object, resource_uri: str) -> UiResourceData |
         _html_cache[resource_uri] = html
 
         # Extract CSP/permissions metadata from content-level _meta
-        content_meta = getattr(content, "_meta", None) or getattr(content, "meta", None) or {}
-        if hasattr(content_meta, "model_dump"):
-            content_meta = content_meta.model_dump()
-        elif hasattr(content_meta, "__dict__"):
-            content_meta = dict(content_meta.__dict__)
-
-        ui_meta = content_meta.get("ui", {}) if isinstance(content_meta, dict) else {}
+        content_meta = connection.meta(content) or {}
+        ui_meta = content_meta.get("ui", {})
 
         # Fall back to tool-level metadata for CSP/permissions
         tool_meta = None

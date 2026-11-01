@@ -115,15 +115,13 @@ def _is_mcp_tool(obj: Any) -> bool:
 
     Matched by TYPE, never by name: an MCP tool's ``.name`` is the SERVER name, which
     an operator chooses, so a name-based test would be defeated by a server called
-    ``image_generate``. ``MCPTool`` is the common base of the stdio and the streamable
-    HTTP transports, both of which stay supported (UDR-0167, PRP-0185 Section 2.1).
+    ``image_generate``. The PUBLIC transport classes are matched (UDR-0221 D6): their
+    common base ``MCPTool`` is not exported by ``agent_framework``, and importing it made
+    this gate inert from PRP-0185 to PRP-0238 (UDR-0167, PRP-0185 Section 2.1).
     """
-    try:
-        from agent_framework import MCPTool
-    except ImportError:  # pragma: no cover - defensive; MAF is a hard dependency
-        logger.debug("agent_framework.MCPTool unavailable; MCP gate inert", exc_info=True)
-        return False
-    return isinstance(obj, MCPTool)
+    from agent_framework import MCPStdioTool, MCPStreamableHTTPTool, MCPWebsocketTool
+
+    return isinstance(obj, (MCPStdioTool, MCPStreamableHTTPTool, MCPWebsocketTool))
 
 
 def _is_skills_provider(obj: Any) -> bool:

@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse
 from openai import NotFoundError as OpenAINotFoundError
 
 from app import providers
-from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, fold_contents, merge_mode
+from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, fold_contents, is_refusal, merge_mode
 from app.agent.temporary import new_temporary_thread_id, schedule_sweep, set_temporary_run
 from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key_strict
@@ -235,7 +235,9 @@ async def _stream_responses(
                     break
 
                 if content_type == "text":
-                    text = text_fold.feed(getattr(content, "text", ""), merge_mode(content))
+                    text = text_fold.feed(
+                        getattr(content, "text", ""), merge_mode(content), refusal=is_refusal(content)
+                    )
                     if not text:
                         continue
                     if not msg_started:

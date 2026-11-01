@@ -269,6 +269,13 @@ export interface ChatMessage {
    */
   streamLost?: { message: string; retry: LostReplyRetry }
   /**
+   * PRP-0237 / CTR-0004 (UDR-0220 D4). Set on an ASSISTANT message whose run ended with
+   * the model's own refusal (the `model_refusal` event). The text answered before it
+   * stays, the refusal is shown as a notice -- never as answer text -- with the same Retry
+   * as a lost reply, and the turn is not saved. Ephemeral: never written to the session file.
+   */
+  modelRefusal?: { message: string; retry: LostReplyRetry }
+  /**
    * Live voice conversation (CTR-0227, PRP-0188). `source: 'live'` marks a message that
    * came from a GPT-Live session: a transcribed user / assistant turn, or the full
    * answer of a delegated agent run. Persisted by the backend, restored on reload.
