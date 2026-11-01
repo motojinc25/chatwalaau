@@ -58,7 +58,7 @@ cd frontend && pnpm run version:set --target product --to X.Y.Z   # also writes 
 cd ../desktop
 pnpm payload:build     # pinned CPython + uv + win_amd64 wheelhouse + manifest + offline trial install
 pnpm dist              # payload:verify + NSIS installer in dist/
-pnpm release           # after pypi:publish, github:sync, github:release for the same version
+pnpm release           # after github:sync and github:release (PyPI publishes via Actions) for the same version
 ```
 
 `pnpm release` uploads `ChatWalaau-Setup-X.Y.Z.exe`, its `.blockmap` and `latest.yml` to

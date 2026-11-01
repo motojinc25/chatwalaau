@@ -1,7 +1,9 @@
-"""MCP Apps sandbox proxy server (CTR-0066, PRP-0034).
+"""MCP Apps sandbox proxy server (CTR-0066, PRP-0034, PRP-0240).
 
 Serves sandbox proxy HTML on a separate port with CSP headers
 for double-iframe origin isolation per the MCP Apps specification.
+The server listens on the app's own address (APP_HOST), so a browser on
+another machine reaches it on the page's host (UDR-0019 D15).
 """
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -196,6 +198,11 @@ def start_sandbox_server(port: int, host: str = "127.0.0.1") -> bool:
     except OSError as e:
         logger.error("Failed to start MCP Apps sandbox proxy on port %d: %s", port, e)
         return False
+
+
+def is_sandbox_running() -> bool:
+    """True while the sandbox proxy server is serving (CTR-0066 v2)."""
+    return _sandbox_server is not None and _sandbox_thread is not None and _sandbox_thread.is_alive()
 
 
 def stop_sandbox_server() -> None:

@@ -1306,6 +1306,13 @@ async def _stream_with_reasoning(
         # decision would have been made from a value the rest of the turn discards.
         _inject_image_content(messages, request_body.messages, pdf_native=_pdf_wants_native(effective_model))
 
+        # MCP App model context (CTR-0067, PRP-0240, UDR-0019 D13): the last
+        # ui/update-model-context of each open View rides on this turn's
+        # RunAgentInput.context and reaches the model for this run only.
+        from app.mcp_apps.context import inject_view_context
+
+        inject_view_context(messages, request_body.context)
+
         # Create session with metadata (same as _agent_run.py:685-691). A harness
         # run reuses the per-conversation CACHED session instead, so its in-memory
         # history / todo / mode / loop state survives across turns (UDR-0119 D4).
@@ -1902,7 +1909,12 @@ async def _stream_with_reasoning(
                             )
                         )
                         # MCP Apps: check if this tool has UI resource (CTR-0067, PRP-0034)
-                        from app.mcp_apps.manager import fetch_ui_resource, get_ui_tool_metadata, store_app_html
+                        from app.mcp_apps.manager import (
+                            fetch_ui_resource,
+                            get_ui_tool_metadata,
+                            host_payload,
+                            store_app_html,
+                        )
 
                         ui_meta = get_ui_tool_metadata(tc_name_current)
                         if ui_meta:
@@ -1917,7 +1929,9 @@ async def _stream_with_reasoning(
                                         break
 
                                 if mcp_tool:
-                                    ui_resource = await fetch_ui_resource(mcp_tool, ui_meta.resource_uri)
+                                    ui_resource = await fetch_ui_resource(
+                                        mcp_tool, ui_meta.resource_uri, ui_meta.server_name
+                                    )
                                     if ui_resource:
                                         ref_id = tc_id or _generate_id()
                                         html_filename = store_app_html(thread_id, ref_id, ui_resource.html)
@@ -1933,6 +1947,10 @@ async def _stream_with_reasoning(
                                                     "csp": ui_resource.csp,
                                                     "permissions": ui_resource.permissions,
                                                     "call_id": ref_id,
+                                                    # The full CallToolResult for the View
+                                                    # (UDR-0019 D12); absent -> the SPA sends
+                                                    # the text result instead.
+                                                    "tool_result": host_payload(content),
                                                 },
                                             )
                                         )

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LiveDelegationEvent } from '@/hooks/useLiveVoice'
 import { finalizeHarnessProgress, parseHarnessProgress } from '@/lib/harnessProgress'
+import { takeViewModelContext } from '@/lib/mcp-app-host'
 import type {
   ChatMessage,
   HarnessProgress,
@@ -418,6 +419,8 @@ export function useChat(options?: UseChatOptions) {
          * continues the workflow that paused, rather than starting a new run.
          */
         workflowResume?: Record<string, unknown>
+        /** Tool name of the MCP App View whose `ui/message` sent this turn (PRP-0240). */
+        mcpAppSource?: string
       },
       // `committed` is true once the AG-UI stream emitted its first event (the turn
       // is live server-side); `success` is the pre-PRP-0110 stream-completed flag.
@@ -429,6 +432,7 @@ export function useChat(options?: UseChatOptions) {
         content: userContent,
         createdAt: new Date().toISOString(),
         ...(options?.images && options.images.length > 0 ? { images: options.images } : {}),
+        ...(options?.mcpAppSource ? { mcpAppSource: options.mcpAppSource } : {}),
       }
 
       // A human-in-the-loop answer CONTINUES the run that paused (v0.117.1), so it continues
@@ -585,6 +589,9 @@ export function useChat(options?: UseChatOptions) {
                 ...(dispatchImages && dispatchImages.length > 0 ? { images: dispatchImages } : {}),
               },
             ]
+        // MCP App model context (PRP-0240, UDR-0019 D13): each open View's last
+        // ui/update-model-context rides on the next user turn as AG-UI context, once.
+        const viewContext = options?.skipUserMessage ? [] : takeViewModelContext(threadIdRef.current)
         const response = await fetch('/ag-ui/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -593,6 +600,7 @@ export function useChat(options?: UseChatOptions) {
             run_id: crypto.randomUUID(),
             messages: aguiMessages,
             ...(Object.keys(aguiState).length > 0 ? { state: aguiState } : {}),
+            ...(viewContext.length > 0 ? { context: viewContext } : {}),
           }),
           signal: abortRef.current.signal,
         })
@@ -633,6 +641,8 @@ export function useChat(options?: UseChatOptions) {
         // after the run, never as answer text. A refused turn is shown with a notice and is
         // not saved.
         let refusalText = ''
+        // The turn's MCP App View (CTR-0068 v2): saved with the message so a reload rebuilds it.
+        let completedMcpApp: McpAppEvent | undefined
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
@@ -960,14 +970,10 @@ export function useChat(options?: UseChatOptions) {
                   if (event.name === 'mcp_app' && event.value) {
                     // MCP Apps: associate UI metadata with the current assistant message (CTR-0068)
                     const mcpAppEvent = event.value as unknown as McpAppEvent
-                    setMessages((prev) => {
-                      const updated = [...prev]
-                      const lastAssistant = [...updated].reverse().find((m: ChatMessage) => m.role === 'assistant')
-                      if (lastAssistant) {
-                        lastAssistant.mcpApp = mcpAppEvent
-                      }
-                      return updated
-                    })
+                    completedMcpApp = mcpAppEvent
+                    setMessages((prev) =>
+                      prev.map((msg) => (msg.id === assistantId ? { ...msg, mcpApp: mcpAppEvent } : msg)),
+                    )
                   }
                   break
                 }
@@ -1028,6 +1034,9 @@ export function useChat(options?: UseChatOptions) {
           }
           if (completedActivityLog.length > 0) {
             assistantMsg.activity_log = completedActivityLog
+          }
+          if (completedMcpApp) {
+            assistantMsg.mcp_app = completedMcpApp
           }
           // Persist the run-target INSIDE the usage object (the established place for
           // per-message model / reasoning / verbosity), so a reloaded chat shows which
@@ -1185,6 +1194,8 @@ export function useChat(options?: UseChatOptions) {
         /** Workflow HITL resume (PRP-0123, UDR-0106 D5): continue a paused run. */
         skipUserMessage?: boolean
         workflowResume?: Record<string, unknown>
+        /** A View's `ui/message` (PRP-0240): the tool name shown on the user bubble. */
+        mcpAppSource?: string
       },
     ): Promise<boolean> => {
       // Nothing to send -> report "committed" so the composer does not try to
@@ -1198,6 +1209,7 @@ export function useChat(options?: UseChatOptions) {
         prepare: opts?.prepare,
         skipUserMessage: opts?.skipUserMessage,
         workflowResume: opts?.workflowResume,
+        mcpAppSource: opts?.mcpAppSource,
       })
       if (!committed) {
         hadPrecommitFailureRef.current = true
@@ -1396,6 +1408,9 @@ export function useChat(options?: UseChatOptions) {
     }
     if (original.usage) {
       assistantMsg.usage = original.usage
+    }
+    if (original.mcpApp) {
+      assistantMsg.mcp_app = original.mcpApp
     }
 
     const threadId = threadIdRef.current

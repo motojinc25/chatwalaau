@@ -29,6 +29,7 @@ from app.core.config import settings
 from app.demo import is_demo_mode
 from app.mcp.lifecycle import get_mcp_tools, get_server_tool_names
 from app.mcp.overrides import get_override_store
+from app.mcp_apps.manager import app_only_tool_names
 from app.session.provider import FileHistoryProvider
 from app.skills.provider import create_skills_provider
 from app.weather.tools import weather_geocode_city, weather_get_current, weather_get_forecast
@@ -366,7 +367,9 @@ def _build_tools_and_instructions(
                     tool.allowed_tools = None
                     continue
                 full_names = get_server_tool_names(server)
-                disabled = store.disabled_tools_for(server)
+                # MCP Apps app-only tools (visibility without "model") are never given
+                # to the agent (PRP-0240, UDR-0019 D11): withheld like a disabled tool.
+                disabled = store.disabled_tools_for(server) | app_only_tool_names(server)
                 if full_names:
                     # Enabled subset after the MCP override store...
                     override_enabled = [n for n in full_names if n not in disabled]

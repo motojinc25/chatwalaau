@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from app.auth import verify_api_key
 from app.mcp import connection
-from app.mcp_apps.manager import read_app_html
+from app.mcp_apps.manager import is_app_callable, read_app_html
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ async def rpc_proxy(server_name: str, request: RpcRequest):
     """Proxy JSON-RPC requests from Views to MCP servers.
 
     Supports:
-    - tools/call: Call an MCP server tool
+    - tools/call: Call an MCP server tool (403 when its visibility excludes "app")
     - resources/read: Read an MCP server resource
     """
     from app.mcp.lifecycle import _mcp_server_status, _mcp_tools
@@ -55,6 +55,10 @@ async def rpc_proxy(server_name: str, request: RpcRequest):
         if request.method == "tools/call":
             name = request.params.get("name", "")
             arguments = request.params.get("arguments", {})
+            # A View may call only tools whose visibility includes "app" (UDR-0019 D11).
+            if not is_app_callable(server_name, name):
+                logger.warning("MCP App on %s called %s, which is not visible to apps; rejected", server_name, name)
+                raise HTTPException(status_code=403, detail=f"Tool not available to apps: {name}")
             result = await connection.call_tool(tool, name, arguments)
             return {"result": connection.to_wire(result)}
 

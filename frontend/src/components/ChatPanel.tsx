@@ -46,6 +46,7 @@ import { resolveContextOccupancy } from '@/lib/contextOccupancy'
 import { IMAGE_EDIT_TOOL } from '@/lib/imageTools'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { requestImageEdit, uploadSessionImage } from '@/lib/maskApi'
+import { type McpAppHost, McpAppHostContext } from '@/lib/mcp-app-host'
 import { type EntryId, isEntryVisible, useChatSurfaceTier } from '@/lib/narrowSurface'
 import { getHarnessRunTarget, getWorkflowRunTarget, RUN_TARGET_CHANGED_EVENT } from '@/lib/runTarget'
 import { cn } from '@/lib/utils'
@@ -813,6 +814,21 @@ export function ChatPanel({
     ],
   )
   const composerBusy = isLoading || discussionPhaseRunning
+
+  // MCP App Views (CTR-0068 v2, PRP-0240, UDR-0019 D13): a View's ui/message becomes a user
+  // turn in this chat, refused while a run is streaming or a discussion waits for input.
+  const mcpAppHost = useMemo<McpAppHost>(
+    () => ({
+      threadId: threadId ?? null,
+      sendViewMessage: (text: string, source: string) => {
+        if (composerBusy || discussionWaiting) return false
+        void sendMessage(text, undefined, { mcpAppSource: source })
+        scrollToBottom()
+        return true
+      },
+    }),
+    [threadId, composerBusy, discussionWaiting, sendMessage, scrollToBottom],
+  )
   const composerStop = discussionPhaseRunning ? () => void discussion.pause() : stopGeneration
   const composerPlaceholder = discussionWaiting ? 'Add your input to the discussion...' : undefined
 
@@ -889,141 +905,142 @@ export function ChatPanel({
   )
 
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop drop zone requires drag events on container div
-    <div
-      className={cn('relative flex flex-1 flex-col overflow-hidden', className)}
-      onDragEnter={handleDragEnter}
-      onDragLeave={handleDragLeave}
-      onDragOver={handleDragOver}
-      onDrop={handleDrop}>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
-        <div className={cn('mx-auto px-4 pt-4', compact ? 'max-w-full pb-4' : 'max-w-3xl')}>
-          {messages.length === 0 && (
-            <div
-              className={cn('flex items-center justify-center text-muted-foreground', compact ? 'h-40' : 'h-[60vh]')}>
-              <p className={cn(compact ? 'text-xs' : 'text-sm')}>{emptyMessage}</p>
-            </div>
-          )}
-          {messages.map((msg, i) => {
-            // CTR-0165: offer the "remember this turn" like only for a complete
-            // turn (has an assistant reply) and only when the feature is enabled.
-            const turn = memory.enabled ? resolveTurn(i) : null
-            // Step 3 (CTR-0228): a Live delegation still queued or running is a marker,
-            // replaced in place by its answer (same id).
-            if (msg.live?.pending) {
+    <McpAppHostContext.Provider value={mcpAppHost}>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop drop zone requires drag events on container div */}
+      <div
+        className={cn('relative flex flex-1 flex-col overflow-hidden', className)}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}>
+        <div ref={scrollRef} className="flex-1 overflow-y-auto">
+          <div className={cn('mx-auto px-4 pt-4', compact ? 'max-w-full pb-4' : 'max-w-3xl')}>
+            {messages.length === 0 && (
+              <div
+                className={cn('flex items-center justify-center text-muted-foreground', compact ? 'h-40' : 'h-[60vh]')}>
+                <p className={cn(compact ? 'text-xs' : 'text-sm')}>{emptyMessage}</p>
+              </div>
+            )}
+            {messages.map((msg, i) => {
+              // CTR-0165: offer the "remember this turn" like only for a complete
+              // turn (has an assistant reply) and only when the feature is enabled.
+              const turn = memory.enabled ? resolveTurn(i) : null
+              // Step 3 (CTR-0228): a Live delegation still queued or running is a marker,
+              // replaced in place by its answer (same id).
+              if (msg.live?.pending) {
+                return (
+                  <LiveDelegationMarker
+                    key={msg.id}
+                    message={msg}
+                    onCancel={liveActive ? live.cancelDelegation : undefined}
+                  />
+                )
+              }
               return (
-                <LiveDelegationMarker
-                  key={msg.id}
-                  message={msg}
-                  onCancel={liveActive ? live.cancelDelegation : undefined}
-                />
+                <Fragment key={msg.id}>
+                  {selectionTraces.get(msg.id)}
+                  <ChatMessageItem
+                    message={msg}
+                    messageIndex={i}
+                    compact={compact}
+                    isLoading={isLoading && i === messages.length - 1}
+                    // TTS is withdrawn while Live speaks (CTR-0040, PRP-0188).
+                    tts={liveActive ? undefined : tts}
+                    // A discussion message belongs to its run: no edit, regenerate or delete
+                    // (CTR-0276, PRP-0232 2.7).
+                    onEditUser={msg.discussion ? undefined : editUserMessage}
+                    onRetryTurn={handleRetryTurn}
+                    onRetryLostTurn={handleRetryLostTurn}
+                    onEditAssistant={msg.discussion ? undefined : editAssistantMessage}
+                    onRegenerateAssistant={msg.discussion ? undefined : regenerateAssistantMessage}
+                    onDelete={msg.discussion ? undefined : deleteMessage}
+                    onBranch={onBranchFromMessage}
+                    onSaveAsTemplate={show('message.saveAsTemplate') ? handleSaveAsTemplate : undefined}
+                    onMaskEdit={show('message.maskEdit') ? handleMaskEdit : undefined}
+                    onPaintEdit={show('message.paintEdit') ? handlePaintEditFromHistory : undefined}
+                    onToggleMemoryLike={turn ? handleToggleMemoryLike : undefined}
+                    memoryLikeStatus={turn ? memory.states[turn.turnKey] : undefined}
+                    workflowRun={
+                      selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant'
+                        ? workflowRun
+                        : undefined
+                    }
+                    onOpenWorkflowCanvas={
+                      // Live run: re-open the canvas for the latest run (closing only hides it).
+                      // Reloaded chat: rebuild the canvas from the run persisted with THAT message,
+                      // so any past workflow turn can be inspected again (v0.117.1).
+                      // Narrow viewport: no "Diagram" entry; the text progress stays (PRP-0171).
+                      !show('message.workflowDiagram')
+                        ? undefined
+                        : selectedWorkflowId &&
+                            i === messages.length - 1 &&
+                            msg.role === 'assistant' &&
+                            canvas.hasCurrent()
+                          ? canvas.openCurrent
+                          : msg.workflowRun
+                            ? () => canvas.openRestored(msg.workflowRun as PersistedWorkflowRun)
+                            : undefined
+                    }
+                  />
+                  {codeMapRows.get(msg.id)}
+                </Fragment>
               )
-            }
-            return (
-              <Fragment key={msg.id}>
-                {selectionTraces.get(msg.id)}
-                <ChatMessageItem
-                  message={msg}
-                  messageIndex={i}
-                  compact={compact}
-                  isLoading={isLoading && i === messages.length - 1}
-                  // TTS is withdrawn while Live speaks (CTR-0040, PRP-0188).
-                  tts={liveActive ? undefined : tts}
-                  // A discussion message belongs to its run: no edit, regenerate or delete
-                  // (CTR-0276, PRP-0232 2.7).
-                  onEditUser={msg.discussion ? undefined : editUserMessage}
-                  onRetryTurn={handleRetryTurn}
-                  onRetryLostTurn={handleRetryLostTurn}
-                  onEditAssistant={msg.discussion ? undefined : editAssistantMessage}
-                  onRegenerateAssistant={msg.discussion ? undefined : regenerateAssistantMessage}
-                  onDelete={msg.discussion ? undefined : deleteMessage}
-                  onBranch={onBranchFromMessage}
-                  onSaveAsTemplate={show('message.saveAsTemplate') ? handleSaveAsTemplate : undefined}
-                  onMaskEdit={show('message.maskEdit') ? handleMaskEdit : undefined}
-                  onPaintEdit={show('message.paintEdit') ? handlePaintEditFromHistory : undefined}
-                  onToggleMemoryLike={turn ? handleToggleMemoryLike : undefined}
-                  memoryLikeStatus={turn ? memory.states[turn.turnKey] : undefined}
-                  workflowRun={
-                    selectedWorkflowId && i === messages.length - 1 && msg.role === 'assistant'
-                      ? workflowRun
-                      : undefined
-                  }
-                  onOpenWorkflowCanvas={
-                    // Live run: re-open the canvas for the latest run (closing only hides it).
-                    // Reloaded chat: rebuild the canvas from the run persisted with THAT message,
-                    // so any past workflow turn can be inspected again (v0.117.1).
-                    // Narrow viewport: no "Diagram" entry; the text progress stays (PRP-0171).
-                    !show('message.workflowDiagram')
-                      ? undefined
-                      : selectedWorkflowId &&
-                          i === messages.length - 1 &&
-                          msg.role === 'assistant' &&
-                          canvas.hasCurrent()
-                        ? canvas.openCurrent
-                        : msg.workflowRun
-                          ? () => canvas.openRestored(msg.workflowRun as PersistedWorkflowRun)
-                          : undefined
-                  }
-                />
-                {codeMapRows.get(msg.id)}
-              </Fragment>
-            )
-          })}
-          {/* CTR-0092 bottom spacer: keeps the final message visible above the floating ChatInput. */}
-          {!compact && <div aria-hidden="true" style={{ height: bottomSpacerHeightPx }} />}
-        </div>
-      </div>
-
-      {/* CTR-0103 Message Navigator: floating right-gutter rail + popover.
-          Overlay only; absent in compact mode and on constrained viewports. */}
-      {messageNav.isAvailable && (
-        <MessageNavigator turns={messageNav.turns} activeId={messageNav.activeId} onJump={messageNav.scrollToTurn} />
-      )}
-
-      {/* PRP-0174 / UDR-0156 D4: a failed save is being retried. The chat is locked
-          (covered, inert to pointer and keyboard) until the save lands or gives up. */}
-      {saveRetry && (
-        <div
-          role="alertdialog"
-          aria-modal="true"
-          aria-live="assertive"
-          aria-label="Saving the reply"
-          className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
-          <div className="flex items-center gap-3 rounded-lg border bg-card px-5 py-4 text-sm shadow-lg">
-            <Loader2 className="h-5 w-5 animate-spin text-primary" aria-hidden="true" />
-            <div>
-              <p className="font-medium">Saving the reply...</p>
-              <p className="text-xs text-muted-foreground">
-                Retry {saveRetry.attempt} of {saveRetry.total}. Please wait.
-              </p>
-            </div>
+            })}
+            {/* CTR-0092 bottom spacer: keeps the final message visible above the floating ChatInput. */}
+            {!compact && <div aria-hidden="true" style={{ height: bottomSpacerHeightPx }} />}
           </div>
         </div>
-      )}
 
-      {/* PRP-0189 amendment A4 (CTR-0235): what the agent sees, full-width /chat only.
+        {/* CTR-0103 Message Navigator: floating right-gutter rail + popover.
+          Overlay only; absent in compact mode and on constrained viewports. */}
+        {messageNav.isAvailable && (
+          <MessageNavigator turns={messageNav.turns} activeId={messageNav.activeId} onJump={messageNav.scrollToTurn} />
+        )}
+
+        {/* PRP-0174 / UDR-0156 D4: a failed save is being retried. The chat is locked
+          (covered, inert to pointer and keyboard) until the save lands or gives up. */}
+        {saveRetry && (
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-live="assertive"
+            aria-label="Saving the reply"
+            className="absolute inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
+            <div className="flex items-center gap-3 rounded-lg border bg-card px-5 py-4 text-sm shadow-lg">
+              <Loader2 className="h-5 w-5 animate-spin text-primary" aria-hidden="true" />
+              <div>
+                <p className="font-medium">Saving the reply...</p>
+                <p className="text-xs text-muted-foreground">
+                  Retry {saveRetry.attempt} of {saveRetry.total}. Please wait.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* PRP-0189 amendment A4 (CTR-0235): what the agent sees, full-width /chat only.
           In Live, only while delegated work runs -- the Live session itself outlives it. */}
-      {!compact && !surface.narrow && (
-        <ComputerUseCaptureView threadId={threadId} active={computerUseActive || (liveActive && live.working)} />
-      )}
+        {!compact && !surface.narrow && (
+          <ComputerUseCaptureView threadId={threadId} active={computerUseActive || (liveActive && live.working)} />
+        )}
 
-      {notification && (
-        <div
-          className={cn(
-            'absolute right-3 top-3 z-50 rounded-md px-4 py-2 text-sm shadow-md',
-            notification.type === 'success' && 'bg-green-500/10 text-green-600 border border-green-500/20',
-            notification.type === 'error' && 'bg-red-500/10 text-red-600 border border-red-500/20',
-            notification.type === 'info' && 'bg-amber-500/10 text-amber-600 border border-amber-500/20',
-          )}>
-          {notification.message}
-        </div>
-      )}
+        {notification && (
+          <div
+            className={cn(
+              'absolute right-3 top-3 z-50 rounded-md px-4 py-2 text-sm shadow-md',
+              notification.type === 'success' && 'bg-green-500/10 text-green-600 border border-green-500/20',
+              notification.type === 'error' && 'bg-red-500/10 text-red-600 border border-red-500/20',
+              notification.type === 'info' && 'bg-amber-500/10 text-amber-600 border border-amber-500/20',
+            )}>
+            {notification.message}
+          </div>
+        )}
 
-      {compact ? (
-        <div ref={inputRef}>
-          {discussion.active && <DiscussionBar discussion={discussion} compact />}
-          <ComputerUseBanner active={computerUseActive} />
-          {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE.
+        {compact ? (
+          <div ref={inputRef}>
+            {discussion.active && <DiscussionBar discussion={discussion} compact />}
+            <ComputerUseBanner active={computerUseActive} />
+            {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE.
               PRP-0184 took the model / options / structured controls off the composer
               and PRP-0185 took the image options and the two managers, leaving a row
               whose only remaining job was to hold two indicators -- and that row cost
@@ -1031,70 +1048,6 @@ export function ChatPanel({
               reserves a spacer of its measured height (CTR-0092). Both survivors moved
               INTO the composer: who answers as an icon in its control row, how full the
               window is as its outline. */}
-          <ChatInput
-            ref={chatInputRef}
-            onSend={handleSend}
-            onStop={composerStop}
-            isLoading={composerBusy}
-            attachments={attachments}
-            onAddFiles={handleAddFiles}
-            onRemoveAttachment={removeAttachment}
-            attachmentNotice={attachmentNotice}
-            onDismissNotice={dismissNotice}
-            getImageRefs={getImageRefs}
-            isUploading={isUploading}
-            onOpenTemplates={handleOpenTemplates}
-            onOpenPaint={handleOpenPaint}
-            onEditAttachment={handleEditAttachment}
-            onSlashModel={handleSlashModel}
-            onSlashHelp={handleSlashHelp}
-            onSlashCron={onSlashCron}
-            onSlashFiles={onSlashFiles}
-            temporary={temporary}
-            runTarget={composerRunTarget}
-            context={contextOccupancy ?? undefined}
-            live={composerLive}
-            placeholder={composerPlaceholder}
-          />
-        </div>
-      ) : (
-        // right edge inset by the scrollbar width so the always-visible chat
-        // scrollbar is never covered by this floating input overlay (CTR-0092)
-        <div ref={inputRef} className="absolute bottom-0 left-0 right-[var(--app-scrollbar-width)] z-20">
-          {/* CTR-0092 ScrollToBottom overlay + CTR-0168 per-message step buttons:
-              anchored above the ChatInput, horizontally centered. prev / next flank
-              the Scroll-to-Bottom button and appear whenever the chat overflows. */}
-          <div className="pointer-events-none absolute -top-3 left-0 right-0 z-10 flex items-center justify-center gap-2">
-            {stepNav.isAvailable && (
-              <div className="pointer-events-auto">
-                <MessageStepButton direction="prev" visible={stepNav.canPrev} onClick={stepNav.stepPrev} />
-              </div>
-            )}
-            <div className="pointer-events-auto">
-              <ScrollToBottomButton visible={showScrollToBottomButton} onClick={scrollToBottom} />
-            </div>
-            {stepNav.isAvailable && (
-              <div className="pointer-events-auto">
-                <MessageStepButton direction="next" visible={stepNav.canNext} onClick={stepNav.stepNext} />
-              </div>
-            )}
-          </div>
-          <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
-          {/* No safe-area padding here (v0.155.2): the surface is sized to the visible
-              viewport, which already ends above Safari's toolbar, so an inset added the
-              home-indicator height a second time (most visibly on iPad). */}
-          <div className="relative bg-background">
-            {discussion.active && (
-              <div className="px-4">
-                <DiscussionBar discussion={discussion} compact={!discussionCapable} />
-              </div>
-            )}
-            <ComputerUseBanner active={computerUseActive} />
-            {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE; see
-                the compact branch for why. Both of its survivors moved into the
-                composer, so this wrapper holds the composer alone and `inputRef`'s
-                measured height -- the chat body's bottom spacer (CTR-0092) -- is the
-                composer's height and nothing else. */}
             <ChatInput
               ref={chatInputRef}
               onSend={handleSend}
@@ -1107,11 +1060,11 @@ export function ChatPanel({
               onDismissNotice={dismissNotice}
               getImageRefs={getImageRefs}
               isUploading={isUploading}
-              onOpenTemplates={show('attach.templates') ? handleOpenTemplates : undefined}
-              onOpenPaint={show('attach.paint') ? handleOpenPaint : undefined}
+              onOpenTemplates={handleOpenTemplates}
+              onOpenPaint={handleOpenPaint}
               onEditAttachment={handleEditAttachment}
               onSlashModel={handleSlashModel}
-              onSlashHelp={show('slash.help') ? handleSlashHelp : undefined}
+              onSlashHelp={handleSlashHelp}
               onSlashCron={onSlashCron}
               onSlashFiles={onSlashFiles}
               temporary={temporary}
@@ -1121,69 +1074,134 @@ export function ChatPanel({
               placeholder={composerPlaceholder}
             />
           </div>
-        </div>
-      )}
-
-      {isDragging && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-xs">
-          <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-primary p-12">
-            <ImageIcon className="h-10 w-10 text-primary" />
-            <p className="text-sm font-medium text-primary">Drop images or PDFs here to attach</p>
+        ) : (
+          // right edge inset by the scrollbar width so the always-visible chat
+          // scrollbar is never covered by this floating input overlay (CTR-0092)
+          <div ref={inputRef} className="absolute bottom-0 left-0 right-[var(--app-scrollbar-width)] z-20">
+            {/* CTR-0092 ScrollToBottom overlay + CTR-0168 per-message step buttons:
+              anchored above the ChatInput, horizontally centered. prev / next flank
+              the Scroll-to-Bottom button and appear whenever the chat overflows. */}
+            <div className="pointer-events-none absolute -top-3 left-0 right-0 z-10 flex items-center justify-center gap-2">
+              {stepNav.isAvailable && (
+                <div className="pointer-events-auto">
+                  <MessageStepButton direction="prev" visible={stepNav.canPrev} onClick={stepNav.stepPrev} />
+                </div>
+              )}
+              <div className="pointer-events-auto">
+                <ScrollToBottomButton visible={showScrollToBottomButton} onClick={scrollToBottom} />
+              </div>
+              {stepNav.isAvailable && (
+                <div className="pointer-events-auto">
+                  <MessageStepButton direction="next" visible={stepNav.canNext} onClick={stepNav.stepNext} />
+                </div>
+              )}
+            </div>
+            <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
+            {/* No safe-area padding here (v0.155.2): the surface is sized to the visible
+              viewport, which already ends above Safari's toolbar, so an inset added the
+              home-indicator height a second time (most visibly on iPad). */}
+            <div className="relative bg-background">
+              {discussion.active && (
+                <div className="px-4">
+                  <DiscussionBar discussion={discussion} compact={!discussionCapable} />
+                </div>
+              )}
+              <ComputerUseBanner active={computerUseActive} />
+              {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE; see
+                the compact branch for why. Both of its survivors moved into the
+                composer, so this wrapper holds the composer alone and `inputRef`'s
+                measured height -- the chat body's bottom spacer (CTR-0092) -- is the
+                composer's height and nothing else. */}
+              <ChatInput
+                ref={chatInputRef}
+                onSend={handleSend}
+                onStop={composerStop}
+                isLoading={composerBusy}
+                attachments={attachments}
+                onAddFiles={handleAddFiles}
+                onRemoveAttachment={removeAttachment}
+                attachmentNotice={attachmentNotice}
+                onDismissNotice={dismissNotice}
+                getImageRefs={getImageRefs}
+                isUploading={isUploading}
+                onOpenTemplates={show('attach.templates') ? handleOpenTemplates : undefined}
+                onOpenPaint={show('attach.paint') ? handleOpenPaint : undefined}
+                onEditAttachment={handleEditAttachment}
+                onSlashModel={handleSlashModel}
+                onSlashHelp={show('slash.help') ? handleSlashHelp : undefined}
+                onSlashCron={onSlashCron}
+                onSlashFiles={onSlashFiles}
+                temporary={temporary}
+                runTarget={composerRunTarget}
+                context={contextOccupancy ?? undefined}
+                live={composerLive}
+                placeholder={composerPlaceholder}
+              />
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      <HelpPortal open={helpOpen} onOpenChange={setHelpOpen} />
-      <PromptTemplatesModal
-        open={templatesModalOpen}
-        onOpenChange={setTemplatesModalOpen}
-        onInsert={handleInsertTemplate}
-        onNotify={(message, type) => setNotification({ type, message })}
-      />
-      <SaveAsTemplateDialog
-        open={saveAsDialogOpen}
-        onOpenChange={setSaveAsDialogOpen}
-        initialBody={saveAsBody}
-        onSave={createTemplate}
-        onNotify={(message, type) => setNotification({ type, message })}
-      />
-      {maskEditorState && threadId && (
-        <MaskEditorDialog
-          open={!!maskEditorState}
-          onOpenChange={(open) => !open && setMaskEditorState(null)}
-          imageUrl={maskEditorState.imageUrl}
-          threadId={threadId}
-          onGenerate={handleMaskGenerate}
-          onNotify={(message) => setNotification({ type: 'error', message })}
+        {isDragging && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-xs">
+            <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-primary p-12">
+              <ImageIcon className="h-10 w-10 text-primary" />
+              <p className="text-sm font-medium text-primary">Drop images or PDFs here to attach</p>
+            </div>
+          </div>
+        )}
+
+        <HelpPortal open={helpOpen} onOpenChange={setHelpOpen} />
+        <PromptTemplatesModal
+          open={templatesModalOpen}
+          onOpenChange={setTemplatesModalOpen}
+          onInsert={handleInsertTemplate}
+          onNotify={(message, type) => setNotification({ type, message })}
         />
-      )}
-      {paintState && (
-        <Suspense fallback={null}>
-          <PaintEditor
-            open={!!paintState}
-            onOpenChange={(open) => !open && setPaintState(null)}
-            initialScene={paintState.scene}
-            onAttach={handlePaintAttach}
+        <SaveAsTemplateDialog
+          open={saveAsDialogOpen}
+          onOpenChange={setSaveAsDialogOpen}
+          initialBody={saveAsBody}
+          onSave={createTemplate}
+          onNotify={(message, type) => setNotification({ type, message })}
+        />
+        {maskEditorState && threadId && (
+          <MaskEditorDialog
+            open={!!maskEditorState}
+            onOpenChange={(open) => !open && setMaskEditorState(null)}
+            imageUrl={maskEditorState.imageUrl}
+            threadId={threadId}
+            onGenerate={handleMaskGenerate}
+            onNotify={(message) => setNotification({ type: 'error', message })}
           />
-        </Suspense>
-      )}
+        )}
+        {paintState && (
+          <Suspense fallback={null}>
+            <PaintEditor
+              open={!!paintState}
+              onOpenChange={(open) => !open && setPaintState(null)}
+              initialScene={paintState.scene}
+              onAttach={handlePaintAttach}
+            />
+          </Suspense>
+        )}
 
-      {/* Detached workflow run canvases (CTR-0187, PRP-0123, UDR-0106 D12). One per run,
+        {/* Detached workflow run canvases (CTR-0187, PRP-0123, UDR-0106 D12). One per run,
           movable and resizable. Closing one HIDES it -- the run's state is retained so the
           in-message indicator's "Diagram" control can re-open it -- and never affects the
           run itself. */}
-      {canvas.instances
-        .filter((i) => i.open)
-        .map((instance, idx) => (
-          <WorkflowRunCanvas
-            key={instance.run.runId}
-            run={instance.run}
-            actions={instance.actions}
-            index={idx}
-            onClose={() => canvas.close(instance.run.runId)}
-            onSubmitInput={(answers) => handleWorkflowInput(instance.run.runId, answers)}
-          />
-        ))}
-    </div>
+        {canvas.instances
+          .filter((i) => i.open)
+          .map((instance, idx) => (
+            <WorkflowRunCanvas
+              key={instance.run.runId}
+              run={instance.run}
+              actions={instance.actions}
+              index={idx}
+              onClose={() => canvas.close(instance.run.runId)}
+              onSubmitInput={(answers) => handleWorkflowInput(instance.run.runId, answers)}
+            />
+          ))}
+      </div>
+    </McpAppHostContext.Provider>
   )
 }

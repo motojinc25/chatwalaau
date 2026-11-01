@@ -287,13 +287,13 @@ async def activate_mcp() -> None:
     else:
         logger.warning("MCP integration: no servers started successfully")
 
-    # Start MCP Apps sandbox proxy server (CTR-0066, PRP-0034)
+    # Start MCP Apps sandbox proxy server (CTR-0066, PRP-0034). It listens on the
+    # same address as the app (PRP-0240, UDR-0019 D15): a browser that reaches the app
+    # from another machine reaches the sandbox on the page's host too.
     if started_count > 0:
         from app.mcp_apps.sandbox import start_sandbox_server
 
-        sandbox_port = settings.mcp_apps_sandbox_port
-        sandbox_host = settings.app_host if settings.app_host != "0.0.0.0" else "127.0.0.1"
-        start_sandbox_server(sandbox_port, host=sandbox_host)
+        start_sandbox_server(settings.mcp_apps_sandbox_port, host=settings.app_host or "127.0.0.1")
 
     # Register emergency cleanup handlers
     _register_cleanup_handlers()

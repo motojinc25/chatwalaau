@@ -770,6 +770,28 @@ class SaveMessageItem(BaseModel):
     tool_calls: list[ToolCallItem] | None = None
     activity_log: list[ActivityLogItem] | None = None
     usage: UsageItem | None = None
+    # MCP App View on an assistant message (PRP-0240, CTR-0068 v2, UDR-0019 D12): the
+    # mcp_app event (server, tool, resource, html_ref, csp, permissions, call_id) and
+    # its tool_result, so a reloaded chat rebuilds the View. Frontend-only: stripped
+    # before the history reaches the model.
+    mcp_app: dict[str, Any] | None = None
+
+
+# A stored View result above this size keeps only its `content` (PRP-0240 P7).
+MCP_APP_RESULT_MAX_BYTES = 256 * 1024
+
+
+def _bounded_mcp_app(mcp_app: dict[str, Any]) -> dict[str, Any]:
+    """The mcp_app record to store, its tool_result reduced to `content` when too large."""
+    result = mcp_app.get("tool_result")
+    if not isinstance(result, dict):
+        return mcp_app
+    if len(json.dumps(result, default=str).encode("utf-8")) <= MCP_APP_RESULT_MAX_BYTES:
+        return mcp_app
+    reduced = {"content": result.get("content", [])}
+    if len(json.dumps(reduced, default=str).encode("utf-8")) > MCP_APP_RESULT_MAX_BYTES:
+        return {k: v for k, v in mcp_app.items() if k != "tool_result"}
+    return {**mcp_app, "tool_result": reduced}
 
 
 class SaveMessagesRequest(BaseModel):
@@ -823,6 +845,8 @@ def _to_maf_message_dict(msg: SaveMessageItem) -> dict[str, Any]:
         result["activity_log"] = [al.model_dump() for al in msg.activity_log]
     if msg.usage:
         result["usage"] = msg.usage.model_dump(exclude_none=True)
+    if msg.mcp_app:
+        result["mcp_app"] = _bounded_mcp_app(msg.mcp_app)
     return result
 
 

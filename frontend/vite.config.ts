@@ -8,11 +8,17 @@ const sslCertfile = process.env.APP_SSL_CERTFILE || ''
 const sslKeyfile = process.env.APP_SSL_KEYFILE || ''
 const sslEnabled = !!(sslCertfile && sslKeyfile && existsSync(sslCertfile) && existsSync(sslKeyfile))
 
+// The product version, for hosts that report it (the MCP Apps hostInfo, CTR-0068 v2).
+const appVersion = (JSON.parse(readFileSync(resolve(import.meta.dirname, 'package.json'), 'utf-8')) as { version: string }).version
+
 const backendProtocol = sslEnabled ? 'https' : 'http'
 const backendTarget = `${backendProtocol}://localhost:${process.env.APP_PORT || '8000'}`
 
 export default defineConfig({
 	plugins: [react()],
+	define: {
+		__APP_VERSION__: JSON.stringify(appVersion),
+	},
 	resolve: {
 		alias: {
 			// `import.meta.dirname`, not `__dirname`: Vite's `configLoader: 'native'`

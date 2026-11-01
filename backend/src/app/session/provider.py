@@ -168,7 +168,8 @@ class FileHistoryProvider(HistoryProvider):
         # `discussion` marks a message written by an AI discussion run (CTR-0271, PRP-0232): the
         # model sees it as text labelled with its speaker, so a later ordinary turn can refer to
         # the discussion (UDR-0215 D11) without mistaking the participants for itself.
-        _frontend_keys = {"tool_calls", "usage", "activity_log", "source", "live", "discussion"}
+        # `mcp_app` is an MCP App View record for the SPA's replay (CTR-0068 v2, PRP-0240).
+        _frontend_keys = {"tool_calls", "usage", "activity_log", "mcp_app", "source", "live", "discussion"}
         messages = [
             Message.from_dict({k: v for k, v in self._project_discussion(m).items() if k not in _frontend_keys})
             for m in raw_messages

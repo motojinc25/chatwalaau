@@ -503,6 +503,7 @@ def _mcp_rows(agent: Any, allow: ResolvedAllowlist | None, model: str = "") -> l
     """
     from app.mcp.lifecycle import get_mcp_tool_inventory
     from app.mcp.overrides import get_override_store
+    from app.mcp_apps.manager import app_only_tool_names
 
     actual = _actual_mcp_servers(agent)
     store = get_override_store()
@@ -538,7 +539,8 @@ def _mcp_rows(agent: Any, allow: ResolvedAllowlist | None, model: str = "") -> l
             predicted = set()
             reason = f"{REASON_ALLOWLIST} (server not selected)"
         else:
-            disabled = store.disabled_tools_for(name)
+            # The factory also withholds MCP Apps app-only tools (PRP-0240, UDR-0019 D11).
+            disabled = store.disabled_tools_for(name) | app_only_tool_names(name)
             override_enabled = [n for n in exposed if n not in disabled]
             if allow is not None:
                 predicted = set(allow.mcp_allowed_tools(name, override_enabled) or [])

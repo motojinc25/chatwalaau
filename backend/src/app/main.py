@@ -916,8 +916,15 @@ def _active_agent_info() -> dict:
 # MCP Apps config endpoint (CTR-0066, PRP-0034)
 @app.get("/api/mcp-apps/config", tags=["MCP Apps"])
 async def get_mcp_apps_config():
-    """Return MCP Apps configuration for frontend sandbox proxy discovery."""
-    return {"sandbox_port": settings.mcp_apps_sandbox_port}
+    """Return MCP Apps configuration for frontend sandbox proxy discovery.
+
+    ``sandbox_running`` (PRP-0240, CTR-0066 v2) is false when the proxy did not start
+    (port conflict, no connected MCP server): the View then shows a notice and the text
+    result stays.
+    """
+    from app.mcp_apps.sandbox import is_sandbox_running
+
+    return {"sandbox_port": settings.mcp_apps_sandbox_port, "sandbox_running": is_sandbox_running()}
 
 
 # Static file serving (CTR-0005)

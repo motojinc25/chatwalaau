@@ -11,6 +11,7 @@ import {
   type ImageRef,
   type ImportResult,
   type LiveMeta,
+  type McpAppEvent,
   type ReasoningBlock,
   type SessionActionResult,
   type SessionFolder,
@@ -199,6 +200,9 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
       // Live voice turns (CTR-0227, PRP-0188): keep the marker so the chip survives reload.
       ...(msg.source === 'live' ? { source: 'live' as const } : {}),
       ...(msg.live && typeof msg.live === 'object' ? { live: msg.live as LiveMeta } : {}),
+      // The turn's MCP App View (CTR-0068 v2, PRP-0240): rebuilt from its stored HTML file
+      // with its stored input and result.
+      ...(msg.mcp_app && typeof msg.mcp_app === 'object' ? { mcpApp: msg.mcp_app as McpAppEvent } : {}),
       // AI Discussion attribution (CTR-0271, PRP-0232): who spoke, in which phase.
       ...(msg.discussion && typeof msg.discussion === 'object'
         ? { discussion: { ...(msg.discussion as DiscussionMessageMeta), status: 'completed' as const } }

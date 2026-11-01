@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  AppWindow,
   AudioLines,
   Bot,
   Check,
@@ -18,7 +19,7 @@ import {
   User,
   Volume2,
 } from 'lucide-react'
-import { type KeyboardEvent, memo, useCallback, useEffect, useRef, useState } from 'react'
+import { type KeyboardEvent, memo, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { AuthedImage } from '@/components/AuthedImage'
 import { DecisionResults } from '@/components/DecisionResults'
 import { DiscussionSpeakerTag, speakerColor } from '@/components/DiscussionParts'
@@ -27,7 +28,6 @@ import { ImageGenerationResults } from '@/components/ImageGenerationResult'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
 import { HeadingFoldContext, useHeadingFold } from '@/components/markdown/HeadingFold'
 import { MIN_FOLD_HEADINGS } from '@/components/markdown/rehypeHeadingSections'
-import { McpAppView } from '@/components/mcp-apps/McpAppView'
 import { ReasoningIndicator, ThinkingBlock } from '@/components/ReasoningIndicator'
 import { TokenUsageDialog } from '@/components/TokenUsageDialog'
 import { ToolCallBlock, ToolCallIndicator } from '@/components/ToolCallIndicator'
@@ -54,10 +54,14 @@ import {
 import { WeatherToolResults } from '@/components/WeatherCard'
 import { WorkflowProgressPanel, type WorkflowRunState } from '@/components/WorkflowProgressPanel'
 import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
+import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { useChatSurfaceTier } from '@/lib/narrowSurface'
 import { openUploadFullSize } from '@/lib/uploads'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from '@/types/chat'
+
+// MCP App Views load the MCP Apps SDK only when a View is shown (CTR-0068 v2, PRP-0240).
+const McpAppView = lazyWithReload(() => import('@/components/mcp-apps/McpAppView'))
 
 /**
  * Wrap a structured (JSON) answer in a ```json code fence so MarkdownRenderer
@@ -641,6 +645,15 @@ function ChatMessageItemImpl({
               <CollapsibleUserText content={redact(message.content, `msg:${message.id}`)} />
             </div>
             <LiveBadge message={message} />
+            {/* A turn sent by an MCP App View's ui/message (PRP-0240, UDR-0019 D13). */}
+            {message.mcpAppSource && (
+              <div
+                className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground"
+                data-testid="mcp-app-source">
+                <AppWindow className="h-3 w-3" />
+                Sent from the {message.mcpAppSource} app
+              </div>
+            )}
             {/*
               Pre-commit send failure (CTR-0004 v2, PRP-0110 / UDR-0088 D3). The turn
               never reached the agent, so it is safe to re-send: nothing was persisted
@@ -688,13 +701,16 @@ function ChatMessageItemImpl({
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               </div>
             )}
-            {/* MCP App View (CTR-0068) */}
+            {/* MCP App View (CTR-0068 v2) */}
             {!isUser && message.mcpApp && (
-              <McpAppView
-                event={message.mcpApp}
-                toolResult={message.toolCalls?.find((tc) => tc.id === message.mcpApp?.call_id)?.result}
-                toolArgs={message.toolCalls?.find((tc) => tc.id === message.mcpApp?.call_id)?.args}
-              />
+              <Suspense fallback={null}>
+                <McpAppView
+                  key={message.mcpApp.call_id}
+                  event={message.mcpApp}
+                  toolResult={message.toolCalls?.find((tc) => tc.id === message.mcpApp?.call_id)?.result}
+                  toolArgs={message.toolCalls?.find((tc) => tc.id === message.mcpApp?.call_id)?.args}
+                />
+              </Suspense>
             )}
             {message.toolCalls && message.toolCalls.length > 0 && <WeatherToolResults toolCalls={message.toolCalls} />}
             {message.toolCalls && message.toolCalls.length > 0 && (

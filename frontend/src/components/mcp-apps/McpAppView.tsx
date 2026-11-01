@@ -1,21 +1,27 @@
 /**
- * MCP App View component (CTR-0068, PRP-0034).
+ * MCP App View component (CTR-0068 v2, PRP-0034, PRP-0240).
  *
- * Renders an MCP App View in a double-iframe sandbox within an assistant message.
- * Manages the initialization handshake and postMessage communication.
+ * Renders an MCP App View in a double-iframe sandbox within an assistant message. The
+ * host side of the MCP Apps protocol (stable specification 2026-01-26) is the official
+ * AppBridge (@modelcontextprotocol/ext-apps, UDR-0019 D8), constructed with no MCP
+ * client: ChatWalaʻau's own handlers proxy the View's requests to the backend. This
+ * module is lazy-loaded, so the SDK is fetched only when a View is shown.
  *
  * Flow:
- *  1. Fetch sandbox port from /api/mcp-apps/config + View HTML from html_ref
- *  2. Set iframe src to sandbox proxy (triggers proxy load)
- *  3. Sandbox sends "sandbox-proxy-ready" via postMessage
- *  4. Host sends View HTML via "sandbox-resource-ready"
- *  5. View sends "ui/initialize" -> Host responds with context
- *  6. Host sends tool input and result immediately after init response
+ *  1. Fetch the sandbox config (port, running) and the View HTML from html_ref
+ *  2. Render ONE iframe on the sandbox origin (<page host>:<port>, UDR-0019 D15) and
+ *     connect an AppBridge over a PostMessageTransport to it
+ *  3. Sandbox sends sandbox-proxy-ready -> the bridge sends sandbox-resource-ready (HTML)
+ *  4. View sends ui/initialize -> the bridge answers with host info, capabilities, context
+ *  5. On ui/notifications/initialized: tool input, then the full CallToolResult
+ *  6. Theme / display-mode changes -> host-context-changed; unmount -> resource-teardown
  */
 
+import { AppBridge, type McpUiHostContext, PostMessageTransport } from '@modelcontextprotocol/ext-apps/app-bridge'
 import { AppWindow, Maximize2, Minimize2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { contextText, dropViewModelContext, setViewModelContext, useMcpAppHost } from '@/lib/mcp-app-host'
 import { HOST_STYLE_VARIABLES } from '@/lib/mcp-apps-styles'
 import type { McpAppEvent } from '@/types/chat'
 
@@ -25,61 +31,101 @@ interface McpAppViewProps {
   toolArgs?: string
 }
 
-const PROXY_READY = 'ui/notifications/sandbox-proxy-ready'
-const RESOURCE_READY = 'ui/notifications/sandbox-resource-ready'
+const SANDBOX_PERMISSIONS = 'allow-scripts allow-same-origin allow-forms'
+const INLINE_MAX_HEIGHT = 600
+const INLINE_HEIGHT_CAP = 800
+const TEARDOWN_TIMEOUT_MS = 1000
 
-export function McpAppView({ event, toolResult, toolArgs }: McpAppViewProps) {
+type DisplayMode = 'inline' | 'fullscreen'
+
+function currentTheme(): 'light' | 'dark' {
+  return document.documentElement.classList.contains('dark') ? 'dark' : 'light'
+}
+
+function hostContext(displayMode: DisplayMode): McpUiHostContext {
+  return {
+    theme: currentTheme(),
+    platform: 'web',
+    styles: { variables: HOST_STYLE_VARIABLES as NonNullable<McpUiHostContext['styles']>['variables'] },
+    displayMode,
+    availableDisplayModes: ['inline', 'fullscreen'],
+    containerDimensions:
+      displayMode === 'fullscreen'
+        ? { height: window.innerHeight, width: window.innerWidth }
+        : { maxHeight: INLINE_MAX_HEIGHT },
+    locale: navigator.language,
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    userAgent: 'ChatWalaʻau',
+  }
+}
+
+/** The View's tool result: the full CallToolResult when the backend sent it (UDR-0019 D12),
+ *  else the text result the chat holds, as one text block. */
+function toolResultParams(event: McpAppEvent, toolResult?: string): Record<string, unknown> | null {
+  if (event.tool_result && typeof event.tool_result === 'object') return event.tool_result
+  if (!toolResult) return null
+  try {
+    const parsed = JSON.parse(toolResult)
+    return { content: [{ type: 'text', text: typeof parsed === 'string' ? parsed : JSON.stringify(parsed) }] }
+  } catch {
+    return { content: [{ type: 'text', text: toolResult }] }
+  }
+}
+
+function toolArguments(toolArgs?: string): Record<string, unknown> {
+  if (!toolArgs) return {}
+  try {
+    const parsed = JSON.parse(toolArgs)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+/** The sandbox URL on the page's own host, so a browser on another machine reaches it. */
+function sandboxUrlFor(port: number, csp: McpAppEvent['csp']): string {
+  const url = new URL(`${window.location.protocol}//${window.location.hostname}:${port}/sandbox.html`)
+  if (csp) url.searchParams.set('csp', JSON.stringify(csp))
+  return url.href
+}
+
+async function rpc(serverName: string, method: string, params: unknown): Promise<Record<string, unknown>> {
+  const res = await fetch(`/api/mcp-apps/${encodeURIComponent(serverName)}/rpc`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ method, params }),
+  })
+  if (!res.ok) {
+    let detail = `RPC error: ${res.status}`
+    try {
+      const body = await res.json()
+      if (typeof body?.detail === 'string') detail = body.detail
+    } catch {
+      /* not JSON */
+    }
+    throw new Error(detail)
+  }
+  const body = await res.json()
+  return (body.result ?? body) as Record<string, unknown>
+}
+
+export default function McpAppView({ event, toolResult, toolArgs }: McpAppViewProps) {
+  const host = useMcpAppHost()
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const bridgeRef = useRef<AppBridge | null>(null)
   const [initialized, setInitialized] = useState(false)
-  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [displayMode, setDisplayMode] = useState<DisplayMode>('inline')
   const [error, setError] = useState<string | null>(null)
+  const [unavailable, setUnavailable] = useState(false)
   const [iframeHeight, setIframeHeight] = useState(400)
   const [sandboxUrl, setSandboxUrl] = useState<string | null>(null)
+  const [html, setHtml] = useState<string | null>(null)
 
-  // Stable refs for values accessed in postMessage handler
-  const htmlRef = useRef<string | null>(null)
-  const serverNameRef = useRef(event.server_name)
-  const toolArgsRef = useRef(toolArgs)
-  const toolResultRef = useRef(toolResult)
-  const isFullscreenRef = useRef(isFullscreen)
-  const sentToolDataRef = useRef(false)
-  serverNameRef.current = event.server_name
-  toolArgsRef.current = toolArgs
-  toolResultRef.current = toolResult
-  isFullscreenRef.current = isFullscreen
+  // Latest values for the bridge handlers, which are bound once per View.
+  const latest = useRef({ event, toolResult, toolArgs, host, displayMode })
+  latest.current = { event, toolResult, toolArgs, host, displayMode }
 
-  /** Send tool input + result to the View iframe.
-   *  Reads from refs so it is safe to call from a stable useEffect. */
-  const sendToolData = (win: Window) => {
-    if (sentToolDataRef.current) return
-    sentToolDataRef.current = true
-
-    const args = toolArgsRef.current
-    if (args) {
-      try {
-        win.postMessage(
-          { jsonrpc: '2.0', method: 'ui/notifications/tool-input', params: { arguments: JSON.parse(args) } },
-          '*',
-        )
-      } catch {
-        /* not valid JSON */
-      }
-    }
-
-    const result = toolResultRef.current
-    if (result) {
-      let content: unknown
-      try {
-        const parsed = JSON.parse(result)
-        content = [{ type: 'text', text: typeof parsed === 'string' ? parsed : JSON.stringify(parsed) }]
-      } catch {
-        content = [{ type: 'text', text: result }]
-      }
-      win.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/tool-result', params: { content } }, '*')
-    }
-  }
-
-  // Fetch sandbox port + View HTML, then set sandboxUrl to render iframe
+  // Sandbox config + View HTML.
   useEffect(() => {
     let cancelled = false
     Promise.all([
@@ -89,13 +135,14 @@ export function McpAppView({ event, toolResult, toolArgs }: McpAppViewProps) {
         return r.text()
       }),
     ])
-      .then(([config, html]) => {
+      .then(([config, viewHtml]) => {
         if (cancelled) return
-        htmlRef.current = html
-        const port = config.sandbox_port ?? 8081
-        const url = new URL(`http://localhost:${port}/sandbox.html`)
-        if (event.csp) url.searchParams.set('csp', JSON.stringify(event.csp))
-        setSandboxUrl(url.href)
+        if (config.sandbox_running === false) {
+          setUnavailable(true)
+          return
+        }
+        setHtml(viewHtml)
+        setSandboxUrl(sandboxUrlFor(config.sandbox_port ?? 8081, event.csp))
       })
       .catch((err) => {
         if (!cancelled) setError(err.message)
@@ -105,112 +152,108 @@ export function McpAppView({ event, toolResult, toolArgs }: McpAppViewProps) {
     }
   }, [event.html_ref, event.csp])
 
-  // Single stable postMessage handler — no deps on props that change.
-  // All mutable values are read via refs so the handler never goes stale.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally stable — uses refs
+  // One AppBridge per View, connected before the sandbox page announces itself.
   useEffect(() => {
-    const handler = (e: MessageEvent) => {
-      const iframe = iframeRef.current
-      if (!iframe || e.source !== iframe.contentWindow) return
-      const data = e.data
-      if (!data || typeof data !== 'object') return
+    const win = iframeRef.current?.contentWindow
+    if (!sandboxUrl || !html || !win) return
+    const callId = latest.current.event.call_id
+    const bridge = new AppBridge(
+      null,
+      { name: 'ChatWalaʻau', version: __APP_VERSION__ },
+      {
+        openLinks: {},
+        serverTools: {},
+        serverResources: {},
+        message: { text: {} },
+        updateModelContext: { text: {}, structuredContent: {} },
+      },
+      { hostContext: hostContext(latest.current.displayMode) },
+    )
+    bridgeRef.current = bridge
 
-      // Sandbox proxy ready -> send View HTML
-      if (data.method === PROXY_READY) {
-        if (htmlRef.current && iframe.contentWindow) {
-          iframe.contentWindow.postMessage(
-            {
-              jsonrpc: '2.0',
-              method: RESOURCE_READY,
-              params: { html: htmlRef.current, sandbox: 'allow-scripts allow-same-origin allow-forms' },
-            },
-            '*',
-          )
-        }
-        return
-      }
+    bridge.addEventListener('sandboxready', () => {
+      void bridge.sendSandboxResourceReady({ html, sandbox: SANDBOX_PERMISSIONS })
+    })
+    bridge.addEventListener('initialized', () => {
+      setInitialized(true)
+      const { event: ev, toolArgs: args, toolResult: text } = latest.current
+      void bridge.sendToolInput({ arguments: toolArguments(args) }).then(() => {
+        const result = toolResultParams(ev, text)
+        // The View exists only after its tool ran; no result means the run ended without one.
+        if (result) void bridge.sendToolResult(result as Parameters<AppBridge['sendToolResult']>[0])
+        else void bridge.sendToolCancelled({ reason: 'The tool call ended without a result.' })
+      })
+    })
+    bridge.addEventListener('sizechange', ({ height }) => {
+      if (typeof height === 'number' && height > 0) setIframeHeight(Math.min(height, INLINE_HEIGHT_CAP))
+    })
 
-      // View initializing -> respond with host context + send tool data
-      if (data.method === 'ui/initialize') {
-        iframe.contentWindow?.postMessage(
-          {
-            jsonrpc: '2.0',
-            id: data.id,
-            result: {
-              protocolVersion: '2025-03-26',
-              hostInfo: { name: 'ChatWalaʻau', version: '0.34.0' },
-              hostCapabilities: { openLinks: {}, updateModelContext: { text: {} } },
-              hostContext: {
-                theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light',
-                platform: 'web',
-                styles: { variables: HOST_STYLE_VARIABLES },
-                containerDimensions: { maxHeight: 600 },
-                displayMode: isFullscreenRef.current ? 'fullscreen' : 'inline',
-                availableDisplayModes: ['inline', 'fullscreen'],
-              },
-            },
-          },
-          '*',
-        )
-        // Send tool data immediately after init response (same as reference impl)
-        if (iframe.contentWindow) sendToolData(iframe.contentWindow)
-        setInitialized(true)
-        return
-      }
-
-      // Also handle notifications/initialized (some Views send this)
-      if (data.method === 'notifications/initialized') {
-        // Tool data already sent after ui/initialize response, just mark ready
-        setInitialized(true)
-        return
-      }
-
-      // View requests
-      if (data.method === 'ui/open-link' && data.params?.url) {
-        window.open(data.params.url, '_blank', 'noopener,noreferrer')
-        iframe.contentWindow?.postMessage({ jsonrpc: '2.0', id: data.id, result: {} }, '*')
-        return
-      }
-      if (data.method === 'ui/size-change' && data.params) {
-        if (typeof data.params.height === 'number' && data.params.height > 0) {
-          setIframeHeight(Math.min(data.params.height, 800))
-        }
-        return
-      }
-      if (data.method === 'ui/request-display-mode' && data.params) {
-        const mode = data.params.mode === 'fullscreen' ? 'fullscreen' : 'inline'
-        setIsFullscreen(mode === 'fullscreen')
-        iframe.contentWindow?.postMessage({ jsonrpc: '2.0', id: data.id, result: { mode } }, '*')
-        return
-      }
-
-      // Proxy tool calls / resource reads to backend
-      if (data.method === 'tools/call' || data.method === 'resources/read') {
-        fetch(`/api/mcp-apps/${serverNameRef.current}/rpc`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ method: data.method, params: data.params }),
-        })
-          .then((res) => {
-            if (!res.ok) throw new Error(`RPC error: ${res.status}`)
-            return res.json()
-          })
-          .then((body) => {
-            iframe.contentWindow?.postMessage({ jsonrpc: '2.0', id: data.id, result: body.result ?? body }, '*')
-          })
-          .catch((err) => {
-            iframe.contentWindow?.postMessage(
-              { jsonrpc: '2.0', id: data.id, error: { code: -32603, message: err.message } },
-              '*',
-            )
-          })
-        return
-      }
+    bridge.onopenlink = async ({ url }) => {
+      if (!/^https?:\/\//i.test(url)) return { isError: true }
+      window.open(url, '_blank', 'noopener,noreferrer')
+      return {}
     }
+    // Only the modes the host offers; otherwise the current mode is returned (spec).
+    bridge.onrequestdisplaymode = async ({ mode }) => {
+      if (mode !== 'fullscreen' && mode !== 'inline') return { mode: latest.current.displayMode }
+      setDisplayMode(mode)
+      return { mode }
+    }
+    bridge.onmessage = async ({ content }) => {
+      const text = contextText(content, undefined)
+      const current = latest.current
+      if (!text || !current.host) return { isError: true }
+      const accepted = current.host.sendViewMessage(text, current.event.tool_name)
+      return accepted ? {} : { isError: true }
+    }
+    bridge.onupdatemodelcontext = async ({ content, structuredContent }) => {
+      const current = latest.current
+      if (current.host?.threadId) {
+        setViewModelContext(
+          current.host.threadId,
+          callId,
+          `${current.event.server_name}/${current.event.tool_name}`,
+          contextText(content, structuredContent),
+        )
+      }
+      return {}
+    }
+    bridge.oncalltool = async (params) =>
+      (await rpc(latest.current.event.server_name, 'tools/call', params)) as Awaited<
+        ReturnType<NonNullable<AppBridge['oncalltool']>>
+      >
+    bridge.onreadresource = async (params) =>
+      (await rpc(latest.current.event.server_name, 'resources/read', params)) as Awaited<
+        ReturnType<NonNullable<AppBridge['onreadresource']>>
+      >
 
-    window.addEventListener('message', handler)
-    return () => window.removeEventListener('message', handler)
-  }, []) // Empty deps: handler is stable, reads all changing values via refs
+    void bridge.connect(new PostMessageTransport(win, win)).catch((err: Error) => setError(err.message))
+
+    return () => {
+      bridgeRef.current = null
+      dropViewModelContext(callId)
+      // resource-teardown before the View goes away (best effort, bounded).
+      const done = bridge
+        .teardownResource({}, { timeout: TEARDOWN_TIMEOUT_MS })
+        .catch(() => undefined)
+        .finally(() => void bridge.close())
+      void done
+    }
+  }, [sandboxUrl, html])
+
+  // host-context-changed: display mode, window size in fullscreen, and theme.
+  useEffect(() => {
+    if (!initialized) return
+    const push = () => bridgeRef.current?.setHostContext(hostContext(displayMode))
+    push()
+    const observer = new MutationObserver(push)
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    window.addEventListener('resize', push)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', push)
+    }
+  }, [initialized, displayMode])
 
   if (error) {
     return (
@@ -220,55 +263,63 @@ export function McpAppView({ event, toolResult, toolArgs }: McpAppViewProps) {
     )
   }
 
-  if (isFullscreen) {
+  if (unavailable) {
     return (
-      <div className="fixed inset-0 z-1000 flex flex-col bg-background">
-        <div className="flex items-center justify-between border-b px-4 py-2">
-          <div className="flex items-center gap-2 text-sm font-medium">
-            <AppWindow className="h-4 w-4" />
-            {event.tool_name}
-          </div>
-          <Button variant="ghost" size="sm" onClick={() => setIsFullscreen(false)}>
-            <Minimize2 className="h-4 w-4" />
-          </Button>
-        </div>
-        <div className="flex-1">
-          {sandboxUrl && (
-            <iframe
-              ref={iframeRef}
-              src={sandboxUrl}
-              sandbox="allow-scripts allow-same-origin allow-forms"
-              style={{ width: '100%', height: '100%', border: 'none' }}
-              className="bg-background"
-              title={`MCP App: ${event.tool_name}`}
-            />
-          )}
-        </div>
+      <div className="my-2 rounded-md border px-3 py-2 text-sm text-muted-foreground">
+        The MCP App for {event.tool_name} cannot be shown: its sandbox is not running on this server. The tool result
+        above is unchanged.
       </div>
     )
   }
 
+  const fullscreen = displayMode === 'fullscreen'
   return (
-    <div className="my-2 overflow-hidden rounded-lg border">
-      <div className="flex items-center justify-between border-b bg-muted/50 px-3 py-1.5">
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <AppWindow className="h-3.5 w-3.5" />
+    <div
+      className={
+        fullscreen ? 'fixed inset-0 z-1000 flex flex-col bg-background' : 'my-2 overflow-hidden rounded-lg border'
+      }
+      data-testid="mcp-app-view"
+      data-display-mode={displayMode}>
+      <div
+        className={
+          fullscreen
+            ? 'flex items-center justify-between border-b px-4 py-2'
+            : 'flex items-center justify-between border-b bg-muted/50 px-3 py-1.5'
+        }>
+        <div
+          className={
+            fullscreen
+              ? 'flex items-center gap-2 text-sm font-medium'
+              : 'flex items-center gap-1.5 text-xs text-muted-foreground'
+          }>
+          <AppWindow className={fullscreen ? 'h-4 w-4' : 'h-3.5 w-3.5'} />
           <span>{event.tool_name}</span>
           {!initialized && sandboxUrl && <span className="animate-pulse text-[10px]">...</span>}
         </div>
-        <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => setIsFullscreen(true)}>
-          <Maximize2 className="h-3 w-3" />
+        <Button
+          variant="ghost"
+          size="sm"
+          className={fullscreen ? undefined : 'h-6 w-6 p-0'}
+          aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+          onClick={() => setDisplayMode(fullscreen ? 'inline' : 'fullscreen')}>
+          {fullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-3 w-3" />}
         </Button>
       </div>
       {sandboxUrl ? (
-        <iframe
-          ref={iframeRef}
-          src={sandboxUrl}
-          sandbox="allow-scripts allow-same-origin allow-forms"
-          style={{ width: '100%', height: `${iframeHeight}px`, border: 'none', borderRadius: '0 0 0.5rem 0.5rem' }}
-          className="bg-background"
-          title={`MCP App: ${event.tool_name}`}
-        />
+        <div className={fullscreen ? 'flex-1' : undefined}>
+          <iframe
+            ref={iframeRef}
+            src={sandboxUrl}
+            sandbox={SANDBOX_PERMISSIONS}
+            style={
+              fullscreen
+                ? { width: '100%', height: '100%', border: 'none' }
+                : { width: '100%', height: `${iframeHeight}px`, border: 'none', borderRadius: '0 0 0.5rem 0.5rem' }
+            }
+            className="bg-background"
+            title={`MCP App: ${event.tool_name}`}
+          />
+        </div>
       ) : (
         <div className="flex h-24 items-center justify-center text-sm text-muted-foreground">Loading sandbox...</div>
       )}

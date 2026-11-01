@@ -203,6 +203,9 @@ export interface McpAppEvent {
   csp?: Record<string, string[]>
   permissions?: Record<string, unknown>
   call_id: string
+  /** The full MCP CallToolResult for the View (CTR-0067 v4, PRP-0240); absent or null ->
+   *  the View gets the text result as one text block. Persisted with the message. */
+  tool_result?: Record<string, unknown> | null
 }
 
 /**
@@ -222,7 +225,11 @@ export interface ChatMessage {
   activityLog?: ActivityEntry[]
   images?: ImageRef[]
   usage?: UsageInfo
+  /** MCP App View of this assistant turn (CTR-0068 v2); persisted as `mcp_app` (PRP-0240). */
   mcpApp?: McpAppEvent
+  /** Set on a USER turn sent by an MCP App View's `ui/message` (PRP-0240, UDR-0019 D13):
+   *  the tool name shown on the bubble. Render-time only, never persisted. */
+  mcpAppSource?: string
   /** Model that generated this assistant message (CTR-0071, PRP-0035) */
   model?: string
   /** Citation markup the backend removed from this turn (CTR-0218, PRP-0178, UDR-0160
