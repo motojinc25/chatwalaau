@@ -172,7 +172,7 @@ GROUPS: tuple[SettingGroup, ...] = (
     SettingGroup(
         "speech",
         "Speech",
-        "Speech-to-text and text-to-speech deployments and voices.",
+        "Speech voices and audio rates; the speech models are Model Offering Catalog offerings.",
     ),
     SettingGroup(
         "rag",
@@ -525,104 +525,38 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         SCOPE_RUNTIME,
         help="Bounds the serialized agent memory body; an over-cap edit is rejected with guidance.",
     ),
-    # ---- Speech (restart -- injected at app construction) -----------------
+    # ---- Speech (runtime -- read on each request) ---------------------------
+    # PRP-0241 / UDR-0222 D5: the STT and TTS MODELS are the catalog's `transcription`
+    # and `speech` offerings, so only how speech sounds is a setting here. The retired
+    # model keys are in RETIRED_KEYS below (app.speech_migration names their successors).
     SettingDescriptor(
-        "tts_provider",
-        "TTS provider",
-        "speech",
-        "enum",
-        SCOPE_RESTART,
-        enum=("elevenlabs", "azure-realtime"),
-        help="elevenlabs uses ELEVENLABS_API_KEY (kept in .env); azure-realtime uses the shared Azure lane.",
-    ),
-    SettingDescriptor(
-        "tts_model_id",
-        "ElevenLabs model id",
+        "tts_voice",
+        "TTS voice",
         "speech",
         "str",
-        SCOPE_RESTART,
-        help="Only consumed by the elevenlabs provider.",
-    ),
-    SettingDescriptor(
-        "tts_voice_id",
-        "ElevenLabs voice id",
-        "speech",
-        "str",
-        SCOPE_RESTART,
-        help="Only consumed by the elevenlabs provider.",
-    ),
-    SettingDescriptor(
-        "tts_realtime_deployment",
-        "Realtime TTS deployment",
-        "speech",
-        "str",
-        SCOPE_RESTART,
-        help="Azure voice Realtime deployment name. Required when the provider is azure-realtime.",
-    ),
-    SettingDescriptor(
-        "tts_realtime_voice",
-        "Realtime TTS voice",
-        "speech",
-        "str",
-        SCOPE_RESTART,
-        help="Voice name such as alloy, marin, or cedar.",
+        SCOPE_RUNTIME,
+        help=(
+            "The voice of the speech offering: an ElevenLabs voice id, or an Azure voice name such as "
+            "alloy, marin, or cedar. Empty uses the provider default (alloy on Azure; ElevenLabs needs one)."
+        ),
     ),
     SettingDescriptor(
         "tts_realtime_audio_rate",
         "Realtime TTS sample rate (Hz)",
         "speech",
         "enum",
-        SCOPE_RESTART,
+        SCOPE_RUNTIME,
         enum=("16000", "24000"),
-        help="Output PCM sample rate before MP3 encoding.",
-    ),
-    SettingDescriptor(
-        "whisper_deployment_name",
-        "STT deployment",
-        "speech",
-        "str",
-        SCOPE_RESTART,
-        help="Azure OpenAI speech-to-text deployment. Empty disables transcription.",
-    ),
-    SettingDescriptor(
-        "whisper_model_kind",
-        "STT transport",
-        "speech",
-        "enum",
-        SCOPE_RESTART,
-        enum=("auto", "rest", "realtime"),
-        help="auto infers from the deployment name (a 'realtime' substring selects the WebSocket path).",
-    ),
-    SettingDescriptor(
-        "whisper_realtime_connection_deployment",
-        "Realtime STT connection deployment",
-        "speech",
-        "str",
-        SCOPE_RESTART,
-        help=(
-            "The VOICE Realtime deployment used for the WebSocket URL. Set this when the "
-            "STT deployment is transcription-only (e.g. gpt-realtime-whisper)."
-        ),
+        help="Output PCM sample rate before MP3 encoding (azure-openai speech offering).",
     ),
     SettingDescriptor(
         "whisper_realtime_audio_rate",
         "Realtime STT sample rate (Hz)",
         "speech",
         "enum",
-        SCOPE_RESTART,
+        SCOPE_RUNTIME,
         enum=("16000", "24000"),
-        help="Input audio is resampled to this rate before being appended to the buffer.",
-    ),
-    SettingDescriptor(
-        "azure_openai_realtime_api_version",
-        "Realtime API version",
-        "speech",
-        "str",
-        SCOPE_RESTART,
-        help=(
-            "Empty selects the GA Realtime path (required by 2025-08-28+ models). A value "
-            "such as 2025-04-01-preview selects the preview path for legacy models."
-        ),
+        help="Input audio is resampled to this rate before being appended to the buffer (realtime transcription).",
     ),
     # ---- Speech: GPT-Live (runtime -- read at each session creation) -------
     # PRP-0188 / UDR-0170 D7 / D8. The Live model itself is a `live` offering in the
@@ -1767,6 +1701,18 @@ RETIRED_KEYS: frozenset[str] = frozenset(
         # because the budget is no longer operator-tunable at all -- a raised floor
         # silently flattened the ladder, giving `low` the same budget as `max`.
         "anthropic_max_tokens",
+        # PRP-0241 / UDR-0222 D7: the speech MODELS are catalog offerings. Not renames:
+        # each value moves to an offering field (or, for the two voices, is absorbed into
+        # `tts_voice` by app.app_settings.store), and app.speech_migration names the successor.
+        "tts_provider",
+        "tts_model_id",
+        "tts_voice_id",
+        "tts_realtime_deployment",
+        "tts_realtime_voice",
+        "whisper_deployment_name",
+        "whisper_model_kind",
+        "whisper_realtime_connection_deployment",
+        "azure_openai_realtime_api_version",
     }
 )
 

@@ -71,8 +71,9 @@ import { cn } from '@/lib/utils'
  * app/app_settings/descriptors.py instead.
  */
 
-type Provider = 'azure-openai' | 'anthropic' | 'openai' | 'foundry'
-type Operation = 'chat' | 'embeddings' | 'image' | 'live' | 'decision'
+type Provider = 'azure-openai' | 'anthropic' | 'openai' | 'foundry' | 'elevenlabs'
+type Operation = 'chat' | 'embeddings' | 'image' | 'live' | 'decision' | 'transcription' | 'speech'
+type Transport = 'rest' | 'realtime'
 type Hosting = 'direct' | 'foundry'
 type Family = 'openai-reasoning' | 'anthropic-adaptive' | 'bare'
 
@@ -152,6 +153,10 @@ interface Offering {
   api_key_env?: string
   image_defaults?: ImageDefaults
   capabilities?: OfferingCapabilities
+  /** Transcription only (PRP-0241, UDR-0222 D3): the VOICE Realtime deployment for the WebSocket URL. */
+  connection_model_ref?: string
+  /** Transcription only: force the rest or realtime lane (absent = inferred from model_ref). */
+  transport?: Transport
   metadata?: Record<string, unknown>
 }
 
@@ -195,10 +200,21 @@ interface CatalogStatus {
 /** Offering carrying a stable client-only key for React list rendering. */
 type EditableOffering = Offering & { _key: string }
 
-const PROVIDERS: Provider[] = ['azure-openai', 'anthropic', 'openai', 'foundry']
+const PROVIDERS: Provider[] = ['azure-openai', 'anthropic', 'openai', 'foundry', 'elevenlabs']
 const FAMILIES: Family[] = ['openai-reasoning', 'anthropic-adaptive', 'bare']
 const HOSTINGS: Hosting[] = ['direct', 'foundry']
-const ALL_OPERATIONS: Operation[] = ['chat', 'embeddings', 'image', 'live', 'decision']
+const ALL_OPERATIONS: Operation[] = ['chat', 'embeddings', 'image', 'live', 'decision', 'transcription', 'speech']
+const TRANSPORTS: Transport[] = ['rest', 'realtime']
+
+/**
+ * The speech operations and the providers each allows (PRP-0241, UDR-0222 D1 / D2).
+ * Keep in step with the backend's SPEECH_PROVIDERS. `elevenlabs` serves `speech` only.
+ */
+const SPEECH_PROVIDERS: Partial<Record<Operation, Provider[]>> = {
+  transcription: ['azure-openai'],
+  speech: ['azure-openai', 'elevenlabs'],
+}
+const isSpeechOp = (op: Operation): boolean => op in SPEECH_PROVIDERS
 
 const IMAGE_DEFAULTS_HELP =
   'Operator defaults for image generation and editing. The model may override a field when the user asks for a specific value in the conversation. A field left on "Default" uses the product default shown in brackets. Output is always PNG.'
@@ -219,7 +235,8 @@ function cleanImageDefaults(d: ImageDefaults | undefined): ImageDefaults | undef
 const CATALOG_ITEM = {
   id: 'catalog',
   label: 'Model Offering Catalog',
-  description: 'Compose the chat, embeddings, image, live, and decision model offerings and their auth references.',
+  description:
+    'Compose the chat, embeddings, image, live, decision, transcription, and speech model offerings and their auth references.',
 } as const
 
 const SECTIONS: Array<{ op: Operation; title: string; hint: string }> = [
@@ -240,6 +257,18 @@ const SECTIONS: Array<{ op: Operation; title: string; hint: string }> = [
     op: 'decision',
     title: 'Decision',
     hint: 'Optional; at most one decision offering -- the Microsoft-Decision-1 deployment (azure-openai; the Endpoint is the Foundry resource endpoint). Registering it offers the decision_evaluate tool.',
+  },
+  // PRP-0241 (UDR-0222 D1): the speech models. Registering one is what turns voice input /
+  // Play message on; the voice and audio rates are the App Settings "Speech" group.
+  {
+    op: 'transcription',
+    title: 'Transcription',
+    hint: 'Optional; at most one transcription offering -- the speech-to-text deployment behind voice input (azure-openai, e.g. gpt-4o-transcribe, or gpt-realtime-whisper with a connection model ref). Endpoint and key fall back to AZURE_OPENAI_ENDPOINT and the shared Azure credential.',
+  },
+  {
+    op: 'speech',
+    title: 'Speech',
+    hint: 'Optional; at most one speech offering -- the text-to-speech model behind Play message: azure-openai (a voice Realtime deployment such as gpt-realtime-2) or elevenlabs (a model id such as eleven_multilingual_v2, with an API key env). The voice is the App Setting "TTS voice".',
   },
 ]
 
@@ -331,6 +360,10 @@ const ENDPOINT_HELP =
   'https://<resource>.services.ai.azure.com/anthropic (leave endpoint empty). Either may contain $' +
   '{VAR} placeholders resolved from the server environment.'
 const PROVIDER_HELP = 'The API surface this model is served through.'
+const CONNECTION_MODEL_HELP =
+  'Transcription only. The VOICE Realtime deployment (gpt-realtime, gpt-realtime-mini, ...) named in the WebSocket URL. Required when the model ref is transcription-only, such as gpt-realtime-whisper; leave empty otherwise.'
+const TRANSPORT_HELP =
+  "Transcription only. Auto infers the lane from the model ref (a 'realtime' substring selects the WebSocket path)."
 
 let keySeq = 0
 const nextKey = (): string => `o${++keySeq}`
@@ -353,15 +386,22 @@ function toWireOfferings(offerings: EditableOffering[]): Offering[] {
   return offerings.map(({ _key, ...o }) => {
     const ops = opsOf(o)
     const out: Offering = { id: o.id.trim(), provider: o.provider, model_ref: o.model_ref.trim(), operations: ops }
-    // A decision offering carries none of the chat / gateway fields (UDR-0201 D1: the
-    // catalog refuses them), so a value left over from another operation is dropped.
+    // A decision or speech offering carries none of the chat / gateway fields (UDR-0201 D1,
+    // UDR-0222 D3: the catalog refuses them), so a value left over from another operation
+    // is dropped. ElevenLabs has one fixed service URL, so it carries no endpoint either.
     const decision = ops.includes('decision')
-    if (!decision && o.provider === 'anthropic' && o.hosting) out.hosting = o.hosting
-    if (!decision && o.family) out.family = o.family
-    if (!decision && o.context_window && o.context_window > 0) out.context_window = o.context_window
-    if (o.endpoint?.trim()) out.endpoint = o.endpoint.trim()
-    if (!decision && o.base_url?.trim()) out.base_url = o.base_url.trim()
-    if (!decision && o.api_version?.trim()) out.api_version = o.api_version.trim()
+    const restricted = decision || ops.some(isSpeechOp)
+    const elevenlabs = o.provider === 'elevenlabs'
+    if (!restricted && o.provider === 'anthropic' && o.hosting) out.hosting = o.hosting
+    if (!restricted && o.family) out.family = o.family
+    if (!restricted && o.context_window && o.context_window > 0) out.context_window = o.context_window
+    if (!elevenlabs && o.endpoint?.trim()) out.endpoint = o.endpoint.trim()
+    if (!restricted && o.base_url?.trim()) out.base_url = o.base_url.trim()
+    if (!decision && !elevenlabs && o.api_version?.trim()) out.api_version = o.api_version.trim()
+    if (ops.includes('transcription')) {
+      if (o.connection_model_ref?.trim()) out.connection_model_ref = o.connection_model_ref.trim()
+      if (o.transport) out.transport = o.transport
+    }
     if (o.api_key_env?.trim()) out.api_key_env = o.api_key_env.trim()
     if (ops.includes('chat') && o.default) out.default = true
     if (ops.includes('image')) {
@@ -372,8 +412,8 @@ function toWireOfferings(offerings: EditableOffering[]): Offering[] {
     // touched serializes exactly as before these fields existed. Only explicitly
     // chosen booleans are emitted, one key at a time.
     const caps: OfferingCapabilities = {}
-    // A decision offering has no capability rows (it is not a chat model), so it emits none.
-    for (const key of decision ? [] : CAPABILITY_KEYS) {
+    // A decision or speech offering has no capability rows (it is not a chat model), so it emits none.
+    for (const key of restricted ? [] : CAPABILITY_KEYS) {
       const v = o.capabilities?.[key]
       if (typeof v === 'boolean') caps[key] = v
     }
@@ -510,6 +550,15 @@ function OfferingCard({
   // PRP-0219: a decision offering shows only id / provider / model ref / endpoint /
   // key / operations -- the other fields are refused by the catalog (UDR-0201 D1).
   const isDecision = ops.includes('decision')
+  // PRP-0241: a speech offering (transcription / speech) likewise shows no chat-only
+  // field (UDR-0222 D3), its provider list is limited to what the operation allows, and
+  // an elevenlabs offering has no endpoint or API version.
+  const speechOp = ops.find(isSpeechOp)
+  const isRestricted = isDecision || speechOp !== undefined
+  const isElevenLabs = offering.provider === 'elevenlabs'
+  const providerChoices = speechOp
+    ? (SPEECH_PROVIDERS[speechOp] ?? PROVIDERS)
+    : PROVIDERS.filter((p) => p !== 'elevenlabs')
   // '' = undeclared (provider decides). Never coerced to a boolean: the three states
   // are meaningfully different (UDR-0112 D2).
   const capabilityValue = (key: keyof OfferingCapabilities) =>
@@ -631,7 +680,7 @@ function OfferingCard({
               value={offering.provider}
               disabled={readOnly}
               onChange={(e) => onChange(index, { provider: e.target.value as Provider })}>
-              {PROVIDERS.map((p) => (
+              {providerChoices.map((p) => (
                 <option key={p} value={p}>
                   {p}
                 </option>
@@ -649,7 +698,7 @@ function OfferingCard({
             />
           </Field>
 
-          {!isDecision && (
+          {!isRestricted && (
             <Field label="Family" hint={FAMILY_HELP}>
               <select
                 className={CONTROL_CLASS}
@@ -666,7 +715,7 @@ function OfferingCard({
             </Field>
           )}
 
-          {!isDecision && (
+          {!isRestricted && (
             <Field label="Hosting" hint={HOSTING_HELP}>
               <select
                 className={CONTROL_CLASS}
@@ -684,7 +733,7 @@ function OfferingCard({
             </Field>
           )}
 
-          {!isDecision && (
+          {!isRestricted && (
             <Field label="Context window" hint="Positive integer token budget (optional).">
               <Input
                 type="number"
@@ -700,17 +749,19 @@ function OfferingCard({
             </Field>
           )}
 
-          <Field label="Endpoint" hint={ENDPOINT_HELP}>
-            <Input
-              className="h-8 text-xs"
-              value={offering.endpoint ?? ''}
-              disabled={readOnly}
-              placeholder="Azure / Foundry resource URL"
-              onChange={(e) => onChange(index, { endpoint: e.target.value })}
-            />
-          </Field>
+          {!isElevenLabs && (
+            <Field label="Endpoint" hint={ENDPOINT_HELP}>
+              <Input
+                className="h-8 text-xs"
+                value={offering.endpoint ?? ''}
+                disabled={readOnly}
+                placeholder="Azure / Foundry resource URL"
+                onChange={(e) => onChange(index, { endpoint: e.target.value })}
+              />
+            </Field>
+          )}
 
-          {!isDecision && (
+          {!isRestricted && (
             <Field label="Base URL" hint={ENDPOINT_HELP}>
               <Input
                 className="h-8 text-xs"
@@ -722,7 +773,7 @@ function OfferingCard({
             </Field>
           )}
 
-          {!isDecision && (
+          {!isDecision && !isElevenLabs && (
             <Field label="API version" hint="Azure API version (optional).">
               <Input
                 className="h-8 text-xs"
@@ -732,6 +783,36 @@ function OfferingCard({
                 onChange={(e) => onChange(index, { api_version: e.target.value })}
               />
             </Field>
+          )}
+
+          {speechOp === 'transcription' && (
+            <>
+              <Field label="Connection model ref" hint={CONNECTION_MODEL_HELP}>
+                <Input
+                  className="h-8 text-xs"
+                  value={offering.connection_model_ref ?? ''}
+                  disabled={readOnly}
+                  placeholder="e.g. gpt-realtime-mini"
+                  onChange={(e) => onChange(index, { connection_model_ref: e.target.value })}
+                />
+              </Field>
+              <Field label="Transport" hint={TRANSPORT_HELP}>
+                <select
+                  className={CONTROL_CLASS}
+                  value={offering.transport ?? ''}
+                  disabled={readOnly}
+                  onChange={(e) =>
+                    onChange(index, { transport: (e.target.value || undefined) as Transport | undefined })
+                  }>
+                  <option value="">Auto</option>
+                  {TRANSPORTS.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </>
           )}
 
           <Field label="API key env" hint={AUTH_HELP}>
@@ -1160,9 +1241,9 @@ export function AppSettingsManager() {
       const fresh: EditableOffering = {
         _key: key,
         id: '',
-        // GPT-Live (UDR-0170 D11) and Microsoft-Decision-1 (UDR-0201 D1) are reached on
-        // the shared Azure lane only.
-        provider: op === 'live' || op === 'decision' ? 'azure-openai' : 'openai',
+        // GPT-Live (UDR-0170 D11), Microsoft-Decision-1 (UDR-0201 D1) and transcription
+        // (UDR-0222 D2) are reached on the shared Azure lane only; speech starts there too.
+        provider: op === 'live' || op === 'decision' || isSpeechOp(op) ? 'azure-openai' : 'openai',
         model_ref: '',
         operations: [op],
         default: op === 'chat' && !hasChatDefault ? true : undefined,
@@ -1257,6 +1338,18 @@ export function AppSettingsManager() {
     if (decision.some((o) => opsOf(o).length > 1)) out.push('A decision offering cannot serve other operations.')
     if (decision.some((o) => o.provider !== 'azure-openai'))
       out.push('A decision offering must use the azure-openai provider.')
+    // PRP-0241 (UDR-0222 D1-D3): the speech offerings.
+    for (const [op, allowed] of Object.entries(SPEECH_PROVIDERS) as Array<[Operation, Provider[]]>) {
+      const rows = offerings.filter((o) => opsOf(o).includes(op))
+      if (rows.length > 1) out.push(`At most one ${op} offering is allowed.`)
+      if (rows.some((o) => opsOf(o).length > 1)) out.push(`A ${op} offering cannot serve other operations.`)
+      if (rows.some((o) => !allowed.includes(o.provider)))
+        out.push(`A ${op} offering must use ${allowed.join(' or ')}.`)
+    }
+    const eleven = offerings.filter((o) => o.provider === 'elevenlabs')
+    if (eleven.some((o) => opsOf(o).join() !== 'speech'))
+      out.push('The elevenlabs provider serves only the speech operation.')
+    if (eleven.some((o) => !o.api_key_env?.trim())) out.push('An elevenlabs offering needs an API key env.')
     return out
   }, [offerings])
 

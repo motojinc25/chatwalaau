@@ -325,8 +325,22 @@ def _absorb_retired(doc: StoreDocument, block: dict[str, Any], key: str, raw_val
 
     A retired key with nothing to rescue is warned about and dropped; that is
     the default path a future retirement gets for free. `compaction_strategy` is
-    the one case that carries a decision worth keeping -- see above.
+    the one case that carries a decision worth keeping -- see above. The retired
+    speech keys (PRP-0241) name their catalog successor, and the voice of the TTS
+    provider that was in use is absorbed into `tts_voice`.
     """
+    from app.speech_migration import RETIRED_SPEECH_KEYS, VOICE_KEYS, retirement_warning, voice_key_in_use
+
+    if key in RETIRED_SPEECH_KEYS:
+        voice = raw_value.strip() if isinstance(raw_value, str) else ""
+        if key in VOICE_KEYS and voice and key == voice_key_in_use(block) and "tts_voice" not in block:
+            doc.values["tts_voice"] = voice
+            doc.warnings.append(
+                f"{key}={raw_value!r} is retired (PRP-0241); tts_voice={voice!r} was written in its place"
+            )
+            return
+        doc.warnings.append(retirement_warning(key, raw_value))
+        return
     if key != "compaction_strategy":
         doc.warnings.append(f"{key} is retired and no longer has any effect; it was dropped")
         return

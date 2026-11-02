@@ -1,6 +1,8 @@
 """Text-to-Speech REST endpoint (CTR-0039).
 
 POST /api/tts accepts text and returns synthesized audio (MP3).
+The provider comes from the catalog's speech offering, resolved per request
+(PRP-0241, UDR-0222 D4); an explicitly installed provider (the test seam) wins.
 """
 
 import logging
@@ -11,6 +13,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.auth import verify_api_key
+from app.tts.factory import current_tts_provider
 from app.tts.provider import TTSProvider
 
 logger = logging.getLogger(__name__)
@@ -22,7 +25,8 @@ router = APIRouter(prefix="/api", tags=["TTS"])
 _provider: TTSProvider | None = None
 
 
-def set_tts_provider(provider: TTSProvider) -> None:
+def set_tts_provider(provider: TTSProvider | None) -> None:
+    """Install a fixed provider (tests); None returns to catalog resolution."""
     global _provider
     _provider = provider
 
@@ -33,11 +37,14 @@ class TTSRequest(BaseModel):
 
 @router.post("/tts", dependencies=[Depends(verify_api_key)])
 async def synthesize(request: TTSRequest):
-    if _provider is None:
-        raise HTTPException(status_code=503, detail="TTS provider not configured")
+    provider = _provider
+    if provider is None:
+        provider, reason = current_tts_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail=f"TTS provider not configured: {reason}")
 
     try:
-        audio_data = await _provider.synthesize(request.text)
+        audio_data = await provider.synthesize(request.text)
     except ApiError as exc:
         logger.exception("TTS synthesis failed (ElevenLabs API %s): %s", exc.status_code, exc.body)
         if exc.status_code == 402:

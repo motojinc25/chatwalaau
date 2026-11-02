@@ -106,12 +106,8 @@ from app.openai_api.router import register_openai_api
 from app.paint.router import router as paint_router
 from app.prompt_templates.router import router as templates_router
 from app.session.router import router as session_router
-from app.stt.factory import create_stt_provider
 from app.stt.router import router as stt_router
-from app.stt.router import set_stt_provider
-from app.tts.factory import create_tts_provider
 from app.tts.router import router as tts_router
-from app.tts.router import set_tts_provider
 from app.upload.router import router as upload_router
 
 # Suppress pydantic warnings from agent-framework-ag-ui's Field(validation_alias=...) usage
@@ -326,6 +322,28 @@ def _warn_retired_tool_approval_env() -> None:
         )
 
 
+def _warn_retired_speech_env() -> None:
+    """Startup advisory for the retired speech-model keys (PRP-0241, UDR-0222 D7).
+
+    The speech models are catalog offerings now, so a WHISPER_* / TTS_* /
+    AZURE_OPENAI_REALTIME_API_VERSION value left in ``.env`` or the environment has no
+    effect. Each is named once at WARNING with its successor. Log-only and
+    non-failing (the PRP-0179 pattern).
+    """
+    import logging as _logging
+
+    from app.speech_migration import retired_env_values, retirement_warning
+
+    _logger = _logging.getLogger(__name__)
+    try:
+        found = retired_env_values()
+    except Exception:  # advisory must never block startup
+        _logger.debug("retired speech env advisory skipped", exc_info=True)
+        return
+    for key, value in found.items():
+        _logger.warning("%s", retirement_warning(key, value).replace(key, key.upper(), 1))
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Application lifespan: startup and shutdown hooks."""
@@ -335,6 +353,8 @@ async def lifespan(_app: FastAPI):
     _warn_removed_role_model_env()
     # Advisory for the retired tool-approval env vars (PRP-0179, UDR-0161 D7).
     _warn_retired_tool_approval_env()
+    # Advisory for the retired speech-model keys (PRP-0241, UDR-0222 D7).
+    _warn_retired_speech_env()
     from app.core.retired_env import warn_scrubbed_env
 
     warn_scrubbed_env()
@@ -578,43 +598,13 @@ app.include_router(image_edit_draft_router)
 # MCP Apps RPC bridge and HTML serving (CTR-0067, PRP-0034)
 app.include_router(mcp_apps_router)
 
-# Speech-to-Text API (CTR-0021)
-# Provider selection delegated to app.stt.factory per UDR-0036
-# (PRP-0061): REST audio.transcriptions for whisper-1 / gpt-4o-transcribe
-# / gpt-4o-mini-transcribe, Realtime API WebSocket for
-# gpt-realtime-whisper. Credential resolution still centralised in
-# app.azure_credential (PRP-0058, UDR-0034).
-_stt_provider = create_stt_provider(
-    azure_openai_endpoint=settings.azure_openai_endpoint,
-    deployment=settings.whisper_deployment_name,
-    kind_override=settings.whisper_model_kind,
-    realtime_connection_deployment=settings.whisper_realtime_connection_deployment,
-    api_version_realtime=settings.azure_openai_realtime_api_version,
-    realtime_audio_rate=settings.whisper_realtime_audio_rate,
-)
-if _stt_provider is not None:
-    set_stt_provider(_stt_provider)
+# Speech-to-Text API (CTR-0021) and Text-to-Speech API (CTR-0039).
+# PRP-0241 / UDR-0222 D4: nothing is built here any more. Each request resolves its
+# provider from the catalog's `transcription` / `speech` offering and the current App
+# Settings (app.stt.factory / app.tts.factory, cached by their inputs), so a catalog
+# or settings save applies without a restart. Credential resolution stays in
+# app.azure_credential (PRP-0058, UDR-0034) unless the offering names its own key.
 app.include_router(stt_router)
-
-# Text-to-Speech API (CTR-0039)
-# Provider selection delegated to app.tts.factory per UDR-0038
-# (PRP-0063): ElevenLabs (default) or Azure OpenAI Realtime
-# (gpt-realtime-2). The realtime lane reuses the centralised credential
-# resolution in app.azure_credential (PRP-0058, UDR-0034) and the
-# shared Realtime URL shape introduced for STT (PRP-0061).
-_tts_provider = create_tts_provider(
-    provider=settings.tts_provider,
-    elevenlabs_api_key=settings.elevenlabs_api_key,
-    tts_voice_id=settings.tts_voice_id,
-    tts_model_id=settings.tts_model_id,
-    azure_openai_endpoint=settings.azure_openai_endpoint,
-    realtime_deployment=settings.tts_realtime_deployment,
-    realtime_voice=settings.tts_realtime_voice,
-    realtime_api_version=settings.azure_openai_realtime_api_version,
-    realtime_audio_rate=settings.tts_realtime_audio_rate,
-)
-if _tts_provider is not None:
-    set_tts_provider(_tts_provider)
 app.include_router(tts_router)
 
 # Prepare MCP tools synchronously before agent creation (CTR-0060, PRP-0031)

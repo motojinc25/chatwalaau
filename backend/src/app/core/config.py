@@ -300,84 +300,29 @@ class Settings(BaseSettings):
     # internal uncompressed-total and entry-count cap (zip-bomb defense).
     session_import_max_bytes: int = 26_214_400  # 25 MiB
 
-    # Speech-to-Text (CTR-0021, PRP-0012)
-    whisper_deployment_name: str = ""
-
-    # STT Model-Kind Dispatch (CTR-0021 v3, PRP-0061, UDR-0036)
-    # Selects which transport drives the STT provider:
-    # - "auto" (default): infer from WHISPER_DEPLOYMENT_NAME -- substring
-    #   "realtime" -> realtime, otherwise rest.
-    # - "rest": force REST audio.transcriptions path (whisper-1,
-    #   gpt-4o-transcribe, gpt-4o-mini-transcribe).
-    # - "realtime": force Realtime API WebSocket path
-    #   (gpt-realtime-whisper). Requires `pip install
-    #   "chatwalaau[realtime]"` for the PCM decoder.
-    # Unknown values are treated as "auto" (no hard failure on typo).
-    whisper_model_kind: str = "auto"
-
-    # Azure OpenAI Realtime API version (PRP-0061, UDR-0036).
-    # Only consumed when WHISPER_MODEL_KIND resolves to "realtime".
-    # Empty (default) selects the GA path:
-    #   wss://<host>/openai/v1/realtime?model=<connection-deployment>
-    # This is the path required by gpt-realtime-whisper and any
-    # 2025-08-28+ Realtime model.
-    # A non-empty value (e.g. "2025-04-01-preview") selects the
-    # preview path for legacy models such as gpt-4o-realtime-preview:
-    #   wss://<host>/openai/realtime?api-version=<v>&deployment=<d>
-    azure_openai_realtime_api_version: str = ""
-
-    # Realtime API WebSocket connection deployment (PRP-0061, UDR-0036).
-    # Azure deviation: the `?model=` URL query parameter must name a
-    # *voice* Realtime deployment (gpt-realtime / gpt-realtime-mini /
-    # gpt-realtime-1.5) per Microsoft Learn `realtime-audio-websockets`.
-    # `gpt-realtime-whisper` is a TRANSCRIPTION-ONLY model and is NOT
-    # accepted as a connection model -- using it on the URL returns
-    # HTTP 400 at handshake.
-    # Resolution:
-    #   - When this value is non-empty -> use it as the URL `?model=`.
-    #   - When empty -> fall back to WHISPER_DEPLOYMENT_NAME (the
-    #     legacy single-deployment shape; works for `gpt-4o-realtime-*`
-    #     style models that handle both connection and transcription).
-    # Set this to your voice Realtime deployment name (e.g. "gpt-realtime")
-    # whenever WHISPER_DEPLOYMENT_NAME is a transcription-only model
-    # such as `gpt-realtime-whisper`.
-    whisper_realtime_connection_deployment: str = ""
-
-    # Realtime API input audio sample rate in Hz (PRP-0061, UDR-0036).
-    # The browser MediaRecorder Opus stream is resampled to this rate
-    # before `input_audio_buffer.append`. Allowed values: 16000, 24000.
-    whisper_realtime_audio_rate: int = 24000
-
     # Model context window: removed (PRP-0113, UDR-0094 D5). The per-model
     # context limit is now an offering's `context_window` in model_offerings.jsonc,
     # defaulting to app.models_catalog.DEFAULT_CONTEXT_WINDOW (128000) when unset.
 
-    # Text-to-Speech (CTR-0039, PRP-0022)
-    elevenlabs_api_key: str = ""
-    tts_model_id: str = "eleven_multilingual_v2"
-    tts_voice_id: str = ""
+    # Speech models (PRP-0241, UDR-0222): the STT and TTS MODELS are the catalog's
+    # `transcription` and `speech` offerings (provider, deployment / model id, endpoint,
+    # key reference, transport, connection deployment, api-version). The former
+    # WHISPER_DEPLOYMENT_NAME / WHISPER_MODEL_KIND / WHISPER_REALTIME_CONNECTION_DEPLOYMENT
+    # / AZURE_OPENAI_REALTIME_API_VERSION / TTS_PROVIDER / TTS_MODEL_ID / TTS_VOICE_ID /
+    # TTS_REALTIME_DEPLOYMENT / TTS_REALTIME_VOICE / ELEVENLABS_API_KEY fields were
+    # REMOVED; the ElevenLabs key stays in .env and is referenced by the speech
+    # offering's `api_key_env`. What remains here is how speech SOUNDS (application
+    # settings, speech group, runtime scope -- read on each request).
 
-    # TTS Provider Selection (CTR-0039 v3, PRP-0063, UDR-0038)
-    # Selects which provider backs POST /api/tts:
-    # - "elevenlabs" (default): ElevenLabs SDK (uses ELEVENLABS_API_KEY,
-    #   TTS_MODEL_ID, TTS_VOICE_ID).
-    # - "azure-realtime": Azure OpenAI Realtime API voice model
-    #   (e.g. gpt-realtime-2) over a WebSocket session; PCM16 output is
-    #   encoded to MP3. Uses AZURE_OPENAI_ENDPOINT, the shared credential
-    #   lane (UDR-0034), and the TTS_REALTIME_* settings below plus the
-    #   shared AZURE_OPENAI_REALTIME_API_VERSION (reused from the STT lane).
-    # Unknown values resolve to "elevenlabs" (no hard failure on typo).
-    tts_provider: str = "elevenlabs"
+    # Realtime API input audio sample rate in Hz for the realtime transcription lane.
+    # The browser MediaRecorder Opus stream is resampled to this rate before
+    # `input_audio_buffer.append`. Allowed values: 16000, 24000.
+    whisper_realtime_audio_rate: int = 24000
 
-    # Azure OpenAI Realtime TTS voice deployment (PRP-0063, UDR-0038).
-    # The voice Realtime deployment name; goes directly into the URL
-    # `?model=` query. gpt-realtime-2 is itself a voice model, so unlike
-    # the STT whisper case there is no transcription/voice deployment
-    # split. Required when TTS_PROVIDER=azure-realtime.
-    tts_realtime_deployment: str = ""
-
-    # Azure OpenAI Realtime TTS voice name (e.g. alloy / marin / cedar).
-    tts_realtime_voice: str = "alloy"
+    # The voice of the speech offering (UDR-0222 D5): an ElevenLabs voice id, or an
+    # Azure Realtime voice name such as alloy / marin / cedar. Empty selects the
+    # provider default (alloy on Azure); ElevenLabs has none and answers 503.
+    tts_voice: str = ""
 
     # Azure OpenAI Realtime TTS output PCM sample rate in Hz. The
     # streamed PCM16 is encoded to MP3 at this rate. Allowed: 16000, 24000.

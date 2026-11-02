@@ -71,8 +71,12 @@ class AzureOpenAIRealtimeTTSProvider:
         voice: str = "alloy",
         api_version: str = "",
         audio_rate: int = 24000,
+        api_key: str | None = None,
     ) -> None:
         self._endpoint = endpoint
+        # The offering's own key (its api_key_env, UDR-0222 D3); None -> the shared
+        # Azure lane (UDR-0034).
+        self._api_key = api_key or None
         # Voice Realtime deployment -- referenced in the URL ?model=
         # query. The canonical example is "gpt-realtime-2".
         self._deployment = deployment
@@ -110,7 +114,9 @@ class AzureOpenAIRealtimeTTSProvider:
 
     async def synthesize(self, text: str) -> bytes:
         """Synchronous-looking synthesis over an async Realtime session."""
-        header_name, header_value = get_realtime_websocket_auth_header()
+        header_name, header_value = (
+            ("api-key", self._api_key) if self._api_key else get_realtime_websocket_auth_header()
+        )
         url = self.ws_url
         logger.debug("Realtime TTS connecting (deployment=%s)", self._deployment)
 

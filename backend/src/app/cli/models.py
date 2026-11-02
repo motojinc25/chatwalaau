@@ -6,6 +6,8 @@ Offering Catalog (``model_offerings.jsonc``, CTR-0174) OFFLINE -- no server is
 required, mirroring how ``chatwalaau init`` writes ``.env`` (PRP-0111 / UDR-0090
 D5). Authoring reuses the ``app.models_catalog`` serializer + validator, so the
 same invariants the server enforces at load are enforced here before any write.
+``models migrate-speech`` turns the retired speech settings into the catalog's
+``transcription`` / ``speech`` offerings, dry run first (PRP-0241, UDR-0222 D7).
 """
 
 from __future__ import annotations
@@ -26,9 +28,11 @@ _DEFAULT_API_KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "foundry": "",  # Entra ID lane; no api key
+    "elevenlabs": "ELEVENLABS_API_KEY",
 }
-_PROVIDERS = ("azure-openai", "anthropic", "openai", "foundry")
-_OPERATIONS = ("chat", "embeddings", "image", "live", "decision")
+_PROVIDERS = ("azure-openai", "anthropic", "openai", "foundry", "elevenlabs")
+_OPERATIONS = ("chat", "embeddings", "image", "live", "decision", "transcription", "speech")
+_TRANSPORTS = ("rest", "realtime")
 _HOSTINGS = ("direct", "foundry")
 _FAMILIES = ("openai-reasoning", "anthropic-adaptive", "bare")
 
@@ -87,6 +91,16 @@ def register_models_parser(
     role_clear.add_argument("--file", default=None, help="Catalog path (default: MODEL_OFFERINGS_FILE)")
     role_clear.set_defaults(func=_run_role_clear)
 
+    # Subcommand "migrate-speech": the retired speech settings -> catalog offerings
+    # (PRP-0241, UDR-0222 D7). Dry run unless --write.
+    migrate_parser = models_sub.add_parser(
+        "migrate-speech",
+        help="Turn the retired STT/TTS settings into transcription / speech offerings (dry run unless --write)",
+    )
+    migrate_parser.add_argument("--file", default=None, help="Catalog path (default: MODEL_OFFERINGS_FILE)")
+    migrate_parser.add_argument("--write", action="store_true", help="Add the offerings to the catalog")
+    migrate_parser.set_defaults(func=_run_models_migrate_speech)
+
 
 def _add_offering_options(parser: argparse.ArgumentParser, argparse_mod: Any, *, include_id: bool = True) -> None:
     """Attach the offering fields as optional flags (prompted when omitted)."""
@@ -105,6 +119,14 @@ def _add_offering_options(parser: argparse.ArgumentParser, argparse_mod: Any, *,
         "Anthropic-on-Foundry URL https://<resource>.services.ai.azure.com/anthropic (may use ${VAR})",
     )
     parser.add_argument("--api-version", default=None, help="API version (optional)")
+    parser.add_argument(
+        "--connection-model-ref",
+        default=None,
+        help="Transcription only: the VOICE Realtime deployment for the WebSocket URL (for gpt-realtime-whisper)",
+    )
+    parser.add_argument(
+        "--transport", choices=_TRANSPORTS, default=None, help="Transcription only: force rest or realtime"
+    )
     parser.add_argument("--hosting", choices=_HOSTINGS, default=None, help="Hosting (anthropic provider only)")
     parser.add_argument("--family", choices=_FAMILIES, default=None, help="Option-catalog family override")
     parser.add_argument("--context-window", type=int, default=None, help="Context window (positive int)")
@@ -294,6 +316,13 @@ def _build_offering(args: argparse.Namespace, existing: dict[str, Any] | None) -
     if ctx:
         offering["context_window"] = int(ctx)
 
+    # Transcription-only fields (PRP-0241, UDR-0222 D3).
+    if "transcription" in ops:
+        for key, flag in (("connection_model_ref", args.connection_model_ref), ("transport", args.transport)):
+            value = flag if flag is not None else base.get(key)
+            if value:
+                offering[key] = value
+
     # Auth reference: env-var NAME only (never a value).
     if args.auth_profile or base.get("auth_profile"):
         offering["auth_profile"] = args.auth_profile or base.get("auth_profile")
@@ -363,6 +392,81 @@ def _run_models_remove(args: argparse.Namespace) -> None:
     if len(data["offerings"]) == before:
         print(f"ERROR: no offering with id '{args.id}' in {path}.")
         sys.exit(1)
+    _write(data, path)
+
+
+# ---- migrate-speech (PRP-0241, UDR-0222 D7) --------------------------------
+
+
+def _retired_speech_values() -> tuple[dict[str, Any], dict[str, str]]:
+    """The retired speech settings still present, and where each came from.
+
+    ``.env`` / the environment first, then the App Settings store, which wins: the
+    store is what the server actually read before the upgrade. The store is read RAW
+    because its loader drops retired keys.
+    """
+    from app.app_settings.store import SETTINGS_BLOCK, SettingsStoreError, read_raw_store
+    from app.speech_migration import RETIRED_SPEECH_KEYS, retired_env_values
+
+    values: dict[str, Any] = dict(retired_env_values())
+    sources = dict.fromkeys(values, ".env")
+    try:
+        raw = read_raw_store()
+    except (SettingsStoreError, OSError) as exc:
+        print(f"warning: the App Settings store could not be read ({exc}); using .env only", file=sys.stderr)
+        raw = None
+    block = raw.get(SETTINGS_BLOCK) if isinstance(raw, dict) else None
+    if isinstance(block, dict):
+        for key in RETIRED_SPEECH_KEYS:
+            value = block.get(key)
+            if value not in (None, ""):
+                values[key] = value
+                sources[key] = "app_settings"
+    return values, sources
+
+
+def _run_models_migrate_speech(args: argparse.Namespace) -> None:
+    import json
+
+    from app.speech_migration import planned_offerings, voice_key_in_use
+
+    values, sources = _retired_speech_values()
+    if not values:
+        print("Nothing to migrate: no retired speech setting is set in the App Settings store or .env.")
+        return
+
+    path = _resolve_path(args)
+    data = _load_raw(path)
+    offerings = [o for o in data["offerings"] if isinstance(o, dict)]
+    taken = {str(o.get("id")) for o in offerings}
+    present_ops = {op for o in offerings for op in (o.get("operations") or ["chat"])}
+
+    planned, notes = planned_offerings(values, taken)
+    kept = [o for o in planned if o["operations"][0] in present_ops]
+    planned = [o for o in planned if o["operations"][0] not in present_ops]
+
+    print("Retired speech settings found:")
+    for key in sorted(values):
+        print(f"  - {key.upper()} = {values[key]!r} ({sources[key]})")
+    for note in notes:
+        print(f"note: {note}")
+    for o in kept:
+        print(f"note: the catalog already has a '{o['operations'][0]}' offering; it is kept and nothing is added.")
+    voice_key = voice_key_in_use(values)
+    if values.get(voice_key) and sources.get(voice_key) == ".env":
+        print(f"note: set the App Setting tts_voice to {values[voice_key]!r} (it was {voice_key.upper()} in .env).")
+
+    if not planned:
+        print("No offering to add.")
+        return
+    print()
+    print(f"{'Adding' if args.write else 'Would add'} to {path}:")
+    print(json.dumps(planned, indent=2, ensure_ascii=False))
+    if not args.write:
+        print()
+        print("Dry run. Re-run with --write to apply.")
+        return
+    data["offerings"].extend(planned)
     _write(data, path)
 
 

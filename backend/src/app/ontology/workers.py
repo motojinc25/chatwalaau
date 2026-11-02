@@ -300,19 +300,25 @@ class Supervisor:
         stop: threading.Event,
         lane: str,
         affinity: str | None = None,
+        limit: float | None = None,
     ) -> Any:
-        """Run one job in a worker (blocking). See the module notes for the errors."""
+        """Run one job in a worker (blocking). See the module notes for the errors.
+
+        ``timeout`` is what the request may still spend; ``limit`` is the configured setting the
+        timeout message names (it defaults to ``timeout``).
+        """
         from app.pipeline.process import decode_error, settings_snapshot
 
         started = time.monotonic()
         deadline = started + timeout if timeout else None
+        stated = float(limit or timeout or 0)
         snapshot = settings_snapshot()
         snapshot["ontology_query_cache_mb"] = int(settings.ontology_query_cache_mb) // max(1, configured_workers())
         try:
             worker = self._acquire(affinity, deadline, stop)
         except TimeoutError:
             self.stats["timeouts"] += 1
-            raise QueryTimeout(limit=float(timeout or 0), phase="queued", lane=lane) from None
+            raise QueryTimeout(limit=stated, phase="queued", lane=lane) from None
         self.stats["jobs"] += 1
         phase = "load"
         broken = False
@@ -344,7 +350,7 @@ class Supervisor:
                     logger.warning(
                         "ontology search timed out: %s %s, phase %s, %.1f s", lane, affinity, phase, timeout or 0
                     )
-                    raise QueryTimeout(limit=float(timeout or 0), phase=phase, lane=lane)
+                    raise QueryTimeout(limit=stated, phase=phase, lane=lane)
         except (EOFError, OSError, BrokenPipeError) as exc:
             broken = True
             self.stats["failed"] += 1
@@ -413,6 +419,7 @@ async def run(
                 stop=stop,
                 lane=budget.lane,
                 affinity=payload.get("ontology_id"),
+                limit=budget.limit,
             )
         )
         try:

@@ -61,8 +61,12 @@ class AzureOpenAIRealtimeWhisperProvider:
         connection_deployment: str = "",
         api_version: str = "",
         audio_rate: int = 24000,
+        api_key: str | None = None,
     ) -> None:
         self._endpoint = endpoint
+        # The offering's own key (its api_key_env, UDR-0222 D3); None -> the shared
+        # Azure lane (UDR-0034).
+        self._api_key = api_key or None
         # Transcription model deployment -- referenced in the session
         # payload's audio.input.transcription.model field. The
         # canonical example is "gpt-realtime-whisper".
@@ -122,7 +126,9 @@ class AzureOpenAIRealtimeWhisperProvider:
             content_type,
             self._audio_rate,
         )
-        header_name, header_value = get_realtime_websocket_auth_header()
+        header_name, header_value = (
+            ("api-key", self._api_key) if self._api_key else get_realtime_websocket_auth_header()
+        )
         url = self.ws_url
         logger.debug("Realtime STT connecting (deployment=%s)", self._deployment)
 

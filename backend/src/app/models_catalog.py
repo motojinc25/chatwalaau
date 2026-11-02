@@ -39,11 +39,13 @@ rejected.
 
 Validation is fail-fast at load (UDR-0087 D3): at least one ``chat`` offering,
 at most one ``default: true`` chat offering, unique ids, a known provider, a
-v1 operation (``chat`` / ``embeddings`` / ``image`` / ``live`` / ``decision``;
-anything else -- audio, managed agents -- is rejected, not silently ignored), at
-most one ``embeddings`` offering, at most one ``image`` offering, at most one
-``live`` offering (the GPT-Live voice deployment, PRP-0188 step 2) and at most one
-``decision`` offering (the Microsoft-Decision-1 deployment, PRP-0219).
+v1 operation (``chat`` / ``embeddings`` / ``image`` / ``live`` / ``decision`` /
+``transcription`` / ``speech``; anything else -- managed agents -- is rejected, not
+silently ignored), at most one ``embeddings`` offering, at most one ``image``
+offering, at most one ``live`` offering (the GPT-Live voice deployment, PRP-0188
+step 2), at most one ``decision`` offering (the Microsoft-Decision-1 deployment,
+PRP-0219) and at most one ``transcription`` and one ``speech`` offering (the speech
+models, PRP-0241, UDR-0222).
 """
 
 from __future__ import annotations
@@ -61,8 +63,28 @@ from app.mcp.config import _strip_jsonc_comments
 
 logger = logging.getLogger(__name__)
 
-VALID_PROVIDERS = frozenset({"azure-openai", "anthropic", "openai", "foundry"})
-VALID_OPERATIONS = frozenset({"chat", "embeddings", "image", "live", "decision"})
+VALID_PROVIDERS = frozenset({"azure-openai", "anthropic", "openai", "foundry", "elevenlabs"})
+VALID_OPERATIONS = frozenset({"chat", "embeddings", "image", "live", "decision", "transcription", "speech"})
+# The speech operations (PRP-0241, UDR-0222 D1 / D2): each is exclusive and allows only
+# these providers. `elevenlabs` is a catalog provider for `speech` and nothing else.
+SPEECH_PROVIDERS: dict[str, frozenset[str]] = {
+    "transcription": frozenset({"azure-openai"}),
+    "speech": frozenset({"azure-openai", "elevenlabs"}),
+}
+# Chat-only fields a speech offering may not carry (UDR-0222 D3), as for `decision`.
+SPEECH_REFUSED_KEYS: tuple[str, ...] = (
+    "default",
+    "family",
+    "context_window",
+    "hosting",
+    "base_url",
+    "image_defaults",
+    "capabilities",
+)
+# Fields an elevenlabs offering may not carry: the SDK has one fixed service URL.
+ELEVENLABS_REFUSED_KEYS: tuple[str, ...] = ("endpoint", "base_url", "api_version")
+# The transcription offering's optional `transport` override (UDR-0036 D1 by name otherwise).
+VALID_TRANSPORTS = frozenset({"rest", "realtime"})
 # Fields a decision offering may not carry (PRP-0219, UDR-0201 D1): it is not a chat
 # model (default / family / context_window / capabilities), it is not reached through an
 # OpenAI-compatible base URL or a dated api-version (the path is versioned), and it draws
@@ -340,6 +362,11 @@ class Offering:
     # Foundry, UDR-0094). An ABSENT block means UNCHANGED -- the provider supplies
     # whatever hosted tool it has. Only an explicit ``false`` withholds one.
     capabilities: dict[str, bool] | None = None
+    # Transcription-only fields (PRP-0241, UDR-0222 D3). ``connection_model_ref`` is the
+    # VOICE Realtime deployment named in the WebSocket URL when ``model_ref`` is a
+    # transcription-only model; ``transport`` overrides the name-based rest / realtime kind.
+    connection_model_ref: str | None = None
+    transport: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -361,6 +388,14 @@ class Offering:
     @property
     def is_decision(self) -> bool:
         return "decision" in self.operations
+
+    @property
+    def is_transcription(self) -> bool:
+        return "transcription" in self.operations
+
+    @property
+    def is_speech(self) -> bool:
+        return "speech" in self.operations
 
     def capability(self, name: str) -> bool | None:
         """Declared value of hosted-tool capability ``name``, or None when undeclared.
@@ -451,6 +486,12 @@ class Catalog:
 
     def decision_offering(self) -> Offering | None:
         return next((o for o in self._offerings if o.is_decision), None)
+
+    def transcription_offering(self) -> Offering | None:
+        return next((o for o in self._offerings if o.is_transcription), None)
+
+    def speech_offering(self) -> Offering | None:
+        return next((o for o in self._offerings if o.is_speech), None)
 
 
 # ---- Loading + validation (UDR-0087 D1/D2/D3/D4) --------------------------
@@ -619,7 +660,7 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
         if op not in VALID_OPERATIONS:
             raise CatalogError(
                 f"offering '{offering_id}': unsupported operation {op!r} "
-                f"(v1 supports {sorted(VALID_OPERATIONS)}; audio and managed agents are deferred)"
+                f"(v1 supports {sorted(VALID_OPERATIONS)}; managed agents are deferred)"
             )
         if op not in operations:
             operations.append(op)
@@ -644,6 +685,38 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
             # the offering would actually carry is refused.
             if entry.get(key) not in (None, False, {}):
                 raise CatalogError(f"offering '{offering_id}': '{key}' does not apply to a 'decision' offering")
+    # The speech models (PRP-0241, UDR-0222 D1-D3): exclusive, at most one each (below),
+    # a closed provider set per operation, and no chat-only fields.
+    if provider == "elevenlabs" and operations != ["speech"]:
+        raise CatalogError(f"offering '{offering_id}': the elevenlabs provider serves only the 'speech' operation")
+    for op in [op for op in operations if op in SPEECH_PROVIDERS]:
+        if len(operations) > 1:
+            raise CatalogError(f"offering '{offering_id}': '{op}' cannot be combined with other operations")
+        if provider not in SPEECH_PROVIDERS[op]:
+            raise CatalogError(
+                f"offering '{offering_id}': a '{op}' offering must use one of the providers "
+                f"{sorted(SPEECH_PROVIDERS[op])}"
+            )
+        for key in SPEECH_REFUSED_KEYS:
+            if entry.get(key) not in (None, False, {}):
+                raise CatalogError(f"offering '{offering_id}': '{key}' does not apply to a '{op}' offering")
+    if provider == "elevenlabs":
+        for key in ELEVENLABS_REFUSED_KEYS:
+            if entry.get(key) not in (None, ""):
+                raise CatalogError(f"offering '{offering_id}': '{key}' does not apply to the elevenlabs provider")
+    connection_model_ref = entry.get("connection_model_ref")
+    transport = entry.get("transport")
+    for key, value in (("connection_model_ref", connection_model_ref), ("transport", transport)):
+        if value in (None, ""):
+            continue
+        if "transcription" not in operations:
+            raise CatalogError(f"offering '{offering_id}': '{key}' applies only to a 'transcription' offering")
+        if not isinstance(value, str):
+            raise CatalogError(f"offering '{offering_id}': '{key}' must be a string")
+    if transport not in (None, "") and transport not in VALID_TRANSPORTS:
+        raise CatalogError(
+            f"offering '{offering_id}': transport must be one of {sorted(VALID_TRANSPORTS)}, got {transport!r}"
+        )
 
     hosting = entry.get("hosting")
     if hosting is not None:
@@ -696,6 +769,12 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
         if not isinstance(profile_name, str) or profile_name not in auth_profiles:
             raise CatalogError(f"offering '{offering_id}': unknown auth_profile {profile_name!r}")
         api_key_env = api_key_env or auth_profiles[profile_name]
+    if provider == "elevenlabs" and not (api_key_env or "").strip():
+        # ElevenLabs has no Entra lane to fall back to (UDR-0222 D3).
+        raise CatalogError(
+            f"offering '{offering_id}': an elevenlabs offering requires 'api_key_env' (or an 'auth_profile'), "
+            "e.g. ELEVENLABS_API_KEY"
+        )
 
     endpoint = entry.get("endpoint")
     if endpoint is not None:
@@ -742,6 +821,8 @@ def _parse_offering(entry: Any, index: int, auth_profiles: dict[str, str]) -> Of
         api_key_env=(api_key_env or None),
         image_defaults=image_defaults,
         capabilities=capabilities,
+        connection_model_ref=(connection_model_ref or "").strip() or None,
+        transport=transport or None,
         metadata=entry.get("metadata", {}) if isinstance(entry.get("metadata"), dict) else {},
     )
 
@@ -849,6 +930,10 @@ def parse_catalog(data: Any) -> Catalog:
         raise CatalogError("at most one 'live' offering is supported")
     if len([o for o in offerings if o.is_decision]) > 1:
         raise CatalogError("at most one 'decision' offering is supported")
+    if len([o for o in offerings if o.is_transcription]) > 1:
+        raise CatalogError("at most one 'transcription' offering is supported")
+    if len([o for o in offerings if o.is_speech]) > 1:
+        raise CatalogError("at most one 'speech' offering is supported")
 
     return Catalog(offerings, roles=roles)
 
@@ -1122,6 +1207,26 @@ def live_config() -> ResolvedModelConfig | None:
     return _resolved(catalog.live_offering())
 
 
+def transcription_offering() -> Offering | None:
+    """The single transcription (speech-to-text) offering, or None (PRP-0241, UDR-0222 D1).
+
+    Voice input exists only when the catalog registers one. Returned as the Offering
+    itself: the STT factory also needs ``transport`` and ``connection_model_ref``.
+    """
+    catalog = active_catalog()
+    return catalog.transcription_offering() if catalog is not None else None
+
+
+def speech_offering() -> Offering | None:
+    """The single speech (text-to-speech) offering, or None (PRP-0241, UDR-0222 D1).
+
+    Play message exists only when the catalog registers one; its ``provider`` selects
+    the TTS provider (azure-openai or elevenlabs, UDR-0222 D2).
+    """
+    catalog = active_catalog()
+    return catalog.speech_offering() if catalog is not None else None
+
+
 def image_output_defaults() -> dict[str, Any]:
     """The image offering's ``image_defaults`` block, or ``{}`` (PRP-0114, UDR-0095 D3).
 
@@ -1149,6 +1254,8 @@ _OFFERING_KEY_ORDER = (
     "provider",
     "model_ref",
     "operations",
+    "connection_model_ref",
+    "transport",
     "hosting",
     "family",
     "endpoint",
