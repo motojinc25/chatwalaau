@@ -1,9 +1,11 @@
-"""In-memory MCP tool override store (CTR-0061, PRP-0086, UDR-0064 D4).
+"""MCP tool override store (CTR-0061, PRP-0086, PRP-0242, UDR-0223 D6).
 
-Holds the operator's runtime selection of which MCP servers / individual MCP
-tools are DISABLED. The store is process-local and is NEVER persisted: on
-restart every MCP tool is enabled again, so the default (empty) state is
-byte-for-byte the pre-PRP-0086 behaviour (UDR-0064 D4/D7).
+Holds the operator's selection of which MCP servers / individual MCP tools are
+DISABLED. The selection is saved in the MCP config file as ``"disabled": true`` and
+``"disabled_tools"`` (UDR-0223 D6, superseding UDR-0064 D4): the lifecycle fills
+this store from the file at startup and on every reload (``seed_from_configs``),
+and PUT /api/mcp/tools writes the file before it updates the store. The store is
+the fast in-process view the agent factory reads on every build.
 
 The store records only the DISABLED identifiers; the live set of available
 servers/tools comes from the connected MCP tool instances (CTR-0061
@@ -60,6 +62,17 @@ class McpOverrideStore:
         with self._lock:
             self._disabled_servers = set(disabled_servers or set())
             self._disabled_tools = {server: set(tools) for server, tools in (disabled_tools or {}).items() if tools}
+
+    def seed_from_configs(self, configs: list) -> None:
+        """Replace the selection with the one saved in the config file (UDR-0223 D6).
+
+        ``configs`` are parsed ``MCPServerConfig`` entries; their ``disabled`` and
+        ``disabled_tools`` fields are the saved selection.
+        """
+        self.set_selection(
+            disabled_servers={c.name for c in configs if getattr(c, "disabled", False)},
+            disabled_tools={c.name: set(getattr(c, "disabled_tools", []) or []) for c in configs},
+        )
 
     def reset(self) -> None:
         """Clear all overrides (all MCP tools enabled). Used by tests."""

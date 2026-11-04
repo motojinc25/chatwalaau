@@ -1,5 +1,6 @@
-import { Loader2, Plug, RefreshCw } from 'lucide-react'
+import { Loader2, Lock, Pencil, Plug, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
+import { detailMessage, type McpServerConfigView, McpServerForm } from '@/components/McpServerForm'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { notifyMcpInventoryChanged } from '@/hooks/useMcpToolNames'
@@ -21,6 +22,12 @@ import { cn } from '@/lib/utils'
  * (`loaded === false`) shows a disabled toggle with a "Reload to apply" hint. The
  * icon is ALWAYS shown when the endpoint is reachable, and an empty state (the MCP
  * config path + Reload) is rendered when no servers are configured (UDR-0068 D5).
+ *
+ * PRP-0242 (CTR-0122 v3, UDR-0223): servers are added, edited, tested and removed
+ * here (McpServerForm, CTR-0278), and the enabled state is SAVED in the config file.
+ * A server saved as disabled is not connected (status `disabled`); its toggle stays
+ * usable so it can be turned back on, which reconnects it. A stdio server can be
+ * added or edited only when the backend says this request may (`stdio_editable`).
  */
 
 interface McpTool {
@@ -39,10 +46,11 @@ interface McpServer {
   tools: McpTool[]
 }
 
-type ConfirmMode = 'save' | 'close' | 'reload' | null
+type ConfirmMode = 'save' | 'close' | 'reload' | 'remove' | null
+type EditorState = { mode: 'add' } | { mode: 'edit'; name: string } | null
 
-// A server is toggleable only when it is actually connected (UDR-0068 D4). `loaded`
-// is optional for back-compat; treat absent as loaded.
+// A tool is toggleable only when its server is actually connected (UDR-0068 D4).
+// `loaded` is optional for back-compat; treat absent as loaded.
 function isLoaded(s: { loaded?: boolean }): boolean {
   return s.loaded !== false
 }
@@ -69,6 +77,8 @@ export function McpToolManager() {
   const [baseline, setBaseline] = useState('')
   const [selected, setSelected] = useState<string | null>(null)
   const [confirmMode, setConfirmMode] = useState<ConfirmMode>(null)
+  const [config, setConfig] = useState<McpServerConfigView | null>(null)
+  const [editor, setEditor] = useState<EditorState>(null)
 
   const dirty = servers.length > 0 && selectionKey(servers) !== baseline
 
@@ -106,9 +116,11 @@ export function McpToolManager() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/mcp/tools')
+      const [res, cfg] = await Promise.all([fetch('/api/mcp/tools'), fetch('/api/mcp/servers')])
       if (!res.ok) throw new Error('Failed to load MCP tools')
       adopt(await res.json())
+      // The editor needs the server entries; without them the modal still gates tools.
+      setConfig(cfg.ok ? ((await cfg.json()) as McpServerConfigView) : null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load MCP tools')
     } finally {
@@ -119,14 +131,46 @@ export function McpToolManager() {
   const openModal = useCallback(() => {
     setOpen(true)
     setConfirmMode(null)
+    setEditor(null)
     void fetchInventory()
   }, [fetchInventory])
 
   const resetAndClose = useCallback(() => {
     setOpen(false)
     setConfirmMode(null)
+    setEditor(null)
     setError(null)
   }, [])
+
+  // A server was added or replaced (the backend already reloaded): show it.
+  const afterServerSaved = useCallback(
+    async (name: string) => {
+      setEditor(null)
+      setSelected(name)
+      await fetchInventory()
+    },
+    [fetchInventory],
+  )
+
+  const doRemove = useCallback(async () => {
+    if (!selected) return
+    setConfirmMode(null)
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch(
+        `/api/mcp/servers/${encodeURIComponent(selected)}?revision=${encodeURIComponent(config?.revision ?? '')}`,
+        { method: 'DELETE' },
+      )
+      if (!res.ok) throw new Error(detailMessage(await res.json().catch(() => null), 'Failed to remove the server'))
+      setSelected(null)
+      await fetchInventory()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to remove the server')
+    } finally {
+      setSaving(false)
+    }
+  }, [selected, config, fetchInventory])
 
   const handleOpenChange = useCallback(
     (next: boolean) => {
@@ -206,6 +250,28 @@ export function McpToolManager() {
 
   const current = servers.find((s) => s.name === selected) ?? null
   const currentLoaded = current ? isLoaded(current) : false
+  const currentEntry = config?.servers.find((s) => s.name === current?.name)
+  const canWrite = Boolean(config?.writable)
+  // Editing needs a clean toggle state: a server save reloads and refreshes the toggles.
+  const editBlocked = !canWrite || dirty || saving
+  const editTitle = !canWrite
+    ? (config?.error ?? 'The MCP config cannot be written (MCP_CONFIG_FILE is empty)')
+    : dirty
+      ? 'Save or discard the toggle changes first'
+      : undefined
+  const currentLocked = currentEntry?.transport === 'stdio' && !config?.stdio_editable
+  const editorPane = editor && config && (
+    <McpServerForm
+      key={editor.mode === 'edit' ? `edit:${editor.name}` : 'add'}
+      mode={editor.mode}
+      initialName={editor.mode === 'edit' ? editor.name : undefined}
+      initialEntry={editor.mode === 'edit' ? config.servers.find((s) => s.name === editor.name)?.entry : undefined}
+      config={config}
+      existingNames={config.servers.map((s) => s.name)}
+      onSaved={afterServerSaved}
+      onCancel={() => setEditor(null)}
+    />
+  )
 
   return (
     <>
@@ -236,10 +302,10 @@ export function McpToolManager() {
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className="flex h-[90vh] w-[90vw] max-w-[90vw] flex-col gap-0 p-0">
           <DialogHeader className="border-b px-6 py-4">
-            <DialogTitle>MCP Tools</DialogTitle>
+            <DialogTitle>MCP Servers</DialogTitle>
             <DialogDescription>
-              Enable or disable MCP servers and individual tools. Saving rebuilds the agents so the next message uses
-              only the selected tools. Use Reload to reconnect servers after editing the config.
+              Add, edit or remove MCP servers, and enable or disable servers and individual tools. Changes are saved to
+              the MCP config file; a disabled server is disconnected. Use Reload after editing the file by hand.
             </DialogDescription>
           </DialogHeader>
 
@@ -248,24 +314,42 @@ export function McpToolManager() {
               <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
               </div>
+            ) : servers.length === 0 && editor ? (
+              <div className="min-w-0 flex-1 overflow-y-auto p-4">{editorPane}</div>
             ) : servers.length === 0 ? (
               /* Empty state (UDR-0068 D5): no MCP servers configured/connected yet. */
               <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
                 <Plug className="h-8 w-8 text-muted-foreground" />
                 <div className="text-sm font-medium">No MCP servers</div>
                 <p className="max-w-md text-xs text-muted-foreground">
-                  Add servers to
+                  Add a server here, or add it to
                   {configPath ? <code className="mx-1 font-mono">{configPath}</code> : ' the MCP config '}
-                  then click Reload to connect them without restarting.
+                  by hand and click Reload to connect it without restarting.
                 </p>
-                <Button variant="outline" size="sm" onClick={() => setConfirmMode('reload')}>
-                  <RefreshCw className="mr-1 h-3.5 w-3.5" /> Reload
-                </Button>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => setEditor({ mode: 'add' })} disabled={!canWrite} title={editTitle}>
+                    <Plus className="mr-1 h-3.5 w-3.5" /> Add server
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setConfirmMode('reload')}>
+                    <RefreshCw className="mr-1 h-3.5 w-3.5" /> Reload
+                  </Button>
+                </div>
               </div>
             ) : (
               <>
                 {/* Left: server list */}
                 <div className="w-64 shrink-0 overflow-y-auto border-r">
+                  <div className="border-b p-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => setEditor({ mode: 'add' })}
+                      disabled={editBlocked}
+                      title={editTitle}>
+                      <Plus className="mr-1 h-3.5 w-3.5" /> Add server
+                    </Button>
+                  </div>
                   {servers.map((s) => {
                     const enabledCount = s.tools.filter((t) => t.enabled).length
                     return (
@@ -277,20 +361,21 @@ export function McpToolManager() {
                         )}>
                         <button
                           type="button"
-                          onClick={() => setSelected(s.name)}
+                          onClick={() => {
+                            setSelected(s.name)
+                            setEditor(null)
+                          }}
                           className="flex min-w-0 flex-1 flex-col items-start text-left">
                           <span className="truncate text-sm font-medium">{s.name}</span>
                           <span className="text-[11px] text-muted-foreground">
                             {s.status} - {enabledCount}/{s.tools.length} tools
                           </span>
                         </button>
-                        <label
-                          className="flex shrink-0 cursor-pointer items-center"
-                          title={isLoaded(s) ? 'Enable server' : 'Not connected -- Reload to apply'}>
+                        <label className="flex shrink-0 cursor-pointer items-center" title="Enable server (saved)">
                           <input
                             type="checkbox"
-                            checked={s.enabled && isLoaded(s)}
-                            disabled={!isLoaded(s)}
+                            aria-label={`Enable ${s.name}`}
+                            checked={s.enabled}
                             onChange={() => toggleServer(s.name)}
                             className="h-4 w-4"
                           />
@@ -302,7 +387,9 @@ export function McpToolManager() {
 
                 {/* Right: selected server detail */}
                 <div className="min-w-0 flex-1 overflow-y-auto p-4">
-                  {current ? (
+                  {editor ? (
+                    editorPane
+                  ) : current ? (
                     <>
                       <div className="mb-3 flex items-center justify-between">
                         <div className="min-w-0">
@@ -311,18 +398,50 @@ export function McpToolManager() {
                             {current.transport} - {current.status}
                           </p>
                         </div>
-                        <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
-                          <input
-                            type="checkbox"
-                            checked={current.enabled && currentLoaded}
-                            disabled={!currentLoaded}
-                            onChange={() => toggleServer(current.name)}
-                            className="h-4 w-4"
-                          />
-                          Server enabled
-                        </label>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {currentEntry && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setEditor({ mode: 'edit', name: current.name })}
+                                disabled={editBlocked}
+                                title={
+                                  currentLocked ? 'stdio servers can be edited only on the server machine' : editTitle
+                                }>
+                                {currentLocked ? (
+                                  <Lock className="mr-1 h-3.5 w-3.5" />
+                                ) : (
+                                  <Pencil className="mr-1 h-3.5 w-3.5" />
+                                )}
+                                {currentLocked ? 'View' : 'Edit'}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setConfirmMode('remove')}
+                                disabled={editBlocked}
+                                title={editTitle}>
+                                <Trash2 className="mr-1 h-3.5 w-3.5" /> Remove
+                              </Button>
+                            </>
+                          )}
+                          <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={current.enabled}
+                              onChange={() => toggleServer(current.name)}
+                              className="h-4 w-4"
+                            />
+                            Server enabled
+                          </label>
+                        </div>
                       </div>
-                      {!currentLoaded ? (
+                      {current.status === 'disabled' ? (
+                        <p className="text-sm text-muted-foreground">
+                          This server is disabled and not connected. Turn it on and Save to connect it.
+                        </p>
+                      ) : !currentLoaded ? (
                         <p className="text-sm text-amber-600 dark:text-amber-500">
                           This server is configured but not connected. Click Reload to connect it.
                         </p>
@@ -379,14 +498,18 @@ export function McpToolManager() {
                         ? 'Apply MCP tool changes?'
                         : confirmMode === 'reload'
                           ? 'Reload MCP servers?'
-                          : 'Discard unsaved changes?'}
+                          : confirmMode === 'remove'
+                            ? `Remove ${selected}?`
+                            : 'Discard unsaved changes?'}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {confirmMode === 'save'
-                        ? 'This rebuilds the agents; the next message uses the selected tools.'
+                        ? 'The selection is saved to the MCP config file and the agents are rebuilt; turning a server on or off reconnects the servers.'
                         : confirmMode === 'reload'
                           ? 'Re-parses the config, reconnects servers, and rebuilds the agents. Unsaved changes are discarded.'
-                          : 'Your changes have not been saved.'}
+                          : confirmMode === 'remove'
+                            ? 'The server is removed from the MCP config file and disconnected. Workflows that name it can no longer reach it.'
+                            : 'Your changes have not been saved.'}
                     </p>
                     <div className="mt-3 flex justify-end gap-2">
                       <Button variant="outline" size="sm" onClick={() => setConfirmMode(null)}>
@@ -399,6 +522,10 @@ export function McpToolManager() {
                       ) : confirmMode === 'reload' ? (
                         <Button size="sm" onClick={doReload}>
                           Reload
+                        </Button>
+                      ) : confirmMode === 'remove' ? (
+                        <Button variant="destructive" size="sm" onClick={doRemove}>
+                          Remove
                         </Button>
                       ) : (
                         <Button variant="destructive" size="sm" onClick={resetAndClose}>
@@ -421,7 +548,7 @@ export function McpToolManager() {
               <Button variant="outline" size="sm" onClick={() => handleOpenChange(false)} disabled={saving}>
                 Close
               </Button>
-              <Button size="sm" onClick={() => setConfirmMode('save')} disabled={!dirty || saving}>
+              <Button size="sm" onClick={() => setConfirmMode('save')} disabled={!dirty || saving || editor !== null}>
                 Save
               </Button>
             </div>

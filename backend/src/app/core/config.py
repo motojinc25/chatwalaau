@@ -784,6 +784,10 @@ class Settings(BaseSettings):
     # the tracked bundle (mcp_servers.default.jsonc). Explicit empty
     # string keeps MCP disabled (operator-acknowledged opt-out).
     mcp_config_file: str = "mcp_servers.jsonc"
+    # PRP-0242 (UDR-0223 D2): adding, editing or testing a stdio MCP server runs a
+    # command on this machine, so the screen allows it only from a local request
+    # (loopback, no forwarding header) unless this .env gate is true.
+    mcp_stdio_remote_edit: bool = False
 
     # MCP Apps (CTR-0066, PRP-0034)
     mcp_apps_sandbox_port: int = 8081

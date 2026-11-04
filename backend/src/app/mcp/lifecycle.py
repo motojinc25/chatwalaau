@@ -4,6 +4,11 @@ Manages startup and shutdown of MCP tool instances tied to the FastAPI
 application lifecycle. Uses AsyncExitStack to properly enter and exit
 each MCP tool's async context manager. Registers atexit and SIGTERM
 handlers for zombie process prevention.
+
+PRP-0242 (UDR-0223 D6): a server saved as ``"disabled": true`` is parsed but not
+connected (a disabled stdio server starts no process), and the override store is
+filled from the file on every startup and reload. ``probe_mcp_server`` connects a
+candidate entry alone for the screen's Test button and always closes it.
 """
 
 import asyncio
@@ -15,7 +20,7 @@ import signal
 import sys
 
 from app.core.config import settings
-from app.mcp.config import parse_mcp_config
+from app.mcp.config import MCPServerConfig, parse_mcp_config
 from app.mcp.provider import create_mcp_tool
 
 logger = logging.getLogger(__name__)
@@ -94,18 +99,22 @@ def get_server_tool_names(server_name: str) -> list[str]:
 def _configured_server_entries() -> list[dict]:
     """Best-effort re-parse of the MCP config for the inventory (PRP-0090, UDR-0068 D4).
 
-    Returns ``[{name, transport}]`` for every server currently declared in the config
-    file. Used to surface servers that were ADDED to the config after startup (not yet
-    connected, so absent from ``_mcp_tools``) as ``loaded=false`` rows -- the operator
-    sees them and can Reload to connect. Any parse problem yields an empty list so the
-    inventory degrades to the connected-only view.
+    Returns ``[{name, transport, disabled}]`` for every server currently declared in
+    the config file. Used to surface servers that are not connected -- ADDED since
+    startup, saved as disabled (PRP-0242), or naming an unset ``${VAR}`` -- as
+    ``loaded=false`` rows. Values are not resolved here, so a server with an unset
+    variable is still listed. Any parse problem yields an empty list so the inventory
+    degrades to the connected-only view.
     """
     try:
-        config_path = _resolve_mcp_config_path()
-        if config_path is None:
+        from app.mcp.config import parse_mcp_document
+        from app.mcp.config_store import read_document
+
+        doc = read_document()
+        if doc.read_path is None or doc.error:
             return []
-        server_configs = parse_mcp_config(config_path)
-        return [{"name": sc.name, "transport": sc.transport} for sc in server_configs]
+        server_configs = parse_mcp_document(doc.data, resolve=False, source=str(doc.read_path))
+        return [{"name": sc.name, "transport": sc.transport, "disabled": sc.disabled} for sc in server_configs]
     except Exception:
         logger.debug("MCP config re-parse for inventory failed", exc_info=True)
         return []
@@ -127,9 +136,10 @@ def get_mcp_tool_inventory() -> list[dict]:
     override store (CTR-0061, UDR-0064 D4).
 
     The inventory is then UNIONED with servers declared in the config but NOT currently
-    connected (added since startup): they appear as ``loaded=false`` rows with status
-    ``not_loaded`` and no tools, so the UI can disable their toggle and prompt a Reload
-    (PRP-0090, UDR-0068 D4).
+    connected: they appear as ``loaded=false`` rows with no tools, with status
+    ``disabled`` for a server saved as disabled (PRP-0242, UDR-0223 D6; enabling it
+    reconnects it) and ``not_loaded`` otherwise (added since startup -- Reload connects
+    it; PRP-0090, UDR-0068 D4).
     """
     from app.mcp.overrides import get_override_store
 
@@ -169,8 +179,8 @@ def get_mcp_tool_inventory() -> list[dict]:
             {
                 "name": entry["name"],
                 "transport": entry.get("transport", ""),
-                "status": "not_loaded",
-                "enabled": not store.server_disabled(entry["name"]),
+                "status": "disabled" if entry.get("disabled") else "not_loaded",
+                "enabled": not entry.get("disabled") and not store.server_disabled(entry["name"]),
                 "loaded": False,
                 "tools": [],
             }
@@ -213,6 +223,42 @@ def _resolve_mcp_config_path() -> Path | None:
     return None
 
 
+def _seed_selection(server_configs: list[MCPServerConfig]) -> None:
+    """Fill the override store from the selection saved in the file (UDR-0223 D6)."""
+    from app.mcp.overrides import get_override_store
+
+    get_override_store().seed_from_configs(server_configs)
+
+
+def _enabled(server_configs: list[MCPServerConfig]) -> list[MCPServerConfig]:
+    """The servers to connect: a server saved as disabled is never connected (UDR-0223 D6)."""
+    out = []
+    for server_config in server_configs:
+        if server_config.disabled:
+            logger.info("MCP server '%s' is disabled in the config; not connecting it", server_config.name)
+        else:
+            out.append(server_config)
+    return out
+
+
+async def probe_mcp_server(server_config: MCPServerConfig, timeout: float) -> list[tuple[str, str]]:
+    """Connect one candidate server alone, list its tools, and close it (CTR-0278 test).
+
+    Touches neither the config file nor the live tool list. The candidate is closed on
+    every outcome, so a stdio test never leaves a process behind. Raises on a failed or
+    timed-out connection.
+    """
+    tool = create_mcp_tool(server_config)
+    try:
+        await asyncio.wait_for(tool.connect(), timeout=timeout)
+        return _function_entries(tool)
+    finally:
+        try:
+            await asyncio.wait_for(tool.close(), timeout=10)
+        except Exception:
+            logger.warning("MCP test connection for '%s' did not close cleanly", server_config.name, exc_info=True)
+
+
 def prepare_mcp() -> None:
     """Synchronous phase: parse config and create MCP tool instances.
 
@@ -232,11 +278,12 @@ def prepare_mcp() -> None:
         return
 
     server_configs = parse_mcp_config(config_path)
+    _seed_selection(server_configs)
     if not server_configs:
         logger.warning("No valid MCP server entries found in %s", config_path)
         return
 
-    for server_config in server_configs:
+    for server_config in _enabled(server_configs):
         tool = create_mcp_tool(server_config)
         _mcp_tools.append(tool)
         _mcp_raw_tools.append(tool)
@@ -330,19 +377,19 @@ async def reload_mcp() -> None:
         new_tools: list = []
         new_raw: list = []
         new_status: list[dict] = []
-        if config_path is not None:
-            server_configs = parse_mcp_config(config_path)
-            for server_config in server_configs:
-                tool = create_mcp_tool(server_config)
-                new_tools.append(tool)
-                new_raw.append(tool)
-                new_status.append(
-                    {
-                        "name": server_config.name,
-                        "transport": server_config.transport,
-                        "status": "prepared",
-                    }
-                )
+        server_configs = parse_mcp_config(config_path) if config_path is not None else []
+        _seed_selection(server_configs)
+        for server_config in _enabled(server_configs):
+            tool = create_mcp_tool(server_config)
+            new_tools.append(tool)
+            new_raw.append(tool)
+            new_status.append(
+                {
+                    "name": server_config.name,
+                    "transport": server_config.transport,
+                    "status": "prepared",
+                }
+            )
 
         new_stack = AsyncExitStack()
         started = 0

@@ -101,6 +101,24 @@ def is_client_loopback(client_host: str | None) -> bool:
         return False
 
 
+#: Headers a reverse proxy or tunnel adds when it forwards someone else's request.
+_FORWARDING_HEADERS = ("forwarded", "x-forwarded-for", "x-real-ip", "cf-connecting-ip")
+
+
+def is_local_request(request: Request) -> bool:
+    """Return True only for a request made on this machine (CTR-0083 v5, PRP-0242, UDR-0223 D3).
+
+    The peer must be loopback AND the request must carry no forwarding header, so a
+    reverse proxy or tunnel on the same host (nginx, cloudflared) never makes a remote
+    person look local. Used by the stdio MCP gate; the loopback bypass of
+    ``verify_api_key`` is unchanged.
+    """
+    client_host = request.client.host if request.client else None
+    if not is_client_loopback(client_host):
+        return False
+    return not any(name in request.headers for name in _FORWARDING_HEADERS)
+
+
 # Backward-compat alias for the previous private name (the existing
 # integration test ``test_ctr0083_api_auth.py`` patches the helper by
 # this name).
@@ -292,6 +310,7 @@ __all__ = [
     "Identity",
     "authorize_websocket",
     "is_client_loopback",
+    "is_local_request",
     "verify_api_key",
     "verify_api_key_strict",
 ]
