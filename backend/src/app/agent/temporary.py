@@ -86,7 +86,8 @@ def in_temporary_run() -> bool:
 def sweep_temporary(retention_days: int | None = None) -> int:
     """Best-effort delete quarantine entries older than the retention period.
 
-    Deletes ``.temporary/temp_*.json`` files and ``.uploads/temp_*/`` upload
+    Deletes ``.temporary/temp_*.json`` files, their ``temp_*.harness/`` session
+    snapshot directories (CTR-0279, UDR-0224 D5) and ``.uploads/temp_*/`` upload
     subdirectories whose last-modified age exceeds the retention period (UDR-0052
     D4). Returns the number of entries deleted. A failed delete logs a WARNING
     and is retried on the next sweep; this function never raises and never blocks
@@ -107,6 +108,15 @@ def sweep_temporary(retention_days: int | None = None) -> int:
                     deleted += 1
             except OSError:
                 logger.warning("Could not delete expired temporary session %s", path, exc_info=True)
+        for path in qdir.glob(f"{TEMP_THREAD_PREFIX}*.harness"):
+            if not path.is_dir():
+                continue
+            try:
+                if path.stat().st_mtime < cutoff:
+                    shutil.rmtree(path, ignore_errors=True)
+                    deleted += 1
+            except OSError:
+                logger.warning("Could not delete expired temporary harness snapshots %s", path, exc_info=True)
 
     uploads = Path(settings.upload_dir)
     if uploads.is_dir():

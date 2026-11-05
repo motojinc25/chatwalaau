@@ -936,7 +936,7 @@ class TruncateRequest(BaseModel):
     delete_from: int
 
 
-async def _reset_harness_conversation(thread_id: str, *, reason: str) -> None:
+async def _reset_harness_conversation(thread_id: str, *, reason: str, keep_snapshot: bool = False) -> None:
     """Discard the conversation's cached harness runtime session (UDR-0119 D11).
 
     A harness agent's history, todo list and mode live in a per-conversation MAF
@@ -948,11 +948,14 @@ async def _reset_harness_conversation(thread_id: str, *, reason: str) -> None:
 
     Best-effort by design. A cleanup failure must never fail the user's edit, and a
     non-harness conversation simply has nothing cached (drops 0).
+
+    The saved harness snapshots are deleted as well (UDR-0224 D5) unless
+    ``keep_snapshot`` -- archive moves them with the chat instead.
     """
     try:
         from app.agent.harness.runtime import drop_thread
 
-        dropped = await drop_thread(thread_id, reason=reason)
+        dropped = await drop_thread(thread_id, reason=reason, keep_snapshot=keep_snapshot)
         if dropped:
             logger.info(
                 "Reset %d harness conversation(s) for session %s (reason=%s)",
@@ -1285,6 +1288,17 @@ async def archive_session(thread_id: str) -> dict[str, str]:
             settings.upload_dir,
             exc_info=True,
         )
+
+    # Harness session snapshots move with the chat (CTR-0279, PRP-0243 Q6, UDR-0224 D5).
+    # The cached runtime is dropped first, KEEPING the snapshot, so a turn still in
+    # memory cannot write a snapshot back into the session directory afterwards.
+    await _reset_harness_conversation(thread_id, reason="session_archived", keep_snapshot=True)
+    try:
+        from app.agent.harness.persist import archive_thread
+
+        archive_thread(thread_id, archived_path)
+    except Exception:  # best-effort, like the uploads: the chat is already archived
+        logger.warning("Archived session %s but could not move its harness snapshots", thread_id, exc_info=True)
 
     logger.info("Archived session %s -> %s", thread_id, dest)
     return {"status": "archived", "thread_id": thread_id}

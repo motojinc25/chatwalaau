@@ -2129,6 +2129,16 @@ async def _stream_with_reasoning(
         # around the window it controlled goes away. Fire-and-forget; never yields.
         end_computer_use_run()
 
+        # Harness session snapshot (CTR-0279, PRP-0243, UDR-0224 D2): saved on EVERY exit
+        # -- completed, failed or stopped -- so it mirrors the cached session and a
+        # restart continues the conversation where it stood. Synchronous (no await
+        # during GeneratorExit) and self-silencing; skipped when a truncate or delete
+        # dropped the conversation during the turn.
+        if _harness_ctx is not None:
+            from app.agent.harness.runtime import save_if_current
+
+            save_if_current(str(_harness_id), thread_id, _harness_ctx[1])
+
         # Token Usage Ledger (CTR-0200, PRP-0158, UDR-0136 D5/D6/D8). The turn is
         # recorded HERE, in the finally, because this is the only place that runs on
         # EVERY exit: normal completion, a classified error, and a user Stop or

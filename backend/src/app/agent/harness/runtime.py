@@ -3,9 +3,13 @@
 A harness agent is a per-conversation RUN-TARGET. Its live state -- the MAF
 InMemoryHistoryProvider history, todo list, mode, and loop state -- lives in ONE
 (agent, AgentSession) pair per (harness_id, thread_id), cached here so it
-survives across turns of one conversation and is lost on restart (the UDR-0072
-D7 in-memory precedent). Authoring writes and reloads clear the cache so an
-edited YAML takes effect on the next turn.
+survives across turns of one conversation. Authoring writes and reloads clear the
+cache so an edited YAML takes effect on the next turn.
+
+The session is also SAVED at the end of each turn (``save_if_current``) and
+RESTORED when the cache builds the conversation again -- after a restart, an
+eviction or a cache clear (CTR-0279, PRP-0243, UDR-0224 D4). A changed YAML
+restores the history only; the todo list and the mode start fresh.
 
 The cache is bounded; eviction closes the entry's persistent LocalShellTool
 process (single-session ownership).
@@ -18,7 +22,7 @@ from collections import OrderedDict
 import logging
 from typing import Any
 
-from app.agent.harness import history_debug, history_normalize
+from app.agent.harness import history_debug, history_normalize, persist
 from app.agent.harness.factory import HarnessRuntime, build_harness_runtime
 from app.agent.harness.loader import resolve_spec
 
@@ -29,10 +33,41 @@ _MAX_ENTRIES = 32
 
 
 class _Entry:
-    def __init__(self, runtime: HarnessRuntime, session: Any, model_id: str) -> None:
+    def __init__(self, runtime: HarnessRuntime, session: Any, model_id: str, spec_fingerprint: str = "") -> None:
         self.runtime = runtime
         self.session = session
         self.model_id = model_id
+        # The YAML this runtime was BUILT from (UDR-0224 D3), saved with the session.
+        self.spec_fingerprint = spec_fingerprint
+
+
+def _history_source_id(agent: Any) -> str:
+    """The source id of MAF's own history provider on this agent (UDR-0119 D4)."""
+    from agent_framework import InMemoryHistoryProvider
+
+    for provider in getattr(agent, "context_providers", None) or []:
+        if isinstance(provider, InMemoryHistoryProvider):
+            return str(provider.source_id)
+    return InMemoryHistoryProvider.DEFAULT_SOURCE_ID
+
+
+def _restore_session(harness_id: str, thread_id: str, runtime: HarnessRuntime, spec: Any) -> Any | None:
+    """The saved session for this conversation, per the UDR-0224 D4 rules, or None."""
+    snapshot = persist.load(thread_id, harness_id)
+    if snapshot is None:
+        return None
+    session = snapshot["session"]
+    if snapshot.get("spec_fingerprint") == spec.source_fingerprint:
+        logger.info("[harness session] thread=%s harness=%s restored", thread_id, harness_id)
+        return session
+    model_changed = snapshot.get("model_id") != spec.model_id
+    logger.info(
+        "[harness session] thread=%s harness=%s restored history only (YAML changed%s)",
+        thread_id,
+        harness_id,
+        ", model changed: reasoning dropped" if model_changed else "",
+    )
+    return persist.history_only(session, _history_source_id(runtime.agent), strip_reasoning=model_changed)
 
 
 _cache: OrderedDict[tuple[str, str], _Entry] = OrderedDict()
@@ -62,7 +97,7 @@ async def agent_for_thread(harness_id: str, thread_id: str) -> tuple[Any, Any, s
         # `_storage_key_segment`, which keeps a literal-safe id verbatim and ENCODES
         # anything else -- a custom id would silently relocate every memory written
         # so far (UDR-0162 D3).
-        session = AgentSession()
+        session = _restore_session(harness_id, thread_id, runtime, spec) or AgentSession()
         # PRP-0148 Section 4.1: make MAF's own history provider report what it loads.
         # Attached here rather than passed into the factory so UDR-0119 D4's "parameter
         # omitted" -- pinned by the PRP-0135 / PRP-0144 invariants -- stays literally true.
@@ -75,7 +110,7 @@ async def agent_for_thread(harness_id: str, thread_id: str) -> tuple[Any, Any, s
         # it removes is what makes MAF's compaction split a call from its result, and
         # the request seam cannot repair that from downstream.
         history_normalize.attach_history_normalization(runtime.agent, thread_id=thread_id)
-        _cache[key] = _Entry(runtime, session, spec.model_id)
+        _cache[key] = _Entry(runtime, session, spec.model_id, spec.source_fingerprint)
         logger.info("[harness session] thread=%s harness=%s created", thread_id, harness_id)
         while len(_cache) > _MAX_ENTRIES:
             evicted_key, evicted = _cache.popitem(last=False)
@@ -91,8 +126,10 @@ async def agent_for_thread(harness_id: str, thread_id: str) -> tuple[Any, Any, s
 def _log_drop(key: tuple[str, str], entry: _Entry, *, reason: str) -> None:
     """One line per discarded conversation, naming what went with it (Section 4.2).
 
-    Dropping a harness session also discards the agent's todo list and mode
-    (PRP-0148 Section 1.4). That cost is accepted, but it is never silent.
+    Dropping a cached harness session removes its todo list and mode from memory
+    (PRP-0148 Section 1.4). An eviction or a cache clear keeps the saved snapshot, so
+    the next turn restores them (UDR-0224 D4); a truncate or delete removes it too.
+    Either way the drop is never silent.
     """
     try:
         harness_id, thread_id = key
@@ -108,7 +145,29 @@ def _log_drop(key: tuple[str, str], entry: _Entry, *, reason: str) -> None:
         logger.exception("[harness session] failed to describe a dropped session")
 
 
-async def drop_thread(thread_id: str, *, reason: str) -> int:
+def save_if_current(harness_id: str, thread_id: str, session: Any) -> bool:
+    """Save the conversation's session at the end of a turn (UDR-0224 D2).
+
+    Only while ``session`` is still the cached one: a truncate or delete during the
+    turn dropped the entry, and writing it back would restore history the operator
+    removed (UDR-0119 D11). Synchronous and never raising -- it runs in the AG-UI
+    endpoint's ``finally``. The check needs no lock: it does not await, so nothing
+    else on the event loop runs between the check and the write.
+    """
+    entry = _cache.get((harness_id, thread_id))
+    if entry is None or entry.session is not session:
+        logger.info("[harness session] thread=%s harness=%s not saved (dropped during the turn)", thread_id, harness_id)
+        return False
+    return persist.save(
+        thread_id,
+        harness_id,
+        session,
+        spec_fingerprint=entry.spec_fingerprint,
+        model_id=entry.model_id,
+    )
+
+
+async def drop_thread(thread_id: str, *, reason: str, keep_snapshot: bool = False) -> int:
     """Discard every cached harness conversation for one thread (UDR-0119 D11).
 
     A harness conversation's runtime session is state the operator CANNOT SEE, and
@@ -122,6 +181,9 @@ async def drop_thread(thread_id: str, *, reason: str) -> int:
     A thread can hold entries for more than one ``harness_id`` when the run-target
     was switched mid-conversation, so every matching entry is dropped.
 
+    The saved snapshots go too (UDR-0224 D5), unless ``keep_snapshot`` -- archive
+    moves them with the chat instead.
+
     Returns the number of conversations dropped. Never raises: a cleanup failure
     must not fail the user's edit.
     """
@@ -134,6 +196,11 @@ async def drop_thread(thread_id: str, *, reason: str) -> int:
                 dropped.append(entry)
     except Exception:
         logger.exception("[harness session] failed to drop thread %s", thread_id)
+    if not keep_snapshot:
+        try:
+            persist.delete_thread(thread_id)
+        except Exception:
+            logger.exception("[harness session] failed to delete the snapshots of thread %s", thread_id)
     for entry in dropped:
         try:
             await entry.runtime.aclose()
@@ -150,6 +217,9 @@ async def clear_cache(reason: str = "authoring_reload") -> None:
     e.g. ``mcp: false``) and the MCP override store / MCP reload. A cached runtime keeps
     the tools it was built with, so without this an already-open harness conversation
     went on calling MCP tools its offering now withholds.
+
+    The saved snapshots stay: the next turn rebuilds the runtime and restores the
+    conversation (UDR-0224 D4), so a reload no longer erases harness memory.
     """
     async with _lock:
         entries = list(_cache.values())
@@ -165,4 +235,4 @@ def cache_size() -> int:
     return len(_cache)
 
 
-__all__ = ["agent_for_thread", "cache_size", "clear_cache", "drop_thread"]
+__all__ = ["agent_for_thread", "cache_size", "clear_cache", "drop_thread", "save_if_current"]

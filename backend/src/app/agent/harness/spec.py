@@ -113,6 +113,9 @@ class HarnessAgentSpec:
     code_act_disabled: bool = False
     # None => MAF harness DEFAULT_MAX_ITERATIONS; always clamped to it (D4).
     loop_max_iterations: int | None = None
+    # PRP-0243 / UDR-0224 D3: SHA-256 of the YAML text this spec was mapped from, set by
+    # resolve_spec(). A saved harness session restores fully only while it matches.
+    source_fingerprint: str = ""
 
     # Validation notes. ANY warning blocks the agent from becoming a selectable
     # run-target (UDR-0119 D8, the UDR-0072 D9 pattern).

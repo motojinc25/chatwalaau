@@ -10,6 +10,7 @@ ANY warning blocks run-target selection (UDR-0119 D8).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 
@@ -126,6 +127,7 @@ def resolve_spec(agent_id: str) -> HarnessAgentSpec:
             except OSError as exc:
                 raise HarnessAgentError(f"Could not read {agent_id}: {exc}") from exc
             spec = map_document(text, agent_id=cid, group_path=group_path, default_name=path.stem)
+            spec.source_fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
             _annotate_model_warnings(spec)
             _annotate_tool_warnings(spec)
             _annotate_budget_warnings(spec)
@@ -248,6 +250,7 @@ def load_inventory() -> dict:
         try:
             text = path.read_text(encoding="utf-8")
             spec = map_document(text, agent_id=cid, group_path=group_path, default_name=path.stem)
+            spec.source_fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
             _annotate_model_warnings(spec)
             _annotate_tool_warnings(spec)
             _annotate_budget_warnings(spec)
