@@ -95,6 +95,7 @@ export function ChatPage() {
     hasMoreSessions,
     // Folder-aware chat (PRP-0196, UDR-0178).
     currentFolderId,
+    currentHarnessProject,
     pendingFolderId,
     confirmSessionFolder,
     clearPendingFolder,
@@ -459,6 +460,8 @@ export function ChatPage() {
                 liveCapable
                 // AI Discussion controls: the full-page chat only (PRP-0232 2.7).
                 discussionCapable
+                // Harness project folder (PRP-0244): the full-page chat only.
+                savedHarnessProject={temp.isTemporary ? undefined : currentHarnessProject}
               />
             )}
           </div>

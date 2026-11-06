@@ -14,8 +14,11 @@ ChatWalaʻau owns every INPUT --
   (initial mode from YAML), ``todos_remaining()`` loop clamped to the MAF cap,
   continuing in EXECUTE mode only (PRP-0181, UDR-0163 D1),
   ``file_access_disable_readonly_tool_approval=True`` set EXPLICITLY.
-* Workspace wiring (UDR-0119 D7): CODING_WORKSPACE_DIR-scoped file stores and a
-  LocalShellTool; Skills through the SHARED provider (below).
+* Workspace wiring (UDR-0119 D7 as amended by PRP-0244 / UDR-0225 D3): the file-access
+  store and the shell share ONE root, the conversation's project folder (the workspace root
+  when none is chosen); the file memory stays at ``{dir}/agent-file-memory``. The project
+  provider (CTR-0280) names that folder and, with ``projectRules.enabled``, adds its
+  AGENTS.md / CLAUDE.md. Skills through the SHARED provider (below).
 * Skills ride ``skills_provider=create_skills_provider(allowlist_names=...)`` -- the
   ONE construction path for a mounted SkillsProvider (CTR-0043, UDR-0130 D1). The
   allow-list is new in PRP-0185 (UDR-0167 D9); ``None`` inherits every enabled skill. Handing MAF a bare
@@ -137,9 +140,10 @@ def loop_looping_modes(spec: HarnessAgentSpec) -> list[str] | None:
     return None if spec.mode_disabled else ["execute"]
 
 
-# Subdirectories under CODING_WORKSPACE_DIR for the harness stores (UDR-0119 D7).
+# The file-memory subdirectory under CODING_WORKSPACE_DIR (UDR-0119 D7, UDR-0162 D3).
+# The file-access store has no subdirectory of its own any more: it shares the project
+# root with the shell (PRP-0244, UDR-0225 D3).
 FILE_MEMORY_SUBDIR = "agent-file-memory"
-FILE_ACCESS_SUBDIR = "agent-file-access"
 
 # Application default output-token budget for compaction (PRP-0144, UDR-0125 D3,
 # amending UDR-0119 D9). A backend constant, deliberately NOT an env var -- the
@@ -417,9 +421,20 @@ class HarnessRuntime:
     eviction (LocalShellTool is single-session by contract).
     """
 
-    def __init__(self, agent: Any, shell_executor: Any | None) -> None:
+    def __init__(
+        self,
+        agent: Any,
+        shell_executor: Any | None,
+        *,
+        project_root: str | None = None,
+        project_provider: Any | None = None,
+    ) -> None:
         self.agent = agent
         self.shell_executor = shell_executor
+        # PRP-0244 / UDR-0225 D4: the root this runtime was BUILT for; the cache rebuilds
+        # the runtime (keeping the session) when a turn names another one. None: no workspace.
+        self.project_root = project_root
+        self.project_provider = project_provider
 
     async def aclose(self) -> None:
         """Best-effort cleanup of the persistent shell process."""
@@ -447,8 +462,17 @@ def build_harness_agent(spec: HarnessAgentSpec) -> Any:
     return build_harness_runtime(spec).agent
 
 
-def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
+def build_harness_runtime(
+    spec: HarnessAgentSpec,
+    *,
+    project_abs: str | None = None,
+    project_rel: str = "",
+) -> HarnessRuntime:
     """Build the runtime for one harness spec (CTR-0193).
+
+    ``project_abs`` / ``project_rel`` are the conversation's VALIDATED project root
+    (``app.coding.folders.resolve_project_root``, UDR-0225 D2); None means the workspace
+    root. Ignored when CODING_WORKSPACE_DIR is unset.
 
     Raises :class:`HarnessAgentError` for a spec with blocking warnings, an
     unbuildable client, or DEMO_MODE (UDR-0119 D7/D8). Never returns a
@@ -496,10 +520,16 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
     file_memory_store = None
     file_access_store = None
     shell_executor = None
+    project_root: Path | None = None
+    project_provider = None
     if workspace is not None:
+        # PRP-0244 / UDR-0225 D3: ONE root for the file tools and the shell -- the
+        # conversation's project folder, or the workspace root (the root the File
+        # Explorer shows). The file memory does not move with the project (UDR-0162 D3).
+        project_root = Path(project_abs) if project_abs else workspace
         if not spec.file_memory_disabled:
             file_memory_store = FileSystemAgentFileStore(workspace / FILE_MEMORY_SUBDIR)
-        file_access_store = FileSystemAgentFileStore(workspace / FILE_ACCESS_SUBDIR)
+        file_access_store = FileSystemAgentFileStore(project_root)
         try:
             from app.agent.harness.shell import WorkspaceShellTool
 
@@ -517,7 +547,7 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
             # (CODING_WORKSPACE_DIR, UDR-0161 D4); the shell stays confined to the
             # workspace directory.
             shell_executor = WorkspaceShellTool(
-                workdir=workspace,
+                workdir=project_root,
                 approval_mode="never_require",
                 acknowledge_unsafe=True,
             )
@@ -577,6 +607,18 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
         codeact_provider = create_codeact_provider()
         if codeact_provider is not None:
             context_providers.append(codeact_provider)
+
+    # The project folder and its rules (PRP-0244, CTR-0280, UDR-0225 D7): LAST, so its
+    # block follows the harness, agent and CodeAct instructions. Only with a workspace.
+    if project_root is not None:
+        from app.agent.harness.project_rules import ProjectRulesProvider
+
+        project_provider = ProjectRulesProvider(
+            str(project_root),
+            project_rel if project_abs else "",
+            rules_enabled=spec.project_rules_enabled,
+        )
+        context_providers.append(project_provider)
 
     max_window, max_output, _budget_source = resolve_compaction_budget(spec)
     # Canary, unreachable by construction above. A declared-enabled compaction
@@ -687,17 +729,25 @@ def build_harness_runtime(spec: HarnessAgentSpec) -> HarnessRuntime:
     else:
         _compaction_desc = "off"
     logger.info(
-        "Harness agent built: id=%s model=%s tools=%d web_search=%s workspace=%s skills=%s code_act=%s compaction=%s",
+        "Harness agent built: id=%s model=%s tools=%d web_search=%s workspace=%s project=%s project_rules=%s "
+        "skills=%s code_act=%s compaction=%s",
         spec.id,
         spec.model_id,
         len(tools),
         not disable_web_search,
         workspace is not None,
+        (project_rel or "(workspace)") if project_root is not None else "-",
+        spec.project_rules_enabled and project_root is not None,
         skills_provider is not None,
-        bool(context_providers),
+        any(p is not project_provider for p in context_providers),
         _compaction_desc,
     )
-    return HarnessRuntime(agent, shell_executor)
+    return HarnessRuntime(
+        agent,
+        shell_executor,
+        project_root=str(project_root) if project_root is not None else None,
+        project_provider=project_provider,
+    )
 
 
 def preflight(spec: HarnessAgentSpec) -> dict:
@@ -729,7 +779,6 @@ def preflight(spec: HarnessAgentSpec) -> dict:
 __all__ = [
     "DEFAULT_AGENT_INSTRUCTIONS",
     "DEFAULT_HARNESS_MAX_OUTPUT_TOKENS",
-    "FILE_ACCESS_SUBDIR",
     "FILE_MEMORY_SUBDIR",
     "HarnessRuntime",
     "build_harness_agent",

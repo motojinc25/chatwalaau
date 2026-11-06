@@ -30,6 +30,8 @@ export interface HarnessDocument {
   webSearch: { disabled?: boolean }
   /** PRP-0193: the CodeAct compute sandbox switch. Optional: older documents omit it. */
   codeAct?: { disabled?: boolean }
+  /** PRP-0244 (UDR-0225 D5): the project folder's AGENTS.md / CLAUDE.md as rules. Off by default. */
+  projectRules?: { enabled?: boolean }
   loop: { maxIterations?: number | null }
 }
 
@@ -38,6 +40,8 @@ export interface HarnessPolicy {
   web_search: 'enabled' | 'disabled' | 'withheld'
   /** PRP-0193 (UDR-0175 D9): YAML switch, offering opt-out, then the App Setting. */
   code_act?: 'enabled' | 'disabled' | 'withheld' | 'off'
+  /** PRP-0244 (UDR-0225 D5): the YAML opt-in; 'off' without a workspace. Absent on older backends. */
+  project_rules?: 'enabled' | 'disabled' | 'off'
   file_memory: boolean
   file_access: boolean
   shell: boolean

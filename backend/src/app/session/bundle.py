@@ -91,6 +91,8 @@ _STRIPPED_FIELDS = (
     "auto_title_pending",
     "auto_title_done",
     "memory_extracted_index",
+    # PRP-0244 / UDR-0225 D1: a harness project folder belongs to the exporting instance.
+    "harness_project",
 )
 
 

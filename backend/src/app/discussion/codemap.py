@@ -45,28 +45,9 @@ MAX_CITATIONS = 30
 BINARY_PROBE_BYTES = 8192
 DOC_CHARS = 120
 
-ALWAYS_EXCLUDED_DIRS: frozenset[str] = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".svn",
-        "node_modules",
-        ".venv",
-        "venv",
-        "__pycache__",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        "dist",
-        "build",
-        "out",
-        "target",
-        ".next",
-        ".turbo",
-        "coverage",
-        ".sessions",
-    }
-)
+# The always-excluded directories are shared with the harness project folders (PRP-0244).
+from app.coding.folders import ALWAYS_EXCLUDED_DIRS  # noqa: E402
+
 #: Never listed, outlined or read (D5).
 SECRET_PATTERNS: tuple[str, ...] = (
     ".env",
@@ -167,27 +148,25 @@ def resolve_folder(folder: str) -> tuple[str, str]:
 
 
 def list_folders(dir_: str = "") -> dict[str, Any]:
-    """One level of sub-directories of the workspace (never files, never contents)."""
+    """One level of sub-directories of the workspace (never files, never contents).
+
+    The listing itself is shared with the harness project folders (``app.coding.folders``,
+    PRP-0244); this rule adds the discussion's exclusions (D5).
+    """
+    from app.coding.folders import FolderError, list_subfolders
     from app.core.config import settings
 
-    abs_dir, rel = resolve_folder(dir_)
+    _abs_dir, rel = resolve_folder(dir_)
     rules = Exclusions(os.path.realpath(workspace_root()))
-    cap = max(1, int(settings.file_explorer_max_tree_entries))
-    names: list[str] = []
     try:
-        with os.scandir(abs_dir) as it:
-            for entry in it:
-                if not entry.is_dir(follow_symlinks=False):
-                    continue
-                child = f"{rel}/{entry.name}" if rel else entry.name
-                if rules.excluded(child, is_dir=True):
-                    continue
-                names.append(entry.name)
-    except OSError as exc:
+        return list_subfolders(
+            workspace_root(),
+            rel,
+            cap=settings.file_explorer_max_tree_entries,
+            skip=lambda child: rules.excluded(child, is_dir=True),
+        )
+    except FolderError as exc:
         raise CodeError(f"cannot list {rel or '(workspace)'}") from exc
-    names.sort(key=str.lower)
-    parent = None if not rel else ("/".join(rel.split("/")[:-1]))
-    return {"dir": rel, "parent": parent, "dirs": names[:cap], "truncated": len(names) > cap}
 
 
 # ---------------------------------------------------------------------------

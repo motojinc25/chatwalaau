@@ -1,7 +1,8 @@
-import { CircleAlert, CircleCheck, ListTodo, Loader2, Maximize2, Repeat } from 'lucide-react'
+import { CircleAlert, CircleCheck, FolderOpen, ListTodo, Loader2, Maximize2, Repeat } from 'lucide-react'
 import { useState } from 'react'
 import { HarnessTodoDialog } from '@/components/HarnessTodoDialog'
 import { harnessDoneCount, harnessStateText } from '@/lib/harnessProgress'
+import { projectLabel, rulesSummary } from '@/lib/harnessProject'
 import { cn } from '@/lib/utils'
 import type { HarnessProgress } from '@/types/chat'
 
@@ -67,6 +68,13 @@ export function HarnessProgressPanel({
           Tasks
         </button>
       </div>
+      {progress.project && (
+        // PRP-0244 / UDR-0225 D8: which folder and which rules files applied to this turn.
+        <p className="mt-1 inline-flex items-center gap-1 text-muted-foreground" data-testid="harness-project-line">
+          <FolderOpen className="h-3 w-3" aria-hidden="true" />
+          Project: {projectLabel(progress.project.root)} · {rulesSummary(progress.project)}
+        </p>
+      )}
       {!running && (
         <p className={cn('mt-1', problem && 'text-amber-700 dark:text-amber-400')}>{harnessStateText(progress)}</p>
       )}

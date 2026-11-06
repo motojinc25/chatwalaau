@@ -154,6 +154,13 @@ interface UseChatOptions {
    */
   selectedHarnessId?: string
   /**
+   * The conversation's harness project folder (PRP-0244, UDR-0225 D1): workspace-relative,
+   * "" for the workspace root. Sent as AG-UI state.harness_project with every harness turn.
+   * Undefined on a surface without the project picker (/popup, /sidebar): nothing is sent and
+   * the backend keeps the folder stored on the chat.
+   */
+  harnessProject?: string
+  /**
    * PRP-0118: label of the run-target (a workflow name, or a non-default active agent
    * name) stamped onto the assistant message so the action bar shows which agent /
    * workflow produced the turn.
@@ -254,6 +261,7 @@ export function useChat(options?: UseChatOptions) {
   const temporaryRef = useRef(options?.temporary ?? false)
   const selectedWorkflowIdRef = useRef(options?.selectedWorkflowId ?? '')
   const selectedHarnessIdRef = useRef(options?.selectedHarnessId ?? '')
+  const harnessProjectRef = useRef<string | undefined>(options?.harnessProject)
   const runTargetLabelRef = useRef(options?.runTargetLabel ?? '')
   const onCustomEventRef = useRef(options?.onCustomEvent)
   const onWorkflowEventRef = useRef(options?.onWorkflowEvent)
@@ -303,6 +311,10 @@ export function useChat(options?: UseChatOptions) {
   useEffect(() => {
     selectedHarnessIdRef.current = options?.selectedHarnessId ?? ''
   }, [options?.selectedHarnessId])
+
+  useEffect(() => {
+    harnessProjectRef.current = options?.harnessProject
+  }, [options?.harnessProject])
 
   useEffect(() => {
     runTargetLabelRef.current = options?.runTargetLabel ?? ''
@@ -564,7 +576,11 @@ export function useChat(options?: UseChatOptions) {
         // the backend runs the cached per-conversation harness agent; its model and
         // effort come from the harness YAML (CTR-0192 / CTR-0193, UDR-0166 D11).
         // Mutually exclusive with workflow_id.
-        if (selectedHarnessIdRef.current) aguiState.harness_id = selectedHarnessIdRef.current
+        if (selectedHarnessIdRef.current) {
+          aguiState.harness_id = selectedHarnessIdRef.current
+          // PRP-0244 / UDR-0225 D1: the conversation's project folder ("" = workspace root).
+          if (harnessProjectRef.current !== undefined) aguiState.harness_project = harnessProjectRef.current
+        }
         // HITL resume (PRP-0123, UDR-0106 D5): the answers to the requests the previous
         // turn interrupted on. The backend routes them into workflow.run(responses=...).
         if (options?.workflowResume && Object.keys(options.workflowResume).length > 0)

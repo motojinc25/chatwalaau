@@ -1,10 +1,11 @@
 // The seat editor of the AI discussion dialogs (CTR-0276): the New AI discussion dialog (PRP-0232)
 // and the Continue dialog (PRP-0233, UDR-0216 D4) use the same component, so a seat follows the same
 // rules in both: a role seat has a model and a reasoning effort, a Prompt agent seat uses the agent's own.
-import { ChevronUp, Folder, FolderOpen, Plus, Trash2, X } from 'lucide-react'
+import { FolderOpen, Plus, Trash2, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { speakerColor } from '@/components/DiscussionParts'
 import { Button } from '@/components/ui/button'
+import { WorkspaceFolderPicker } from '@/components/WorkspaceFolderPicker'
 import {
   type CodeFolderListing,
   type DiscussionOptions,
@@ -164,16 +165,6 @@ interface CodeFolderProps {
  *  one level at a time (folders only). Shown only when the coding workspace is on. */
 export function CodeFolderOption({ value, onChange, full }: CodeFolderProps) {
   const [browsing, setBrowsing] = useState(false)
-  const [listing, setListing] = useState<CodeFolderListing | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  const open = (dir: string) => {
-    setError(null)
-    discussionApi
-      .codeFolders(dir)
-      .then(setListing)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Could not list the folders'))
-  }
 
   return (
     <div className="space-y-1 text-sm" data-testid="discussion-code-folder">
@@ -184,14 +175,7 @@ export function CodeFolderOption({ value, onChange, full }: CodeFolderProps) {
           data-testid="discussion-code-folder-value">
           {value === null ? 'none' : value || '(workspace)'}
         </span>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7"
-          onClick={() => {
-            setBrowsing(true)
-            open(value ?? '')
-          }}>
+        <Button variant="outline" size="sm" className="h-7" onClick={() => setBrowsing(true)}>
           <FolderOpen className="mr-1 h-3.5 w-3.5" />
           Choose...
         </Button>
@@ -217,53 +201,17 @@ export function CodeFolderOption({ value, onChange, full }: CodeFolderProps) {
         </p>
       )}
       {browsing && (
-        <div className="space-y-1 rounded-md border p-2" data-testid="discussion-code-folder-picker">
-          <div className="flex items-center gap-2 text-xs">
-            <span className="min-w-0 flex-1 truncate font-mono">{listing ? listing.dir || '(workspace)' : '...'}</span>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-2"
-              disabled={!listing || listing.parent === null}
-              onClick={() => listing && listing.parent !== null && open(listing.parent)}>
-              <ChevronUp className="mr-1 h-3 w-3" />
-              Up
-            </Button>
-            <Button
-              size="sm"
-              className="h-6 px-2"
-              disabled={!listing}
-              onClick={() => {
-                if (!listing) return
-                onChange(listing.dir)
-                setBrowsing(false)
-              }}>
-              Use this folder
-            </Button>
-            <Button variant="ghost" size="sm" className="h-6 px-2" onClick={() => setBrowsing(false)}>
-              Cancel
-            </Button>
-          </div>
-          {error && (
-            <p role="alert" className="text-xs text-red-600">
-              {error}
-            </p>
-          )}
-          <ul className="max-h-40 overflow-y-auto text-xs">
-            {listing?.dirs.map((name) => (
-              <li key={name}>
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-muted"
-                  onClick={() => open(listing.dir ? `${listing.dir}/${name}` : name)}>
-                  <Folder className="h-3 w-3 shrink-0" aria-hidden="true" />
-                  {name}
-                </button>
-              </li>
-            ))}
-            {listing && listing.dirs.length === 0 && <li className="px-1 text-muted-foreground">No sub-folders</li>}
-          </ul>
-        </div>
+        // The listing is shared with the harness project folders (PRP-0244).
+        <WorkspaceFolderPicker<CodeFolderListing>
+          initialDir={value ?? ''}
+          load={discussionApi.codeFolders}
+          onUse={(dir) => {
+            onChange(dir)
+            setBrowsing(false)
+          }}
+          onCancel={() => setBrowsing(false)}
+          testId="discussion-code-folder-picker"
+        />
       )}
     </div>
   )

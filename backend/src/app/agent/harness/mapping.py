@@ -42,6 +42,8 @@ _KNOWN_TOP_KEYS = {
     "webSearch",
     # PRP-0193 / UDR-0175: the CodeAct compute sandbox switch, the `webSearch` shape.
     "codeAct",
+    # PRP-0244 / UDR-0225 D5: the project rules opt-in (`enabled`, default false).
+    "projectRules",
     # "toolApproval" is deliberately NOT here (UDR-0119 D6): it is reported by a
     # dedicated warning in map_document rather than the generic unknown-field one.
     "toolApproval",
@@ -337,6 +339,7 @@ def map_document(
     file_access = _block(data, "fileAccess", warnings)
     web_search = _block(data, "webSearch", warnings)
     code_act = _block(data, "codeAct", warnings)
+    project_rules = _block(data, "projectRules", warnings)
     # `fileAccess.disableWriteToolApproval` is no longer read (PRP-0179, UDR-0161 D6):
     # no harness tool asks for approval, so the key asks for what the harness already
     # does. It is ignored WITHOUT a warning -- a warning would make the agent
@@ -380,6 +383,7 @@ def map_document(
         file_access_disable_write_tools=_bool(file_access, "disableWriteTools", "fileAccess", warnings),
         web_search_disabled=_bool(web_search, "disabled", "webSearch", warnings),
         code_act_disabled=_bool(code_act, "disabled", "codeAct", warnings),
+        project_rules_enabled=_bool(project_rules, "enabled", "projectRules", warnings),
         loop_max_iterations=loop_max,
         warnings=warnings,
     )

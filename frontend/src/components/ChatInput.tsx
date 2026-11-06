@@ -3,6 +3,7 @@ import {
   File,
   FileText,
   Folder,
+  FolderOpen,
   Loader2,
   Mic,
   Paintbrush,
@@ -120,6 +121,16 @@ interface ChatInputProps {
     onOpen: () => void
   }
   /**
+   * Harness project folder entry (PRP-0244, CTR-0221 v3, UDR-0225 D1). Present only while a
+   * harness is the run-target and the workspace is on. ICON ONLY, after the run-target icon;
+   * `label` ("projects/shop" / "workspace root") is in `title` and `aria-label`.
+   */
+  project?: {
+    label: string
+    onOpen: () => void
+    disabled?: boolean
+  }
+  /**
    * Context window occupancy (CTR-0041 v5, UDR-0168 D5/D6).
    *
    * ABSENT means "nothing to say" -- below the warning threshold, or no turn measured
@@ -181,6 +192,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     placeholder,
     temporary = false,
     runTarget,
+    project,
     context,
     live,
   },
@@ -890,6 +902,25 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                         'transition-colors',
                       )}>
                       {runTarget.icon}
+                    </button>
+                  )}
+                  {/* Harness project folder (PRP-0244, CTR-0221 v3): only with a harness
+                  run-target and a workspace; it opens the project folder dialog. */}
+                  {project && (
+                    <button
+                      type="button"
+                      onClick={project.onOpen}
+                      disabled={project.disabled}
+                      aria-label={`Project folder: ${project.label}`}
+                      title={`Project folder: ${project.label}`}
+                      data-testid="harness-project-button"
+                      className={cn(
+                        'inline-flex shrink-0 items-center justify-center rounded-md',
+                        controlSize,
+                        'text-muted-foreground hover:text-foreground disabled:opacity-50',
+                        'transition-colors',
+                      )}>
+                      <FolderOpen className="h-4 w-4" />
                     </button>
                   )}
 

@@ -673,7 +673,7 @@ class _RunStats:
         return time.monotonic() - self.started
 
 
-def _build_harness_tracker(agent: Any, session: Any, harness_id: Any, run_id: str) -> Any:
+def _build_harness_tracker(agent: Any, session: Any, harness_id: Any, run_id: str, thread_id: str = "") -> Any:
     """The CTR-0219 tracker for a harness turn, or None when it has no Todo list.
 
     Never raises: progress reporting must not fail a run.
@@ -681,6 +681,7 @@ def _build_harness_tracker(agent: Any, session: Any, harness_id: Any, run_id: st
     try:
         from app.agent.harness.loader import resolve_spec
         from app.agent.harness.mapping import HARNESS_MAX_ITERATIONS, effective_loop_max_iterations
+        from app.agent.harness.runtime import project_report
 
         try:
             max_iterations = effective_loop_max_iterations(resolve_spec(str(harness_id)))
@@ -692,11 +693,61 @@ def _build_harness_tracker(agent: Any, session: Any, harness_id: Any, run_id: st
             harness_id=str(harness_id),
             run_id=run_id,
             max_iterations=max_iterations,
+            # PRP-0244 / UDR-0225 D8: the project folder and the rules files that apply.
+            project=project_report(str(harness_id), thread_id) if thread_id else None,
         )
         return tracker if tracker.enabled else None
     except Exception:
         logger.warning("Harness progress tracker unavailable for %s", harness_id, exc_info=True)
         return None
+
+
+def _harness_project_of(state: dict[str, Any] | None) -> str | None:
+    """``state.harness_project`` (CTR-0009 v25): a string, or None when the turn sends none."""
+    raw = (state or {}).get("harness_project")
+    return raw if isinstance(raw, str) else None
+
+
+def _stored_harness_project(thread_id: str) -> str:
+    """The project folder stored on the session record ("" when none; never raises).
+
+    Used when a turn sends no ``state.harness_project`` (a surface without the project
+    picker, such as /popup and /sidebar), so it keeps the conversation's folder.
+    """
+    from app.session.storage import read_session_json
+
+    try:
+        data = read_session_json(thread_id) or {}
+    except Exception:
+        return ""
+    value = data.get("harness_project")
+    return value if isinstance(value, str) else ""
+
+
+def _remember_harness_project(thread_id: str, project: str | None) -> None:
+    """Store the conversation's project folder on its session record (UDR-0225 D1).
+
+    Only a value the turn SENT, only on an EXISTING record (the SPA creates it before the
+    turn), and only when it changes. Never raises: remembering the folder must not fail
+    the turn.
+    """
+    if project is None:
+        return
+    from app.coding.folders import posix
+    from app.session.storage import update_session_json
+
+    value = posix(project)
+
+    def mutate(data: dict[str, Any]) -> bool:
+        if data.get("harness_project") == value:
+            return False
+        data["harness_project"] = value
+        return True
+
+    try:
+        update_session_json(thread_id, mutate)
+    except Exception:
+        logger.warning("Could not store the harness project folder of %s", thread_id, exc_info=True)
 
 
 def _harness_run_target(harness_id: Any) -> str | None:
@@ -1176,8 +1227,17 @@ async def _stream_with_reasoning(
         from app.agent.harness.runtime import agent_for_thread as _harness_agent_for_thread
         from app.agent.harness.spec import HarnessAgentError as _HarnessAgentError
 
+        # PRP-0244 / UDR-0225 D1: the conversation's project folder rides each message
+        # (workspace-relative; "" or absent = the workspace root). The runtime validates it
+        # (D2) and a refused folder is a clean RUN_ERROR below.
+        _harness_project = _harness_project_of(request_body.state)
         try:
-            _harness_ctx = await _harness_agent_for_thread(str(_harness_id), thread_id)
+            _harness_ctx = await _harness_agent_for_thread(
+                str(_harness_id),
+                thread_id,
+                project=_harness_project if _harness_project is not None else _stored_harness_project(thread_id),
+            )
+            _remember_harness_project(thread_id, _harness_project)
         except _HarnessAgentError as exc:
             # Unknown id / blocking warnings / demo mode: a clean RUN_ERROR run.
             yield encoder.encode(RunStartedEvent(type=EventType.RUN_STARTED, run_id=run_id, thread_id=thread_id))
@@ -1609,7 +1669,7 @@ async def _stream_with_reasoning(
                 session=session,
                 cached=True,
             )
-            harness_tracker = _build_harness_tracker(agent, session, _harness_id, run_id)
+            harness_tracker = _build_harness_tracker(agent, session, _harness_id, run_id, thread_id)
             if harness_tracker is not None:
                 progress_value = await harness_tracker.snapshot(at_start=True)
                 if progress_value is not None:

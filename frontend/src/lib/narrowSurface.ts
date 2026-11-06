@@ -39,6 +39,7 @@ export type EntryId =
   | 'sidebar.skills'
   // composer control row (CTR-0221)
   | 'toolbar.runTargetAction'
+  | 'toolbar.harnessProject'
   // composer
   | 'attach.file'
   | 'attach.paint'
@@ -112,6 +113,8 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   // ICON rather than a labelled chip above the composer, and its destination no longer
   // depends on the tier (UDR-0168 D7 amends UDR-0158 D1).
   'toolbar.runTargetAction': 'all',
+  // PRP-0244 (CTR-0221 v3): the harness project folder icon, on every tier (UDR-0225 D1).
+  'toolbar.harnessProject': 'all',
   // PRP-0185 / UDR-0167 D11/D13: `toolbar.imageOutput`, `toolbar.mcpTools` and
   // `toolbar.skills` are GONE from this table with the controls they gated, exactly as
   // PRP-0184 removed the model / options / structured-output entries. Image output

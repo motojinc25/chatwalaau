@@ -193,6 +193,13 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
         code_act = "off"
     else:
         code_act = "enabled"
+    # PRP-0244 / UDR-0225 D5: an enabled block without a workspace is inert, not a warning.
+    if not spec.project_rules_enabled:
+        project_rules = "disabled"
+    elif not workspace:
+        project_rules = "off"
+    else:
+        project_rules = "enabled"
     return {
         "model": spec.model_id,
         # PRP-0184 / UDR-0166 D11: the declared reasoning effort, or "" when the model
@@ -201,6 +208,7 @@ def policy_summary(spec: HarnessAgentSpec) -> dict:
         "effort": spec.effort,
         "web_search": web_search,
         "code_act": code_act,
+        "project_rules": project_rules,
         "file_memory": bool(workspace) and not spec.file_memory_disabled,
         "file_access": bool(workspace),
         "shell": bool(workspace),

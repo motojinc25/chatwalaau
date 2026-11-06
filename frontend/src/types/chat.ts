@@ -1,3 +1,5 @@
+import type { HarnessProjectReport } from '@/lib/harnessProject'
+
 export interface ToolCall {
   id: string
   name: string
@@ -158,6 +160,8 @@ export interface HarnessProgress {
   state: HarnessRunState
   todos: HarnessTodo[]
   todos_truncated: boolean
+  /** The project folder and the rules files that applied (PRP-0244, CTR-0219 v2). */
+  project?: HarnessProjectReport
 }
 
 /** A workflow run as saved with its assistant message (v0.117.1). */

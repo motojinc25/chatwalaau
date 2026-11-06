@@ -217,7 +217,7 @@ function convertMafMessages(mafMessages: Record<string, unknown>[]): ChatMessage
 const LOAD_RETRY_DELAY_MS = 1000
 
 type SessionLoadResult =
-  | { status: 'ok'; messages: ChatMessage[]; folderId: string | null }
+  | { status: 'ok'; messages: ChatMessage[]; folderId: string | null; harnessProject: string | null }
   | { status: 'not_found' }
   | { status: 'failed' }
 
@@ -245,7 +245,9 @@ async function fetchSessionMessages(threadId: string): Promise<SessionLoadResult
         // Keep the record's folder (PRP-0196, UDR-0178 D1): the sidebar list may not hold
         // this chat (a collapsed folder's rows are not loaded), the record always does.
         const folderId = typeof data.folder_id === 'string' && data.folder_id ? data.folder_id : null
-        return { status: 'ok', messages: convertMafMessages(data.messages ?? []), folderId }
+        // The chat's harness project folder (PRP-0244, UDR-0225 D1); null when never chosen.
+        const harnessProject = typeof data.harness_project === 'string' ? data.harness_project : null
+        return { status: 'ok', messages: convertMafMessages(data.messages ?? []), folderId, harnessProject }
       }
       if (res.status === 404) return { status: 'not_found' }
     } catch {
@@ -275,6 +277,10 @@ export function useSession() {
   // The chat whose history could not be loaded (PRP-0174, UDR-0156 D8), or null.
   const [loadFailedThreadId, setLoadFailedThreadId] = useState<string | null>(null)
   const [openFolder, setOpenFolder] = useState<OpenChatFolder | null>(null)
+  // The open chat's stored harness project folder (PRP-0244), keyed by thread id like the folder.
+  const [openHarnessProject, setOpenHarnessProject] = useState<{ threadId: string; project: string | null } | null>(
+    null,
+  )
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null)
@@ -548,6 +554,7 @@ export function useSession() {
         setLoadFailedThreadId(null)
         setInitialMessages(result.messages)
         setOpenFolder({ threadId: id, folderId: result.folderId, pending: false })
+        setOpenHarnessProject({ threadId: id, project: result.harnessProject })
       } else if (result.status === 'failed') {
         setLoadFailedThreadId(id)
       }
@@ -568,6 +575,7 @@ export function useSession() {
       setInitialMessages(result.messages)
       setLoadFailedThreadId(null)
       setOpenFolder({ threadId: id, folderId: result.folderId, pending: false })
+      setOpenHarnessProject({ threadId: id, project: result.harnessProject })
     } else if (result.status === 'not_found') {
       setInitialMessages([])
       setLoadFailedThreadId(null)
@@ -630,6 +638,9 @@ export function useSession() {
       setLoadFailedThreadId(result.status === 'failed' ? targetThreadId : null)
       setOpenFolder(
         result.status === 'ok' ? { threadId: targetThreadId, folderId: result.folderId, pending: false } : null,
+      )
+      setOpenHarnessProject(
+        result.status === 'ok' ? { threadId: targetThreadId, project: result.harnessProject } : null,
       )
 
       setThreadId(targetThreadId)
@@ -1090,6 +1101,9 @@ export function useSession() {
     createSession,
     /** The open chat's folder id (PRP-0196, UDR-0178 D1), or null. */
     currentFolderId: openFolder && openFolder.threadId === threadId ? openFolder.folderId : null,
+    // PRP-0244: the stored harness project folder of the open chat (null: never chosen).
+    currentHarnessProject:
+      openHarnessProject && openHarnessProject.threadId === threadId ? openHarnessProject.project : null,
     /** The folder a not-yet-created chat will start in (UDR-0178 D7), or null. */
     pendingFolderId: openFolder && openFolder.threadId === threadId && openFolder.pending ? openFolder.folderId : null,
     confirmSessionFolder,

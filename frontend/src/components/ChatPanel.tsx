@@ -17,6 +17,7 @@ import { ComputerUseCaptureView } from '@/components/ComputerUseCaptureView'
 import { ACTIVE_AGENT_CHANGED_EVENT } from '@/components/DeclarativeAgentManager'
 import { DiscussionBar } from '@/components/DiscussionBar'
 import { DiscussionCodeMapRow, DiscussionSelectionTrace } from '@/components/DiscussionParts'
+import { HarnessProjectDialog } from '@/components/HarnessProjectDialog'
 import { HelpPortal } from '@/components/HelpPortal'
 import { LiveDelegationMarker } from '@/components/LiveDelegationMarker'
 import { type ImageEditSubmission, MaskEditorDialog } from '@/components/MaskEditorDialog'
@@ -43,6 +44,7 @@ import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
 import { NO_THREAD_NOTICE } from '@/lib/attachmentPolicy'
 import { isComputerUseTool } from '@/lib/computerUse'
 import { resolveContextOccupancy } from '@/lib/contextOccupancy'
+import { harnessProjectApi, projectLabel } from '@/lib/harnessProject'
 import { IMAGE_EDIT_TOOL } from '@/lib/imageTools'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { requestImageEdit, uploadSessionImage } from '@/lib/maskApi'
@@ -94,6 +96,12 @@ interface ChatPanelProps {
    * /popup and /sidebar show a discussion chat read-only.
    */
   discussionCapable?: boolean
+  /**
+   * The chat's stored harness project folder (PRP-0244, UDR-0225 D1): a string, or null when
+   * never chosen (the workspace root). Only the full-page /chat surface passes it; undefined
+   * hides the project folder entry and sends no state.harness_project.
+   */
+  savedHarnessProject?: string | null
 }
 
 function buildStreamingKey(messages: ChatMessage[], isLoading: boolean): string {
@@ -141,6 +149,7 @@ export function ChatPanel({
   temporary = false,
   liveCapable = false,
   discussionCapable = false,
+  savedHarnessProject,
 }: ChatPanelProps) {
   const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null)
   // Which model answers is the RUN-TARGET's business since PRP-0184 (UDR-0166 D1):
@@ -210,6 +219,28 @@ export function ChatPanel({
     ? { name: runTargetText, icon: runTargetIcon, onOpen: openRunTargetSurface }
     : undefined
 
+  // Harness project folder (PRP-0244, UDR-0225 D1/D4). The panel is keyed by thread id, so
+  // this state belongs to ONE conversation: the folder picked here, else the one stored on
+  // the chat, else the workspace root (a new chat, Q2). Only /chat passes the stored value.
+  const projectPickerSurface = savedHarnessProject !== undefined && !temporary
+  const [pickedHarnessProject, setPickedHarnessProject] = useState<string | null>(null)
+  const harnessProject = projectPickerSurface ? (pickedHarnessProject ?? savedHarnessProject ?? '') : undefined
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false)
+  // The entry exists only when the harness has a workspace: the folder listing answers 404
+  // without CODING_WORKSPACE_DIR (CTR-0194 v3).
+  const [workspaceAvailable, setWorkspaceAvailable] = useState(false)
+  useEffect(() => {
+    if (!projectPickerSurface || !selectedHarnessId) return
+    let cancelled = false
+    harnessProjectApi
+      .list('')
+      .then(() => !cancelled && setWorkspaceAvailable(true))
+      .catch(() => !cancelled && setWorkspaceAvailable(false))
+    return () => {
+      cancelled = true
+    }
+  }, [projectPickerSurface, selectedHarnessId])
+
   // Keep the run-target in sync with the modal (workflow selection + agent activation).
   useEffect(() => {
     const onRt = () => {
@@ -277,6 +308,7 @@ export function ChatPanel({
     temporary,
     selectedWorkflowId,
     selectedHarnessId,
+    harnessProject,
     runTargetLabel,
     // Fold the additive workflow_* progress events into the live workflow run state
     // (PRP-0118, CTR-0185). The tool-approval consumer that used to share this fan-out
@@ -299,6 +331,13 @@ export function ChatPanel({
     // PRP-0174 / UDR-0156 D4: a reply / edit / delete that could not be saved.
     onPersistError: useCallback((message: string) => setNotification({ type: 'error', message }), []),
   })
+
+  // The composer's project folder entry (PRP-0244, CTR-0221 v3): a harness run-target, the
+  // /chat surface and a workspace. Disabled while a turn runs (UDR-0225 D4).
+  const composerProject =
+    harnessProject !== undefined && selectedHarnessId && workspaceAvailable && show('toolbar.harnessProject')
+      ? { label: projectLabel(harnessProject), onOpen: () => setProjectDialogOpen(true), disabled: isLoading }
+      : undefined
 
   // AI Discussion (CTR-0276, PRP-0232). A discussion chat routes the composer to the
   // discussion while it waits for the person and turns Stop into Pause while a phase runs; an
@@ -1069,6 +1108,7 @@ export function ChatPanel({
               onSlashFiles={onSlashFiles}
               temporary={temporary}
               runTarget={composerRunTarget}
+              project={composerProject}
               context={contextOccupancy ?? undefined}
               live={composerLive}
               placeholder={composerPlaceholder}
@@ -1133,6 +1173,7 @@ export function ChatPanel({
                 onSlashFiles={onSlashFiles}
                 temporary={temporary}
                 runTarget={composerRunTarget}
+                project={composerProject}
                 context={contextOccupancy ?? undefined}
                 live={composerLive}
                 placeholder={composerPlaceholder}
@@ -1183,6 +1224,16 @@ export function ChatPanel({
               onAttach={handlePaintAttach}
             />
           </Suspense>
+        )}
+
+        {/* Harness project folder dialog (PRP-0244, CTR-0197 v3). */}
+        {harnessProject !== undefined && (
+          <HarnessProjectDialog
+            open={projectDialogOpen}
+            onOpenChange={setProjectDialogOpen}
+            project={harnessProject}
+            onChoose={setPickedHarnessProject}
+          />
         )}
 
         {/* Detached workflow run canvases (CTR-0187, PRP-0123, UDR-0106 D12). One per run,

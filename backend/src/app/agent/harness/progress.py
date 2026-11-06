@@ -85,6 +85,7 @@ class HarnessRunTracker:
         harness_id: str,
         run_id: str,
         max_iterations: int,
+        project: dict[str, Any] | None = None,
     ) -> None:
         from agent_framework import AgentModeProvider, TodoProvider
 
@@ -93,6 +94,9 @@ class HarnessRunTracker:
         self.harness_id = harness_id
         self.run_id = run_id
         self.max_iterations = max_iterations
+        # PRP-0244 / UDR-0225 D8: the project folder and the rules files that applied
+        # ({root, rules_enabled, rules: [{name, chars, truncated}]}); never rules text.
+        self.project = project
         self._todo_provider = _find_provider(agent, TodoProvider)
         self._mode_provider = _find_provider(agent, AgentModeProvider)
         # The first iteration is running as soon as the turn starts.
@@ -163,6 +167,7 @@ class HarnessRunTracker:
             "state": state,
             "todos": todos,
             "todos_truncated": truncated,
+            **({"project": self.project} if self.project is not None else {}),
         }
 
     async def snapshot(self, *, at_start: bool = False) -> dict[str, Any] | None:

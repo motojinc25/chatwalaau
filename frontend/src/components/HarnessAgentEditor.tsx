@@ -97,6 +97,7 @@ function emptyDocument(): HarnessDocument {
     fileAccess: { disableWriteTools: false },
     webSearch: { disabled: false },
     codeAct: { disabled: false },
+    projectRules: { enabled: false },
     loop: { maxIterations: null },
   }
 }
@@ -210,6 +211,13 @@ function blockParts(doc: HarnessDocument): Array<{ id: string; label: string; su
   parts.push({ id: 'b-shell', label: 'Shell', sub: 'workspace-scoped', icon: <TerminalSquare className="h-4 w-4" /> })
   if (!doc.webSearch.disabled)
     parts.push({ id: 'b-web', label: 'Web search', sub: 'offering-gated', icon: <Globe className="h-4 w-4" /> })
+  if (doc.projectRules?.enabled)
+    parts.push({
+      id: 'b-rules',
+      label: 'Project rules',
+      sub: 'AGENTS.md / CLAUDE.md',
+      icon: <FileText className="h-4 w-4" />,
+    })
   if (!doc.codeAct?.disabled)
     parts.push({
       id: 'b-codeact',
@@ -587,6 +595,12 @@ export function HarnessAgentEditor({ open, onOpenChange, editId, onSaved }: Prop
                   checked={!doc.codeAct?.disabled}
                   onChange={(on) => patch({ codeAct: { disabled: !on } })}
                   note="Offered only while App Settings > CodeAct is on, and withheld when the offering's gate is off."
+                />
+                <SwitchField
+                  label="Project rules (AGENTS.md / CLAUDE.md)"
+                  checked={!!doc.projectRules?.enabled}
+                  onChange={(on) => patch({ projectRules: { enabled: on } })}
+                  note="Reads the project folder's AGENTS.md and CLAUDE.md every turn as the project's conventions. Turn on only for folders you trust: they steer an agent whose shell runs without approval."
                 />
                 <SwitchField
                   label="Context compaction"

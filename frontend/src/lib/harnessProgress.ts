@@ -1,3 +1,4 @@
+import { parseProjectReport } from '@/lib/harnessProject'
 import type { HarnessProgress, HarnessRunState, HarnessTodo } from '@/types/chat'
 
 /**
@@ -30,6 +31,7 @@ export function parseHarnessProgress(value: unknown): HarnessProgress | null {
     state,
     todos,
     todos_truncated: v.todos_truncated === true,
+    ...(parseProjectReport(v.project) ? { project: parseProjectReport(v.project) } : {}),
   }
 }
 

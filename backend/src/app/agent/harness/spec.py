@@ -111,6 +111,9 @@ class HarnessAgentSpec:
     web_search_disabled: bool = False
     # PRP-0193 / UDR-0175 D5: `codeAct: {disabled: true}` removes the CodeAct provider.
     code_act_disabled: bool = False
+    # PRP-0244 / UDR-0225 D5: `projectRules: {enabled: true}` adds the project folder's
+    # AGENTS.md / CLAUDE.md as project rules. OFF unless the YAML enables it.
+    project_rules_enabled: bool = False
     # None => MAF harness DEFAULT_MAX_ITERATIONS; always clamped to it (D4).
     loop_max_iterations: int | None = None
     # PRP-0243 / UDR-0224 D3: SHA-256 of the YAML text this spec was mapped from, set by

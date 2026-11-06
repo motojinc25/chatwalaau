@@ -1037,7 +1037,8 @@ class ForkRequest(BaseModel):
 # and a branch continues that conversation. Everything else that is not listed here
 # or set explicitly below -- pinned_at, auto_title_pending, memory_liked, source,
 # runtime / retired fields -- belongs to the source ITEM and is not copied.
-_FORK_INHERITED_FIELDS = ("user_profile_snapshot", "agent_memory_snapshot")
+# PRP-0244 / UDR-0225 D1: a fork keeps its harness project folder (same instance).
+_FORK_INHERITED_FIELDS = ("user_profile_snapshot", "agent_memory_snapshot", "harness_project")
 
 
 @router.post("/{thread_id}/fork", dependencies=[Depends(verify_api_key)])

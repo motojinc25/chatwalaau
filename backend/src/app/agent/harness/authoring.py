@@ -47,7 +47,7 @@ def build_harness_yaml(document: dict[str, Any]) -> str:
 
     Field order is fixed (kind, name, displayName, description, model,
     instructions, tools, compaction, todo, mode, fileMemory, fileAccess,
-    webSearch, codeAct, loop); ``kind`` is always ``Harness``. Unknown keys
+    webSearch, codeAct, projectRules, loop); ``kind`` is always ``Harness``. Unknown keys
     are ignored -- the GUI only authors the mapped subset. Provider / connection
     / sampling are never emitted (UDR-0119 D10).
     """
@@ -116,6 +116,8 @@ def build_harness_yaml(document: dict[str, Any]) -> str:
     # PRP-0193: written only when disabled, so a default agent stays loadable by a
     # build that predates the field.
     _switch_block("codeAct", {"disabled": False})
+    # PRP-0244 / UDR-0225 D5: written only when enabled (the default is off).
+    _switch_block("projectRules", {"enabled": False})
     _switch_block("loop", {"maxIterations": None})
 
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, default_flow_style=False)
@@ -188,6 +190,7 @@ def document_from_yaml(text: str) -> dict[str, Any]:
         },
         "webSearch": {"disabled": bool(_block("webSearch").get("disabled"))},
         "codeAct": {"disabled": bool(_block("codeAct").get("disabled"))},
+        "projectRules": {"enabled": _block("projectRules").get("enabled") is True},
         "loop": {"maxIterations": loop.get("maxIterations")},
     }
 
