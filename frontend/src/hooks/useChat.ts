@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LiveDelegationEvent } from '@/hooks/useLiveVoice'
+import { fetchSessionMessages } from '@/hooks/useSession'
 import { finalizeHarnessProgress, parseHarnessProgress } from '@/lib/harnessProgress'
 import { takeViewModelContext } from '@/lib/mcp-app-host'
 import type {
@@ -249,6 +250,22 @@ function sleep(ms: number): Promise<void> {
  * When threadId is provided, sends only the new message (provider loads history).
  * When threadId is not provided, sends full message history (ephemeral mode).
  */
+const HISTORY_CHANGED_MESSAGE =
+  'This chat changed in another tab or window, so nothing was removed. The latest chat is now shown. Please try again.'
+
+/**
+ * A rewind says what this tab holds, so the server can refuse one that would remove a turn this
+ * tab has never seen (PRP-0245, UDR-0226 D6).
+ */
+function rewindBody(current: ChatMessage[], idx: number) {
+  return {
+    after_index: idx > 0 ? idx - 1 : 0,
+    delete_from: idx,
+    previous_id: idx > 0 ? current[idx - 1].id : null,
+    known_ids: current.slice(idx).map((m) => m.id),
+  }
+}
+
 export function useChat(options?: UseChatOptions) {
   const [messages, setMessages] = useState<ChatMessage[]>(options?.initialMessages ?? [])
   const [isLoading, setIsLoading] = useState(false)
@@ -394,21 +411,41 @@ export function useChat(options?: UseChatOptions) {
     onStreamCompleteRef.current?.()
   }, [])
 
-  /** Rewind the saved conversation; reports and returns false when the server refused. */
-  const truncateSaved = useCallback(async (idx: number): Promise<boolean> => {
-    try {
-      const res = await fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),
-      })
-      if (res.ok || res.status === 404) return true // 404: nothing saved yet to rewind
-    } catch {
-      // fall through
-    }
-    onPersistErrorRef.current?.('The conversation could not be updated. Please try again.')
-    return false
+  /**
+   * Answer to 409 history_changed (PRP-0245, UDR-0226 D6): this tab's list no longer matches the
+   * chat, usually because another tab added or rewound turns. Nothing was changed on the server.
+   * The saved chat replaces this tab's list, so the next try is computed from what is stored.
+   */
+  const recoverIfHistoryChanged = useCallback(async (res: Response): Promise<boolean> => {
+    if (res.status !== 409) return false
+    const body = await res.json().catch(() => null)
+    if (body?.detail?.error !== 'history_changed') return false
+    const threadId = threadIdRef.current
+    const loaded = await fetchSessionMessages(threadId)
+    if (loaded.status === 'ok' && threadIdRef.current === threadId) setMessages(loaded.messages)
+    onPersistErrorRef.current?.(HISTORY_CHANGED_MESSAGE)
+    return true
   }, [])
+
+  /** Rewind the saved conversation; reports and returns false when the server refused. */
+  const truncateSaved = useCallback(
+    async (idx: number): Promise<boolean> => {
+      try {
+        const res = await fetch(`/api/sessions/${threadIdRef.current}/truncate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(rewindBody(messagesRef.current, idx)),
+        })
+        if (res.ok || res.status === 404) return true // 404: nothing saved yet to rewind
+        if (await recoverIfHistoryChanged(res)) return false
+      } catch {
+        // fall through
+      }
+      onPersistErrorRef.current?.('The conversation could not be updated. Please try again.')
+      return false
+    },
+    [recoverIfHistoryChanged],
+  )
 
   const streamResponse = useCallback(
     async (
@@ -1365,91 +1402,100 @@ export function useChat(options?: UseChatOptions) {
    * Plain regenerate (`retryTurn` / `regenerateAssistantMessage`) is unaffected.
    */
 
-  const deleteMessage = useCallback((messageId: string) => {
-    if (savingRef.current) return
-    const current = messagesRef.current
-    const idx = current.findIndex((m) => m.id === messageId)
-    if (idx === -1) return
+  const deleteMessage = useCallback(
+    (messageId: string) => {
+      if (savingRef.current) return
+      const current = messagesRef.current
+      const idx = current.findIndex((m) => m.id === messageId)
+      if (idx === -1) return
 
-    setMessages((prev) => prev.filter((m) => m.id !== messageId))
+      setMessages((prev) => prev.filter((m) => m.id !== messageId))
 
-    // Not retried: a delete is addressed by index and is not idempotent. A refusal
-    // puts the message back so the screen matches what is saved (PRP-0174).
-    fetch(`/api/sessions/${threadIdRef.current}/messages/${idx}`, {
-      method: 'DELETE',
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      // Not retried: a delete is addressed by index and is not idempotent. A refusal
+      // puts the message back so the screen matches what is saved (PRP-0174). The id
+      // refuses a delete whose index points at another message now (UDR-0226 D6).
+      fetch(`/api/sessions/${threadIdRef.current}/messages/${idx}?expected_id=${encodeURIComponent(messageId)}`, {
+        method: 'DELETE',
       })
-      .catch(() => {
-        setMessages(current)
-        onPersistErrorRef.current?.('The message could not be deleted. Please try again.')
-      })
-      .finally(() => onStreamCompleteRef.current?.())
-  }, [])
-
-  const editAssistantMessage = useCallback((messageId: string, newContent: string) => {
-    if (savingRef.current) return
-    setMessages((prev) => prev.map((msg) => (msg.id === messageId ? { ...msg, content: newContent } : msg)))
-
-    // Update backend session - we need to find the index and rewrite
-    // For simplicity, save the updated content by truncating and re-saving
-    const current = messagesRef.current
-    const idx = current.findIndex((m) => m.id === messageId)
-    if (idx === -1) return
-
-    // Preserve everything except the text (in-place edit): generated images and
-    // tool results (toolCalls), attached images, reasoning, the activity log
-    // ordering, and usage. Re-saving content alone previously dropped tool_calls
-    // (generated images) and attachments, so they vanished on reload.
-    const original = current[idx]
-    const assistantMsg: Record<string, unknown> = { role: 'assistant', content: newContent, id: original.id }
-    if (original.reasoningBlocks && original.reasoningBlocks.length > 0) {
-      assistantMsg.reasoning = original.reasoningBlocks.map((r) => ({ id: r.id, content: r.content }))
-    }
-    if (original.toolCalls && original.toolCalls.length > 0) {
-      assistantMsg.tool_calls = original.toolCalls.map((t) => ({
-        id: t.id,
-        name: t.name,
-        status: t.status,
-        ...(t.args != null ? { args: t.args } : {}),
-        ...(t.result != null ? { result: t.result } : {}),
-      }))
-    }
-    if (original.activityLog && original.activityLog.length > 0) {
-      assistantMsg.activity_log = original.activityLog.map((a) => ({ type: a.type, id: a.id }))
-    }
-    if (original.images && original.images.length > 0) {
-      assistantMsg.images = original.images.map((im) => ({ uri: im.uri, media_type: im.media_type }))
-    }
-    if (original.usage) {
-      assistantMsg.usage = original.usage
-    }
-    if (original.mcpApp) {
-      assistantMsg.mcp_app = original.mcpApp
-    }
-
-    const threadId = threadIdRef.current
-    fetch(`/api/sessions/${threadId}/truncate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ after_index: idx > 0 ? idx - 1 : 0, delete_from: idx }),
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return fetch(`/api/sessions/${threadId}/messages`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: [assistantMsg] }),
+        .then(async (res) => {
+          if (res.ok) return
+          setMessages(current)
+          if (await recoverIfHistoryChanged(res)) return
+          throw new Error(`HTTP ${res.status}`)
         })
+        .catch(() => {
+          setMessages(current)
+          onPersistErrorRef.current?.('The message could not be deleted. Please try again.')
+        })
+        .finally(() => onStreamCompleteRef.current?.())
+    },
+    [recoverIfHistoryChanged],
+  )
+
+  const editAssistantMessage = useCallback(
+    (messageId: string, newContent: string) => {
+      if (savingRef.current) return
+      setMessages((prev) => prev.map((msg) => (msg.id === messageId ? { ...msg, content: newContent } : msg)))
+
+      // Update backend session - we need to find the index and rewrite
+      // For simplicity, save the updated content by truncating and re-saving
+      const current = messagesRef.current
+      const idx = current.findIndex((m) => m.id === messageId)
+      if (idx === -1) return
+
+      // Preserve everything except the text (in-place edit): generated images and
+      // tool results (toolCalls), attached images, reasoning, the activity log
+      // ordering, and usage. Re-saving content alone previously dropped tool_calls
+      // (generated images) and attachments, so they vanished on reload.
+      const original = current[idx]
+      const assistantMsg: Record<string, unknown> = { role: 'assistant', content: newContent, id: original.id }
+      if (original.reasoningBlocks && original.reasoningBlocks.length > 0) {
+        assistantMsg.reasoning = original.reasoningBlocks.map((r) => ({ id: r.id, content: r.content }))
+      }
+      if (original.toolCalls && original.toolCalls.length > 0) {
+        assistantMsg.tool_calls = original.toolCalls.map((t) => ({
+          id: t.id,
+          name: t.name,
+          status: t.status,
+          ...(t.args != null ? { args: t.args } : {}),
+          ...(t.result != null ? { result: t.result } : {}),
+        }))
+      }
+      if (original.activityLog && original.activityLog.length > 0) {
+        assistantMsg.activity_log = original.activityLog.map((a) => ({ type: a.type, id: a.id }))
+      }
+      if (original.images && original.images.length > 0) {
+        assistantMsg.images = original.images.map((im) => ({ uri: im.uri, media_type: im.media_type }))
+      }
+      if (original.usage) {
+        assistantMsg.usage = original.usage
+      }
+      if (original.mcpApp) {
+        assistantMsg.mcp_app = original.mcpApp
+      }
+
+      const threadId = threadIdRef.current
+      fetch(`/api/sessions/${threadId}/truncate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(rewindBody(current, idx)),
       })
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      })
-      .catch(() => {
-        onPersistErrorRef.current?.('The edit could not be saved. It will be missing after a reload.')
-      })
-  }, [])
+        .then(async (res) => {
+          if (await recoverIfHistoryChanged(res)) return
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+          const saved = await fetch(`/api/sessions/${threadId}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: [assistantMsg] }),
+          })
+          if (!saved.ok) throw new Error(`HTTP ${saved.status}`)
+        })
+        .catch(() => {
+          onPersistErrorRef.current?.('The edit could not be saved. It will be missing after a reload.')
+        })
+    },
+    [recoverIfHistoryChanged],
+  )
 
   /**
    * A turn the SERVER persists (PRP-0187 / UDR-0169 D8): the image editor's direct

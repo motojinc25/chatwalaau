@@ -934,6 +934,53 @@ def _message_text(message: dict[str, Any]) -> str:
 class TruncateRequest(BaseModel):
     after_index: int
     delete_from: int
+    # What the sending tab holds (PRP-0245, UDR-0226 D6). Optional: a caller that omits them
+    # gets the old behaviour. ``previous_id`` is the message right before the cut, ``known_ids``
+    # the tab's messages from the cut onward.
+    previous_id: str | None = None
+    known_ids: list[str] | None = None
+
+
+def _history_changed() -> HTTPException:
+    """409 when a rewind was computed from a list that no longer matches the chat (UDR-0226 D6)."""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": "history_changed",
+            "message": "This chat changed in another tab or window. Nothing was removed.",
+        },
+    )
+
+
+def _indexes_are_visible_positions(messages: list[Any]) -> bool:
+    """The SPA's index is a position among user and assistant messages only (``convertMafMessages``).
+
+    With any other role stored the positions differ, so comparing them could refuse every rewind
+    of that chat forever, and reloading would not help. Such a chat keeps the old behaviour.
+    """
+    return all(isinstance(m, dict) and m.get("role") in ("user", "assistant") for m in messages)
+
+
+def _refuse_stale_truncate(messages: list[Any], body: TruncateRequest) -> None:
+    """Refuse a rewind that would remove a turn the sending tab has never seen (UDR-0226 D6).
+
+    Runs under the session write lock. A stored message without a ``message_id`` (legacy, Teams,
+    the OpenAI API) cannot be compared by id, so only the count covers it.
+    """
+    if body.known_ids is None or not _indexes_are_visible_positions(messages):
+        return
+    if body.previous_id is not None:
+        if body.delete_from < 1 or body.delete_from > len(messages):
+            raise _history_changed()
+        stored_id = messages[body.delete_from - 1].get("message_id")
+        if stored_id and stored_id != body.previous_id:
+            raise _history_changed()
+    doomed = messages[body.delete_from :]
+    if len(doomed) > len(body.known_ids):
+        raise _history_changed()
+    known = set(body.known_ids)
+    if any(m.get("message_id") and m["message_id"] not in known for m in doomed):
+        raise _history_changed()
 
 
 async def _reset_harness_conversation(thread_id: str, *, reason: str, keep_snapshot: bool = False) -> None:
@@ -978,6 +1025,7 @@ async def truncate_session(thread_id: str, body: TruncateRequest) -> dict[str, A
     def truncate(data: dict[str, Any]) -> bool:
         _refuse_open_discussion(data)
         messages = data.get("messages", [])
+        _refuse_stale_truncate(messages, body)
         if body.delete_from >= len(messages):
             return False
         data["messages"] = messages[: body.delete_from]
@@ -999,8 +1047,12 @@ async def truncate_session(thread_id: str, body: TruncateRequest) -> dict[str, A
 
 
 @router.delete("/{thread_id}/messages/{index}", dependencies=[Depends(verify_api_key)])
-async def delete_message(thread_id: str, index: int) -> dict[str, Any]:
-    """Delete a single message at the given index from a session."""
+async def delete_message(thread_id: str, index: int, expected_id: str | None = None) -> dict[str, Any]:
+    """Delete a single message at the given index from a session.
+
+    ``expected_id`` (PRP-0245, UDR-0226 D6): the id the sending tab holds at that index. When
+    the stored message there has a different id the delete is refused with 409 history_changed.
+    """
     out_of_range = False
 
     def remove(data: dict[str, Any]) -> bool:
@@ -1010,6 +1062,10 @@ async def delete_message(thread_id: str, index: int) -> dict[str, Any]:
         if index < 0 or index >= len(messages):
             out_of_range = True
             return False
+        if expected_id is not None and _indexes_are_visible_positions(messages):
+            stored_id = messages[index].get("message_id")
+            if stored_id and stored_id != expected_id:
+                raise _history_changed()
         messages.pop(index)
         data["messages"] = messages
         data["message_count"] = len(messages)

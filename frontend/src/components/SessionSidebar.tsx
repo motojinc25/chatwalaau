@@ -349,6 +349,11 @@ interface SessionRowProps {
   onDragEnd: () => void
 }
 
+/** The one address of a stored session (CTR-0003, UDR-0124 D2). */
+function sessionAddress(threadId: string): string {
+  return `/chat?session=${threadId}`
+}
+
 const SessionRow = memo(function SessionRow({
   session,
   nested,
@@ -400,16 +405,17 @@ const SessionRow = memo(function SessionRow({
           event.preventDefault()
           return
         }
-        event.dataTransfer.effectAllowed = 'move'
-        event.dataTransfer.setData('text/plain', session.thread_id)
+        // The drag carries the address (PRP-0245, UDR-0226 D2): dropped on the browser's tab bar
+        // it opens the chat in a new tab. A folder drop reads component state, not this data.
+        const url = new URL(sessionAddress(session.thread_id), window.location.origin).href
+        event.dataTransfer.effectAllowed = 'copyMove'
+        event.dataTransfer.setData('text/uri-list', url)
+        event.dataTransfer.setData('text/plain', url)
         onDragStart(session.thread_id)
       }}
       onDragEnd={onDragEnd}>
-      <button
-        type="button"
-        className="min-w-0 flex-1 cursor-pointer text-left"
-        onClick={() => !isRenaming && onSwitch(session.thread_id)}>
-        {rename ? (
+      {rename ? (
+        <div className="min-w-0 flex-1">
           <Input
             ref={rename.inputRef}
             type="text"
@@ -419,7 +425,27 @@ const SessionRow = memo(function SessionRow({
             onBlur={rename.onCommit}
             className="h-8"
           />
-        ) : (
+        </div>
+      ) : (
+        // A real link (PRP-0245, UDR-0226 D1): Ctrl / Cmd / Shift+click, a middle click and the
+        // link menu stay the browser's. A plain click switches this tab, and so does Alt+click,
+        // which would otherwise download the page. draggable=false keeps the row the drag source.
+        <a
+          href={sessionAddress(session.thread_id)}
+          rel="noopener"
+          draggable={false}
+          className="block min-w-0 flex-1 cursor-pointer text-left text-inherit no-underline"
+          onClick={(event) => {
+            if (event.ctrlKey || event.metaKey || event.shiftKey) return
+            event.preventDefault()
+            onSwitch(session.thread_id)
+          }}
+          onKeyDown={(event) => {
+            // Space activated the button this link replaced; a link ignores it by itself.
+            if (event.key !== ' ') return
+            event.preventDefault()
+            onSwitch(session.thread_id)
+          }}>
           <>
             <p className="flex items-center gap-1 truncate text-sm leading-tight">
               {session.pinned_at && <Pin className="h-3 w-3 shrink-0 text-muted-foreground" />}
@@ -503,8 +529,8 @@ const SessionRow = memo(function SessionRow({
               </span>
             </p>
           </>
-        )}
-      </button>
+        </a>
+      )}
       {!isRenaming && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -1300,6 +1326,25 @@ export function SessionSidebar({
     setDraggedSessionId(null)
     setDropFolderId(null)
   }, [])
+
+  // A missed drop never leaves the chat (PRP-0245, UDR-0226 D3). The row's drag carries a URL, so
+  // a drop nothing on the page handles could navigate this tab away from a running reply. Listens
+  // only during a row drag and leaves alone what a folder or the chat area has already handled.
+  // The bubble phase comes after them; the browser's tab bar is outside the page.
+  useEffect(() => {
+    if (!draggedSessionId) return
+    const refuse = (event: DragEvent) => {
+      if (event.defaultPrevented) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'none'
+    }
+    document.addEventListener('dragover', refuse)
+    document.addEventListener('drop', refuse)
+    return () => {
+      document.removeEventListener('dragover', refuse)
+      document.removeEventListener('drop', refuse)
+    }
+  }, [draggedSessionId])
 
   const handleDragOverFolder = useCallback((folderId: string) => setDropFolderId(folderId), [])
   const handleDragLeaveFolder = useCallback(

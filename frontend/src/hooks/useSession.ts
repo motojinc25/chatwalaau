@@ -236,7 +236,7 @@ interface OpenChatFolder {
  * Fetch a chat's history. `not_found` means a fresh chat; `failed` means the history
  * exists (or may exist) but could not be read, and must NOT be shown as an empty chat.
  */
-async function fetchSessionMessages(threadId: string): Promise<SessionLoadResult> {
+export async function fetchSessionMessages(threadId: string): Promise<SessionLoadResult> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetch(`/api/sessions/${threadId}`)
