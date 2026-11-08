@@ -104,6 +104,7 @@ Thumbs.db
 assets/
 tests/
 .releases/
+releases/
 RELEASE_NOTES*.md
 CHANGELOG.md
 CLAUDE.md

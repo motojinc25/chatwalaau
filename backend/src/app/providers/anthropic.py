@@ -36,6 +36,7 @@ follow-up supersedes the original UDR-0045 D5 deferral for Anthropic.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app import models_catalog
@@ -216,6 +217,87 @@ def _inject_prompt_cache(run_options: dict[str, Any], ttl: str) -> dict[str, Any
     return run_options
 
 
+# UDR-0228 D4: the connector's own record of a hosted (server) tool call.
+_SERVER_TOOL_ID_PREFIX = "srvtoolu_"
+_SERVER_TOOL_METADATA = ("anthropic", "server_tool_block")
+_MAX_OLDER_HOSTED_SOURCES = 5
+_SOURCE_URL = re.compile(r"""https?://[^\s'"<>\\]+""")
+
+
+def _is_older_hosted_record(content: Any) -> bool:
+    """A hosted-tool call or result stored without the metadata MAF 1.24.0 records."""
+    if getattr(content, "type", None) not in ("function_call", "function_result"):
+        return False
+    call_id = getattr(content, "call_id", None)
+    if not isinstance(call_id, str) or not call_id.startswith(_SERVER_TOOL_ID_PREFIX):
+        return False
+    namespace, key = _SERVER_TOOL_METADATA
+    scoped = (getattr(content, "additional_properties", None) or {}).get(namespace)
+    return not (isinstance(scoped, dict) and key in scoped)
+
+
+def _older_hosted_text(name: str | None, result: Any) -> str:
+    """What the model sees instead of an older record. Only URLs leave the stored result."""
+    try:
+        found = _SOURCE_URL.findall(str(getattr(result, "result", None) or ""))
+    except Exception:  # a record that cannot be read costs its sources, never the turn
+        found = []
+    sources = list(dict.fromkeys(url.rstrip(".,;)]") for url in found))[:_MAX_OLDER_HOSTED_SOURCES]
+    text = f"[An earlier {name or 'hosted tool'} call ran here; its results are no longer available.]"
+    return f"{text} Sources: {' '.join(sources)}" if sources else text
+
+
+def convert_older_hosted_records(messages: Any) -> Any:
+    """Turn hosted-tool records from before MAF 1.24.0 into assistant text (UDR-0228 D4).
+
+    The connector replays a server-tool block from metadata it records since 1.24.0 (#9718) and
+    raises ``ContentError`` for a record without it, which a harness snapshot (CTR-0279) from an
+    older version holds. Each call id becomes ONE text at the position of its first record.
+    The stored messages are not changed; history without such a record is returned as it is.
+    """
+    from agent_framework import Content, Message
+
+    try:
+        older = [c for m in messages for c in m.contents if _is_older_hosted_record(c)]
+        if not older:
+            return messages
+        names = {c.call_id: c.name for c in older if c.type == "function_call"}
+        results = {c.call_id: c for c in older if c.type == "function_result"}
+        seen: set[str] = set()
+        converted: list[Any] = []
+        for message in messages:
+            if not any(_is_older_hosted_record(c) for c in message.contents):
+                converted.append(message)
+                continue
+            contents: list[Any] = []
+            for content in message.contents:
+                if not _is_older_hosted_record(content):
+                    contents.append(content)
+                elif content.call_id not in seen:
+                    seen.add(content.call_id)
+                    text = _older_hosted_text(names.get(content.call_id), results.get(content.call_id))
+                    contents.append(Content.from_text(text))
+            if not contents:
+                continue
+            # A tool message that holds only these records has no tool result left to carry.
+            only_text = all(c.type == "text" for c in contents)
+            role = "assistant" if message.role == "tool" and only_text else message.role
+            converted.append(
+                Message(
+                    role=role,
+                    contents=contents,
+                    author_name=message.author_name,
+                    message_id=message.message_id,
+                    additional_properties=message.additional_properties,
+                )
+            )
+    except Exception:  # D4.4: the connector then decides; this seam never fails a turn itself
+        logger.exception("[anthropic] could not convert older hosted-tool records")
+        return messages
+    logger.info("[anthropic] converted %d older hosted-tool record(s) to text", len(seen))
+    return converted
+
+
 class _PromptCacheMixin:
     """Mixin overriding ``_prepare_options`` to inject prompt-cache markers.
 
@@ -228,6 +310,8 @@ class _PromptCacheMixin:
         # UDR-0164 D4 (PRP-0182): forward positional extras. MAF 1.19.0's Anthropic
         # connector passes a per-request `request_state` POSITIONALLY; a signature
         # without *args failed every request with TypeError before it was sent.
+        # UDR-0228 D4: a hosted-tool record stored before MAF 1.24.0 cannot be replayed.
+        messages = convert_older_hosted_records(messages)
         run_options = super()._prepare_options(messages, options, *args, **kwargs)  # type: ignore[misc]
         # PRP-0151 C4 / UDR-0129 D8: see app/providers/azure_openai.py. The Anthropic
         # connector filters framework-level options by its own denylist, which does not

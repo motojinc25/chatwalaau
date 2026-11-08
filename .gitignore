@@ -111,6 +111,7 @@ batch-server.log
 .archived_uploads
 
 # Releases
+releases/*/
 .releases
 
 # Ontologies

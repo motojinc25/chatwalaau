@@ -110,7 +110,10 @@ class WorkspaceShellTool(LocalShellTool):
             mode="stateless",
             workdir=workdir,
             timeout=timeout,
-            max_output_bytes=max_output_bytes,
+            # UDR-0228 D3: MAF 1.24.0 (#9795) replaced `max_output_bytes` with one limit per
+            # stream. Only the constructor sees these; run() below caps each stream itself.
+            max_stdout_bytes=max_output_bytes,
+            max_stderr_bytes=max_output_bytes,
             policy=policy,
             env=env,
             **kwargs,
