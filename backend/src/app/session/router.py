@@ -284,8 +284,8 @@ def _read_session_or_404(thread_id: str) -> dict[str, Any]:
 def _update_session_or_error(thread_id: str, mutate: SessionMutator) -> dict[str, Any]:
     """Serialised read-modify-write of an EXISTING session (UDR-0156 D1/D2).
 
-    404 when absent, 503 / 500 when unreadable (nothing written), 500 when the write
-    itself fails.
+    404 when absent, 503 / 500 when unreadable (nothing written), 503 when another handle
+    keeps the file from being replaced, 500 when the write itself fails.
     """
     try:
         data = update_session_json(thread_id, mutate)

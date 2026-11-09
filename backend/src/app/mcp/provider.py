@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 def _forwarded_kwargs(server: MCPServerConfig) -> dict[str, Any]:
     """Build MAF kwargs from the PRP-0046 optional fields.
 
-    Mostly a passthrough that skips ``None``, with one exception:
-    ``load_prompts`` is defaulted to ``False`` when unset. The real-world
+    Mostly a passthrough that skips ``None``, with two exceptions.
+    ``request_timeout`` is always passed: unset means no limit, not MAF's
+    30-second default (UDR-0229 D5). ``load_prompts`` is defaulted to
+    ``False`` when unset. The real-world
     MCP server ecosystem (filesystem, git, github, batch, etc.) is
     dominated by tools-only servers that do not implement ``prompts/list``,
     so forwarding MAF's default ``True`` produces a "Method not found"
@@ -39,8 +41,7 @@ def _forwarded_kwargs(server: MCPServerConfig) -> dict[str, Any]:
     # Safer default than MAF's True: most community servers are
     # tools-only and returning "Method not found" aborts connection.
     out["load_prompts"] = server.load_prompts if server.load_prompts is not None else False
-    if server.request_timeout is not None:
-        out["request_timeout"] = server.request_timeout
+    out["request_timeout"] = server.request_timeout
     return out
 
 

@@ -107,7 +107,7 @@ class OffLoopCodeBridge:
         self._limits = dict(resource_limits) if resource_limits else None
 
     def _request_timeout(self) -> float | None:
-        duration = (self._limits or {}).get("max_duration_secs")
+        duration = (self._limits or {}).get("max_feed_duration_secs")
         return float(duration) + REQUEST_TIMEOUT_MARGIN_SECS if duration else None
 
     async def run(self, code: str) -> dict[str, Any]:
@@ -172,6 +172,10 @@ class OffLoopCodeBridge:
 
     @staticmethod
     def _answer_function(snapshot: Any) -> dict[str, str]:
+        if snapshot.is_os_function and str(snapshot.function_name) == "import":
+            # pydantic-monty 1.x asks the host for a module it does not bundle (UDR-0229 D3).
+            module = str(snapshot.args[0]) if snapshot.args else "module"
+            return _error("ModuleNotFoundError", f"No module named {module!r}")
         if snapshot.is_os_function:
             return _error("PermissionError", "OS, filesystem and network calls are not available.")
         return _error("NameError", f"Function {str(snapshot.function_name)!r} is not available.")

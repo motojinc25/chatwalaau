@@ -40,7 +40,8 @@ _BYTES_PER_MB = 1024 * 1024
 def codeact_resource_limits() -> dict[str, Any]:
     """Monty ``ResourceLimits`` from the App Settings bounds, read now (D7)."""
     return {
-        "max_duration_secs": float(settings.codeact_max_duration_secs),
+        # With no host tools, one feed is the whole run (UDR-0229 D2).
+        "max_feed_duration_secs": float(settings.codeact_max_duration_secs),
         "max_memory": int(settings.codeact_max_memory_mb) * _BYTES_PER_MB,
     }
 

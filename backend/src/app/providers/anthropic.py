@@ -306,6 +306,20 @@ class _PromptCacheMixin:
     per call from settings so a test toggling it sees the effect.
     """
 
+    def _parse_usage_from_anthropic(self, *args: Any, **kwargs: Any) -> Any:
+        """Keep ``input_token_count`` exclusive of cache (UDR-0229 D4, UDR-0135 D5).
+
+        MAF 1.25.0 (#9859) adds both cache counts to it. Every reader here expects the provider's
+        own value, and several read it directly, so it is restored at this one seam.
+        """
+        details = super()._parse_usage_from_anthropic(*args, **kwargs)  # type: ignore[misc]
+        if details and details.get("input_token_count") is not None:
+            cached = (details.get("cache_read_input_token_count") or 0) + (
+                details.get("cache_creation_input_token_count") or 0
+            )
+            details["input_token_count"] = max(details["input_token_count"] - cached, 0)
+        return details
+
     def _prepare_options(self, messages: Any, options: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
         # UDR-0164 D4 (PRP-0182): forward positional extras. MAF 1.19.0's Anthropic
         # connector passes a per-request `request_state` POSITIONALLY; a signature

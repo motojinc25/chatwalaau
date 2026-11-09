@@ -31,7 +31,8 @@ JSON, and regular expressions. Do not use it for anything that needs no computat
   other tools: call your other tools directly, as usual, and pass their results into
   the code.
 - It is a Python subset. `json`, `re`, `math`, `datetime`, `collections`, `itertools`,
-  `base64` and `dataclasses` are available; `statistics` and `csv` are not.
+  `base64`, `dataclasses`, `random`, `time`, `hashlib` and `decimal` are available;
+  `statistics` and `csv` are not, and the code cannot sleep.
 - Return the answer with `print(...)` or by ending the code with an expression.
 - Each call starts fresh: variables do not survive between calls. Execution time and
   memory are limited."""

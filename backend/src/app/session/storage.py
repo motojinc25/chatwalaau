@@ -130,6 +130,15 @@ class SessionCorruptError(SessionUnavailableError):
     """A session file exists and was read, but is not a JSON object."""
 
 
+class SessionWriteBlockedError(SessionUnavailableError):
+    """Another handle kept a session file from being replaced, through every retry.
+
+    The same transient condition as an unreadable file, so a caller answers it the same way
+    (503 with Retry-After). The file on disk is unchanged. Any other write failure stays a
+    plain ``OSError``.
+    """
+
+
 def write_json_atomic(path: Path, payload: Any) -> None:
     """Write JSON atomically using a temp file and replace."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,6 +146,9 @@ def write_json_atomic(path: Path, payload: Any) -> None:
     temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
         _retry_transient(lambda: temp_path.replace(path))
+    except PermissionError as e:
+        temp_path.unlink(missing_ok=True)
+        raise SessionWriteBlockedError(f"Session file is temporarily locked: {path.name}") from e
     except OSError:
         temp_path.unlink(missing_ok=True)
         raise

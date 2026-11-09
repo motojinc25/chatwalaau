@@ -264,7 +264,35 @@ class _JailedMcpToolHandler:
             arguments=invocation.arguments,
             headers=dict(server.headers or {}),
         )
-        return await self._default.invoke_tool(jailed)
+        return await self._invoke_on_configured_server(jailed, server.request_timeout)
+
+    async def _invoke_on_configured_server(
+        self, invocation: MCPToolInvocation, request_timeout: int | None
+    ) -> MCPToolResult:
+        """Run one call under the server's own time limit (UDR-0229 D6).
+
+        ``DefaultMCPToolHandler`` always takes MAF's 30-second default and has no parameter for it,
+        so the tool is built here. The result mapping and the cleanup stay upstream's, and each
+        invocation keeps its own protocol session.
+        """
+        from agent_framework import MCPStreamableHTTPTool
+
+        if invocation.tool_name == self._default.LIST_TOOLS_TOOL_NAME and invocation.arguments:
+            raise ValueError(f"The reserved MCP '{invocation.tool_name}' operation does not accept tool arguments.")
+        tool: MCPStreamableHTTPTool | None = None
+        try:
+            tool = MCPStreamableHTTPTool(
+                name=invocation.server_label or "McpClient",
+                url=invocation.server_url,
+                load_prompts=False,
+                static_headers=dict(invocation.headers),
+                request_timeout=request_timeout,
+            )
+            await tool.connect()
+            return await self._default._invoke_connected_tool(tool, invocation)
+        finally:
+            if tool is not None:
+                await self._default._close_tool(tool)
 
 
 def build_mcp_tool_handler() -> _JailedMcpToolHandler:
