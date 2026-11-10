@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { HighlightedText } from '@/components/HighlightedText'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
@@ -14,34 +15,6 @@ interface SessionSearchDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   onSelect: (threadId: string) => void
-}
-
-/**
- * Highlights the query match inside `text`.
- *
- * `redacted` BYPASSES the highlight entirely (CTR-0190, UDR-0107 D7). This is
- * not cosmetic: the highlight is placed at the true match offset, so wrapping a
- * slice of already-scrambled text in <mark> would publish exactly WHERE the
- * query matched inside otherwise-illegible content -- the one thing the
- * redaction was meant to hide.
- */
-function HighlightedText({ text, query, redacted }: { text: string; query: string; redacted: boolean }) {
-  if (redacted) return <>{text}</>
-  if (!query.trim()) return <>{text}</>
-
-  const lowerText = text.toLowerCase()
-  const lowerQuery = query.toLowerCase()
-  const idx = lowerText.indexOf(lowerQuery)
-
-  if (idx === -1) return <>{text}</>
-
-  return (
-    <>
-      {text.slice(0, idx)}
-      <mark className="bg-yellow-200 dark:bg-yellow-800">{text.slice(idx, idx + query.length)}</mark>
-      {text.slice(idx + query.length)}
-    </>
-  )
 }
 
 export function SessionSearchDialog({ sessions, open, onOpenChange, onSelect }: SessionSearchDialogProps) {

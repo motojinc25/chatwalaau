@@ -24,7 +24,7 @@ const STATUS_LABELS: Record<string, string> = {
   failed: 'Failed',
 }
 
-const REASONS: Record<string, string> = {
+export const REASONS: Record<string, string> = {
   human_finished: 'you asked for the summary',
   max_rounds: 'all rounds were held',
   budget: 'the token budget ran out',

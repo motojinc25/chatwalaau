@@ -27,6 +27,14 @@
  *
  * An empty or unparseable input yields an empty string, never `Invalid Date`.
  */
+/** The viewer's local calendar date as `YYYY-MM-DD`, or '' when `iso` cannot be read (UDR-0230 D2). */
+export function localDateKey(iso: string): string {
+  const date = new Date(iso)
+  if (!iso || Number.isNaN(date.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
 export function formatSessionDateTime(iso: string): string {
   if (!iso) return ''
   const date = new Date(iso)

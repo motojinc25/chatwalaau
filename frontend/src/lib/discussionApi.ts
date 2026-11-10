@@ -172,6 +172,8 @@ export const discussionApi = {
   create: (body: CreateDiscussionRequest) =>
     call<{ thread_id: string; run: DiscussionRun }>('/api/discussions', { method: 'POST', body: JSON.stringify(body) }),
   runs: (threadId: string) => call<{ runs: DiscussionRun[] }>(`/api/discussions/${encodeURIComponent(threadId)}/runs`),
+  /** One run in full (PRP-0249): the decision log reads it for the selected row only. */
+  run: (threadId: string, runId: string) => call<{ run: DiscussionRun }>(base(threadId, runId)),
   input: (
     threadId: string,
     runId: string,
