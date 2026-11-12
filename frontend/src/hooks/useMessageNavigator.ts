@@ -43,9 +43,7 @@ function buildPreview(content: string): string {
 export function useMessageNavigator(
   scrollRef: RefObject<HTMLDivElement | null>,
   messages: ChatMessage[],
-  options: { enabled: boolean },
 ): UseMessageNavigatorResult {
-  const { enabled } = options
   const [gutterOk, setGutterOk] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
 
@@ -63,10 +61,6 @@ export function useMessageNavigator(
   // Responsive gutter gate (UDR-0048 D6). Measure the scroll container width
   // via ResizeObserver so a sidebar open/close or window resize re-evaluates.
   useEffect(() => {
-    if (!enabled) {
-      setGutterOk(false)
-      return
-    }
     const el = scrollRef.current
     if (!el) return
     if (typeof ResizeObserver === 'undefined') {
@@ -82,9 +76,9 @@ export function useMessageNavigator(
     const ro = new ResizeObserver(measure)
     ro.observe(el)
     return () => ro.disconnect()
-  }, [enabled, scrollRef])
+  }, [scrollRef])
 
-  const isAvailable = enabled && gutterOk && turns.length >= MIN_TURNS_TO_SHOW
+  const isAvailable = gutterOk && turns.length >= MIN_TURNS_TO_SHOW
 
   // Scrollspy via IntersectionObserver over the user-message nodes. The active
   // turn is the topmost user node currently within the upper viewport band;

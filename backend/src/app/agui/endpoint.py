@@ -711,8 +711,8 @@ def _harness_project_of(state: dict[str, Any] | None) -> str | None:
 def _stored_harness_project(thread_id: str) -> str:
     """The project folder stored on the session record ("" when none; never raises).
 
-    Used when a turn sends no ``state.harness_project`` (a surface without the project
-    picker, such as /popup and /sidebar), so it keeps the conversation's folder.
+    Used when a turn sends no ``state.harness_project`` (an API client without the
+    project picker), so it keeps the conversation's folder.
     """
     from app.session.storage import read_session_json
 

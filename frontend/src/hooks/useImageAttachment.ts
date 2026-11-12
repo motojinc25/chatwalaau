@@ -197,7 +197,6 @@ export function useImageAttachment() {
     attachments,
     addFiles,
     notice,
-    reportNotice,
     dismissNotice,
     attachPaintImage,
     removeAttachment,

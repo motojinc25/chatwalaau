@@ -108,8 +108,7 @@ export function ChatPage() {
   const temp = useTemporaryChat()
   const effectiveThreadId = temp.isTemporary && temp.tempThreadId ? temp.tempThreadId : threadId
 
-  // Chat surface tier (PRP-0171, UDR-0153 D1/D2). This page is the ONLY provider, so
-  // the compact ChatPanel on /popup and /sidebar keeps the wide default untouched.
+  // Chat surface tier (PRP-0171, UDR-0153 D1/D2). This page is the ONLY provider.
   const { narrow, touchPrimary } = useViewportTier()
   // The page is sized to what the browser actually shows, at every width (v0.155.1):
   // iPad / iPhone Safari's 100vh includes its tab bar and toolbar.
@@ -456,11 +455,7 @@ export function ChatPage() {
                 attachFile={attachFile}
                 onAttachConsumed={() => setAttachFile(null)}
                 temporary={temp.isTemporary}
-                // Live voice is offered on the full-page chat only (PRP-0188, Q3).
-                liveCapable
-                // AI Discussion controls: the full-page chat only (PRP-0232 2.7).
-                discussionCapable
-                // Harness project folder (PRP-0244): the full-page chat only.
+                // Harness project folder (PRP-0244).
                 savedHarnessProject={temp.isTemporary ? undefined : currentHarnessProject}
               />
             )}

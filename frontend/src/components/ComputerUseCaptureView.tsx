@@ -14,8 +14,7 @@ const POLL_MS = 1000
  * agent keeps the desktop, and the kill switches (Ctrl+Alt+End, moving the mouse,
  * Stop, Abort) are unchanged.
  *
- * Rendered by ChatPanel on the full-width /chat surface only (not /popup, /sidebar or
- * a narrow screen).
+ * Rendered by ChatPanel at full width only (not on a narrow screen).
  */
 export function ComputerUseCaptureView({ threadId, active }: { threadId?: string | null; active: boolean }) {
   const [capture, setCapture] = useState<ComputerUseCapture | null>(null)

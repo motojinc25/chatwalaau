@@ -18,7 +18,7 @@ import { isPreviewableRef, workspaceRefName } from '@/lib/workspace-ref'
 export interface WorkspaceLinkContextValue {
   /**
    * File Explorer availability (useFileExplorerAvailable). `undefined` where no
-   * probe is mounted (/popup, /sidebar): the control stays interactive and a
+   * probe is mounted: the control stays interactive and a
    * failure shows the server's reason on click.
    */
   available?: boolean

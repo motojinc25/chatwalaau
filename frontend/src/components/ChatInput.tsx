@@ -199,8 +199,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   ref,
 ) {
   const [value, setValue] = useState('')
-  // Chat surface tier (PRP-0171, UDR-0153). Wide / unmanaged (the compact /popup and
-  // /sidebar panels) keeps today's behaviour exactly.
+  // Chat surface tier (PRP-0171, UDR-0153).
   const surface = useChatSurfaceTier()
   // Voice input needs getUserMedia, which exists only in a secure context (UDR-0153 D8).
   // Loopback is a secure context, so a localhost operator never loses the button.
@@ -217,8 +216,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const pdfInputRef = useRef<HTMLInputElement>(null)
-  // The id `aria-describedby` points at. Stable per mount, and unique because /chat,
-  // /popup and /sidebar can be open in one browser at once.
+  // The id `aria-describedby` points at. Stable per mount, and unique because several
+  // chat tabs can be open in one browser at once.
   const contextNoteId = useId()
 
   // --- Slash command completion state (CTR-0128, PRP-0088) ---

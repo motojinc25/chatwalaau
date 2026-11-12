@@ -41,7 +41,6 @@ import { useMessageStepNav } from '@/hooks/useMessageStepNav'
 import { useTemplates } from '@/hooks/useTemplates'
 import { useTTS } from '@/hooks/useTTS'
 import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
-import { NO_THREAD_NOTICE } from '@/lib/attachmentPolicy'
 import { isComputerUseTool } from '@/lib/computerUse'
 import { resolveContextOccupancy } from '@/lib/contextOccupancy'
 import { harnessProjectApi, projectLabel } from '@/lib/harnessProject'
@@ -60,18 +59,16 @@ import type { ChatMessage, ImageRef, PersistedWorkflowRun, UsageInfo } from '@/t
 const PaintEditor = lazyWithReload(() => import('@/components/PaintEditor').then((m) => ({ default: m.PaintEditor })))
 
 interface ChatPanelProps {
-  compact?: boolean
   emptyMessage?: string
   className?: string
-  threadId?: string
+  threadId: string
   initialMessages?: ChatMessage[]
   onStreamComplete?: () => void
   /** New-session created (PRP-0077, CTR-0016): show it in the sidebar immediately. */
   onSessionCreated?: (info: { threadId: string; title: string; folderId: string | null }) => void
   /**
    * "New chat in folder" (PRP-0196, UDR-0178 D7): the folder the chat is created in on
-   * its first send. Only the full-page /chat surface passes it; /popup and /sidebar
-   * never do, so their requests are unchanged.
+   * its first send.
    */
   initFolderId?: string | null
   onBranchFromMessage?: (messageIndex: number) => void
@@ -86,20 +83,9 @@ interface ChatPanelProps {
   /** Temporary Chat mode (CTR-0107, PRP-0076): dark input, no history. */
   temporary?: boolean
   /**
-   * Live voice conversation (CTR-0228, PRP-0188, UDR-0170 D11). Only the full-page
-   * /chat surface passes it: the compact /popup and /sidebar panels share this
-   * component and do not offer Live (operator answer Q3).
-   */
-  liveCapable?: boolean
-  /**
-   * AI Discussion controls (CTR-0276, PRP-0232). Only the full-page /chat surface passes it;
-   * /popup and /sidebar show a discussion chat read-only.
-   */
-  discussionCapable?: boolean
-  /**
    * The chat's stored harness project folder (PRP-0244, UDR-0225 D1): a string, or null when
-   * never chosen (the workspace root). Only the full-page /chat surface passes it; undefined
-   * hides the project folder entry and sends no state.harness_project.
+   * never chosen (the workspace root). A Temporary Chat passes undefined, which hides the
+   * project folder entry and sends no state.harness_project.
    */
   savedHarnessProject?: string | null
 }
@@ -133,7 +119,6 @@ function turnKeyFromContent(userText: string, assistantText: string): string {
 }
 
 export function ChatPanel({
-  compact,
   emptyMessage = 'How can I help you today?',
   className,
   threadId,
@@ -147,8 +132,6 @@ export function ChatPanel({
   attachFile,
   onAttachConsumed,
   temporary = false,
-  liveCapable = false,
-  discussionCapable = false,
   savedHarnessProject,
 }: ChatPanelProps) {
   const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null)
@@ -178,8 +161,7 @@ export function ChatPanel({
   // On a phone the button exists before /api/model has answered (D9), so it never renders
   // an empty label.
   const runTargetText = runTargetName || 'Agent'
-  // Chat surface tier (PRP-0171, UDR-0153). Only the full-page /chat surface provides
-  // one; the compact /popup and /sidebar panels read the wide default.
+  // Chat surface tier (PRP-0171, UDR-0153), provided by ChatPage.
   const surface = useChatSurfaceTier()
   // PRP-0186 (UDR-0168 D7): ONE switching surface on EVERY tier. The tier no longer
   // chooses the destination.
@@ -345,12 +327,12 @@ export function ChatPanel({
   // messages are written by the backend and only shown here (UDR-0215 D4).
   const discussion = useDiscussion({
     threadId,
-    enabled: discussionCapable && !temporary,
+    enabled: !temporary,
     messages,
     upsertMessage,
     onChanged: onStreamComplete,
   })
-  const discussionDrives = discussionCapable && discussion.active
+  const discussionDrives = discussion.active
   const discussionPhaseRunning =
     discussionDrives &&
     (discussion.streaming || discussion.latest?.status === 'running' || discussion.latest?.status === 'summarizing')
@@ -398,7 +380,6 @@ export function ChatPanel({
     getImageRefs,
     isUploading,
     notice: attachmentNotice,
-    reportNotice,
     dismissNotice,
   } = useImageAttachment()
 
@@ -406,7 +387,7 @@ export function ChatPanel({
   // sourced from an image/PDF preview; upload it to the active thread via the
   // existing composer attach path, then signal it consumed so it is not re-added.
   useEffect(() => {
-    if (!attachFile || !threadId) return
+    if (!attachFile) return
     void addFiles([attachFile], threadId)
     onAttachConsumed?.()
   }, [attachFile, threadId, addFiles, onAttachConsumed])
@@ -421,7 +402,7 @@ export function ChatPanel({
 
   const loadScene = useCallback(
     async (filename: string | undefined): Promise<unknown> => {
-      if (!threadId || !filename) return undefined
+      if (!filename) return undefined
       try {
         const res = await fetch(`/api/paint/${threadId}/${encodeURIComponent(filename)}`)
         return res.ok ? await res.json() : undefined
@@ -454,7 +435,6 @@ export function ChatPanel({
 
   const handlePaintAttach = useCallback(
     (blob: Blob, scene: unknown) => {
-      if (!threadId) return
       void attachPaintImage(blob, scene, threadId, paintState?.replaceId)
       setPaintState(null)
     },
@@ -464,11 +444,10 @@ export function ChatPanel({
   const tts = useTTS()
 
   // Live voice conversation (CTR-0228, PRP-0188, UDR-0170 D11). Offered only when the
-  // server has it on (CTR-0223 status), on /chat, for a Prompt run-target (Core or
+  // server has it on (CTR-0223 status), for a Prompt run-target (Core or
   // Custom -- not a Workflow or Harness), in a secure context (getUserMedia).
   const [liveOffered, setLiveOffered] = useState(false)
   useEffect(() => {
-    if (!liveCapable) return
     let cancelled = false
     fetch('/api/live/status')
       .then((r) => (r.ok ? r.json() : null))
@@ -479,7 +458,7 @@ export function ChatPanel({
     return () => {
       cancelled = true
     }
-  }, [liveCapable])
+  }, [])
   const liveHadMessagesRef = useRef(false)
   liveHadMessagesRef.current = messages.length > 0
   const live = useLiveVoice({
@@ -489,7 +468,7 @@ export function ChatPanel({
     onDelegation: applyLiveDelegation,
     onStarted: useCallback(() => {
       // A Live-first chat now exists on the server: show it in the sidebar at once.
-      if (!liveHadMessagesRef.current && !temporary && threadId) {
+      if (!liveHadMessagesRef.current && !temporary) {
         // The Live lane creates the record at the root (PRP-0196 scope: init / save only).
         onSessionCreated?.({ threadId, title: 'Live conversation', folderId: null })
       }
@@ -504,7 +483,7 @@ export function ChatPanel({
   const promptRunTarget = !selectedWorkflowId && !selectedHarnessId
   const secureContext = typeof window !== 'undefined' && window.isSecureContext
   const composerLive =
-    liveCapable && liveOffered && promptRunTarget && secureContext && show('composer.live')
+    liveOffered && promptRunTarget && secureContext && show('composer.live')
       ? {
           state: live.state,
           levels: live.levels,
@@ -708,9 +687,9 @@ export function ChatPanel({
     useChatScroll(streamingKey)
 
   // CTR-0103 Message Navigator (PRP-0072): user-turn index rail + popover.
-  // Full-page /chat only (non-compact); availability is gated by the measured
-  // right gutter and the user-turn count inside the hook.
-  const messageNav = useMessageNavigator(scrollRef, messages, { enabled: !compact })
+  // Availability is gated by the measured right gutter and the user-turn count
+  // inside the hook.
+  const messageNav = useMessageNavigator(scrollRef, messages)
 
   // CTR-0168 Message Step Navigation (PRP-0101 / UDR-0081): per-message prev/next
   // buttons flanking the ScrollToBottom button, shown whenever the container
@@ -858,7 +837,7 @@ export function ChatPanel({
   // turn in this chat, refused while a run is streaming or a discussion waits for input.
   const mcpAppHost = useMemo<McpAppHost>(
     () => ({
-      threadId: threadId ?? null,
+      threadId,
       sendViewMessage: (text: string, source: string) => {
         if (composerBusy || discussionWaiting) return false
         void sendMessage(text, undefined, { mcpAppSource: source })
@@ -902,14 +881,12 @@ export function ChatPanel({
     [retryLostTurn, scrollToBottom],
   )
 
-  // Picker and paste (CTR-0023 v2). /popup and /sidebar have no thread, so an
-  // attachment there is reported instead of being dropped silently (UDR-0211 D4).
+  // Picker and paste (CTR-0023 v2).
   const handleAddFiles = useCallback(
     (files: FileList | File[]) => {
-      if (threadId) void addFiles(files, threadId)
-      else reportNotice(NO_THREAD_NOTICE)
+      void addFiles(files, threadId)
     },
-    [addFiles, threadId, reportNotice],
+    [addFiles, threadId],
   )
 
   const handleDragEnter = useCallback((e: DragEvent) => {
@@ -953,11 +930,10 @@ export function ChatPanel({
         onDragOver={handleDragOver}
         onDrop={handleDrop}>
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
-          <div className={cn('mx-auto px-4 pt-4', compact ? 'max-w-full pb-4' : 'max-w-3xl')}>
+          <div className="mx-auto max-w-3xl px-4 pt-4">
             {messages.length === 0 && (
-              <div
-                className={cn('flex items-center justify-center text-muted-foreground', compact ? 'h-40' : 'h-[60vh]')}>
-                <p className={cn(compact ? 'text-xs' : 'text-sm')}>{emptyMessage}</p>
+              <div className="flex h-[60vh] items-center justify-center text-muted-foreground">
+                <p className="text-sm">{emptyMessage}</p>
               </div>
             )}
             {messages.map((msg, i) => {
@@ -981,7 +957,6 @@ export function ChatPanel({
                   <ChatMessageItem
                     message={msg}
                     messageIndex={i}
-                    compact={compact}
                     isLoading={isLoading && i === messages.length - 1}
                     // TTS is withdrawn while Live speaks (CTR-0040, PRP-0188).
                     tts={liveActive ? undefined : tts}
@@ -1026,12 +1001,12 @@ export function ChatPanel({
               )
             })}
             {/* CTR-0092 bottom spacer: keeps the final message visible above the floating ChatInput. */}
-            {!compact && <div aria-hidden="true" style={{ height: bottomSpacerHeightPx }} />}
+            <div aria-hidden="true" style={{ height: bottomSpacerHeightPx }} />
           </div>
         </div>
 
         {/* CTR-0103 Message Navigator: floating right-gutter rail + popover.
-          Overlay only; absent in compact mode and on constrained viewports. */}
+          Overlay only; absent on constrained viewports. */}
         {messageNav.isAvailable && (
           <MessageNavigator turns={messageNav.turns} activeId={messageNav.activeId} onJump={messageNav.scrollToTurn} />
         )}
@@ -1057,9 +1032,9 @@ export function ChatPanel({
           </div>
         )}
 
-        {/* PRP-0189 amendment A4 (CTR-0235): what the agent sees, full-width /chat only.
+        {/* PRP-0189 amendment A4 (CTR-0235): what the agent sees, full width only.
           In Live, only while delegated work runs -- the Live session itself outlives it. */}
-        {!compact && !surface.narrow && (
+        {!surface.narrow && (
           <ComputerUseCaptureView threadId={threadId} active={computerUseActive || (liveActive && live.working)} />
         )}
 
@@ -1075,18 +1050,42 @@ export function ChatPanel({
           </div>
         )}
 
-        {compact ? (
-          <div ref={inputRef}>
-            {discussion.active && <DiscussionBar discussion={discussion} compact />}
+        {/* Right edge inset by the scrollbar width so the always-visible chat scrollbar is
+          never covered by this floating input overlay (CTR-0092). */}
+        <div ref={inputRef} className="absolute bottom-0 left-0 right-[var(--app-scrollbar-width)] z-20">
+          {/* CTR-0092 ScrollToBottom overlay + CTR-0168 per-message step buttons:
+              anchored above the ChatInput, horizontally centered. prev / next flank
+              the Scroll-to-Bottom button and appear whenever the chat overflows. */}
+          <div className="pointer-events-none absolute -top-3 left-0 right-0 z-10 flex items-center justify-center gap-2">
+            {stepNav.isAvailable && (
+              <div className="pointer-events-auto">
+                <MessageStepButton direction="prev" visible={stepNav.canPrev} onClick={stepNav.stepPrev} />
+              </div>
+            )}
+            <div className="pointer-events-auto">
+              <ScrollToBottomButton visible={showScrollToBottomButton} onClick={scrollToBottom} />
+            </div>
+            {stepNav.isAvailable && (
+              <div className="pointer-events-auto">
+                <MessageStepButton direction="next" visible={stepNav.canNext} onClick={stepNav.stepNext} />
+              </div>
+            )}
+          </div>
+          <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
+          {/* No safe-area padding here (v0.155.2): the surface is sized to the visible
+              viewport, which already ends above Safari's toolbar, so an inset added the
+              home-indicator height a second time (most visibly on iPad). */}
+          <div className="relative bg-background">
+            {discussion.active && (
+              <div className="px-4">
+                <DiscussionBar discussion={discussion} />
+              </div>
+            )}
             <ComputerUseBanner active={computerUseActive} />
-            {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE.
-              PRP-0184 took the model / options / structured controls off the composer
-              and PRP-0185 took the image options and the two managers, leaving a row
-              whose only remaining job was to hold two indicators -- and that row cost
-              real height, because useChatScroll observes this subtree and ChatPanel
-              reserves a spacer of its measured height (CTR-0092). Both survivors moved
-              INTO the composer: who answers as an icon in its control row, how full the
-              window is as its outline. */}
+            {/* PRP-0186 (CTR-0221, UDR-0168 D1): both indicators of the former strip moved
+                into the composer, so this wrapper holds the composer alone and `inputRef`'s
+                measured height -- the chat body's bottom spacer (CTR-0092) -- is the
+                composer's height and nothing else. */}
             <ChatInput
               ref={chatInputRef}
               onSend={handleSend}
@@ -1099,11 +1098,11 @@ export function ChatPanel({
               onDismissNotice={dismissNotice}
               getImageRefs={getImageRefs}
               isUploading={isUploading}
-              onOpenTemplates={handleOpenTemplates}
-              onOpenPaint={handleOpenPaint}
+              onOpenTemplates={show('attach.templates') ? handleOpenTemplates : undefined}
+              onOpenPaint={show('attach.paint') ? handleOpenPaint : undefined}
               onEditAttachment={handleEditAttachment}
               onSlashModel={handleSlashModel}
-              onSlashHelp={handleSlashHelp}
+              onSlashHelp={show('slash.help') ? handleSlashHelp : undefined}
               onSlashCron={onSlashCron}
               onSlashFiles={onSlashFiles}
               temporary={temporary}
@@ -1114,73 +1113,7 @@ export function ChatPanel({
               placeholder={composerPlaceholder}
             />
           </div>
-        ) : (
-          // right edge inset by the scrollbar width so the always-visible chat
-          // scrollbar is never covered by this floating input overlay (CTR-0092)
-          <div ref={inputRef} className="absolute bottom-0 left-0 right-[var(--app-scrollbar-width)] z-20">
-            {/* CTR-0092 ScrollToBottom overlay + CTR-0168 per-message step buttons:
-              anchored above the ChatInput, horizontally centered. prev / next flank
-              the Scroll-to-Bottom button and appear whenever the chat overflows. */}
-            <div className="pointer-events-none absolute -top-3 left-0 right-0 z-10 flex items-center justify-center gap-2">
-              {stepNav.isAvailable && (
-                <div className="pointer-events-auto">
-                  <MessageStepButton direction="prev" visible={stepNav.canPrev} onClick={stepNav.stepPrev} />
-                </div>
-              )}
-              <div className="pointer-events-auto">
-                <ScrollToBottomButton visible={showScrollToBottomButton} onClick={scrollToBottom} />
-              </div>
-              {stepNav.isAvailable && (
-                <div className="pointer-events-auto">
-                  <MessageStepButton direction="next" visible={stepNav.canNext} onClick={stepNav.stepNext} />
-                </div>
-              )}
-            </div>
-            <div className="pointer-events-none bg-linear-to-t from-background from-60% to-transparent pt-6" />
-            {/* No safe-area padding here (v0.155.2): the surface is sized to the visible
-              viewport, which already ends above Safari's toolbar, so an inset added the
-              home-indicator height a second time (most visibly on iPad). */}
-            <div className="relative bg-background">
-              {discussion.active && (
-                <div className="px-4">
-                  <DiscussionBar discussion={discussion} compact={!discussionCapable} />
-                </div>
-              )}
-              <ComputerUseBanner active={computerUseActive} />
-              {/* PRP-0186 (CTR-0221, UDR-0168 D1): the strip that stood here is GONE; see
-                the compact branch for why. Both of its survivors moved into the
-                composer, so this wrapper holds the composer alone and `inputRef`'s
-                measured height -- the chat body's bottom spacer (CTR-0092) -- is the
-                composer's height and nothing else. */}
-              <ChatInput
-                ref={chatInputRef}
-                onSend={handleSend}
-                onStop={composerStop}
-                isLoading={composerBusy}
-                attachments={attachments}
-                onAddFiles={handleAddFiles}
-                onRemoveAttachment={removeAttachment}
-                attachmentNotice={attachmentNotice}
-                onDismissNotice={dismissNotice}
-                getImageRefs={getImageRefs}
-                isUploading={isUploading}
-                onOpenTemplates={show('attach.templates') ? handleOpenTemplates : undefined}
-                onOpenPaint={show('attach.paint') ? handleOpenPaint : undefined}
-                onEditAttachment={handleEditAttachment}
-                onSlashModel={handleSlashModel}
-                onSlashHelp={show('slash.help') ? handleSlashHelp : undefined}
-                onSlashCron={onSlashCron}
-                onSlashFiles={onSlashFiles}
-                temporary={temporary}
-                runTarget={composerRunTarget}
-                project={composerProject}
-                context={contextOccupancy ?? undefined}
-                live={composerLive}
-                placeholder={composerPlaceholder}
-              />
-            </div>
-          </div>
-        )}
+        </div>
 
         {isDragging && (
           <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-xs">
@@ -1205,7 +1138,7 @@ export function ChatPanel({
           onSave={createTemplate}
           onNotify={(message, type) => setNotification({ type, message })}
         />
-        {maskEditorState && threadId && (
+        {maskEditorState && (
           <MaskEditorDialog
             open={!!maskEditorState}
             onOpenChange={(open) => !open && setMaskEditorState(null)}

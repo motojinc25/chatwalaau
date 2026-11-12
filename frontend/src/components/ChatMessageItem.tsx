@@ -98,7 +98,6 @@ interface TTSControls {
 interface ChatMessageItemProps {
   message: ChatMessage
   messageIndex?: number
-  compact?: boolean
   isLoading?: boolean
   tts?: TTSControls
   onEditUser?: (messageId: string, newContent: string) => void
@@ -358,7 +357,6 @@ function CollapsibleUserText({ content }: { content: string }) {
 function ChatMessageItemImpl({
   message,
   messageIndex = 0,
-  compact,
   isLoading,
   tts,
   onEditUser,
@@ -524,11 +522,8 @@ function ChatMessageItemImpl({
   return (
     // CTR-0103: data attributes let the Message Navigator resolve user-turn
     // nodes for scrollspy and jump-to-turn.
-    <div
-      data-message-id={message.id}
-      data-message-role={message.role}
-      className={cn('group/msg flex gap-3', compact ? 'px-3 py-1' : 'px-4 py-1')}>
-      <Avatar className={cn('mt-0.5 shrink-0', compact ? 'h-6 w-6' : 'h-7 w-7')}>
+    <div data-message-id={message.id} data-message-role={message.role} className="group/msg flex gap-3 px-4 py-1">
+      <Avatar className="mt-0.5 h-7 w-7 shrink-0">
         <AvatarFallback
           className={cn(
             isUser ? 'bg-primary text-primary-foreground' : 'bg-muted',
@@ -542,9 +537,9 @@ function ChatMessageItemImpl({
               {message.discussion.display_name.slice(0, 1).toUpperCase()}
             </span>
           ) : isUser ? (
-            <User className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+            <User className="h-3.5 w-3.5" />
           ) : (
-            <Bot className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+            <Bot className="h-3.5 w-3.5" />
           )}
         </AvatarFallback>
       </Avatar>

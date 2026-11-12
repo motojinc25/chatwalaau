@@ -94,9 +94,8 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   'sidebar.appSettings': 'wide-only',
   // PRP-0185 / UDR-0167 D13: MOVED here from the composer toolbar, and wide-only like
   // every other management launcher in this footer -- a ~90% modal is an out-of-scope
-  // screen on a phone (UDR-0153 D3). The move also takes them off /popup and /sidebar,
-  // which mount ChatPanel but not SessionSidebar; the capabilities themselves and their
-  // APIs (CTR-0121 / CTR-0123) are untouched on every surface.
+  // screen on a phone (UDR-0153 D3). The capabilities themselves and their APIs
+  // (CTR-0121 / CTR-0123) are untouched.
   'sidebar.mcpTools': 'wide-only',
   'sidebar.skills': 'wide-only',
   // PRP-0184 / UDR-0166 D1: `toolbar.model`, `toolbar.modelOptions` and
@@ -164,8 +163,7 @@ export interface ChatSurfaceTier {
 }
 
 /**
- * Default = today's presentation. Only ChatPage provides a tier, so the compact
- * ChatPanel on /popup and /sidebar (out of PRP-0171 scope) is never affected.
+ * Default = the wide presentation. Only ChatPage provides a tier.
  */
 export const WIDE_SURFACE: ChatSurfaceTier = { managed: false, narrow: false, touchPrimary: false }
 

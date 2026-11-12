@@ -5,8 +5,6 @@ import { PrivacyScreenProvider } from './components/PrivacyScreenProvider'
 import { ChatPage } from './pages/ChatPage'
 import { LoginPage } from './pages/LoginPage'
 import { NotFoundPage } from './pages/NotFoundPage'
-import { PopupPage } from './pages/PopupPage'
-import { SidebarPage } from './pages/SidebarPage'
 
 export function App() {
   // BootGate (CTR-0096 v3, UDR-0092 D2) wraps EVERY route, including /login: a
@@ -15,8 +13,7 @@ export function App() {
   // backend answers once, the gate renders children and never intervenes again.
   //
   // PrivacyScreenProvider (CTR-0190, UDR-0107 D11) sits OUTSIDE the gate and the
-  // router: the toggle CONTROL is the /chat surface only, but the redaction
-  // EFFECT is app-wide, so /popup and /sidebar redact too while the mode is on.
+  // router: the redaction EFFECT is app-wide.
   return (
     <PrivacyScreenProvider>
       <BootGate>
@@ -28,22 +25,6 @@ export function App() {
               element={
                 <AuthGuard>
                   <ChatPage />
-                </AuthGuard>
-              }
-            />
-            <Route
-              path="/popup"
-              element={
-                <AuthGuard>
-                  <PopupPage />
-                </AuthGuard>
-              }
-            />
-            <Route
-              path="/sidebar"
-              element={
-                <AuthGuard>
-                  <SidebarPage />
                 </AuthGuard>
               }
             />

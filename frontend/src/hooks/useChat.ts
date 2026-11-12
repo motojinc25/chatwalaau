@@ -157,7 +157,7 @@ interface UseChatOptions {
   /**
    * The conversation's harness project folder (PRP-0244, UDR-0225 D1): workspace-relative,
    * "" for the workspace root. Sent as AG-UI state.harness_project with every harness turn.
-   * Undefined on a surface without the project picker (/popup, /sidebar): nothing is sent and
+   * Undefined in a Temporary Chat: nothing is sent and
    * the backend keeps the folder stored on the chat.
    */
   harnessProject?: string

@@ -1,9 +1,7 @@
 /**
  * Folder-aware chat cue (PRP-0196, UDR-0178, CTR-0016).
  *
- * Shows which folder the open chat belongs to. Rendered by ChatPage ONLY (D2): the
- * compact /popup and /sidebar surfaces share ChatPanel and must stay unchanged, so
- * neither component is ever imported by ChatPanel.
+ * Shows which folder the open chat belongs to. Rendered by ChatPage ONLY (D2).
  *
  * - FolderGlow (D3): an edge-only inset shadow over the chat area in the folder's
  *   palette color. `pointer-events-none` + `aria-hidden`, so it can never intercept a

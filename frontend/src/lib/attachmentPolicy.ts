@@ -30,8 +30,6 @@ const IMAGE_SET = new Set<string>(IMAGE_MEDIA_TYPES)
 
 const SUPPORTED_TEXT = 'Supported: JPEG, PNG, GIF and WebP images (up to 20 MB) and PDF files (up to 50 MB).'
 
-export const NO_THREAD_NOTICE = "Attachments aren't available in this view. Open the chat page to attach files."
-
 export type RejectReason = 'unsupported-type' | 'too-large'
 
 export interface Rejection {

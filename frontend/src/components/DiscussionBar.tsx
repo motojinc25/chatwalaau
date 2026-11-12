@@ -50,7 +50,7 @@ const REPORT_SKIPPED: Record<string, string> = {
 
 const VERDICT_LABELS = { adopt: 'Adopted', hold: 'On hold', rediscuss: 'To be discussed again' } as const
 
-export function DiscussionBar({ discussion, compact }: { discussion: DiscussionController; compact?: boolean }) {
+export function DiscussionBar({ discussion }: { discussion: DiscussionController }) {
   const run = discussion.latest
   const [askTarget, setAskTarget] = useState('')
   const [askText, setAskText] = useState('')
@@ -71,8 +71,6 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
   const reservePct = Math.min(100, Math.round((reserve / Math.max(total, 1)) * 100))
   const roundShown = run.phase.startsWith('round:') ? Number(run.phase.slice(6)) : run.round
   const disabled = discussion.busy
-  // A read-only surface (/popup, /sidebar) shows the state but offers no action (PRP-0232 2.7).
-  const readOnly = Boolean(compact)
   // In auto mode a finish suggestion is only shown; the rounds go on (PRP-0234, UDR-0217 D4).
   const autoSuggestion = run.advisory?.suggest
     ? { reason: run.advisory.reason }
@@ -148,7 +146,7 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
         </div>
       )}
 
-      {!readOnly && (status === 'running' || status === 'summarizing') && (
+      {(status === 'running' || status === 'summarizing') && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">
             {status === 'summarizing'
@@ -187,7 +185,7 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
         </div>
       )}
 
-      {!readOnly && discussion.waiting && run.pending_request && (
+      {discussion.waiting && run.pending_request && (
         <div className="mt-2 space-y-2" data-testid="discussion-question">
           <p className="flex items-start gap-1.5">
             <CircleHelp className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
@@ -328,7 +326,7 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
         </div>
       )}
 
-      {!readOnly && !discussion.streaming && (run.status === 'paused' || run.status === 'created') && (
+      {!discussion.streaming && (run.status === 'paused' || run.status === 'created') && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <span className="text-xs text-muted-foreground">
             {(run.pause_reason && PAUSE_REASONS[run.pause_reason]) || ''}
@@ -371,40 +369,38 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
               {run.human_decision.note ? ` -- ${run.human_decision.note}` : ''}
             </p>
           ) : (
-            !readOnly && (
-              <div className="flex flex-wrap items-center gap-2">
-                <Button size="sm" className="h-7" onClick={() => void discussion.decide('adopt')} disabled={disabled}>
-                  Adopt
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7"
-                  onClick={() => void decideThenContinue('hold')}
-                  disabled={disabled}>
-                  Hold
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7"
-                  onClick={() => void decideThenContinue('rediscuss')}
-                  disabled={disabled}>
-                  Re-discuss
-                </Button>
-              </div>
-            )
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" className="h-7" onClick={() => void discussion.decide('adopt')} disabled={disabled}>
+                Adopt
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7"
+                onClick={() => void decideThenContinue('hold')}
+                disabled={disabled}>
+                Hold
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7"
+                onClick={() => void decideThenContinue('rediscuss')}
+                disabled={disabled}>
+                Re-discuss
+              </Button>
+            </div>
           )}
         </div>
       )}
 
-      {!readOnly && !discussion.streaming && !discussion.open && discussion.threadId && (
+      {!discussion.streaming && !discussion.open && discussion.threadId && (
         <div className="mt-2">
           <DiscussionExportActions threadId={discussion.threadId} runId={run.id} />
         </div>
       )}
 
-      {!readOnly && !discussion.streaming && !discussion.open && (
+      {!discussion.streaming && !discussion.open && (
         <div className="mt-2 flex items-center gap-2">
           <Button size="sm" variant="outline" className="h-7" onClick={() => setContinueOpen(true)} disabled={disabled}>
             <Repeat className="mr-1 h-3 w-3" />
@@ -414,21 +410,13 @@ export function DiscussionBar({ discussion, compact }: { discussion: DiscussionC
         </div>
       )}
 
-      {!readOnly && (
-        <DiscussionContinueDialog
-          open={continueOpen}
-          onOpenChange={setContinueOpen}
-          run={run}
-          error={discussion.error}
-          onContinue={(body) => discussion.continueDiscussion(body)}
-        />
-      )}
-
-      {readOnly && discussion.open && (
-        <p className="mt-2 text-xs text-muted-foreground">
-          Open this chat in the main window to continue the discussion.
-        </p>
-      )}
+      <DiscussionContinueDialog
+        open={continueOpen}
+        onOpenChange={setContinueOpen}
+        run={run}
+        error={discussion.error}
+        onContinue={(body) => discussion.continueDiscussion(body)}
+      />
     </section>
   )
 }

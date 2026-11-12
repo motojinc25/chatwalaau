@@ -10,7 +10,7 @@ import type { HarnessProgress } from '@/types/chat'
  * Harness run progress indicator (PRP-0181, CTR-0197 v2, UDR-0163 D4).
  *
  * Rendered inside the assistant message, above the answer text, so it appears on every
- * surface that renders the message (/chat, /popup, /sidebar, phone). It makes the
+ * surface that renders the message (/chat, phone). It makes the
  * agent loop's automatic continuation visible -- which iteration of how many, how many
  * tasks are done, and why the turn ended -- and opens the Todo dialog. The loop's own
  * injected messages ("Progress so far", "Continue working ...") no longer reach the
