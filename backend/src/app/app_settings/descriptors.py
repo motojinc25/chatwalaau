@@ -223,6 +223,12 @@ GROUPS: tuple[SettingGroup, ...] = (
         "AI Discussion",
         "Limits of a human-led AI discussion: rounds, participants, tokens and time. A run keeps the values it started with.",
     ),
+    # PRP-0252 (CTR-0057 v5, CTR-0198, UDR-0233 D6): operator controls of POST /v1/responses only.
+    SettingGroup(
+        "openai_api",
+        "OpenAI-compatible API",
+        "Controls for POST /v1/responses only: an output cap, what tool output callers see, and which input roles are accepted.",
+    ),
 )
 
 
@@ -1669,6 +1675,50 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         help=(
             "Characters the Code tool may return in one discussion. When they are used up, the "
             "tool says so and the participants answer with what they have."
+        ),
+    ),
+    # ---- OpenAI-compatible API (runtime; PRP-0252, UDR-0233) -------------------
+    # Read per request by app.openai_api.router; /v1/responses only (D6). Every default
+    # reproduces the behavior before PRP-0252 (D7).
+    SettingDescriptor(
+        "responses_max_output_tokens",
+        "Output cap per model call (tokens)",
+        "openai_api",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=128_000,
+        help=(
+            "Upper bound for max_output_tokens on /v1/responses. A smaller value from the caller is kept; "
+            "a missing one gets this cap. 0 = no cap. It applies to each model call, so a turn that uses "
+            "tools can spend it more than once. Reasoning models count their reasoning in it: set it too "
+            "low and the answer can come back empty."
+        ),
+    ),
+    SettingDescriptor(
+        "responses_tool_output",
+        "Tool output in responses",
+        "openai_api",
+        "enum",
+        SCOPE_RUNTIME,
+        enum=("full", "sources", "none"),
+        help=(
+            "full returns tool calls and their raw results. sources returns only the answer, with "
+            "file_citation annotations for the documents rag_search retrieved (retrieved, not "
+            "necessarily used). none returns only the answer. Stored sessions keep the full turn."
+        ),
+    ),
+    SettingDescriptor(
+        "responses_input_roles",
+        "Accepted input roles",
+        "openai_api",
+        "enum",
+        SCOPE_RUNTIME,
+        enum=("passthrough", "user_only"),
+        help=(
+            "passthrough accepts input items as sent. user_only rejects with 400 any item that is not a "
+            "user message (system, developer, assistant, tool items), so a caller cannot rewrite the "
+            "instructions or plant a history. Continue a conversation with previous_response_id."
         ),
     ),
 )

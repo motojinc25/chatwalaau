@@ -1,8 +1,9 @@
-"""OpenAI Responses API endpoint (CTR-0057, PRP-0030, PRP-0035).
+"""OpenAI Responses API endpoint (CTR-0057, PRP-0030, PRP-0035, PRP-0252).
 
 Custom OpenAI-compatible Responses API on the main server.
 Uses the AgentRegistry (CTR-0070) to route model parameter to the
-corresponding Agent instance.
+corresponding Agent instance. The operator controls of PRP-0252 / UDR-0233 (output
+cap, tool output mode, input role policy) live in app.openai_api.controls.
 """
 
 from collections.abc import AsyncGenerator
@@ -24,6 +25,7 @@ from app.agent.temporary import new_temporary_thread_id, schedule_sweep, set_tem
 from app.agui.agent_registry import AgentRegistry
 from app.auth import verify_api_key_strict
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
+from app.openai_api import controls
 from app.openai_api.converter import api_usage, maf_contents_to_openai_output, openai_input_to_maf_messages
 from app.openai_api.models import ResponsesRequest, ResponsesResponse, UsageInfo
 from app.openai_api.session import (
@@ -179,8 +181,10 @@ async def _stream_responses(
         run_options["temperature"] = request.temperature
     if request.top_p is not None:
         run_options["top_p"] = request.top_p
-    if request.max_output_tokens is not None:
-        run_options["max_output_tokens"] = request.max_output_tokens
+    # Operator cap (CTR-0057 v5, PRP-0252, UDR-0233 D2): min(requested, cap).
+    max_output_tokens = controls.effective_max_output_tokens(request.max_output_tokens)
+    if max_output_tokens is not None:
+        run_options["max_output_tokens"] = max_output_tokens
     # Structured output passthrough (CTR-0057 v3, PRP-0082, UDR-0058 D8).
     providers.merge_generation_options(run_options, _structured_run_options(request, agent_registry))
 
@@ -199,6 +203,10 @@ async def _stream_responses(
     _image_gen_thread_id.set(thread_id)
 
     output_items: list[dict[str, Any]] = []
+    # Tool output mode (PRP-0252, UDR-0233 D3): every tool item is kept here for the
+    # citations; it reaches output_items and the wire only in `full`.
+    tool_mode = controls.tool_output_mode()
+    tool_items: list[dict[str, Any]] = []
     text_parts: list[str] = []
     usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     msg_started = False
@@ -282,13 +290,15 @@ async def _stream_responses(
                             "call_id": call_id,
                         }
                         call_items[call_id] = fc_item
-                        output_items.append(fc_item)
-                        fc_added = {
-                            "type": "response.output_item.added",
-                            "output_index": len(output_items) - 1,
-                            "item": fc_item,
-                        }
-                        yield f"event: response.output_item.added\ndata: {json.dumps(fc_added)}\n\n"
+                        tool_items.append(fc_item)
+                        if tool_mode == "full":
+                            output_items.append(fc_item)
+                            fc_added = {
+                                "type": "response.output_item.added",
+                                "output_index": len(output_items) - 1,
+                                "item": fc_item,
+                            }
+                            yield f"event: response.output_item.added\ndata: {json.dumps(fc_added)}\n\n"
 
                 elif content_type == "function_result":
                     usage_fold.call_boundary()
@@ -298,13 +308,15 @@ async def _stream_responses(
                     if not isinstance(result, str):
                         result = json.dumps(result)
                     fr_item = {"type": "function_call_output", "call_id": call_id, "output": result}
-                    output_items.append(fr_item)
-                    fr_added = {
-                        "type": "response.output_item.added",
-                        "output_index": len(output_items) - 1,
-                        "item": fr_item,
-                    }
-                    yield f"event: response.output_item.added\ndata: {json.dumps(fr_added)}\n\n"
+                    tool_items.append(fr_item)
+                    if tool_mode == "full":
+                        output_items.append(fr_item)
+                        fr_added = {
+                            "type": "response.output_item.added",
+                            "output_index": len(output_items) - 1,
+                            "item": fr_item,
+                        }
+                        yield f"event: response.output_item.added\ndata: {json.dumps(fr_added)}\n\n"
 
                 elif content_type == "usage":
                     # CTR-0200 (PRP-0158, UDR-0136 D5). The `usage` dict below keeps
@@ -338,18 +350,22 @@ async def _stream_responses(
     full_text = "".join(text_parts)
     if msg_started:
         msg_output_index = len(output_items)
+        text_part: dict[str, Any] = {"type": "output_text", "text": full_text}
+        if tool_mode == "sources":
+            # rag_search retrievals as file_citation annotations (UDR-0233 D3, D8).
+            text_part["annotations"] = controls.rag_citations(tool_items, full_text)
         part_done = {
             "type": "response.content_part.done",
             "output_index": msg_output_index,
             "content_index": 0,
-            "part": {"type": "output_text", "text": full_text},
+            "part": text_part,
         }
         yield f"event: response.content_part.done\ndata: {json.dumps(part_done)}\n\n"
 
         msg_item = {
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "output_text", "text": full_text}],
+            "content": [text_part],
         }
         item_done = {
             "type": "response.output_item.done",
@@ -401,6 +417,8 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
     @app.post("/v1/responses", tags=["OpenAI API"], dependencies=[Depends(verify_api_key_strict)])
     async def create_response(request: ResponsesRequest):
         """OpenAI Responses API-compatible endpoint."""
+        # Input role policy (PRP-0252, UDR-0233 D5): reject before any session exists.
+        controls.check_input_roles(request.input)
         temporary = bool(request.temporary)
         # Temporary Chat (CTR-0057 / CTR-0106, UDR-0052 D5): no continuity. A
         # temporary response cannot be chained, so reject previous_response_id.
@@ -467,8 +485,10 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
             run_options["temperature"] = request.temperature
         if request.top_p is not None:
             run_options["top_p"] = request.top_p
-        if request.max_output_tokens is not None:
-            run_options["max_output_tokens"] = request.max_output_tokens
+        # Operator cap (CTR-0057 v5, PRP-0252, UDR-0233 D2): min(requested, cap).
+        max_output_tokens = controls.effective_max_output_tokens(request.max_output_tokens)
+        if max_output_tokens is not None:
+            run_options["max_output_tokens"] = max_output_tokens
         # Structured output passthrough (CTR-0057 v3, PRP-0082, UDR-0058 D8).
         providers.merge_generation_options(run_options, _structured_run_options(request, agent_registry))
 
@@ -558,6 +578,10 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
             _build_session_message("user", user_text),
             _build_session_message("assistant", full_text),
         )
+
+        # Tool output mode (PRP-0252, UDR-0233 D3/D4): shapes the RESPONSE only; the
+        # session and the ledger above already saw the full turn.
+        output_items = controls.shape_output(output_items, controls.tool_output_mode())
 
         return ResponsesResponse(
             id=response_id,

@@ -13,8 +13,12 @@ Two dependencies are exposed:
   require Bearer or cookie when ``APP_REQUIRE_AUTH_ON_LAN`` is
   ``true`` (the default).
 - ``verify_api_key_strict`` -- external-app entry points such as
-  ``/v1/responses`` (CTR-0057). Bearer ``API_KEY`` only; cookies are
-  intentionally ignored regardless of ``AUTH_USERNAME``.
+  ``/v1/responses`` (CTR-0057). Bearer ``API_KEY`` or Bearer
+  ``RESPONSES_API_KEY`` (PRP-0252, UDR-0233 D1); cookies are
+  intentionally ignored regardless of ``AUTH_USERNAME``. The dedicated
+  ``RESPONSES_API_KEY`` is accepted HERE ONLY -- never by
+  ``verify_api_key``, ``verify_api_key_no_loopback`` or
+  ``authorize_websocket``.
 
 History:
     - PRP-0045 (v0.43.0) introduced the unified Bearer check.
@@ -51,7 +55,9 @@ _MISSING_AUTH_DETAIL = (
     "AUTH_PASSWORD_HASH (browser ID/PW) in .env, or set "
     "APP_REQUIRE_AUTH_ON_LAN=false to acknowledge unauthenticated LAN exposure."
 )
-_MISSING_API_KEY_STRICT_DETAIL = "API is not configured. Set API_KEY in .env to enable external-app access."
+_MISSING_API_KEY_STRICT_DETAIL = (
+    "API is not configured. Set API_KEY or RESPONSES_API_KEY in .env to enable external-app access."
+)
 _MISSING_CREDENTIAL_DETAIL = (
     "Missing or invalid credential. Expected: Authorization: Bearer <token>, "
     "or a valid session cookie (after POST /api/auth/login)."
@@ -77,11 +83,13 @@ class Identity:
     """
 
     subject: str = "local"
-    source: Literal["loopback", "api-key", "session"] = "loopback"
+    source: Literal["loopback", "api-key", "session", "responses-key"] = "loopback"
 
 
 _LOCAL = Identity(subject="local", source="loopback")
 _VIA_API_KEY = Identity(subject="api-key", source="api-key")
+# The dedicated /v1/responses key (PRP-0252, UDR-0233 D1). Only verify_api_key_strict returns it.
+_VIA_RESPONSES_KEY = Identity(subject="responses-key", source="responses-key")
 
 
 def is_client_loopback(client_host: str | None) -> bool:
@@ -292,18 +300,22 @@ async def verify_api_key_strict(request: Request) -> Identity:
     CTR-0057). Session cookies are intentionally ignored on this
     endpoint -- external-app callers speak Bearer auth only.
 
-    - ``API_KEY`` empty -> 503.
-    - ``API_KEY`` set -> require ``Authorization: Bearer <API_KEY>``;
-      401 on missing or mismatched header.
+    - ``API_KEY`` and ``RESPONSES_API_KEY`` both empty -> 503.
+    - Otherwise require ``Authorization: Bearer <API_KEY or RESPONSES_API_KEY>``;
+      401 on missing or mismatched header (PRP-0252, UDR-0233 D1).
     """
-    if not settings.api_key:
+    api_key = settings.api_key
+    responses_key = getattr(settings, "responses_api_key", "")
+    if not api_key and not responses_key:
         raise HTTPException(status_code=503, detail=_MISSING_API_KEY_STRICT_DETAIL)
     bearer = _extract_bearer(request)
     if bearer is None:
         raise HTTPException(status_code=401, detail=_MISSING_HEADER_DETAIL_STRICT)
-    if bearer != settings.api_key:
-        raise HTTPException(status_code=401, detail=_INVALID_KEY_DETAIL)
-    return _VIA_API_KEY
+    if api_key and bearer == api_key:
+        return _VIA_API_KEY
+    if responses_key and bearer == responses_key:
+        return _VIA_RESPONSES_KEY
+    raise HTTPException(status_code=401, detail=_INVALID_KEY_DETAIL)
 
 
 __all__ = [

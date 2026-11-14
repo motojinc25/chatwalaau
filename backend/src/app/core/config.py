@@ -799,6 +799,17 @@ class Settings(BaseSettings):
     # gates enforcement.
     api_key: str = ""
     app_require_auth_on_lan: bool = True
+    # Dedicated key for POST /v1/responses only (CTR-0056 v3, PRP-0252, UDR-0233 D1).
+    # Accepted by verify_api_key_strict and by NOTHING else, so a BFF holding it can
+    # call the Responses API but cannot reach /api/* writes such as App Settings.
+    responses_api_key: str = ""
+
+    # /v1/responses operator controls (CTR-0057 v5, CTR-0198, PRP-0252, UDR-0233).
+    # Runtime App Settings (group openai_api); every default reproduces the prior
+    # behavior (UDR-0233 D7).
+    responses_max_output_tokens: int = 0
+    responses_tool_output: str = "full"
+    responses_input_roles: str = "passthrough"
 
     # Web SPA Authentication (CTR-0093, PRP-0057)
     # Optional ID/PW + opaque session cookie lane for cloud-deployed SPAs.
@@ -965,6 +976,16 @@ class Settings(BaseSettings):
             except ValueError:
                 return False
         return True
+
+    @model_validator(mode="after")
+    def _warn_on_shared_responses_key(self) -> "Settings":
+        """UDR-0233 D1: equal keys void the separation -- say so once."""
+        if self.responses_api_key and self.responses_api_key == self.api_key:
+            _logger.warning(
+                "RESPONSES_API_KEY equals API_KEY, so a caller holding it can also reach every "
+                "/api/* write (App Settings included). Give RESPONSES_API_KEY its own value."
+            )
+        return self
 
     @model_validator(mode="after")
     def _warn_on_unauthenticated_lan(self) -> "Settings":
