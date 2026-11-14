@@ -93,6 +93,11 @@ backend/model_offerings.jsonc.*.tmp
 # happened to be on the build machine.
 backend/app_settings.jsonc
 backend/app_settings.jsonc.*.tmp
+# API Key Store (PRP-0253): operator-owned; keep it on persistent storage via API_KEYS_FILE,
+# never baked into an image.
+backend/api_keys.jsonc
+backend/api_keys.audit.jsonl
+backend/.api_keys.jsonc.*.tmp
 
 # ---- IDE / OS ----
 .vscode/

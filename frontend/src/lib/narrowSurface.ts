@@ -37,6 +37,7 @@ export type EntryId =
   | 'sidebar.appSettings'
   | 'sidebar.mcpTools'
   | 'sidebar.skills'
+  | 'sidebar.apiKeys'
   // composer control row (CTR-0221)
   | 'toolbar.runTargetAction'
   | 'toolbar.harnessProject'
@@ -98,6 +99,8 @@ export const ENTRY_POLICY: Record<EntryId, EntryPolicy> = {
   // (CTR-0121 / CTR-0123) are untouched.
   'sidebar.mcpTools': 'wide-only',
   'sidebar.skills': 'wide-only',
+  // PRP-0253 (CTR-0284): the API Keys screen is a ~90% modal like Skills, so wide-only.
+  'sidebar.apiKeys': 'wide-only',
   // PRP-0184 / UDR-0166 D1: `toolbar.model`, `toolbar.modelOptions` and
   // `toolbar.structuredOutput` are GONE from this table with the controls they gated.
   // Model, reasoning effort and structured output are configured on the run-target, so

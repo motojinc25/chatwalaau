@@ -792,17 +792,14 @@ class Settings(BaseSettings):
     # MCP Apps (CTR-0066, PRP-0034)
     mcp_apps_sandbox_port: int = 8081
 
-    # API Authentication (CTR-0056, CTR-0083, PRP-0045)
-    # API_KEY is the unified Bearer token for write-endpoint authentication.
-    # When the client address is loopback, auth is bypassed.
-    # When the client address is non-loopback, APP_REQUIRE_AUTH_ON_LAN
-    # gates enforcement.
-    api_key: str = ""
+    # API Authentication (CTR-0056 v4, CTR-0083 v7, PRP-0253, UDR-0234)
+    # Managed API keys live in the API Key Store (CTR-0282): hashed secrets, one scope
+    # each (responses / api / admin), optional expiry, an enabled flag. API_KEY and
+    # RESPONSES_API_KEY are no longer read (main._warn_retired_api_key_env names them).
+    # Empty disables managed keys. The loopback bypass and APP_REQUIRE_AUTH_ON_LAN are
+    # unchanged: the switch stays an .env value (UDR-0234 D8).
+    api_keys_file: str = "api_keys.jsonc"
     app_require_auth_on_lan: bool = True
-    # Dedicated key for POST /v1/responses only (CTR-0056 v3, PRP-0252, UDR-0233 D1).
-    # Accepted by verify_api_key_strict and by NOTHING else, so a BFF holding it can
-    # call the Responses API but cannot reach /api/* writes such as App Settings.
-    responses_api_key: str = ""
 
     # /v1/responses operator controls (CTR-0057 v5, CTR-0198, PRP-0252, UDR-0233).
     # Runtime App Settings (group openai_api); every default reproduces the prior
@@ -977,31 +974,28 @@ class Settings(BaseSettings):
                 return False
         return True
 
-    @model_validator(mode="after")
-    def _warn_on_shared_responses_key(self) -> "Settings":
-        """UDR-0233 D1: equal keys void the separation -- say so once."""
-        if self.responses_api_key and self.responses_api_key == self.api_key:
-            _logger.warning(
-                "RESPONSES_API_KEY equals API_KEY, so a caller holding it can also reach every "
-                "/api/* write (App Settings included). Give RESPONSES_API_KEY its own value."
-            )
-        return self
+    @property
+    def has_active_api_key(self) -> bool:
+        """True when the API Key Store holds an enabled, unexpired key (PRP-0253)."""
+        from app.api_keys.store import count_active_keys
+
+        return count_active_keys(self.api_keys_file) > 0
 
     @model_validator(mode="after")
     def _warn_on_unauthenticated_lan(self) -> "Settings":
         if self.is_loopback_bind:
             return self
-        if not self.api_key:
+        if not self.has_active_api_key:
             if self.app_require_auth_on_lan:
                 _logger.warning(
-                    "APP_HOST=%s is non-loopback and API_KEY is unset. "
-                    "Write endpoints will return 503 until API_KEY is set or "
-                    "APP_REQUIRE_AUTH_ON_LAN=false is acknowledged.",
+                    "APP_HOST=%s is non-loopback and no API key is active. "
+                    "Write endpoints will return 503 until an API key is created "
+                    "(`chatwalaau keys create`) or APP_REQUIRE_AUTH_ON_LAN=false is acknowledged.",
                     self.app_host,
                 )
             else:
                 _logger.warning(
-                    "APP_HOST=%s is non-loopback, API_KEY is unset, and "
+                    "APP_HOST=%s is non-loopback, no API key is active, and "
                     "APP_REQUIRE_AUTH_ON_LAN=false. Write endpoints are open "
                     "to LAN peers; this is an operator-acknowledged insecure mode.",
                     self.app_host,
@@ -1057,24 +1051,23 @@ class Settings(BaseSettings):
         """Extend CTR-0083 startup warning: warn when neither lane is configured.
 
         Original PRP-0045 warning only checked API_KEY. With PRP-0057,
-        either API_KEY or AUTH_USERNAME satisfies the non-loopback
-        deployment. Warn only if BOTH are empty AND the bind is non-
+        either an API key (managed keys since PRP-0253) or AUTH_USERNAME satisfies
+        the non-loopback deployment. Warn only if BOTH are empty AND the bind is non-
         loopback AND APP_REQUIRE_AUTH_ON_LAN is true.
         """
         if self.is_loopback_bind:
             return self
         if not self.app_require_auth_on_lan:
             return self
-        if self.api_key or self.web_auth_enabled:
+        if self.web_auth_enabled or self.has_active_api_key:
             return self
-        # Both API_KEY and AUTH_USERNAME empty on a non-loopback bind with
-        # gating on -- the _warn_on_unauthenticated_lan validator already
-        # logs the API_KEY-side message; this one specifically calls out
-        # the new alternative.
+        # No active key and AUTH_USERNAME empty on a non-loopback bind with gating
+        # on -- the _warn_on_unauthenticated_lan validator already logs the key-side
+        # message; this one specifically calls out the browser alternative.
         _logger.warning(
-            "APP_HOST=%s is non-loopback; neither API_KEY (CLI/external) nor "
-            "AUTH_USERNAME (browser ID/PW) is set. Configure one of them in "
-            ".env or set APP_REQUIRE_AUTH_ON_LAN=false to acknowledge the "
+            "APP_HOST=%s is non-loopback; no API key is active (CLI/external) and "
+            "AUTH_USERNAME (browser ID/PW) is not set. Configure one of them "
+            "or set APP_REQUIRE_AUTH_ON_LAN=false to acknowledge the "
             "open mode.",
             self.app_host,
         )

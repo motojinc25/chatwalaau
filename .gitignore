@@ -86,6 +86,12 @@ app_settings.jsonc
 # survives a crash mid-write, and it must never be committed when it does.
 app_settings.jsonc.*.tmp
 
+# API Key Store (PRP-0253: hashed managed keys, audit log, atomic-write sidecar).
+# Operator-owned; never commit it.
+api_keys.jsonc
+api_keys.audit.jsonl
+.api_keys.jsonc.*.tmp
+
 # Pipeline Jobs store + run logs (PRP-0096; replaces .jobs)
 .pipeline/
 

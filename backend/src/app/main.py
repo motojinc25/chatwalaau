@@ -94,6 +94,7 @@ from fastapi.staticfiles import StaticFiles
 from app import providers
 from app.agui.agent_factory import create_agent_registry
 from app.agui.endpoint import register_agui_endpoints
+from app.api_keys.router import router as api_keys_router
 from app.auth.web_auth import router as web_auth_router
 from app.core.config import settings
 from app.core.version import get_app_version
@@ -322,6 +323,53 @@ def _warn_retired_tool_approval_env() -> None:
         )
 
 
+RETIRED_API_KEY_ENV_VARS = ("API_KEY", "RESPONSES_API_KEY")
+
+
+def _retired_api_key_env() -> list[str]:
+    """Names of the retired single-key variables still SET (process env or backend .env)."""
+    import os as _os
+
+    file_values: dict[str, str | None] = {}
+    env_file = Path(".env")
+    if env_file.is_file():
+        from dotenv import dotenv_values
+
+        file_values = dict(dotenv_values(env_file))
+    found: list[str] = []
+    for key in RETIRED_API_KEY_ENV_VARS:
+        value = _os.environ.get(key)
+        if value is None:
+            value = file_values.get(key)
+        if value is not None and value.strip():
+            found.append(key)
+    return found
+
+
+def _warn_retired_api_key_env() -> None:
+    """Startup advisory for API_KEY / RESPONSES_API_KEY (PRP-0253, UDR-0234 D1).
+
+    Managed keys replaced both; their values are never read. Each one still set is named
+    once at WARNING so an operator learns why callers using it now get 401. Log-only and
+    non-failing (the PRP-0179 pattern).
+    """
+    import logging as _logging
+
+    _logger = _logging.getLogger(__name__)
+    try:
+        found = _retired_api_key_env()
+    except Exception:  # advisory must never block startup
+        _logger.debug("retired API key env advisory skipped", exc_info=True)
+        return
+    for key in found:
+        _logger.warning(
+            "%s is set but ignored since v0.215.0 (PRP-0253): API callers use managed keys now. "
+            "Create a key in API Keys or with `chatwalaau keys create`, then remove %s.",
+            key,
+            key,
+        )
+
+
 def _warn_retired_speech_env() -> None:
     """Startup advisory for the retired speech-model keys (PRP-0241, UDR-0222 D7).
 
@@ -355,6 +403,8 @@ async def lifespan(_app: FastAPI):
     _warn_retired_tool_approval_env()
     # Advisory for the retired speech-model keys (PRP-0241, UDR-0222 D7).
     _warn_retired_speech_env()
+    # Advisory for the retired API_KEY / RESPONSES_API_KEY (PRP-0253, UDR-0234 D1).
+    _warn_retired_api_key_env()
     from app.core.retired_env import warn_scrubbed_env
 
     warn_scrubbed_env()
@@ -560,6 +610,8 @@ app.add_middleware(
 # Web SPA Authentication API (CTR-0094, PRP-0057) -- mounted before session
 # routes so /api/auth/* takes priority over the catch-all SPA fallback.
 app.include_router(web_auth_router)
+# API Key Management (CTR-0283, PRP-0253): verify_key_admin on every route.
+app.include_router(api_keys_router)
 
 # Memory Curation API (CTR-0164, PRP-0100) -- per-turn "like" trigger for the
 # Agent Curated Memory (CTR-0162).

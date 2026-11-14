@@ -13,8 +13,9 @@ Rules, applied to every ``http`` and ``websocket`` scope (``lifespan`` passes th
    Desktop sets as HttpOnly + SameSite=Strict in its own chat partition. A cross-site
    request never carries it.                                               -> 403
 3. Exception: a request carrying ``Authorization: Bearer`` or ``X-API-Key`` is passed on
-   WITHOUT the cookie only while ``API_KEY`` is configured; CTR-0083 then validates the
-   credential exactly as today. With no API_KEY the header grants nothing.  -> 403
+   WITHOUT the cookie only while the API Key Store holds an active key (PRP-0253; the
+   launcher passes that check in); CTR-0083 then validates the credential and its scope.
+   With no active key the header grants nothing.                           -> 403
 
 Pure standard library; importable without the backend (unit-tested by
 tests/invariants/test_prp0167_desktop.py).

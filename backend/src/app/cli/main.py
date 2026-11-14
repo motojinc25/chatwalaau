@@ -167,8 +167,8 @@ def _add_client_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--api-key",
-        default=os.environ.get("CHATWALAAU_API_KEY", os.environ.get("API_KEY")),
-        help="Bearer token (default: CHATWALAAU_API_KEY or API_KEY)",
+        default=os.environ.get("CHATWALAAU_API_KEY"),
+        help="Bearer token: a managed API key with scope api or admin (default: CHATWALAAU_API_KEY)",
     )
     parser.add_argument(
         "--json",
@@ -268,6 +268,11 @@ def main() -> None:
 
     register_settings_parser(subparsers)
 
+    # keys subcommand: managed API keys on disk (CTR-0033, CTR-0282, PRP-0253)
+    from app.cli.keys import register_keys_parser
+
+    register_keys_parser(subparsers)
+
     # --- Client subcommands (PRP-0041) ---
 
     # chat subcommand (CTR-0081)
@@ -314,6 +319,7 @@ def main() -> None:
         "hash-password",
         "env",
         "settings",
+        "keys",
     ):
         # Client and utility subcommands
         args.func(args)

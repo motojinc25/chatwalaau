@@ -262,7 +262,6 @@ async def serve(cmd: dict[str, Any], control: TextIO) -> int:
     print(f"profile .env loaded: {added} keys added", file=sys.stderr, flush=True)
 
     try:
-        from app.core.config import settings
         from app.main import app
     except Exception:
         traceback.print_exc()
@@ -272,11 +271,15 @@ async def serve(cmd: dict[str, Any], control: TextIO) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from desktop_guard import DesktopGuard
 
+    # Rule 3 (CTR-0211, PRP-0253): a key header passes without the cookie only while the
+    # API Key Store holds an active key. The store caches by mtime, so this is cheap.
+    from app.api_keys.store import get_store
+
     guarded = DesktopGuard(
         app,
         token=str(cmd["token"]),
         port=port,
-        api_key_configured=lambda: bool((getattr(settings, "api_key", "") or "").strip()),
+        api_key_configured=lambda: get_store().has_active(),
     )
     config = uvicorn.Config(guarded, host=LOOPBACK, port=port, lifespan="on", log_level="info")
     server = uvicorn.Server(config)

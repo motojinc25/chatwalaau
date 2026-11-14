@@ -34,6 +34,7 @@ import {
   GripVertical,
   Image as ImageIcon,
   Info,
+  KeyRound,
   ListChecks,
   Loader2,
   LogOut,
@@ -69,6 +70,7 @@ import {
   useState,
 } from 'react'
 import { AboutDialog } from '@/components/AboutDialog'
+import { ApiKeysManager } from '@/components/ApiKeysManager'
 import { AppSettingsManager } from '@/components/AppSettingsManager'
 import { DeclarativeAgentManagerTrigger } from '@/components/DeclarativeAgentManager'
 import { DiscussionDecisionLog } from '@/components/DiscussionDecisionLog'
@@ -1674,6 +1676,11 @@ export function SessionSidebar({
             // composer. Self-probing, like the other manager triggers.
             ...(show('sidebar.mcpTools')
               ? [{ id: 'mcp', label: 'MCP Servers', icon: <Plug className="h-4 w-4" />, node: <McpToolManager /> }]
+              : []),
+            // 3b. API key management (CTR-0284, PRP-0253): self-probing -- renders only for a
+            // caller allowed to manage keys (UDR-0234 D7). Wide-only like the other managers.
+            ...(show('sidebar.apiKeys')
+              ? [{ id: 'apiKeys', label: 'API Keys', icon: <KeyRound className="h-4 w-4" />, node: <ApiKeysManager /> }]
               : []),
             // 4. Ontology manager (CTR-0173, PRP-0105): ONTOLOGY_ENABLED probe.
             ...(ontologyAvailable && show('sidebar.ontology')

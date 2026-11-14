@@ -14,7 +14,7 @@ same loop can broadcast directly.
 
 Authentication mirrors CTR-0083 (see ``app.auth.authorize_websocket``): loopback
 peers bypass; same-origin handshakes carry the session cookie automatically; the
-API_KEY lane is accepted via an ``api_key`` query parameter (the browser
+managed API key (scope api or admin, PRP-0253) is accepted via an ``api_key`` query parameter (the browser
 WebSocket API cannot set an Authorization header). The gate is never relaxed.
 """
 

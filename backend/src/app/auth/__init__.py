@@ -1,34 +1,30 @@
-"""API Authentication Dependency (CTR-0083, PRP-0045, PRP-0051, PRP-0057).
+"""API Authentication Dependency (CTR-0083 v7, PRP-0045, PRP-0057, PRP-0253).
 
-Shared FastAPI dependencies for authentication across REST endpoints,
-the AG-UI SSE endpoint, and the OpenAI Responses API.
+Shared FastAPI dependencies for authentication across REST endpoints, the AG-UI SSE
+endpoint, the OpenAI Responses API and key management.
 
-Two dependencies are exposed:
+Since PRP-0253 (UDR-0234) API callers present MANAGED keys from the API Key Store
+(CTR-0282, ``API_KEYS_FILE``). ``API_KEY`` and ``RESPONSES_API_KEY`` are no longer read.
+Each key carries one scope, ``responses`` < ``api`` < ``admin``:
 
-- ``verify_api_key`` -- write endpoints consumed by the SPA, the CLI
-  client, and AG-UI (CTR-0009). Accepts EITHER a Bearer ``API_KEY``
-  header OR a valid session cookie (PRP-0057). Loopback clients
-  (``127.0.0.1``, ``::1``, ``localhost``, or the Starlette TestClient
-  sentinel) pass through without any credential. Non-loopback clients
-  require Bearer or cookie when ``APP_REQUIRE_AUTH_ON_LAN`` is
-  ``true`` (the default).
-- ``verify_api_key_strict`` -- external-app entry points such as
-  ``/v1/responses`` (CTR-0057). Bearer ``API_KEY`` or Bearer
-  ``RESPONSES_API_KEY`` (PRP-0252, UDR-0233 D1); cookies are
-  intentionally ignored regardless of ``AUTH_USERNAME``. The dedicated
-  ``RESPONSES_API_KEY`` is accepted HERE ONLY -- never by
-  ``verify_api_key``, ``verify_api_key_no_loopback`` or
-  ``authorize_websocket``.
+- ``verify_api_key_strict`` (``/v1/responses``, CTR-0057): a Bearer key of any scope.
+  Cookies and loopback are ignored. 503 when the store holds no active key.
+- ``verify_api_key`` (``/api/*``, ``/ag-ui/``): a session cookie, a Bearer key with scope
+  ``api`` or ``admin``, a loopback peer, or ``APP_REQUIRE_AUTH_ON_LAN=false`` open mode.
+- ``verify_api_key_no_loopback`` (uploads): a session cookie or a Bearer ``api`` / ``admin``
+  key while web sign-in is on; otherwise ``verify_api_key``.
+- ``authorize_websocket``: the ``verify_api_key`` rules, the key via ``?api_key=``.
+- ``verify_key_admin`` (key management, CTR-0283): a session cookie, a loopback peer or a
+  Bearer ``admin`` key. Open mode does NOT grant it (UDR-0234 D7).
+
+An expired, disabled or unknown key gets 401; a key whose scope is too narrow gets 403
+(UDR-0234 D6). A session or loopback identity counts as ``admin``.
 
 History:
     - PRP-0045 (v0.43.0) introduced the unified Bearer check.
-    - PRP-0048 (v0.46.0) added the AuthProvider Protocol seam.
-    - PRP-0051 (v0.49.0) reverted to an inline Bearer check after the
-      commercial line was retired.
-    - PRP-0057 (v0.54.0) added the cookie session lane for the SPA
-      while keeping the strict variant unchanged. The two lanes are
-      branches inside this module; no Protocol seam is reintroduced
-      (per UDR-0033 boundary).
+    - PRP-0057 (v0.54.0) added the cookie session lane for the SPA.
+    - PRP-0252 (v0.214.0) added RESPONSES_API_KEY; PRP-0253 (v0.215.0) replaced both keys
+      with managed, scoped keys.
 """
 
 from __future__ import annotations
@@ -45,18 +41,20 @@ from typing import Any, Literal
 # 422 on every authenticated write endpoint.
 from fastapi import HTTPException, Request
 
+from app.api_keys import store as key_store
 from app.core.config import settings
 
-# ---- Detail strings (kept stable for caller-visible 503 / 401 payloads) ----
+# ---- Detail strings (kept stable for caller-visible 503 / 401 / 403 payloads) ----
 
 _MISSING_AUTH_DETAIL = (
     "Client is on a non-loopback address but no authentication method is "
-    "configured. Set API_KEY (CLI/external) or AUTH_USERNAME + "
-    "AUTH_PASSWORD_HASH (browser ID/PW) in .env, or set "
+    "configured. Create an API key (API Keys screen or `chatwalaau keys create`) or set "
+    "AUTH_USERNAME + AUTH_PASSWORD_HASH (browser ID/PW) in .env, or set "
     "APP_REQUIRE_AUTH_ON_LAN=false to acknowledge unauthenticated LAN exposure."
 )
 _MISSING_API_KEY_STRICT_DETAIL = (
-    "API is not configured. Set API_KEY or RESPONSES_API_KEY in .env to enable external-app access."
+    "API is not configured. Create an API key (API Keys screen or `chatwalaau keys create`) to enable "
+    "external-app access."
 )
 _MISSING_CREDENTIAL_DETAIL = (
     "Missing or invalid credential. Expected: Authorization: Bearer <token>, "
@@ -64,6 +62,10 @@ _MISSING_CREDENTIAL_DETAIL = (
 )
 _MISSING_HEADER_DETAIL_STRICT = "Missing or invalid Authorization header. Expected: Bearer <token>"
 _INVALID_KEY_DETAIL = "Invalid API key."
+_EXPIRED_KEY_DETAIL = "API key expired."
+_DISABLED_KEY_DETAIL = "API key disabled."
+_SCOPE_DETAIL = "This key's scope does not allow this endpoint."
+_ADMIN_DETAIL = "Key management needs a signed-in session, this machine, or an admin API key."
 
 # Starlette TestClient uses "testclient" as the client host in its ASGI
 # scope. Treat it as loopback so in-process tests do not need to inject
@@ -75,21 +77,23 @@ _LOOPBACK_HOSTNAMES = frozenset({"localhost", "testclient"})
 class Identity:
     """Authenticated principal surfaced by the auth dependency.
 
-    ``subject`` is ``"local"`` for loopback / open-mode requests,
-    ``"api-key"`` for Bearer-matched requests, and the configured
-    ``AUTH_USERNAME`` for cookie-matched requests (PRP-0057).
-    ``source`` distinguishes the three lanes so downstream code can
-    log it without re-deriving from headers.
+    ``subject`` is ``"local"`` for loopback / open-mode requests, the key NAME for a
+    managed key, and the configured ``AUTH_USERNAME`` for cookie-matched requests.
+    ``source`` distinguishes the lanes. ``scope`` is the key's scope; a session or
+    loopback identity is ``admin`` (UDR-0234 D2). ``key_id`` is set for key matches.
     """
 
     subject: str = "local"
-    source: Literal["loopback", "api-key", "session", "responses-key"] = "loopback"
+    source: Literal["loopback", "api-key", "session"] = "loopback"
+    scope: str = "admin"
+    key_id: str | None = None
 
 
 _LOCAL = Identity(subject="local", source="loopback")
-_VIA_API_KEY = Identity(subject="api-key", source="api-key")
-# The dedicated /v1/responses key (PRP-0252, UDR-0233 D1). Only verify_api_key_strict returns it.
-_VIA_RESPONSES_KEY = Identity(subject="responses-key", source="responses-key")
+
+
+def _key_identity(record: key_store.KeyRecord) -> Identity:
+    return Identity(subject=record.name, source="api-key", scope=record.scope, key_id=record.id)
 
 
 def is_client_loopback(client_host: str | None) -> bool:
@@ -173,78 +177,83 @@ async def _try_session_lane(request: Request) -> Identity | None:
     return Identity(subject=record.username, source="session")
 
 
+def _store() -> key_store.KeyStore:
+    """The live API Key Store (CTR-0282). A seam tests may patch."""
+    return key_store.get_store()
+
+
+def _key_failure(outcome: str) -> HTTPException:
+    detail = {key_store.EXPIRED: _EXPIRED_KEY_DETAIL, key_store.DISABLED: _DISABLED_KEY_DETAIL}.get(
+        outcome, _INVALID_KEY_DETAIL
+    )
+    return HTTPException(status_code=401, detail=detail)
+
+
+def _check_key(token: str, required: str) -> tuple[Identity | None, HTTPException | None]:
+    """``(identity, None)`` when ``token`` is an active key of at least ``required`` scope,
+    else ``(None, the error to raise if nothing else admits the caller)``."""
+    outcome, record = _store().authenticate(token)
+    if record is None:
+        return None, _key_failure(outcome)
+    if not key_store.scope_allows(record.scope, required):
+        return None, HTTPException(status_code=403, detail=_SCOPE_DETAIL)
+    return _key_identity(record), None
+
+
 async def verify_api_key(request: Request) -> Identity:
-    """FastAPI dependency: validate the caller on write / SPA endpoints.
+    """FastAPI dependency: validate the caller on write / SPA endpoints (CTR-0083 v7).
 
-    Decision order (CTR-0083 v4.1, amended by PRP-0057 follow-up
-    on 2026-05-16):
+    Decision order:
 
-    1. Valid session cookie -> Identity(source="session"). Tried first so
-       an authenticated loopback browser reports the correct username
-       instead of falling into the loopback bypass branch.
-    2. Matching Bearer ``API_KEY`` -> Identity(source="api-key").
-    3. Loopback peer with no credential / failed credential ->
-       Identity(source="loopback"). Preserved so CLI tools and
-       ``curl localhost`` continue to work without configuration.
+    1. Valid session cookie -> Identity(source="session").
+    2. Bearer key with scope ``api`` or ``admin`` -> Identity(source="api-key").
+    3. Loopback peer -> Identity(source="loopback") (unchanged; out of PRP-0253's scope).
     4. ``APP_REQUIRE_AUTH_ON_LAN=false`` -> open mode.
-    5. Neither method configured -> 503.
-    6. Method(s) configured but no valid credential -> 401.
+    5. No active key and no web sign-in -> 503.
+    6. Otherwise: the Bearer's failure (401 expired / disabled / invalid, 403 scope), or
+       401 for a missing credential.
     """
-    # 1. Try cookie session lane first (cheap dict lookup if enabled).
-    #    Cookie wins over loopback bypass so /api/auth/me reports the
-    #    real username instead of the "local" sentinel.
     session_identity = await _try_session_lane(request)
     if session_identity is not None:
         return session_identity
 
-    # 2. Try Bearer.
     bearer = _extract_bearer(request)
-    api_key_configured = bool(settings.api_key)
-    if bearer is not None and api_key_configured and bearer == settings.api_key:
-        return _VIA_API_KEY
+    failure: HTTPException | None = None
+    if bearer is not None:
+        identity, failure = _check_key(bearer, "api")
+        if identity is not None:
+            return identity
 
-    # 3. Loopback bypass for credential-less / failed-credential callers.
-    #    This is what keeps "chatwalaau chat" without API_KEY working on
-    #    localhost even when the operator has enabled AUTH_USERNAME for
-    #    the SPA. Browsers visiting /chat hit the AuthGuard via the
-    #    /api/auth/status flow before any /api/* request, so they are
-    #    redirected to /login regardless of this bypass.
     client_host = request.client.host if request.client else None
     if is_client_loopback(client_host):
         return _LOCAL
 
-    # 4. Operator-acknowledged open mode.
     if not settings.app_require_auth_on_lan:
         return _LOCAL
 
-    # 5. Nothing configured.
     web_enabled = getattr(settings, "web_auth_enabled", False)
-    if not api_key_configured and not web_enabled:
+    if not _store().has_active() and not web_enabled:
         raise HTTPException(status_code=503, detail=_MISSING_AUTH_DETAIL)
 
-    # 6. Method(s) configured but no valid credential presented.
+    if failure is not None:
+        raise failure
     if web_enabled:
         raise HTTPException(status_code=401, detail=_MISSING_CREDENTIAL_DETAIL)
-    if bearer is None:
-        raise HTTPException(status_code=401, detail=_MISSING_HEADER_DETAIL_STRICT)
-    raise HTTPException(status_code=401, detail=_INVALID_KEY_DETAIL)
+    raise HTTPException(status_code=401, detail=_MISSING_HEADER_DETAIL_STRICT)
 
 
 async def verify_api_key_no_loopback(request: Request) -> Identity:
     """``verify_api_key`` WITHOUT the loopback bypass when web login is enabled
     (CTR-0022, UDR-0097 D5).
 
-    A directly-opened ``/api/uploads/...`` URL bypasses the SPA AuthGuard, and
-    behind a dev / reverse proxy every request reaches the backend from the proxy's
-    loopback address, so the normal loopback bypass would leave uploaded images
-    openable by anyone -- even on ``localhost`` -- once ``AUTH_USERNAME`` is set.
+    A directly-opened ``/api/uploads/...`` URL bypasses the SPA AuthGuard, and behind a
+    dev / reverse proxy every request reaches the backend from the proxy's loopback
+    address, so the normal loopback bypass would leave uploaded images openable by anyone
+    once ``AUTH_USERNAME`` is set.
 
-    - Web login configured (``AUTH_USERNAME`` set): require a valid session cookie
-      or a matching Bearer ``API_KEY``; 401 otherwise. The loopback bypass and
-      ``APP_REQUIRE_AUTH_ON_LAN=false`` open mode do NOT apply.
-    - Web login NOT configured: defer to ``verify_api_key`` so zero-config
-      localhost and API_KEY-only deployments are unchanged (there is no browser
-      credential to require in those modes).
+    - Web login configured: require a valid session cookie or a Bearer ``api`` / ``admin``
+      key; 401 (or 403 for a narrower scope) otherwise.
+    - Web login NOT configured: defer to ``verify_api_key``.
     """
     if not settings.web_auth_enabled:
         return await verify_api_key(request)
@@ -254,8 +263,12 @@ async def verify_api_key_no_loopback(request: Request) -> Identity:
         return session_identity
 
     bearer = _extract_bearer(request)
-    if bearer is not None and settings.api_key and bearer == settings.api_key:
-        return _VIA_API_KEY
+    if bearer is not None:
+        identity, failure = _check_key(bearer, "api")
+        if identity is not None:
+            return identity
+        if failure is not None and failure.status_code == 403:
+            raise failure
 
     raise HTTPException(status_code=401, detail=_MISSING_CREDENTIAL_DETAIL)
 
@@ -263,14 +276,11 @@ async def verify_api_key_no_loopback(request: Request) -> Identity:
 async def authorize_websocket(websocket: Any) -> bool:
     """Authorize a WebSocket handshake (CTR-0110), mirroring ``verify_api_key``.
 
-    The browser WebSocket API cannot set an Authorization header, so the API_KEY
-    lane is accepted via the ``api_key`` query parameter; the session-cookie lane
-    works automatically for same-origin handshakes; loopback peers bypass; and
-    ``APP_REQUIRE_AUTH_ON_LAN=false`` opens it. The gate is NEVER relaxed beyond
-    what ``verify_api_key`` allows. Returns True to accept, False to reject (the
-    caller closes the socket). Never raises.
+    The browser WebSocket API cannot set an Authorization header, so a key is accepted
+    via the ``api_key`` query parameter (scope ``api`` or ``admin``); the session-cookie
+    lane works for same-origin handshakes; loopback peers bypass; and
+    ``APP_REQUIRE_AUTH_ON_LAN=false`` opens it. Returns True to accept. Never raises.
     """
-    # 1. Session cookie lane (same-origin handshakes carry cookies).
     name = getattr(settings, "auth_cookie_name", "")
     if getattr(settings, "web_auth_enabled", False) and name:
         token_value = websocket.cookies.get(name)
@@ -280,42 +290,64 @@ async def authorize_websocket(websocket: Any) -> bool:
             record = await get_session_store().lookup(token_value)
             if record is not None:
                 return True
-    # 2. API key via query parameter (browser WS cannot send a Bearer header).
-    if settings.api_key:
-        qp_key = websocket.query_params.get("api_key")
-        if qp_key is not None and qp_key == settings.api_key:
+    qp_key = websocket.query_params.get("api_key")
+    if qp_key:
+        try:
+            identity, _ = _check_key(qp_key, "api")
+        except Exception:
+            identity = None
+        if identity is not None:
             return True
-    # 3. Loopback bypass.
     client_host = websocket.client.host if websocket.client else None
     if is_client_loopback(client_host):
         return True
-    # 4. Operator-acknowledged open mode.
     return not settings.app_require_auth_on_lan
 
 
 async def verify_api_key_strict(request: Request) -> Identity:
-    """FastAPI dependency: Bearer-only variant for external-app paths.
+    """FastAPI dependency: Bearer-only variant for ``/v1/responses`` (CTR-0057).
 
-    Used by the OpenAI-compatible Responses API (``/v1/responses``,
-    CTR-0057). Session cookies are intentionally ignored on this
-    endpoint -- external-app callers speak Bearer auth only.
+    Any active key passes: ``responses``, ``api`` and ``admin`` all cover it. Session
+    cookies and loopback are ignored.
 
-    - ``API_KEY`` and ``RESPONSES_API_KEY`` both empty -> 503.
-    - Otherwise require ``Authorization: Bearer <API_KEY or RESPONSES_API_KEY>``;
-      401 on missing or mismatched header (PRP-0252, UDR-0233 D1).
+    - No active key in the store -> 503.
+    - Missing Bearer -> 401; expired / disabled / unknown key -> 401.
     """
-    api_key = settings.api_key
-    responses_key = getattr(settings, "responses_api_key", "")
-    if not api_key and not responses_key:
+    if not _store().has_active():
         raise HTTPException(status_code=503, detail=_MISSING_API_KEY_STRICT_DETAIL)
     bearer = _extract_bearer(request)
     if bearer is None:
         raise HTTPException(status_code=401, detail=_MISSING_HEADER_DETAIL_STRICT)
-    if api_key and bearer == api_key:
-        return _VIA_API_KEY
-    if responses_key and bearer == responses_key:
-        return _VIA_RESPONSES_KEY
-    raise HTTPException(status_code=401, detail=_INVALID_KEY_DETAIL)
+    identity, failure = _check_key(bearer, "responses")
+    if identity is None:
+        raise failure or HTTPException(status_code=401, detail=_INVALID_KEY_DETAIL)
+    return identity
+
+
+async def verify_key_admin(request: Request) -> Identity:
+    """FastAPI dependency for key management (CTR-0283, UDR-0234 D7).
+
+    Accepts a session cookie, a loopback peer or a Bearer ``admin`` key. Open mode
+    (``APP_REQUIRE_AUTH_ON_LAN=false``) does NOT grant it.
+    """
+    session_identity = await _try_session_lane(request)
+    if session_identity is not None:
+        return session_identity
+
+    bearer = _extract_bearer(request)
+    failure: HTTPException | None = None
+    if bearer is not None:
+        identity, failure = _check_key(bearer, "admin")
+        if identity is not None:
+            return identity
+
+    client_host = request.client.host if request.client else None
+    if is_client_loopback(client_host):
+        return _LOCAL
+
+    if failure is not None:
+        raise failure
+    raise HTTPException(status_code=401, detail=_ADMIN_DETAIL)
 
 
 __all__ = [
@@ -325,4 +357,5 @@ __all__ = [
     "is_local_request",
     "verify_api_key",
     "verify_api_key_strict",
+    "verify_key_admin",
 ]

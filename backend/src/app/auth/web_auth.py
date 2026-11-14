@@ -307,7 +307,7 @@ async def status(request: Request) -> StatusResponse:
             demo_mode=demo,
         )
 
-    # No web auth lane; Bearer API_KEY required for non-loopback callers.
+    # No web auth lane; a Bearer API key (managed, PRP-0253) required for non-loopback callers.
     return StatusResponse(
         mode="api-key-only",
         authenticated=False,
