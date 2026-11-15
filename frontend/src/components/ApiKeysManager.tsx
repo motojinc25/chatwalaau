@@ -18,6 +18,9 @@ import { cn } from '@/lib/utils'
  * - Name, scope, expiry and the enabled switch are editable. The secret is reissue-only (D5).
  * - Issue, Save, Reissue, Enable/Disable and Delete show a spinner on the pressed button and
  *   lock every action until the server answers. Reissue and Delete confirm inside the pane.
+ * - PRP-0254 (UDR-0235 D5): each key may carry /v1/responses limits (requests per minute, day,
+ *   month; total tokens per day, month), edited with the other fields and saved by Save. The
+ *   left pane shows today's and this month's global usage against the App Settings limits.
  */
 
 type Scope = 'responses' | 'api' | 'admin'
@@ -34,6 +37,34 @@ interface ApiKey {
   last_used_at: string | null
   created_by: string
   expired: boolean
+  limits: KeyLimits | null
+  usage?: KeyUsage
+}
+
+const LIMIT_FIELDS = [
+  { key: 'requests_per_minute', label: 'Requests per minute' },
+  { key: 'requests_per_day', label: 'Requests per day' },
+  { key: 'requests_per_month', label: 'Requests per month' },
+  { key: 'total_tokens_per_day', label: 'Total tokens per day' },
+  { key: 'total_tokens_per_month', label: 'Total tokens per month' },
+] as const
+
+type LimitField = (typeof LIMIT_FIELDS)[number]['key']
+type KeyLimits = Partial<Record<LimitField, number>>
+type LimitForm = Record<LimitField, string>
+
+interface KeyUsage {
+  requests_today: number
+  requests_month: number
+  total_tokens_today: number
+  total_tokens_month: number
+}
+
+interface ResponsesLimits {
+  limits: Record<string, number>
+  usage: KeyUsage & Record<string, number>
+  timezone: string
+  in_flight: number
 }
 
 interface AuthStatus {
@@ -46,6 +77,7 @@ interface ListResponse {
   keys: ApiKey[]
   auth: AuthStatus
   caller: { source: string; scope: Scope; key_id: string | null }
+  responses_limits?: ResponsesLimits
 }
 
 type Pending = 'issue' | 'save' | 'reissue' | 'toggle' | 'delete' | null
@@ -69,6 +101,49 @@ const PENDING_LABEL: Record<Exclude<Pending, null>, string> = {
   reissue: 'Reissuing...',
   toggle: 'Updating...',
   delete: 'Deleting...',
+}
+
+const EMPTY_LIMITS: LimitForm = {
+  requests_per_minute: '',
+  requests_per_day: '',
+  requests_per_month: '',
+  total_tokens_per_day: '',
+  total_tokens_per_month: '',
+}
+
+function limitsToForm(limits: KeyLimits | null | undefined): LimitForm {
+  const form = { ...EMPTY_LIMITS }
+  for (const { key } of LIMIT_FIELDS) {
+    const value = limits?.[key]
+    if (value) form[key] = String(value)
+  }
+  return form
+}
+
+/** The non-zero limits of the form, or null when none is set (0 / empty = no limit). */
+function formToLimits(form: LimitForm): KeyLimits | null {
+  const out: KeyLimits = {}
+  for (const { key } of LIMIT_FIELDS) {
+    const value = Number(form[key])
+    if (form[key].trim() !== '' && Number.isInteger(value) && value > 0) out[key] = value
+  }
+  return Object.keys(out).length ? out : null
+}
+
+function limitsValid(form: LimitForm): boolean {
+  return LIMIT_FIELDS.every(({ key }) => {
+    const raw = form[key].trim()
+    return raw === '' || (/^\d+$/.test(raw) && Number(raw) <= 1_000_000_000_000)
+  })
+}
+
+function sameLimits(a: KeyLimits | null, b: KeyLimits | null | undefined): boolean {
+  return JSON.stringify(a ?? {}) === JSON.stringify(formToLimits(limitsToForm(b)) ?? {})
+}
+
+function usedOf(used: number, limit: number | undefined): string {
+  const n = used.toLocaleString()
+  return limit ? `${n} / ${limit.toLocaleString()}` : n
 }
 
 function formatDate(value: string | null): string {
@@ -112,6 +187,7 @@ export function ApiKeysManager() {
   const [scope, setScope] = useState<Scope>('responses')
   const [expiry, setExpiry] = useState<ExpiryChoice>('none')
   const [expiryDate, setExpiryDate] = useState('')
+  const [limitForm, setLimitForm] = useState<LimitForm>(EMPTY_LIMITS)
   const [pending, setPending] = useState<Pending>(null)
   const [confirm, setConfirm] = useState<Confirm>(null)
   const [error, setError] = useState<string | null>(null)
@@ -142,6 +218,7 @@ export function ApiKeysManager() {
     setScope(key?.scope ?? 'responses')
     setExpiry(key ? 'keep' : 'none')
     setExpiryDate('')
+    setLimitForm(limitsToForm(key?.limits))
     setConfirm(null)
     setError(null)
   }, [])
@@ -213,7 +290,7 @@ export function ApiKeysManager() {
         fetch('/api/api-keys', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, scope, expires_at: expires ?? null }),
+          body: JSON.stringify({ name, scope, expires_at: expires ?? null, limits: formToLimits(limitForm) }),
         }),
       (body) => {
         const b = body as { key: ApiKey; secret: string }
@@ -231,6 +308,8 @@ export function ApiKeysManager() {
     if (scope !== current.scope) patch.scope = scope
     const expires = expiryToIso(expiry, expiryDate)
     if (expires !== undefined) patch.expires_at = expires
+    const limits = formToLimits(limitForm)
+    if (!sameLimits(limits, current.limits)) patch.limits = limits
     void run(
       'save',
       () =>
@@ -302,9 +381,14 @@ export function ApiKeysManager() {
   const isNew = selected === NEW_KEY
   const nameValid = name.trim().length > 0 && name.trim().length <= 64
   const expiryValid = expiry !== 'date' || expiryDate !== ''
+  const limitsOk = limitsValid(limitForm)
   const dirty =
     current !== null &&
-    (name !== current.name || scope !== current.scope || expiryToIso(expiry, expiryDate) !== undefined)
+    (name !== current.name ||
+      scope !== current.scope ||
+      expiryToIso(expiry, expiryDate) !== undefined ||
+      !sameLimits(formToLimits(limitForm), current.limits))
+  const globalLimits = data?.responses_limits
 
   const actionButton = (
     kind: Exclude<Pending, null>,
@@ -401,6 +485,25 @@ export function ApiKeysManager() {
                       )
                     })}
                   </div>
+                  {globalLimits && (
+                    <div
+                      className="space-y-0.5 border-t px-3 py-2 text-[11px] text-muted-foreground"
+                      data-testid="responses-usage">
+                      <p className="font-medium text-foreground">/v1/responses usage ({globalLimits.timezone})</p>
+                      <p>
+                        Today: {usedOf(globalLimits.usage.requests_today, globalLimits.limits.requests_per_day)}{' '}
+                        requests,{' '}
+                        {usedOf(globalLimits.usage.total_tokens_today, globalLimits.limits.total_tokens_per_day)} tokens
+                      </p>
+                      <p>
+                        This month: {usedOf(globalLimits.usage.requests_month, globalLimits.limits.requests_per_month)}{' '}
+                        requests,{' '}
+                        {usedOf(globalLimits.usage.total_tokens_month, globalLimits.limits.total_tokens_per_month)}{' '}
+                        tokens
+                      </p>
+                      <p>Global limits are set in App Settings.</p>
+                    </div>
+                  )}
                   {data && (
                     <div
                       className="space-y-1 border-t px-3 py-2 text-[11px] text-muted-foreground"
@@ -535,6 +638,39 @@ export function ApiKeysManager() {
                       </div>
                     </div>
 
+                    <fieldset className="space-y-1.5" disabled={busy} data-testid="api-key-limits">
+                      <legend className="text-sm font-medium">Limits for /v1/responses</legend>
+                      <p className="text-xs text-muted-foreground">
+                        Empty or 0 = no limit for this key. The global limits in App Settings apply as well; the
+                        stricter one refuses first (429).
+                      </p>
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                        {LIMIT_FIELDS.map((f) => (
+                          <div key={f.key} className="space-y-1">
+                            <label htmlFor={`api-key-limit-${f.key}`} className="text-xs text-muted-foreground">
+                              {f.label}
+                            </label>
+                            <Input
+                              id={`api-key-limit-${f.key}`}
+                              inputMode="numeric"
+                              value={limitForm[f.key]}
+                              placeholder="No limit"
+                              onChange={(e) => setLimitForm((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                      {!isNew && current?.usage && (
+                        <p className="text-xs text-muted-foreground" data-testid="api-key-usage">
+                          Used today: {current.usage.requests_today.toLocaleString()} requests,{' '}
+                          {current.usage.total_tokens_today.toLocaleString()} tokens. This month:{' '}
+                          {current.usage.requests_month.toLocaleString()} requests,{' '}
+                          {current.usage.total_tokens_month.toLocaleString()} tokens.
+                        </p>
+                      )}
+                      {!limitsOk && <p className="text-xs text-destructive">Use whole numbers only.</p>}
+                    </fieldset>
+
                     {error && (
                       <p className="flex items-center gap-1.5 text-sm text-destructive" role="alert">
                         <TriangleAlert className="h-4 w-4" /> {error}
@@ -545,7 +681,7 @@ export function ApiKeysManager() {
                       <div className="flex gap-2">
                         {actionButton('issue', 'Issue', <KeyRound className="mr-1.5 h-3.5 w-3.5" />, issue, {
                           variant: 'default',
-                          disabled: !nameValid || !expiryValid,
+                          disabled: !nameValid || !expiryValid || !limitsOk,
                         })}
                       </div>
                     ) : current ? (
@@ -556,7 +692,7 @@ export function ApiKeysManager() {
                         <div className="flex flex-wrap gap-2">
                           {actionButton('save', 'Save', <Check className="mr-1.5 h-3.5 w-3.5" />, save, {
                             variant: 'default',
-                            disabled: !dirty || !nameValid || !expiryValid,
+                            disabled: !dirty || !nameValid || !expiryValid || !limitsOk,
                           })}
                           {actionButton(
                             'toggle',

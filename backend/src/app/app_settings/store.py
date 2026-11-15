@@ -98,7 +98,22 @@ def _ontology_iri_base(value: str) -> str:
 # A per-key check of a `str` value (PRP-0218, UDR-0200 D1): it returns the normalized
 # value or raises ValueError. Reached by `coerce_value`, so the WRITE path rejects and
 # the LOAD path falls back to the default with a warning (UDR-0141 D4 / D5).
-_STRING_CHECKS: dict[str, Callable[[str], str]] = {"ontology_iri_base": _ontology_iri_base}
+def _iana_zone(value: str) -> str:
+    """An IANA time zone name (PRP-0254, UDR-0235 D6); empty reads as UTC."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    name = value.strip() or "UTC"
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"{name!r} is not an IANA time zone name, for example Asia/Tokyo or UTC") from exc
+    return name
+
+
+_STRING_CHECKS: dict[str, Callable[[str], str]] = {
+    "ontology_iri_base": _ontology_iri_base,
+    "responses_limit_timezone": _iana_zone,
+}
 
 # A RETIRED key (descriptors.RETIRED_KEYS, UDR-0120 D7) is not an unknown key.
 # An unknown key is one this binary cannot interpret, so D5 preserves it; a

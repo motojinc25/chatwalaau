@@ -4,6 +4,9 @@ Every route requires ``verify_key_admin``: a signed-in session, a loopback peer 
 Bearer ``admin`` key (D7). A secret is returned only by issue and reissue (D4); no route
 ever returns a hash. A caller cannot grant a scope above its own (D2). Responses carry
 ``Cache-Control: no-store``.
+
+PRP-0254 (UDR-0235 D5): a key may carry per-key ``/v1/responses`` limits, and the list
+reports each key's usage plus the global limits and usage (CTR-0285).
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StrictInt
 
 from app.api_keys import store as key_store
 from app.auth import Identity, verify_key_admin
@@ -22,12 +25,25 @@ router = APIRouter(prefix="/api/api-keys", tags=["API Keys"])
 _NO_STORE = {"Cache-Control": "no-store"}
 
 
+class KeyLimits(BaseModel):
+    """Per-key /v1/responses limits (PRP-0254). 0 or absent = no limit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requests_per_minute: StrictInt | None = None
+    requests_per_day: StrictInt | None = None
+    requests_per_month: StrictInt | None = None
+    total_tokens_per_day: StrictInt | None = None
+    total_tokens_per_month: StrictInt | None = None
+
+
 class CreateKeyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
     scope: str
     expires_at: str | None = None
+    limits: KeyLimits | None = None
 
 
 class UpdateKeyRequest(BaseModel):
@@ -37,6 +53,7 @@ class UpdateKeyRequest(BaseModel):
     scope: str | None = None
     expires_at: str | None = None
     enabled: bool | None = None
+    limits: KeyLimits | None = None
 
 
 def _actor(identity: Identity) -> str:
@@ -67,14 +84,37 @@ def _auth_status() -> dict[str, Any]:
     }
 
 
+def _limits_payload(limits: KeyLimits | None) -> dict[str, int] | None:
+    return None if limits is None else limits.model_dump(exclude_none=True)
+
+
 @router.get("")
 async def list_keys(response: Response, identity: Identity = Depends(verify_key_admin)) -> dict[str, Any]:
     response.headers.update(_NO_STORE)
     store = key_store.get_store()
+    records = store.list()
+    from app.openai_api import quota
+
+    snapshot = quota.guard().snapshot(record.id for record in records)
+    keys = []
+    for record in records:
+        item = record.public()
+        usage = snapshot["keys"].get(record.id, {})
+        item["usage"] = {
+            name: usage.get(name, 0)
+            for name in ("requests_today", "requests_month", "total_tokens_today", "total_tokens_month")
+        }
+        keys.append(item)
     return {
-        "keys": [record.public() for record in store.list()],
+        "keys": keys,
         "auth": _auth_status(),
         "caller": {"source": identity.source, "scope": identity.scope, "key_id": identity.key_id},
+        "responses_limits": {
+            "limits": quota.global_limit_settings(),
+            "usage": snapshot["usage"],
+            "timezone": snapshot["timezone"],
+            "in_flight": snapshot["in_flight"],
+        },
     }
 
 
@@ -86,7 +126,11 @@ async def create_key(
     _check_grant(identity, body.scope)
     try:
         record, secret = key_store.get_store().create(
-            name=body.name, scope=body.scope, expires_at=body.expires_at, actor=_actor(identity)
+            name=body.name,
+            scope=body.scope,
+            expires_at=body.expires_at,
+            actor=_actor(identity),
+            limits=_limits_payload(body.limits),
         )
     except key_store.KeyStoreError as exc:
         raise _translate(exc) from exc
@@ -100,6 +144,8 @@ async def update_key(
     response.headers.update(_NO_STORE)
     _check_grant(identity, body.scope)
     sent = body.model_dump(exclude_unset=True)
+    if "limits" in sent:
+        sent["limits"] = _limits_payload(body.limits)
     store = key_store.get_store()
     try:
         current = store.get(key_id)

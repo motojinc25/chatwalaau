@@ -808,6 +808,23 @@ class Settings(BaseSettings):
     responses_tool_output: str = "full"
     responses_input_roles: str = "passthrough"
 
+    # /v1/responses admission limits (CTR-0285, CTR-0198, PRP-0254, UDR-0235).
+    # Runtime App Settings (group openai_api_limits). 0 = no limit, so every default
+    # keeps the behavior before PRP-0254 (UDR-0235 D4).
+    responses_requests_per_minute: int = 0
+    responses_requests_per_day: int = 0
+    responses_requests_per_month: int = 0
+    responses_input_tokens_per_day: int = 0
+    responses_input_tokens_per_month: int = 0
+    responses_output_tokens_per_day: int = 0
+    responses_output_tokens_per_month: int = 0
+    responses_total_tokens_per_day: int = 0
+    responses_total_tokens_per_month: int = 0
+    responses_max_concurrent: int = 0
+    responses_max_input_chars: int = 0
+    responses_count_cache_reads: bool = True
+    responses_limit_timezone: str = "UTC"
+
     # Web SPA Authentication (CTR-0093, PRP-0057)
     # Optional ID/PW + opaque session cookie lane for cloud-deployed SPAs.
     # When AUTH_USERNAME is empty, the entire lane is disabled and

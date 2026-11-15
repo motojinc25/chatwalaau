@@ -48,6 +48,7 @@ EXPORT_COLUMNS: tuple[str, ...] = (
     "model_calls",
     *TOKEN_FIELDS,
     "outcome",
+    "key_id",  # PRP-0254: appended, never inserted (append-only columns)
 )
 
 # Columns whose values are numbers, booleans or timestamps -- never neutralized.

@@ -3,7 +3,9 @@
 Custom OpenAI-compatible Responses API on the main server.
 Uses the AgentRegistry (CTR-0070) to route model parameter to the
 corresponding Agent instance. The operator controls of PRP-0252 / UDR-0233 (output
-cap, tool output mode, input role policy) live in app.openai_api.controls.
+cap, tool output mode, input role policy) live in app.openai_api.controls; the admission
+limits of PRP-0254 / UDR-0235 (requests, tokens, concurrency, input size) live in
+app.openai_api.quota.
 """
 
 from collections.abc import AsyncGenerator
@@ -16,16 +18,17 @@ from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from openai import NotFoundError as OpenAINotFoundError
+from starlette.background import BackgroundTask
 
 from app import providers
 from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, fold_contents, is_refusal, merge_mode
 from app.agent.temporary import new_temporary_thread_id, schedule_sweep, set_temporary_run
 from app.agui.agent_registry import AgentRegistry
-from app.auth import verify_api_key_strict
+from app.auth import Identity, verify_api_key_strict
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
-from app.openai_api import controls
+from app.openai_api import controls, quota
 from app.openai_api.converter import api_usage, maf_contents_to_openai_output, openai_input_to_maf_messages
 from app.openai_api.models import ResponsesRequest, ResponsesResponse, UsageInfo
 from app.openai_api.session import (
@@ -51,36 +54,51 @@ def _accumulate_usage_contents(contents: Any) -> tuple[dict[str, Any] | None, in
     return usage.turn, usage.calls
 
 
+def _turn_summary(turn_usage: dict[str, Any] | None, model_calls: int, model: str) -> dict[str, Any] | None:
+    """The ledger-shaped turn total (price-point breakdown), or None when nothing was measured."""
+    if not turn_usage or model_calls <= 0:
+        return None
+    try:
+        from app.agui.token_usage import turn_summary
+
+        return dict(
+            turn_summary(
+                turn_usage,
+                model_calls=model_calls,
+                includes_cache_read=providers.input_tokens_include_cache_read(model),
+            )
+        )
+    except Exception:
+        logger.warning("openai-api turn summary failed", exc_info=True)
+        return None
+
+
 def _record_api_turn(
-    turn_usage: dict[str, Any] | None,
-    model_calls: int,
+    summary: dict[str, Any] | None,
     requested_model: str,
     thread_id: str,
     *,
     temporary: bool,
+    key_id: str | None = None,
 ) -> None:
     """Append an OpenAI-compatible turn to the CTR-0200 ledger (PRP-0158).
 
     This lane writes no browsable chat, so its consumption reached no record at all
     before now. Self-silencing: statistics may never fail a request (UDR-0136 D6).
+    ``key_id`` is the managed key's public id (PRP-0254, UDR-0235 D9).
     """
-    if not turn_usage or model_calls <= 0:
+    if not summary:
         return
     try:
-        from app.agui.token_usage import turn_summary
         from app.usage.ledger import append_turn_usage
 
-        model = requested_model
         append_turn_usage(
             lane="openai-api",
-            turn=turn_summary(
-                turn_usage,
-                model_calls=model_calls,
-                includes_cache_read=providers.input_tokens_include_cache_read(model),
-            ),
-            model=model,
+            turn=summary,
+            model=requested_model,
             thread_id=thread_id,
             temporary=temporary,
+            key_id=key_id,
         )
     except Exception:
         logger.warning("usage ledger openai-api append failed for thread %s", thread_id, exc_info=True)
@@ -134,8 +152,13 @@ async def _stream_responses(
     request: ResponsesRequest,
     thread_id: str,
     response_id: str,
+    ticket: quota.Ticket | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Stream OpenAI Responses API SSE events."""
+    """Stream OpenAI Responses API SSE events.
+
+    ``ticket`` is the CTR-0285 admission; it sees each turn total and is finished before
+    the ledger append (UDR-0235 D7). The caller also finishes it on every other path.
+    """
     # Temporary Chat (CTR-0057 / CTR-0106, UDR-0052): set inside the generator so
     # the contextvar is active in the same context that runs agent.run (the
     # memory tool reads it to no-op). request.temporary defaults false.
@@ -328,6 +351,8 @@ async def _stream_responses(
                     turn_usage = usage_fold.turn
                     model_calls = usage_fold.calls
                     usage = api_usage(usage_fold.last_call)
+                    if ticket is not None:
+                        ticket.observe(_turn_summary(turn_usage, model_calls, request.model))
             if unexpected_approval_tool is not None:
                 break
 
@@ -390,8 +415,12 @@ async def _stream_responses(
     )
 
     # CTR-0200 append (PRP-0158, UDR-0136 D5). This lane writes no chat the operator
-    # can browse, so before now its consumption was recorded nowhere at all.
-    _record_api_turn(turn_usage, model_calls, request.model, thread_id, temporary=temporary)
+    # can browse, so before now its consumption was recorded nowhere at all. The
+    # CTR-0285 counters take the turn FIRST, so a failed append cannot skip them.
+    summary = _turn_summary(turn_usage, model_calls, request.model)
+    if ticket is not None:
+        ticket.finish(summary)
+    _record_api_turn(summary, request.model, thread_id, temporary=temporary, key_id=ticket.key_id if ticket else None)
 
     # Emit completed event
     completed = {
@@ -408,14 +437,41 @@ async def _stream_responses(
     yield f"event: response.completed\ndata: {json.dumps(completed)}\n\n"
 
 
+async def _guarded_stream(inner: AsyncGenerator[str, None], ticket: quota.Ticket) -> AsyncGenerator[str, None]:
+    """Release the admission however the stream ends: completion, error or disconnect."""
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        ticket.finish()
+        await inner.aclose()
+
+
+def _quota_response(exc: quota.QuotaError) -> JSONResponse:
+    """The OpenAI error shape for a refusal (UDR-0235 D8)."""
+    return JSONResponse(status_code=exc.status, content=exc.body(), headers=exc.headers())
+
+
+def _key_record(identity: Identity | None) -> Any:
+    key_id = getattr(identity, "key_id", None)
+    if not key_id:
+        return None
+    try:
+        from app.api_keys.store import get_store
+
+        return get_store().get(key_id)
+    except Exception:
+        return None
+
+
 def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
     """Register OpenAI-compatible Responses API endpoint (CTR-0057).
 
     Uses the AgentRegistry for model-based routing (CTR-0070).
     """
 
-    @app.post("/v1/responses", tags=["OpenAI API"], dependencies=[Depends(verify_api_key_strict)])
-    async def create_response(request: ResponsesRequest):
+    @app.post("/v1/responses", tags=["OpenAI API"])
+    async def create_response(request: ResponsesRequest, identity: Identity = Depends(verify_api_key_strict)):
         """OpenAI Responses API-compatible endpoint."""
         # Input role policy (PRP-0252, UDR-0233 D5): reject before any session exists.
         controls.check_input_roles(request.input)
@@ -437,6 +493,32 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
                 raise HTTPException(
                     status_code=404, detail=f"Previous response not found: {request.previous_response_id}"
                 )
+
+        # Admission (CTR-0285, PRP-0254, UDR-0235): input size, then the limits. A refusal
+        # runs nothing and creates no session.
+        try:
+            quota.check_input_size(request.input, thread_id if request.previous_response_id else None)
+            ticket = quota.guard().admit(getattr(identity, "key_id", None), _key_record(identity))
+        except quota.QuotaError as exc:
+            return _quota_response(exc)
+
+        try:
+            prior = thread_id if request.previous_response_id else None
+            return await _run_admitted(request, ticket, response_id, temporary, prior)
+        except BaseException:
+            ticket.finish()
+            raise
+
+    async def _run_admitted(
+        request: ResponsesRequest,
+        ticket: quota.Ticket,
+        response_id: str,
+        temporary: bool,
+        prior_thread_id: str | None,
+    ) -> Any:
+        """Everything after admission. The ticket is finished on every path."""
+        if prior_thread_id:
+            thread_id = prior_thread_id
         else:
             # Temporary: a temp_ thread id routes the session to the .temporary/
             # quarantine (CTR-0014) so it is excluded from listing/search and
@@ -459,13 +541,15 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
 
         if request.stream:
             return StreamingResponse(
-                _stream_responses(agent_registry, request, thread_id, response_id),
+                _guarded_stream(_stream_responses(agent_registry, request, thread_id, response_id, ticket), ticket),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
                     "X-Accel-Buffering": "no",
                 },
+                # A stream that never starts (the client left first) still releases the slot.
+                background=BackgroundTask(ticket.finish),
             )
 
         # Non-streaming response
@@ -539,6 +623,7 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
 
         except (OpenAINotFoundError, ChatClientException, TypeError, Exception) as exc:
             logger.exception("OpenAI API error")
+            ticket.finish()
             raise HTTPException(status_code=500, detail="Agent execution failed.") from exc
 
         if unexpected_approval_tool is not None:
@@ -555,7 +640,9 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
         # converter reads, so the ledger records the TURN while the response keeps
         # its existing field semantics.
         _ledger_turn, _ledger_calls = _accumulate_usage_contents(all_contents)
-        _record_api_turn(_ledger_turn, _ledger_calls, request.model, thread_id, temporary=temporary)
+        summary = _turn_summary(_ledger_turn, _ledger_calls, request.model)
+        ticket.finish(summary)  # CTR-0285 first, independent of the append (UDR-0235 D7)
+        _record_api_turn(summary, request.model, thread_id, temporary=temporary, key_id=ticket.key_id)
 
         # Save session
         full_text = ""

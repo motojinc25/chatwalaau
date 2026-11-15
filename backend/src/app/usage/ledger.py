@@ -94,6 +94,10 @@ LEDGER_FIELDS: tuple[str, ...] = (
     "model_calls",
     *TOKEN_FIELDS,
     "outcome",
+    # The managed API key that made an openai-api turn (PRP-0254, UDR-0235 D9): the
+    # key's public id only -- never its name, hash or secret. A credential identifier,
+    # not a person's; it lets the CTR-0285 guard rebuild per-key counters.
+    "key_id",
 )
 
 
@@ -144,6 +148,7 @@ def build_record(
     run_id: str | None = None,
     outcome: str = "completed",
     when: datetime | None = None,
+    key_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Assemble one ledger record, or None when nothing was measured.
 
@@ -212,6 +217,8 @@ def build_record(
         return None
 
     record["outcome"] = outcome
+    if key_id:
+        record["key_id"] = key_id
     return record
 
 
@@ -264,6 +271,7 @@ def append_turn_usage(
     temporary: bool = False,
     run_target: str | None = None,
     outcome: str = "completed",
+    key_id: str | None = None,
 ) -> None:
     """Record one lane turn (CTR-0009 / CTR-0057 / CTR-0140 append sites).
 
@@ -282,6 +290,7 @@ def append_turn_usage(
             temporary=temporary,
             run_target=run_target,
             outcome=outcome,
+            key_id=key_id,
         )
     except Exception:
         logger.warning("usage ledger record build failed", exc_info=True)

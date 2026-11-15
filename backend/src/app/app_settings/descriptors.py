@@ -229,6 +229,12 @@ GROUPS: tuple[SettingGroup, ...] = (
         "OpenAI-compatible API",
         "Controls for POST /v1/responses only: an output cap, what tool output callers see, and which input roles are accepted.",
     ),
+    # PRP-0254 (CTR-0285, CTR-0198, UDR-0235 D4): admission limits of POST /v1/responses only.
+    SettingGroup(
+        "openai_api_limits",
+        "OpenAI-compatible API: limits",
+        "Request, token and concurrency limits for POST /v1/responses only. 0 = no limit. Counted per server process.",
+    ),
 )
 
 
@@ -1720,6 +1726,147 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
             "user message (system, developer, assistant, tool items), so a caller cannot rewrite the "
             "instructions or plant a history. Continue a conversation with previous_response_id."
         ),
+    ),
+    # ---- OpenAI-compatible API limits (runtime; PRP-0254, UDR-0235) ------------
+    # Read per request by app.openai_api.quota; /v1/responses only (D1). 0 = no limit,
+    # so every default keeps the behavior before PRP-0254 (D4).
+    SettingDescriptor(
+        "responses_requests_per_minute",
+        "Requests per minute",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=100_000,
+        help="Requests admitted in any 60 seconds, all callers together. Over it: 429 rate_limit_exceeded. 0 = no limit.",
+    ),
+    SettingDescriptor(
+        "responses_requests_per_day",
+        "Requests per day",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=100_000_000,
+        help="Requests admitted per calendar day in the limit time zone. Over it: 429 insufficient_quota. 0 = no limit.",
+    ),
+    SettingDescriptor(
+        "responses_requests_per_month",
+        "Requests per month",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=1_000_000_000,
+        help="Requests admitted per calendar month in the limit time zone. 0 = no limit.",
+    ),
+    SettingDescriptor(
+        "responses_input_tokens_per_day",
+        "Input tokens per day",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=100_000_000_000,
+        help=(
+            "Input tokens (uncached + cache creation, plus cache reads when counted) per day. A request is "
+            "refused once the day has reached it; the turns already running may finish above it. 0 = no limit."
+        ),
+    ),
+    SettingDescriptor(
+        "responses_input_tokens_per_month",
+        "Input tokens per month",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=1_000_000_000_000,
+        help="Input tokens per calendar month. 0 = no limit.",
+    ),
+    SettingDescriptor(
+        "responses_output_tokens_per_day",
+        "Output tokens per day",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=100_000_000_000,
+        help=(
+            "Output tokens (reasoning included) per day. Output costs several times more than input, so it has "
+            "its own limit. 0 = no limit."
+        ),
+    ),
+    SettingDescriptor(
+        "responses_output_tokens_per_month",
+        "Output tokens per month",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=1_000_000_000_000,
+        help="Output tokens per calendar month. 0 = no limit.",
+    ),
+    SettingDescriptor(
+        "responses_total_tokens_per_day",
+        "Total tokens per day",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=100_000_000_000,
+        help="Input plus output tokens per day. 0 = no limit.",
+    ),
+    SettingDescriptor(
+        "responses_total_tokens_per_month",
+        "Total tokens per month",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=1_000_000_000_000,
+        help="Input plus output tokens per calendar month. 0 = no limit.",
+    ),
+    SettingDescriptor(
+        "responses_max_concurrent",
+        "Concurrent requests",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=1_000,
+        help=(
+            "Requests running at the same time. It also bounds how far a token limit can be exceeded: at most "
+            "this many turns are in flight when the limit is reached. 0 = no limit."
+        ),
+    ),
+    SettingDescriptor(
+        "responses_max_input_chars",
+        "Input size (characters)",
+        "openai_api_limits",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=10_000_000,
+        help=(
+            "Characters of input text per request, including the stored history of previous_response_id. "
+            "Over it: 400 input_too_large, before any token is spent. 0 = no limit."
+        ),
+    ),
+    SettingDescriptor(
+        "responses_count_cache_reads",
+        "Count cache reads as input",
+        "openai_api_limits",
+        "bool",
+        SCOPE_RUNTIME,
+        help="Count prompt-cache reads toward the input and total token limits. They are billed lower; counting them is the safe side.",
+    ),
+    SettingDescriptor(
+        "responses_limit_timezone",
+        "Limit time zone",
+        "openai_api_limits",
+        "str",
+        SCOPE_RUNTIME,
+        help="IANA time zone in which the day and month limits reset, for example Asia/Tokyo. Default UTC.",
     ),
 )
 

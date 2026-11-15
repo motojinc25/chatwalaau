@@ -16,6 +16,8 @@ named by ``API_KEYS_FILE`` (default ``api_keys.jsonc``, relative to the working 
   as no keys: authentication fails closed and the server keeps running (D9).
 - Every change appends one line to ``<stem>.audit.jsonl`` beside the file: time, actor,
   action, key id, name and scope -- never a secret or a hash (D10).
+- A key may carry ``limits`` for ``/v1/responses`` (PRP-0254, UDR-0235 D5), read by the
+  quota guard (CTR-0285). Only non-zero fields are kept; reissue keeps them.
 
 This module imports nothing from ``app`` at load time, so ``app.core.config`` may use it.
 """
@@ -46,6 +48,15 @@ NAME_MAX = 64
 #: the file on every request.
 LAST_USED_WRITE_INTERVAL_SECS = 300
 SCHEMA_VERSION = 1
+#: Per-key limits of /v1/responses (PRP-0254, UDR-0235 D5). An absent field or 0 = no limit.
+LIMIT_FIELDS: tuple[str, ...] = (
+    "requests_per_minute",
+    "requests_per_day",
+    "requests_per_month",
+    "total_tokens_per_day",
+    "total_tokens_per_month",
+)
+LIMIT_MAX = 1_000_000_000_000
 _HEADER = (
     "// ChatWalaau API keys (PRP-0253). Managed in the API Keys screen or with `chatwalaau keys`.\n"
     "// Only SHA-256 hashes are stored; an issued secret cannot be recovered from this file.\n"
@@ -119,6 +130,8 @@ class KeyRecord:
     expires_at: str | None = None
     last_used_at: str | None = None
     created_by: str = ""
+    #: Per-key limits (PRP-0254): only non-zero LIMIT_FIELDS are kept; None = no limit.
+    limits: dict[str, int] | None = None
 
     def expired(self, at: datetime | None = None) -> bool:
         expiry = parse_time(self.expires_at) if self.expires_at else None
@@ -133,6 +146,27 @@ class KeyRecord:
         data.pop("hash")
         data["expired"] = self.expired()
         return data
+
+
+def normalize_limits(limits: Any) -> dict[str, int] | None:
+    """Validate per-key limits; keep the non-zero fields, ``None`` when nothing is left."""
+    if limits is None:
+        return None
+    if not isinstance(limits, dict):
+        raise InvalidKeyInput("limits must be an object.")
+    unknown = sorted(set(limits) - set(LIMIT_FIELDS))
+    if unknown:
+        raise InvalidKeyInput(f"Unknown limit field(s): {', '.join(unknown)}. Use {', '.join(LIMIT_FIELDS)}.")
+    clean: dict[str, int] = {}
+    for field in LIMIT_FIELDS:
+        value = limits.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= LIMIT_MAX:
+            raise InvalidKeyInput(f"{field} must be an integer from 0 to {LIMIT_MAX}.")
+        if value:
+            clean[field] = value
+    return clean or None
 
 
 def _new_secret() -> tuple[str, str]:
@@ -179,6 +213,8 @@ def _strip_comments(text: str) -> str:
 
 def _record_from(raw: dict[str, Any]) -> KeyRecord:
     fields = {k: raw[k] for k in KeyRecord.__dataclass_fields__ if k in raw}
+    if "limits" in fields:
+        fields["limits"] = normalize_limits(fields["limits"])
     record = KeyRecord(**fields)
     if record.scope not in SCOPES or not record.id or not record.hash:
         raise ValueError(f"bad key record {record.id!r}")
@@ -349,7 +385,9 @@ class KeyStore:
             raise InvalidKeyInput("The expiry must be in the future.")
         return _iso(moment)
 
-    def create(self, *, name: str, scope: str, expires_at: str | None, actor: str) -> tuple[KeyRecord, str]:
+    def create(
+        self, *, name: str, scope: str, expires_at: str | None, actor: str, limits: Any = None
+    ) -> tuple[KeyRecord, str]:
         with self._lock:
             self._refresh()
             clean = self._check_name(name)
@@ -368,6 +406,7 @@ class KeyStore:
                 updated_at=stamp,
                 expires_at=self._check_expiry(expires_at),
                 created_by=actor,
+                limits=normalize_limits(limits),
             )
             self._write([*self._records.values(), record])
             self._audit("create", record, actor)
@@ -384,6 +423,7 @@ class KeyStore:
         scope: Any = _UNSET,
         expires_at: Any = _UNSET,
         enabled: Any = _UNSET,
+        limits: Any = _UNSET,
     ) -> KeyRecord:
         with self._lock:
             record = self.get(key_id)
@@ -396,6 +436,8 @@ class KeyStore:
                 changes["expires_at"] = self._check_expiry(expires_at)
             if enabled is not self._UNSET:
                 changes["enabled"] = bool(enabled)
+            if limits is not self._UNSET:
+                changes["limits"] = normalize_limits(limits)
             if not changes:
                 return record
             updated = replace(record, **changes, updated_at=_iso(now_utc()))

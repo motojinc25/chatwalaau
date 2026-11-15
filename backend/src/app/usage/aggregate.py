@@ -46,6 +46,8 @@ GROUP_BY = (
     "provider",
     "outcome",
     "kind",
+    # PRP-0254 (UDR-0235 D9): the managed key of an openai-api turn; others group as (none).
+    "key_id",
 )
 
 # The chat view's bucket for Temporary Chat records, which carry no thread id by
@@ -55,6 +57,9 @@ TEMPORARY_KEY = "(temporary)"
 
 # A record whose grouping field is missing entirely (an older or partial record).
 UNKNOWN_KEY = "(unknown)"
+
+# A record made without a managed key (every lane but openai-api, and older records).
+NO_KEY = "(none)"
 
 
 def _months_in_range(start: date, end: date) -> list[str]:
@@ -157,6 +162,8 @@ def _group_key(record: dict[str, Any], group_by: str, tz: tzinfo = UTC) -> str:
         if not node:
             return UNKNOWN_KEY
         return f"{record.get('run_target') or UNKNOWN_KEY} / {node}"
+    if group_by == "key_id":
+        return str(record.get("key_id") or NO_KEY)
     value = record.get(group_by)
     return str(value) if value else UNKNOWN_KEY
 
