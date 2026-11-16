@@ -62,6 +62,7 @@ from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, is_refusal
 from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_path
 from app.agent.user_memory import session_user_profile_snapshot
 from app.agui.agent_registry import AgentRegistry
+from app.agui.refusal_text import text_refusal
 from app.agui.sanitize import TextSanitizer
 from app.agui.token_usage import context_base_tokens, turn_summary
 from app.auth import is_client_loopback, verify_api_key
@@ -1273,6 +1274,10 @@ async def _stream_with_reasoning(
     # the (frontend-saved) session file. Pre-initialized here so they are always
     # bound on the normal-completion path below.
     assistant_text_parts: list[str] = []
+    # The parts of the CURRENT (last) AG-UI text message -- always the tail of
+    # assistant_text_parts. A new text message starts after every tool result, so
+    # at the end of the run this is the final answer (PRP-0255, UDR-0236 D6).
+    final_text_parts: list[str] = []
     # Model-private citation markup (CTR-0218, PRP-0178, UDR-0160 D1/D2). A GPT-family
     # model writes U+E200 cite U+E202 turn0search0 U+E201 instead of the Markdown link the
     # prompt asks for; the characters have no glyph, so the reader sees boxes around
@@ -1796,6 +1801,9 @@ async def _stream_with_reasoning(
                     # Accumulate visible assistant text for Auto Session
                     # Title (PRP-0077, CTR-0109).
                     assistant_text_parts.append(text)
+                    if msg_id is None:
+                        final_text_parts.clear()
+                    final_text_parts.append(text)
                     # Close any open reasoning block before text
                     if reasoning_msg_id is not None:
                         yield encoder.encode(
@@ -2233,6 +2241,9 @@ async def _stream_with_reasoning(
     if tail:
         assistant_text_parts.append(tail)
         if msg_id is None:
+            final_text_parts.clear()
+        final_text_parts.append(tail)
+        if msg_id is None:
             msg_id = _generate_id()
             yield encoder.encode(
                 TextMessageStartEvent(
@@ -2287,21 +2298,32 @@ async def _stream_with_reasoning(
     # PRP-0237 (UDR-0220 D2/D3): a refusal is reported, never silent and never answer
     # text -- one additive CUSTOM event for the SPA's notice, and one log line with the
     # same run_id. Lengths only: the refusal can quote the request.
-    if text_fold.refusal:
+    # PRP-0255 (UDR-0236 D6): a final message that is nothing but the refusal
+    # template is the same refusal written as text. It was already streamed, so the
+    # event tells the SPA to take it back out; it leaves the title / memory text here.
+    # A refusal part wins: a turn sends at most one model_refusal.
+    refusal_text, refusal_source = text_fold.refusal, "part"
+    if not refusal_text and not run_error:
+        sentence = text_refusal("".join(final_text_parts))
+        if sentence is not None:
+            del assistant_text_parts[len(assistant_text_parts) - len(final_text_parts) :]
+            refusal_text, refusal_source = sentence, "text"
+    if refusal_text:
         logger.warning(
-            "Model refusal: thread=%s run=%s model=%s refusal_chars=%d answer_chars=%d; "
-            "sent as model_refusal, not as answer text (UDR-0220 D2)",
+            "Model refusal: thread=%s run=%s model=%s source=%s refusal_chars=%d answer_chars=%d; "
+            "sent as model_refusal, not as answer text (UDR-0220 D2, UDR-0236 D6)",
             thread_id,
             run_id,
             effective_model,
-            len(text_fold.refusal),
+            refusal_source,
+            len(refusal_text),
             len("".join(assistant_text_parts)),
         )
         yield encoder.encode(
             CustomEvent(
                 type=EventType.CUSTOM,
                 name=MODEL_REFUSAL_EVENT,
-                value={"text": text_fold.refusal, "run_id": run_id},
+                value={"text": refusal_text, "run_id": run_id, "source": refusal_source},
             )
         )
 

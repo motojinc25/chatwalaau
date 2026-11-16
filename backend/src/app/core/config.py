@@ -17,6 +17,11 @@ COMPACTION_BOUND_MAX = 64
 # tool rounds; the second K is the headroom for interim `assistant_text` groups,
 # which stage (1) does not bound. The measured tolerance is exactly N - K - 1,
 # so this rule states "the headroom is at least as large as the tool budget".
+# How many skill contexts the PRP-0255 pin pass may keep (UDR-0236 D1). One
+# definition for the descriptor (write path) and the validator (load path).
+SKILL_CONTEXT_MAX_MIN = 1
+SKILL_CONTEXT_MAX_MAX = 16
+
 COMPACTION_RULE_TEXT = "2 * COMPACTION_KEEP_LAST_TOOL_CALL_GROUPS < COMPACTION_KEEP_LAST_GROUPS"
 
 
@@ -892,20 +897,30 @@ class Settings(BaseSettings):
     # K -- newest tool-call groups stage (1) keeps. Because stage (1) caps the
     # INCLUDED tool-call groups at K across the whole history, the active
     # request sits at most K+1 groups from the end, which is what makes the
-    # UDR-0141 D3 guarantee structural. Range 1..64.
-    compaction_keep_last_tool_call_groups: int = 12
+    # UDR-0141 D3 guarantee structural. Range 1..64. Default 24 since PRP-0255
+    # (UDR-0236 D4): 12 lost a skill's instructions at the 13th tool round.
+    compaction_keep_last_tool_call_groups: int = 24
 
     # N -- newest non-system groups stage (2) keeps, counted over what stage (1)
     # left included. Range 1..64. MUST satisfy 2K < N (UDR-0141 D3): N > K is
     # the bare minimum for tool rounds, and the second K is the measured
     # headroom for interim `assistant_text` groups, which stage (1) does not
-    # bound (the tolerance is exactly N - K - 1).
-    compaction_keep_last_groups: int = 25
+    # bound (the tolerance is exactly N - K - 1). Default 50 since PRP-0255.
+    compaction_keep_last_groups: int = 50
 
     # Preserve system-kind groups during stage (2). Inert on the Prompt lane --
     # the assembled prompt travels as the agent's `instructions` and is never a
     # system MESSAGE in the compacted list (UDR-0138, unchanged by PRP-0163).
     compaction_preserve_system: bool = True
+
+    # Skill-context pin pass (PRP-0255, UDR-0236 D1-D3). After both stages, the
+    # pipeline re-includes the newest excluded load_skill / read_skill_resource
+    # group per skill (and resource), at most `compaction_skill_context_max`
+    # of them, so a long tool turn keeps the instructions it is following. It
+    # only re-includes: the D3 request guarantee and the meaning of K and N
+    # are unchanged. False restores the two-stage projection exactly.
+    compaction_keep_skill_context: bool = True
+    compaction_skill_context_max: int = 4
 
     # ---- Tool approval: REMOVED (PRP-0179, UDR-0161) ----
     # TOOL_APPROVAL_MODE / _REQUIRE_LIST / _TIMEOUT_SEC / _ARG_MAX_CHARS /
@@ -1107,6 +1122,18 @@ class Settings(BaseSettings):
         A cross-field violation resets BOTH bounds rather than clamping one:
         clamping invents a window the operator neither chose nor can predict.
         """
+        pin_max = self.compaction_skill_context_max
+        if not (SKILL_CONTEXT_MAX_MIN <= pin_max <= SKILL_CONTEXT_MAX_MAX):
+            default_pin = type(self).model_fields["compaction_skill_context_max"].default
+            _logger.warning(
+                "COMPACTION_SKILL_CONTEXT_MAX=%r is outside %d..%d; using the default %d",
+                pin_max,
+                SKILL_CONTEXT_MAX_MIN,
+                SKILL_CONTEXT_MAX_MAX,
+                default_pin,
+            )
+            self.compaction_skill_context_max = default_pin
+
         keep_k = self.compaction_keep_last_tool_call_groups
         keep_n = self.compaction_keep_last_groups
         default_k = type(self).model_fields["compaction_keep_last_tool_call_groups"].default

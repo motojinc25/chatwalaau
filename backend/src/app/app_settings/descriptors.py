@@ -72,7 +72,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-from app.core.config import COMPACTION_BOUND_MAX, COMPACTION_BOUND_MIN, Settings
+from app.core.config import (
+    COMPACTION_BOUND_MAX,
+    COMPACTION_BOUND_MIN,
+    SKILL_CONTEXT_MAX_MAX,
+    SKILL_CONTEXT_MAX_MIN,
+    Settings,
+)
 
 # ---- Scope values (UDR-0120 D3) ------------------------------------------
 
@@ -471,6 +477,37 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         parent="compaction_enabled",
         enabled_when=True,
         help="Exempt system-kind groups from the stage 2 sliding window.",
+    ),
+    # Skill-context pin pass (PRP-0255, UDR-0236 D1). `rebuild` for the same
+    # reason as the bounds above: the pipeline instance is baked into the
+    # cached agents and re-resolved by the CTR-0070 rebuild.
+    SettingDescriptor(
+        "compaction_keep_skill_context",
+        "Compaction: keep skill instructions",
+        "chat",
+        "bool",
+        SCOPE_REBUILD,
+        parent="compaction_enabled",
+        enabled_when=True,
+        help=(
+            "Keep the instructions of loaded skills when compaction trims older tool calls. "
+            "Without them, a long turn can lose the skill it is following and reload it or refuse."
+        ),
+    ),
+    SettingDescriptor(
+        "compaction_skill_context_max",
+        "Compaction: skills kept",
+        "chat",
+        "int",
+        SCOPE_REBUILD,
+        min=SKILL_CONTEXT_MAX_MIN,
+        max=SKILL_CONTEXT_MAX_MAX,
+        parent="compaction_keep_skill_context",
+        enabled_when=True,
+        help=(
+            "How many loaded skills (newest first) keep their instructions. Each one is sent "
+            "again on every model call of a long turn, so a large skill costs tokens."
+        ),
     ),
     # ---- Memory ------------------------------------------------------------
     # NOTE (PRP-0140): `user_profile_enabled` and `agent_memory_enabled` are

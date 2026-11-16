@@ -232,6 +232,14 @@ export const CONNECTION_LOST_MESSAGE =
  */
 export const MODEL_REFUSAL_MESSAGE =
   "The model's safety system stopped this reply, and this reply was not saved. The model said:"
+// PRP-0255 (UDR-0236 D6): the same refusal, written by the model as answer text.
+export const MODEL_TEXT_REFUSAL_MESSAGE = 'The model declined to answer, and this reply was not saved. The model said:'
+
+/** Remove `tail` from the end of `content` (ignoring trailing whitespace), when it is there. */
+function withoutTrailing(content: string, tail: string): string {
+  const trimmed = content.trimEnd()
+  return trimmed.endsWith(tail) ? trimmed.slice(0, trimmed.length - tail.length).trimEnd() : content
+}
 const NOT_SAVED_SUFFIX = ' and this reply was not saved.'
 const STREAM_ENDED_EARLY = 'the stream ended before the run finished'
 
@@ -694,6 +702,7 @@ export function useChat(options?: UseChatOptions) {
         // after the run, never as answer text. A refused turn is shown with a notice and is
         // not saved.
         let refusalText = ''
+        let refusalFromText = false
         // The turn's MCP App View (CTR-0068 v2): saved with the message so a reload rebuilds it.
         let completedMcpApp: McpAppEvent | undefined
         while (true) {
@@ -953,8 +962,11 @@ export function useChat(options?: UseChatOptions) {
                     onNoticeRef.current?.(`Temporary server error -- retrying${counter}...`)
                   }
                   if (event.name === 'model_refusal' && event.value) {
-                    const refusal = (event.value as Record<string, unknown>).text
-                    refusalText = typeof refusal === 'string' ? refusal : ''
+                    const value = event.value as Record<string, unknown>
+                    refusalText = typeof value.text === 'string' ? value.text : ''
+                    // PRP-0255 (UDR-0236 D6): a refusal written as answer text was already
+                    // streamed. An event without `source` is a refusal part (older backend).
+                    refusalFromText = value.source === 'text'
                   }
                   if (event.name === 'workflow_completed') {
                     workflowCompleted = true
@@ -1048,10 +1060,17 @@ export function useChat(options?: UseChatOptions) {
         // the model as if it had answered that way. Never retried automatically (D5).
         if (refusalText) {
           streamSuccess = false
+          const notice = refusalFromText ? MODEL_TEXT_REFUSAL_MESSAGE : MODEL_REFUSAL_MESSAGE
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantId
-                ? { ...msg, modelRefusal: { message: `${MODEL_REFUSAL_MESSAGE} ${refusalText}`, retry: retryMode } }
+                ? {
+                    ...msg,
+                    // A text refusal (UDR-0236 D6) is taken back out of the answer: it is
+                    // shown once, in the notice, never as the model's answer.
+                    content: refusalFromText ? withoutTrailing(msg.content, refusalText) : msg.content,
+                    modelRefusal: { message: `${notice} ${refusalText}`, retry: retryMode },
+                  }
                 : msg,
             ),
           )
