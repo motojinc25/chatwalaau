@@ -25,6 +25,8 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import '@/lib/monaco-setup'
 import {
   type AgentDocument,
+  type KnowledgeScope,
+  type KnowledgeSources,
   type ToolEntry,
   type ToolInventory,
   useAgentAuthoring,
@@ -218,6 +220,7 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
   const [rawMode, setRawMode] = useState(false)
   const [rawYaml, setRawYaml] = useState('')
   const [inventory, setInventory] = useState<ToolInventory | null>(null)
+  const [sources, setSources] = useState<KnowledgeSources>({ rag_collections: null, ontologies: null })
   const [models, setModels] = useState<{
     ids: string[]
     options: Record<string, Array<{ key: string; allowed?: string[] }>>
@@ -258,9 +261,10 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
     setSaveNotice(null)
     ;(async () => {
       try {
-        const [inv, mi] = await Promise.all([api.loadInventory(), api.loadModels()])
+        const [inv, mi, ks] = await Promise.all([api.loadInventory(), api.loadModels(), api.loadKnowledgeSources()])
         if (cancelled) return
         setInventory(inv)
+        setSources(ks)
         const options: Record<string, Array<{ key: string; allowed?: string[] }>> = {}
         for (const [id, entry] of Object.entries(mi.model_options ?? {})) {
           // Effort is the only selectable generation option (PRP-0184, UDR-0166 D6).
@@ -510,6 +514,7 @@ export function DeclarativeAgentEditor({ open, onOpenChange, editId, onSaved }: 
                   </p>
                 </Field>
                 <OutputSchemaEditor doc={doc} patch={patch} />
+                <KnowledgeEditor doc={doc} patch={patch} sources={sources} />
               </div>
             </Panel>
 
@@ -792,6 +797,119 @@ function OutputSchemaEditor({ doc, patch }: { doc: AgentDocument; patch: (p: Par
           onClick={() => setProps({ ...props, [`field${entries.length + 1}`]: { type: 'string' } })}>
           + Add field
         </Button>
+      </div>
+    </Field>
+  )
+}
+
+const EMPTY_KNOWLEDGE: KnowledgeScope = {
+  rag_collections: [],
+  ontologies: [],
+  grounding: 'off',
+  max_distance: null,
+  web_search: false,
+}
+
+/**
+ * Knowledge scope (PRP-0256, UDR-0237 D3/D4/D6). Limits rag_search and ontology_query to the
+ * chosen sources; strict grounding answers a fixed text when nothing is found (/v1/responses
+ * with a key bound to this agent). Written by the backend under metadata.chatwalaau.knowledge.
+ */
+function KnowledgeEditor({
+  doc,
+  patch,
+  sources,
+}: {
+  doc: AgentDocument
+  patch: (p: Partial<AgentDocument>) => void
+  sources: KnowledgeSources
+}) {
+  const k = doc.knowledge ?? EMPTY_KNOWLEDGE
+  const set = (next: Partial<KnowledgeScope>) => {
+    const merged = { ...k, ...next }
+    patch({ knowledge: merged.rag_collections.length || merged.ontologies.length ? merged : null })
+  }
+  const toggle = (list: string[], value: string) =>
+    list.includes(value) ? list.filter((v) => v !== value) : [...list, value]
+  const collections = Array.from(new Set([...(sources.rag_collections ?? []), ...k.rag_collections]))
+  const ontologies = sources.ontologies ?? []
+  const scoped = k.rag_collections.length > 0 || k.ontologies.length > 0
+  return (
+    <Field label="Knowledge scope (optional)">
+      <div className="space-y-2 rounded-md border p-2" data-testid="agent-knowledge">
+        <p className="text-[10px] text-muted-foreground">
+          Choose the only documents this agent may search. With a scope, sources you do not choose are not searched and
+          web search is off.
+        </p>
+        <div>
+          <span className="block text-[11px] text-muted-foreground">Document collections</span>
+          {sources.rag_collections === null && <p className="text-[10px] text-muted-foreground">RAG is not set up.</p>}
+          {collections.map((name) => (
+            <label key={name} className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={k.rag_collections.includes(name)}
+                onChange={() => set({ rag_collections: toggle(k.rag_collections, name) })}
+              />
+              {name}
+            </label>
+          ))}
+        </div>
+        <div>
+          <span className="block text-[11px] text-muted-foreground">Ontologies</span>
+          {sources.ontologies === null && <p className="text-[10px] text-muted-foreground">Ontologies are off.</p>}
+          {ontologies.map((o) => (
+            <label key={o.id} className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={k.ontologies.includes(o.id) || k.ontologies.includes(o.name)}
+                onChange={() => {
+                  const on = k.ontologies.includes(o.id) || k.ontologies.includes(o.name)
+                  set({
+                    ontologies: on ? k.ontologies.filter((v) => v !== o.id && v !== o.name) : [...k.ontologies, o.id],
+                  })
+                }}
+              />
+              {o.name}
+            </label>
+          ))}
+        </div>
+        {scoped && (
+          <>
+            <label className="flex items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={k.grounding === 'strict'}
+                disabled={k.rag_collections.length === 0}
+                onChange={(e) => set({ grounding: e.target.checked ? 'strict' : 'off' })}
+              />
+              Answer only from the documents (strict)
+            </label>
+            <label className="block text-[11px] text-muted-foreground">
+              Maximum distance (optional)
+              <input
+                className={cn(CONTROL, 'mt-0.5 text-xs')}
+                inputMode="decimal"
+                value={k.max_distance ?? ''}
+                placeholder="No limit"
+                onChange={(e) => {
+                  const value = Number.parseFloat(e.target.value)
+                  set({ max_distance: Number.isFinite(value) && value > 0 ? value : null })
+                }}
+              />
+            </label>
+            <label className="flex items-center gap-1.5 text-xs">
+              <input type="checkbox" checked={k.web_search} onChange={(e) => set({ web_search: e.target.checked })} />
+              Allow web search
+            </label>
+            {k.grounding === 'strict' && (
+              <p className="text-[10px] text-muted-foreground">
+                Strict applies to /v1/responses through an API key bound to this agent. Set a maximum distance, or every
+                question finds its nearest passages.
+              </p>
+            )}
+          </>
+        )}
       </div>
     </Field>
   )

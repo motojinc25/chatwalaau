@@ -12,6 +12,10 @@ pre-PRP-0094 behavior byte-for-byte (UDR-0072 D13).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.agent.declarative.knowledge import KnowledgeScope
 
 # Sentinel for the YAML ``instructions`` field meaning "use the runtime Global
 # Agent Identity (.agent/IDENTITY.md) unchanged" (UDR-0072 D6). The bundled CORE
@@ -70,6 +74,9 @@ class DeclarativeAgentSpec:
     # can only narrow, never introduce a tool. Applied at the single tool-assembly
     # chokepoint (app.agui.agent_factory) on the activate/reload rebuild (UDR-0100 D2).
     tool_allowlist: list[str] | None = None
+    # Knowledge scope (PRP-0256, UDR-0237 D3): metadata.chatwalaau.knowledge. None => the
+    # tools search everything they can (byte-for-byte the prior behavior).
+    knowledge: KnowledgeScope | None = None
 
     # Non-fatal mapping notes (ignored fields) surfaced in the inventory (D3/D5).
     # ANY entry here BLOCKS activation (UDR-0072 D9), so a field that merely became

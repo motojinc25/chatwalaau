@@ -36,9 +36,11 @@ diagnostic text and never raise into the run.
 
 from __future__ import annotations
 
+import contextvars
+import functools
 import json
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi.concurrency import run_in_threadpool
 from pydantic import Field
@@ -84,12 +86,28 @@ _VALIDATE_RESULTS = 50
 _GRAPHS_PER_ONTOLOGY = 20
 
 
-def _catalog_summary() -> list[dict[str, object]]:
+# Knowledge scope of the running agent (PRP-0256, UDR-0237 D3): the ontology ids or exact
+# names it may see, or None for every ontology. Set only by make_scoped_ontology_query.
+_scope: contextvars.ContextVar[tuple[str, ...] | None] = contextvars.ContextVar("ontology_scope", default=None)
+
+
+def _in_scope(entry: dict[str, str], scope: tuple[str, ...] | None) -> bool:
+    if scope is None:
+        return True
+    names = {s.casefold() for s in scope}
+    return entry["id"] in scope or entry["name"].casefold() in names
+
+
+def _visible_catalog(scope: tuple[str, ...] | None) -> list[dict[str, str]]:
+    return [e for e in store.read_catalog() if _in_scope(e, scope)]
+
+
+def _catalog_summary(scope: tuple[str, ...] | None = None) -> list[dict[str, object]]:
     from app.ontology.imports import Resolver, direct_import_names
 
     resolver = Resolver()
     out: list[dict[str, object]] = []
-    for e in store.read_catalog():
+    for e in _visible_catalog(scope):
         item: dict[str, object] = {"id": e["id"], "name": e["name"], "description": e["description"]}
         if store.is_dataset(e):
             item["graphs"] = store.graph_names(e["id"])[:_GRAPHS_PER_ONTOLOGY]
@@ -144,9 +162,13 @@ def _ready_modes(ontology_id: str) -> list[str]:
     ]
 
 
-def _resolve_entry(selector: str) -> dict[str, str] | list[dict[str, str]] | None:
-    """Resolve id (exact) then name (case-insensitive, unique); list = ambiguous."""
-    entries = store.read_catalog()
+def _resolve_entry(selector: str, scope: tuple[str, ...] | None = None) -> dict[str, str] | list[dict[str, str]] | None:
+    """Resolve id (exact) then name (case-insensitive, unique); list = ambiguous.
+
+    Under a knowledge scope only the allowed ontologies resolve; any other answers None,
+    exactly like an unknown one (UDR-0237 D3).
+    """
+    entries = _visible_catalog(scope)
     wanted = (selector or "").strip()
     if not wanted:
         return None
@@ -212,17 +234,21 @@ async def ontology_query(
     inferred triples follow in a second block.
     """
     act = (action or "").strip().lower()
+    scope = _scope.get()
 
     if act == "catalog":
-        return json.dumps({"ontologies": await run_in_threadpool(_catalog_summary)}, ensure_ascii=False)
+        return json.dumps({"ontologies": await run_in_threadpool(_catalog_summary, scope)}, ensure_ascii=False)
 
     if act not in ("query", "explain", "validate"):
         return "Error: 'action' must be one of catalog, query, explain, validate."
 
-    resolved = _resolve_entry(ontology)
+    resolved = _resolve_entry(ontology, scope)
     if resolved is None:
         return json.dumps(
-            {"error": f"No ontology matches {ontology!r}.", "ontologies": await run_in_threadpool(_catalog_summary)},
+            {
+                "error": f"No ontology matches {ontology!r}.",
+                "ontologies": await run_in_threadpool(_catalog_summary, scope),
+            },
             ensure_ascii=False,
         )
     if isinstance(resolved, list):
@@ -491,3 +517,23 @@ async def _validate(resolved: dict[str, str], focus: str) -> str:
 
 
 __all__ = ["ONTOLOGY_TOOL_INSTRUCTION", "ontology_query"]
+
+
+def make_scoped_ontology_query(ontologies: tuple[str, ...]):
+    """``ontology_query`` limited to ``ontologies`` (ids or exact names; PRP-0256, UDR-0237 D3).
+
+    Installed only by the tool-assembly chokepoint for a spec with a knowledge scope. Same
+    name, parameters and description as the shared tool.
+    """
+    allowed = tuple(ontologies)
+
+    @functools.wraps(ontology_query)
+    async def scoped(*args: Any, **kwargs: Any) -> str:
+        token = _scope.set(allowed)
+        try:
+            return await ontology_query(*args, **kwargs)
+        finally:
+            _scope.reset(token)
+
+    scoped.scoped_ontologies = allowed  # type: ignore[attr-defined]
+    return scoped

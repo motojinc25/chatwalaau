@@ -39,6 +39,11 @@ def tool_output_mode() -> str:
     return mode if mode in TOOL_OUTPUT_MODES else "full"
 
 
+def reject_unknown_model() -> bool:
+    """``responses_reject_unknown_model`` (PRP-0256, UDR-0237 D2); default False."""
+    return bool(_setting("responses_reject_unknown_model", False))
+
+
 def effective_max_output_tokens(requested: int | None) -> int | None:
     """``min(requested, cap)``, ``cap`` when the request omits it, ``requested`` when cap is 0 (D2)."""
     try:

@@ -2,15 +2,24 @@
 
 Maps response_id (resp_ prefix) to thread_id for unified session storage
 via FileHistoryProvider. Tracks response_chain for multi-turn conversations.
+
+PRP-0256 (UDR-0237 D8-D10): ``previous_response_id`` resolves through the response id
+index (``app.openai_api.response_index``) for saved and temporary threads alike, and saved
+API sessions may expire after ``responses_session_retention_days``.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 import logging
 from pathlib import Path
+import shutil
+import threading
+import time
 from typing import Any
 import uuid
 
+from app.core import config as _config
+from app.openai_api import response_index
 from app.session.storage import (
     create_session_json,
     iter_session_files,
@@ -44,7 +53,8 @@ def resolve_thread_id(previous_response_id: str) -> str | None:
     """Find the session thread_id containing the given response_id.
 
     1. Check if previous_response_id is itself a thread_id (first response in session)
-    2. Search sessions for response_chain containing the id
+    2. Look it up in the response id index (UDR-0237 D9): saved and temporary threads,
+       no scan once the index is complete.
     """
     # Direct match: the response_id IS the thread_id (first response)
     session = _read_session(previous_response_id)
@@ -53,17 +63,7 @@ def resolve_thread_id(previous_response_id: str) -> str | None:
         if previous_response_id in chain or session.get("thread_id") == previous_response_id:
             return previous_response_id
 
-    # Search all sessions for response_chain containing this id.
-    # iter_session_files excludes the metadata index (UDR-0091 D6).
-    for file in iter_session_files(_sessions_dir()):
-        try:
-            data = json.loads(file.read_text(encoding="utf-8"))
-            if previous_response_id in data.get("response_chain", []):
-                return data.get("thread_id", file.stem)
-        except (json.JSONDecodeError, OSError):
-            continue
-
-    return None
+    return response_index.lookup(previous_response_id)
 
 
 def create_api_session(thread_id: str, response_id: str, title: str = "") -> dict[str, Any]:
@@ -83,6 +83,7 @@ def create_api_session(thread_id: str, response_id: str, title: str = "") -> dic
         "messages": [],
     }
     create_session_json(thread_id, data)
+    response_index.record(response_id, thread_id)
     logger.info("Created API session %s", thread_id)
     return data
 
@@ -122,3 +123,76 @@ def update_api_session(
     # Serialised; an unreadable file raises and is never replaced (UDR-0156 D1/D2).
     if update_session_json(thread_id, append) is None:
         logger.warning("Session not found for update: %s", thread_id)
+        return
+    response_index.record(new_response_id, thread_id)
+
+
+# ---- retention of saved API sessions (PRP-0256, UDR-0237 D10) -----------------------
+
+#: The opportunistic sweep runs at most this often.
+SWEEP_INTERVAL_SECS = 3600
+_last_sweep = 0.0
+_sweep_lock = threading.Lock()
+
+
+def _retention_days() -> int:
+    try:
+        return max(0, int(getattr(_config.settings, "responses_session_retention_days", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def sweep_api_sessions(retention_days: int | None = None) -> int:
+    """Delete saved ``source: openai-api`` sessions not updated for ``retention_days``.
+
+    0 keeps everything. App chats are never touched (only ``source == "openai-api"``).
+    Never raises; returns how many sessions were deleted.
+    """
+    days = _retention_days() if retention_days is None else max(0, retention_days)
+    if days <= 0:
+        return 0
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    deleted = 0
+    for path in iter_session_files(_sessions_dir()):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or data.get("source") != "openai-api":
+                continue
+            stamp = datetime.fromisoformat(str(data.get("updated_at") or data.get("created_at")))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=UTC)
+            if stamp >= cutoff:
+                continue
+            thread_id = str(data.get("thread_id") or path.stem)
+            path.unlink()
+            uploads = Path(_config.settings.upload_dir) / thread_id
+            if uploads.is_dir():
+                shutil.rmtree(uploads, ignore_errors=True)
+            response_index.forget_thread(thread_id)
+            deleted += 1
+        except (OSError, ValueError, TypeError):
+            logger.warning("API session retention could not process %s", path, exc_info=True)
+    if deleted:
+        logger.info("API session retention removed %d session(s) older than %d day(s)", deleted, days)
+    return deleted
+
+
+def sweep_now() -> int:
+    """The retention sweep plus index pruning (startup and the hourly opportunistic run)."""
+    global _last_sweep
+    with _sweep_lock:
+        _last_sweep = time.monotonic()
+    deleted = sweep_api_sessions()
+    try:
+        response_index.prune_missing()
+    except Exception:
+        logger.warning("Response id index pruning failed", exc_info=True)
+    return deleted
+
+
+def sweep_due() -> bool:
+    """True at most once per SWEEP_INTERVAL_SECS, and only when retention is on."""
+    if _retention_days() <= 0:
+        return False
+    with _sweep_lock:
+        return _last_sweep == 0.0 or time.monotonic() - _last_sweep >= SWEEP_INTERVAL_SECS

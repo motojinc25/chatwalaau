@@ -152,8 +152,13 @@ def subset_for_model(
     tools: list[Any],
     context_providers: list[Any],
     guidance: list[ToolGuidance],
+    *,
+    allow_web_search: bool = True,
 ) -> ModelToolSurface:
     """Return the tool surface ``model`` gets, after its catalog capability gates.
+
+    ``allow_web_search=False`` withholds the hosted web search for a spec with a knowledge scope
+    that did not ask for it (PRP-0256, UDR-0237 D4); it is recorded as withheld.
 
     Attaches the provider-supplied hosted web search (the ONE gate for it stays
     ``providers.web_search_tool()`` returning None, UDR-0112 D3) and removes whatever
@@ -223,6 +228,8 @@ def subset_for_model(
         # Attached LAST so it is never a candidate for the filters above, and decided
         # by the single value that also decides its instruction (UDR-0112 D3 / D6).
         web_search = providers.web_search_tool(model)
+        if web_search is not None and not allow_web_search:
+            web_search = None  # a knowledge-scoped spec without web_search (PRP-0256, UDR-0237 D4)
         if web_search is not None:
             out_tools = [web_search, *out_tools]
             web_search_instruction = WEB_SEARCH_INSTRUCTION

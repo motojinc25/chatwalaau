@@ -25,6 +25,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from app.agent.declarative import authoring
@@ -189,6 +190,14 @@ def register_declarative_agents(app: FastAPI, *, agent_registry) -> None:
             "writable": writable,
             "agents_dir": str(directory or ""),
         }
+
+    @router.get("/authoring/knowledge-sources", dependencies=[Depends(verify_api_key)])
+    async def knowledge_sources_endpoint() -> dict:
+        """The collections and ontologies a knowledge scope can name (PRP-0256, CTR-0177).
+
+        ``None`` for a source that is not configured (RAG not initialized, ontology off).
+        """
+        return await run_in_threadpool(authoring.knowledge_sources)
 
     @router.post("/authoring/validate", dependencies=[Depends(verify_api_key)])
     async def validate_authoring(body: AuthoringBody) -> dict:

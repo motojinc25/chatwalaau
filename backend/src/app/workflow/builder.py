@@ -18,6 +18,7 @@ from agent_framework import Agent
 
 from app import providers
 from app.agent.compaction import resolve_compaction_strategy
+from app.agent.declarative.knowledge import allows_web_search
 from app.agent.declarative.loader import resolve_spec
 from app.agent.declarative.spec import DeclarativeAgentError, DeclarativeAgentSpec
 from app.agent.identity import load_identity
@@ -49,6 +50,10 @@ def _pick_model(spec: DeclarativeAgentSpec) -> str:
         if preferred:
             return preferred
     return default
+
+
+#: Public name of the model rule, shared with the key-bound API agent (CTR-0286, PRP-0256).
+pick_model = _pick_model
 
 
 def build_prompt_agent(
@@ -111,7 +116,7 @@ def build_prompt_agent(
         # value visible. Whether a workflow node SHOULD carry the tool guidance is a
         # separate question with a separate answer (see the PRP-0185 completion
         # report), and fixing it here would silently alter every workflow prompt.
-        surface = subset_for_model(model, tools, context_providers, guidance)
+        surface = subset_for_model(model, tools, context_providers, guidance, allow_web_search=allows_web_search(spec))
         tools = surface.tools
         context_providers = surface.context_providers
         model_options = providers.build_model_options(model, spec.model_options_override)
@@ -147,4 +152,4 @@ def build_prompt_agent(
     return agent
 
 
-__all__ = ["build_prompt_agent"]
+__all__ = ["build_prompt_agent", "pick_model"]

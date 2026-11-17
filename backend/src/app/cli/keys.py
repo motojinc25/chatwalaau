@@ -7,6 +7,8 @@ web sign-in.
 
     chatwalaau keys list
     chatwalaau keys create --name NAME --scope responses|api|admin [--expires-days N]
+                           [--agent AGENT_ID] [--storage saved|temporary]
+    chatwalaau keys set ID [--agent AGENT_ID | --no-agent] [--storage saved|temporary]
     chatwalaau keys reissue ID
     chatwalaau keys disable ID | enable ID
     chatwalaau keys delete ID
@@ -44,6 +46,13 @@ def register_keys_parser(subparsers: argparse._SubParsersAction) -> None:
     create.add_argument("--name", required=True)
     create.add_argument("--scope", required=True, choices=("responses", "api", "admin"))
     create.add_argument("--expires-days", type=int, default=None, help="Days until it expires (default: never)")
+    _add_binding_args(create)
+
+    # PRP-0256 (UDR-0237 D1/D8): bind a key to a custom agent and choose its storage.
+    setter = sub.add_parser("set", help="Bind a key to a custom agent and/or set its conversation storage")
+    setter.add_argument("key_id")
+    _add_binding_args(setter)
+    setter.add_argument("--no-agent", action="store_true", help="Remove the agent binding")
 
     for name, help_text in (
         ("reissue", "Issue a new secret for a key; the old one stops working"),
@@ -55,6 +64,31 @@ def register_keys_parser(subparsers: argparse._SubParsersAction) -> None:
         cmd.add_argument("key_id")
 
     parser.set_defaults(func=run_keys)
+
+
+def _add_binding_args(cmd: argparse.ArgumentParser) -> None:
+    cmd.add_argument("--agent", default=None, help="Custom declarative agent id this key runs (/v1/responses)")
+    cmd.add_argument(
+        "--storage",
+        default=None,
+        choices=("saved", "temporary"),
+        help="temporary: every /v1/responses request of this key runs temporary",
+    )
+
+
+def _check_agent(agent: str | None) -> None:
+    if not agent:
+        return
+    from app.agent.declarative.loader import resolve_spec
+    from app.agent.declarative.spec import CORE_AGENT_ID, DeclarativeAgentError
+
+    try:
+        if agent == CORE_AGENT_ID:
+            raise DeclarativeAgentError("the Built-in agent cannot be bound")
+        resolve_spec(agent)
+    except DeclarativeAgentError as exc:
+        print(f"Error: {agent!r} is not a usable custom agent ({exc}).", file=sys.stderr)
+        sys.exit(1)
 
 
 def _store():
@@ -89,7 +123,16 @@ def run_keys(args: argparse.Namespace) -> None:
             expires = None
             if args.expires_days is not None:
                 expires = (key_store.now_utc() + timedelta(days=args.expires_days)).isoformat()
-            record, secret = store.create(name=args.name, scope=args.scope, expires_at=expires, actor=ACTOR)
+            agent = getattr(args, "agent", None)
+            _check_agent(agent)
+            record, secret = store.create(
+                name=args.name,
+                scope=args.scope,
+                expires_at=expires,
+                actor=ACTOR,
+                agent=agent,
+                storage=getattr(args, "storage", None),
+            )
             _emit(
                 args,
                 {"key": record.public(), "secret": secret},
@@ -103,6 +146,21 @@ def run_keys(args: argparse.Namespace) -> None:
                 {"key": record.public(), "secret": secret},
                 f"Reissued {record.name}. The old secret no longer works.\n\n  {secret}\n\n"
                 "Copy it now. It will not be shown again.",
+            )
+        elif command == "set":
+            changes: dict = {}
+            if args.no_agent:
+                changes["agent"] = None
+            elif args.agent is not None:
+                _check_agent(args.agent)
+                changes["agent"] = args.agent
+            if args.storage is not None:
+                changes["storage"] = args.storage
+            record = store.update(args.key_id, actor=ACTOR, **changes)
+            _emit(
+                args,
+                {"key": record.public()},
+                f"{record.name}: agent {record.agent or '(none)'}, storage {record.storage}.",
             )
         elif command in ("disable", "enable"):
             record = store.update(args.key_id, actor=ACTOR, enabled=command == "enable")

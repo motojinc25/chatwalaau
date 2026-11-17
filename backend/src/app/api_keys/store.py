@@ -18,6 +18,10 @@ named by ``API_KEYS_FILE`` (default ``api_keys.jsonc``, relative to the working 
   action, key id, name and scope -- never a secret or a hash (D10).
 - A key may carry ``limits`` for ``/v1/responses`` (PRP-0254, UDR-0235 D5), read by the
   quota guard (CTR-0285). Only non-zero fields are kept; reissue keeps them.
+- A key may be bound to a declarative ``agent`` and carry a ``storage`` mode for
+  ``/v1/responses`` (PRP-0256, UDR-0237 D1/D8). The store checks only their shape; whether
+  the agent id resolves is checked by the management API and the CLI (this module imports
+  nothing from ``app``). Reissue keeps both.
 
 This module imports nothing from ``app`` at load time, so ``app.core.config`` may use it.
 """
@@ -57,6 +61,9 @@ LIMIT_FIELDS: tuple[str, ...] = (
     "total_tokens_per_month",
 )
 LIMIT_MAX = 1_000_000_000_000
+#: Storage modes of /v1/responses conversations per key (PRP-0256, UDR-0237 D8).
+STORAGE_MODES: tuple[str, ...] = ("saved", "temporary")
+AGENT_ID_MAX = 200
 _HEADER = (
     "// ChatWalaau API keys (PRP-0253). Managed in the API Keys screen or with `chatwalaau keys`.\n"
     "// Only SHA-256 hashes are stored; an issued secret cannot be recovered from this file.\n"
@@ -132,6 +139,10 @@ class KeyRecord:
     created_by: str = ""
     #: Per-key limits (PRP-0254): only non-zero LIMIT_FIELDS are kept; None = no limit.
     limits: dict[str, int] | None = None
+    #: Declarative agent this key is bound to (PRP-0256, UDR-0237 D1); None = unbound.
+    agent: str | None = None
+    #: "saved" (default) or "temporary": every request of the key runs temporary (D8).
+    storage: str = "saved"
 
     def expired(self, at: datetime | None = None) -> bool:
         expiry = parse_time(self.expires_at) if self.expires_at else None
@@ -167,6 +178,27 @@ def normalize_limits(limits: Any) -> dict[str, int] | None:
         if value:
             clean[field] = value
     return clean or None
+
+
+def normalize_agent(agent: Any) -> str | None:
+    """Shape check of a bound agent id; ``None`` / empty unbinds."""
+    if agent is None:
+        return None
+    if not isinstance(agent, str):
+        raise InvalidKeyInput("agent must be a string (a declarative agent id) or null.")
+    clean = agent.strip()
+    if len(clean) > AGENT_ID_MAX:
+        raise InvalidKeyInput(f"agent must be at most {AGENT_ID_MAX} characters.")
+    return clean or None
+
+
+def normalize_storage(storage: Any) -> str:
+    """``saved`` or ``temporary``; ``None`` reads as ``saved``."""
+    if storage is None:
+        return "saved"
+    if storage not in STORAGE_MODES:
+        raise InvalidKeyInput(f"storage must be one of {', '.join(STORAGE_MODES)}.")
+    return storage
 
 
 def _new_secret() -> tuple[str, str]:
@@ -215,6 +247,10 @@ def _record_from(raw: dict[str, Any]) -> KeyRecord:
     fields = {k: raw[k] for k in KeyRecord.__dataclass_fields__ if k in raw}
     if "limits" in fields:
         fields["limits"] = normalize_limits(fields["limits"])
+    if "agent" in fields:
+        fields["agent"] = normalize_agent(fields["agent"])
+    if "storage" in fields:
+        fields["storage"] = normalize_storage(fields["storage"])
     record = KeyRecord(**fields)
     if record.scope not in SCOPES or not record.id or not record.hash:
         raise ValueError(f"bad key record {record.id!r}")
@@ -386,7 +422,15 @@ class KeyStore:
         return _iso(moment)
 
     def create(
-        self, *, name: str, scope: str, expires_at: str | None, actor: str, limits: Any = None
+        self,
+        *,
+        name: str,
+        scope: str,
+        expires_at: str | None,
+        actor: str,
+        limits: Any = None,
+        agent: Any = None,
+        storage: Any = None,
     ) -> tuple[KeyRecord, str]:
         with self._lock:
             self._refresh()
@@ -407,6 +451,8 @@ class KeyStore:
                 expires_at=self._check_expiry(expires_at),
                 created_by=actor,
                 limits=normalize_limits(limits),
+                agent=normalize_agent(agent),
+                storage=normalize_storage(storage),
             )
             self._write([*self._records.values(), record])
             self._audit("create", record, actor)
@@ -424,6 +470,8 @@ class KeyStore:
         expires_at: Any = _UNSET,
         enabled: Any = _UNSET,
         limits: Any = _UNSET,
+        agent: Any = _UNSET,
+        storage: Any = _UNSET,
     ) -> KeyRecord:
         with self._lock:
             record = self.get(key_id)
@@ -438,6 +486,10 @@ class KeyStore:
                 changes["enabled"] = bool(enabled)
             if limits is not self._UNSET:
                 changes["limits"] = normalize_limits(limits)
+            if agent is not self._UNSET:
+                changes["agent"] = normalize_agent(agent)
+            if storage is not self._UNSET:
+                changes["storage"] = normalize_storage(storage)
             if not changes:
                 return record
             updated = replace(record, **changes, updated_at=_iso(now_utc()))

@@ -18,6 +18,22 @@ export interface AgentDocument {
   model: { id?: string; options?: { effort?: string; verbosity?: string } }
   tools: ToolEntry[]
   outputSchema?: { properties: Record<string, { type: string; description?: string; required?: boolean }> } | null
+  /** Knowledge scope (PRP-0256, UDR-0237 D3): written under metadata.chatwalaau.knowledge. */
+  knowledge?: KnowledgeScope | null
+}
+
+export interface KnowledgeScope {
+  rag_collections: string[]
+  ontologies: string[]
+  grounding: 'off' | 'strict'
+  max_distance: number | null
+  web_search: boolean
+}
+
+/** Names a knowledge scope can use; null = that source is not configured on this server. */
+export interface KnowledgeSources {
+  rag_collections: string[] | null
+  ontologies: Array<{ id: string; name: string }> | null
 }
 
 export interface ToolEntry {
@@ -98,6 +114,12 @@ export function useAgentAuthoring() {
     return (await res.json()) as ToolInventory
   }, [])
 
+  const loadKnowledgeSources = useCallback(async (): Promise<KnowledgeSources> => {
+    const res = await fetch('/api/agents/authoring/knowledge-sources')
+    if (!res.ok) return { rag_collections: null, ontologies: null }
+    return (await res.json()) as KnowledgeSources
+  }, [])
+
   const loadModels = useCallback(async (): Promise<ModelInfo> => {
     const res = await fetch('/api/model')
     if (!res.ok) throw new Error('Failed to load models')
@@ -143,7 +165,7 @@ export function useAgentAuthoring() {
   // identity every render and re-trigger any effect that depends on the hook value
   // (the initial-load effect would loop and never settle -- PRP-0117 fix).
   return useMemo(
-    () => ({ validate, loadInventory, loadModels, loadSource, save, remove }),
-    [validate, loadInventory, loadModels, loadSource, save, remove],
+    () => ({ validate, loadInventory, loadKnowledgeSources, loadModels, loadSource, save, remove }),
+    [validate, loadInventory, loadKnowledgeSources, loadModels, loadSource, save, remove],
   )
 }

@@ -29,6 +29,7 @@ from agent_framework import Agent
 from app import providers
 from app.agent.capability_guidance import ToolGuidance, render_capability_guidance
 from app.agent.declarative import active_spec
+from app.agent.declarative.knowledge import allows_web_search
 from app.agent.identity import build_capability_block, load_identity
 from app.agent.model_capabilities import subset_for_model
 from app.demo import is_demo_mode, resolve_demo_models
@@ -141,6 +142,9 @@ class AgentRegistry:
         partially-populated one.
         """
         agents, caps, models, default = built
+        # Bumped on every build so agents built OUTSIDE the registry from the same inputs
+        # (the key-bound API agent, CTR-0286) know when to rebuild (PRP-0256, UDR-0237 D1).
+        self.generation = getattr(self, "generation", 0) + 1
         # Per-model capability instructions (slot #3..) feed the per-run remainder
         # (Memory Block + capabilities) when USER_PROFILE_ENABLED (CTR-0105).
         self._agents = agents
@@ -225,9 +229,13 @@ class AgentRegistry:
         # this through subset_for_model() would change which client factory resolves the
         # tool for no behavioural gain. The guidance is rendered here instead, which is
         # the only thing the new return type requires.
-        web_search = providers.openai_web_search_tool()
-        demo_tools = [web_search, *tools]
-        demo_caps = render_capability_guidance(guidance) + WEB_SEARCH_INSTRUCTION
+        # A knowledge-scoped spec gets no web search unless it asks (PRP-0256, UDR-0237 D4).
+        if allows_web_search(spec):
+            demo_tools = [providers.openai_web_search_tool(), *tools]
+            demo_caps = render_capability_guidance(guidance) + WEB_SEARCH_INSTRUCTION
+        else:
+            demo_tools = list(tools)
+            demo_caps = render_capability_guidance(guidance)
 
         for model in models:
             caps[model] = demo_caps
@@ -301,6 +309,8 @@ class AgentRegistry:
         agents: dict[str, Agent] = {}
         caps: dict[str, str] = {}
 
+        # A knowledge-scoped spec gets no hosted web search unless it asks (PRP-0256, UDR-0237 D4).
+        web_ok = allows_web_search(spec)
         for model, provider_name in resolved:
             client = _build_chat_client(model)
             model_middleware = list(self._middleware)
@@ -310,7 +320,7 @@ class AgentRegistry:
             # removes whatever this model's offering withholds -- image tools, MCP tools,
             # the SkillsProvider -- together with each one's guidance block (D6). The
             # shared inputs are never mutated (D8).
-            surface = subset_for_model(model, tools, context_providers, guidance)
+            surface = subset_for_model(model, tools, context_providers, guidance, allow_web_search=web_ok)
             model_tools = surface.tools
             model_context_providers = surface.context_providers
             model_caps = surface.instructions()

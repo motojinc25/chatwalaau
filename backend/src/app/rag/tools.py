@@ -128,38 +128,72 @@ def _embed_query(text: str) -> list[float]:
     return response.data[0].embedding
 
 
-def rag_search(
-    query: Annotated[str, Field(description="Search query text in natural language")],
-    collection: Annotated[str, Field(description="Collection name (leave empty for default)")] = "",
-    n_results: Annotated[int, Field(description="Number of results to return (0 for default)")] = 0,
-) -> str:
-    """Search ingested documents for relevant information using vector similarity. Use when the user asks about uploaded PDFs, ingested documents, or the knowledge base. Returns text chunks with source filename, page number, and relevance score."""
+#: Fixed answers (PRP-0256, UDR-0237 D3/D5). A refused and a missing collection give the
+#: same text under a scope, so the model learns nothing about other collections.
+COLLECTION_NOT_FOUND = "Collection not found."
+COLLECTION_NOT_AVAILABLE = "Collection not available."
+NO_DOCUMENTS_YET = "No documents ingested in this collection yet."
+
+_RAG_SEARCH_DOC = (
+    "Search ingested documents for relevant information using vector similarity. Use when the user asks "
+    "about uploaded PDFs, ingested documents, or the knowledge base. Returns text chunks with source "
+    "filename, page number, and relevance score."
+)
+
+
+def default_collection() -> str:
+    return _default_collection
+
+
+def default_top_k() -> int:
+    return _default_top_k
+
+
+def is_initialized() -> bool:
+    return _chroma_client is not None
+
+
+def collection_names() -> list[str] | None:
+    """Names of the existing collections, or None when RAG is not initialized."""
     if _chroma_client is None:
-        return json.dumps({"error": "RAG search not initialized. CHROMA_DIR may not be configured."})
+        return None
+    return [
+        item if isinstance(item, str) else getattr(item, "name", str(item))
+        for item in _chroma_client.list_collections()
+    ]
 
-    col_name = collection or _default_collection
-    top_k = n_results if n_results > 0 else _default_top_k
 
+def _get_collection(name: str):
+    """The collection, or None when it does not exist. Never creates one (UDR-0237 D5)."""
     try:
-        col = _chroma_client.get_or_create_collection(name=col_name)
+        return _chroma_client.get_collection(name=name)
+    except Exception:
+        return None
 
-        if col.count() == 0:
-            return json.dumps(
-                {
-                    "results": [],
-                    "query": query,
-                    "collection": col_name,
-                    "message": "No documents ingested in this collection yet.",
-                }
-            )
+
+def search_collection(query: str, collection: str, top_k: int) -> dict:
+    """One similarity search; the JSON-ready result of ``rag_search`` (CTR-0077).
+
+    Shared by the tool and the grounded answer gate (CTR-0287), so both read the same hits.
+    """
+    if _chroma_client is None:
+        return {"error": "RAG search not initialized. CHROMA_DIR may not be configured."}
+    try:
+        col = _get_collection(collection)
+        if col is None:
+            if collection == _default_collection:
+                # A fresh install has not ingested into the default collection yet.
+                return {"results": [], "query": query, "collection": collection, "message": NO_DOCUMENTS_YET}
+            return {"error": COLLECTION_NOT_FOUND, "results": [], "query": query, "collection": collection}
+
+        count = col.count()
+        if count == 0:
+            return {"results": [], "query": query, "collection": collection, "message": NO_DOCUMENTS_YET}
 
         # Embed query using Azure OpenAI (same model as ingest) to match dimensions
         query_embedding = _embed_query(query)
 
-        results = col.query(
-            query_embeddings=[query_embedding],
-            n_results=min(top_k, col.count()),
-        )
+        results = col.query(query_embeddings=[query_embedding], n_results=min(top_k, count))
 
         formatted = []
         if results["documents"] and results["documents"][0]:
@@ -178,20 +212,52 @@ def rag_search(
                     }
                 )
 
-        return json.dumps(
-            {
-                "results": formatted,
-                "query": query,
-                "collection": col_name,
-            }
-        )
+        return {"results": formatted, "query": query, "collection": collection}
 
     except Exception:
         logger.exception("RAG search failed for query: %s", query)
-        return json.dumps(
-            {
-                "error": "RAG search failed. The collection may not exist or ChromaDB is unavailable.",
-                "query": query,
-                "collection": col_name,
-            }
-        )
+        return {
+            "error": "RAG search failed. The collection may not exist or ChromaDB is unavailable.",
+            "query": query,
+            "collection": collection,
+        }
+
+
+def rag_search(
+    query: Annotated[str, Field(description="Search query text in natural language")],
+    collection: Annotated[str, Field(description="Collection name (leave empty for default)")] = "",
+    n_results: Annotated[int, Field(description="Number of results to return (0 for default)")] = 0,
+) -> str:
+    """Search ingested documents for relevant information using vector similarity. Use when the user asks about uploaded PDFs, ingested documents, or the knowledge base. Returns text chunks with source filename, page number, and relevance score."""
+    top_k = n_results if n_results > 0 else _default_top_k
+    return json.dumps(search_collection(query, collection or _default_collection, top_k))
+
+
+def make_scoped_rag_search(collections: tuple[str, ...]):
+    """``rag_search`` limited to ``collections`` (PRP-0256, UDR-0237 D3).
+
+    Installed only by the tool-assembly chokepoint for a spec with a knowledge scope. The
+    first collection is the default; any other name answers ``COLLECTION_NOT_AVAILABLE``.
+    """
+    allowed = tuple(collections)
+
+    def rag_search(query: str, collection: str = "", n_results: int = 0) -> str:
+        name = collection or allowed[0]
+        if name not in allowed:
+            return json.dumps({"error": COLLECTION_NOT_AVAILABLE, "results": [], "query": query})
+        top_k = n_results if n_results > 0 else _default_top_k
+        return json.dumps(search_collection(query, name, top_k))
+
+    # Real objects, not strings: this module uses postponed annotations, and the allowed
+    # names are local to this call.
+    rag_search.__annotations__ = {
+        "query": Annotated[str, Field(description="Search query text in natural language")],
+        "collection": Annotated[
+            str, Field(description=f"Collection name, one of: {', '.join(allowed)} (leave empty for {allowed[0]})")
+        ],
+        "n_results": Annotated[int, Field(description="Number of results to return (0 for default)")],
+        "return": str,
+    }
+    rag_search.__doc__ = _RAG_SEARCH_DOC
+    rag_search.scoped_collections = allowed  # type: ignore[attr-defined]
+    return rag_search

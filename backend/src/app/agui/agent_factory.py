@@ -180,6 +180,13 @@ def _build_tools_and_instructions(
     def _fn_ok(name: str) -> bool:
         return _allow is None or _allow.allows_function(name)
 
+    # Knowledge scope (PRP-0256, UDR-0237 D3): a spec with metadata.chatwalaau.knowledge
+    # gets rag_search / ontology_query limited to its lists. Installed HERE, the single
+    # chokepoint, so every lane that runs the spec gets the same scope.
+    # A scoped spec that names no collections (or no ontologies) gets no rag_search (or
+    # no ontology_query) at all: an unscoped tool would reach every source.
+    _knowledge = getattr(_effective_spec, "knowledge", None)
+
     # Web search is provider-supplied and added per-model in the AgentRegistry
     # (PRP-0069, UDR-0045 D5), so it is NOT part of this shared
     # base tool list and the web search guidance lives in WEB_SEARCH_INSTRUCTION
@@ -233,6 +240,7 @@ def _build_tools_and_instructions(
         and settings.chroma_dir
         and (models_catalog.embedding_config() is not None or is_demo_mode())
         and _fn_ok("rag_search")
+        and (_knowledge is None or _knowledge.rag_collections)
     ):
         try:
             from app.rag.tools import init_rag_search, rag_search
@@ -242,7 +250,12 @@ def _build_tools_and_instructions(
                 collection_name=settings.rag_collection_name,
                 top_k=settings.rag_top_k,
             )
-            tools.append(rag_search)
+            if _knowledge is not None:
+                from app.rag.tools import make_scoped_rag_search
+
+                tools.append(make_scoped_rag_search(_knowledge.rag_collections))
+            else:
+                tools.append(rag_search)
             guidance.append(
                 ToolGuidance(
                     "rag",
@@ -473,10 +486,15 @@ def _build_tools_and_instructions(
     # shared agent only when ONTOLOGY_ENABLED so the LLM can answer questions from
     # the operator's RDF concept models (catalog + CONSTRUCT-only NL query answering
     # fenced Turtle). Read-only by construction.
-    if settings.ontology_enabled and _fn_ok("ontology_query"):
+    if settings.ontology_enabled and _fn_ok("ontology_query") and (_knowledge is None or _knowledge.ontologies):
         from app.ontology.tool import ONTOLOGY_TOOL_INSTRUCTION, ontology_query
 
-        tools.append(ontology_query)
+        if _knowledge is not None:
+            from app.ontology.tool import make_scoped_ontology_query
+
+            tools.append(make_scoped_ontology_query(_knowledge.ontologies))
+        else:
+            tools.append(ontology_query)
         guidance.append(ToolGuidance("ontology", ONTOLOGY_TOOL_INSTRUCTION))
 
     # Computer Use (PRP-0189, FEAT-0071, UDR-0171). Registered only where the backend

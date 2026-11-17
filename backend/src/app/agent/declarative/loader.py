@@ -230,6 +230,62 @@ def _annotate_tool_warnings(spec: DeclarativeAgentSpec) -> DeclarativeAgentSpec:
     return spec
 
 
+def _annotate_knowledge_warnings(spec: DeclarativeAgentSpec) -> DeclarativeAgentSpec:
+    """Warn for knowledge-scope names that do not resolve (PRP-0256, UDR-0237 D3).
+
+    Ontologies are checked against the catalog when the ontology feature is on; collections
+    against ChromaDB when RAG is initialized. Grounding on a non-API lane is a note. Best
+    effort: a read failure leaves the spec unchanged.
+    """
+    scope = spec.knowledge
+    if scope is None:
+        return spec
+    from app.agent.declarative.knowledge import KNOWLEDGE_PATH
+
+    try:
+        from app.rag import tools as rag_tools
+
+        existing = rag_tools.collection_names()
+        if existing is not None:
+            missing = [c for c in scope.rag_collections if c not in existing]
+            if missing:
+                spec.warnings.append(f"{KNOWLEDGE_PATH}: collection(s) {missing} do not exist.")
+    except Exception:
+        logger.debug("Collection list read failed during knowledge validation", exc_info=True)
+    try:
+        from app.core.config import settings as _settings
+
+        if scope.ontologies and _settings.ontology_enabled:
+            from app.ontology import store as ontology_store
+
+            entries = ontology_store.read_catalog()
+            ids = {e["id"] for e in entries}
+            names = {e["name"].casefold() for e in entries}
+            missing = [o for o in scope.ontologies if o not in ids and o.casefold() not in names]
+            if missing:
+                spec.warnings.append(f"{KNOWLEDGE_PATH}: ontolog(ies) {missing} do not exist.")
+    except Exception:
+        logger.debug("Ontology catalog read failed during knowledge validation", exc_info=True)
+    if scope.strict:
+        note = "grounding: strict applies only to /v1/responses through an API key bound to this agent."
+        if note not in spec.notes:
+            spec.notes.append(note)
+    return spec
+
+
+def source_digest(agent_id: str) -> str | None:
+    """SHA-256 of a custom agent's YAML text, or None (PRP-0256: the bound-agent cache key)."""
+    import hashlib
+
+    for cid, path, _group in _discover_files():
+        if cid == agent_id:
+            try:
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                return None
+    return None
+
+
 def resolve_spec(agent_id: str) -> DeclarativeAgentSpec:
     """Resolve an agent id to a mapped spec, raising on parse/mapping failure.
 
@@ -252,6 +308,7 @@ def resolve_spec(agent_id: str) -> DeclarativeAgentSpec:
             )
             _annotate_model_warnings(spec)
             _annotate_tool_warnings(spec)
+            _annotate_knowledge_warnings(spec)
             return spec
     raise DeclarativeAgentError(f"Unknown declarative agent id: {agent_id!r}")
 
@@ -282,6 +339,7 @@ def load_inventory(active_id: str) -> dict:
             # it can be neither edited nor deleted; it never restricts its tool surface.
             "editable": False,
             "tool_allowlist": None,
+            "knowledge": None,
             # CTR-0143 v4 (PRP-0184, UDR-0166 D8): the Built-in agent's PERSISTED model
             # and reasoning effort, so the management UI can render the two controls that
             # left the chat input. Both are None/absent until the operator chooses.
@@ -307,12 +365,14 @@ def load_inventory(active_id: str) -> dict:
             # modal offers Edit / Delete even when it currently fails to map.
             "editable": True,
             "tool_allowlist": None,
+            "knowledge": None,
         }
         try:
             text = path.read_text(encoding="utf-8")
             spec = map_document(text, agent_id=cid, source="custom", group_path=group_path, default_name=path.stem)
             _annotate_model_warnings(spec)
             _annotate_tool_warnings(spec)
+            _annotate_knowledge_warnings(spec)
             entry["name"] = spec.name
             entry["display_name"] = spec.display_name
             entry["description"] = spec.description
@@ -320,6 +380,7 @@ def load_inventory(active_id: str) -> dict:
             entry["warnings"] = spec.warnings
             entry["notes"] = spec.notes
             entry["tool_allowlist"] = spec.tool_allowlist
+            entry["knowledge"] = spec.knowledge.to_dict() if spec.knowledge is not None else None
         except DeclarativeAgentError as exc:
             entry["error"] = str(exc)
         except OSError as exc:

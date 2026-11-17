@@ -6,9 +6,16 @@ corresponding Agent instance. The operator controls of PRP-0252 / UDR-0233 (outp
 cap, tool output mode, input role policy) live in app.openai_api.controls; the admission
 limits of PRP-0254 / UDR-0235 (requests, tokens, concurrency, input size) live in
 app.openai_api.quota.
+
+PRP-0256 / UDR-0237: a key bound to a declarative agent runs that agent
+(app.openai_api.bound_agent, CTR-0286) and never the registry fallback; its strict
+grounding retrieves before any model call (app.openai_api.grounding, CTR-0287); a key may
+force temporary storage, temporary threads chain, and an unknown model can be refused.
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 import json
 import logging
 from typing import Any
@@ -18,17 +25,19 @@ from agent_framework.exceptions import ChatClientException
 from agent_framework_ag_ui._agent_run import _normalize_response_stream
 from agent_framework_ag_ui._message_adapters import normalize_agui_input_messages
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from openai import NotFoundError as OpenAINotFoundError
 from starlette.background import BackgroundTask
 
 from app import providers
 from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, fold_contents, is_refusal, merge_mode
-from app.agent.temporary import new_temporary_thread_id, schedule_sweep, set_temporary_run
+from app.agent.temporary import is_temporary, new_temporary_thread_id, schedule_sweep, set_temporary_run
 from app.agui.agent_registry import AgentRegistry
 from app.auth import Identity, verify_api_key_strict
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
-from app.openai_api import controls, quota
+from app.openai_api import bound_agent, controls, grounding, quota
+from app.openai_api import session as api_session
 from app.openai_api.converter import api_usage, maf_contents_to_openai_output, openai_input_to_maf_messages
 from app.openai_api.models import ResponsesRequest, ResponsesResponse, UsageInfo
 from app.openai_api.session import (
@@ -121,7 +130,9 @@ def _build_session_message(role: str, text: str) -> dict[str, Any]:
     }
 
 
-def _structured_run_options(request: ResponsesRequest, agent_registry: AgentRegistry) -> dict[str, Any]:
+def _structured_run_options(
+    request: ResponsesRequest, agent_registry: AgentRegistry, model_override: str | None = None
+) -> dict[str, Any]:
     """Resolve the standard OpenAI `text.format` field into a provider-native
     structured-output run-options fragment (CTR-0057 v3, PRP-0082, UDR-0058 D8).
 
@@ -133,7 +144,7 @@ def _structured_run_options(request: ResponsesRequest, agent_registry: AgentRegi
     fmt = text.get("format") if isinstance(text, dict) else None
     if not isinstance(fmt, dict):
         return {}
-    model = request.model if request.model != "chatwalaau" else agent_registry.default_model
+    model = model_override or (request.model if request.model != "chatwalaau" else agent_registry.default_model)
     ftype = fmt.get("type")
     if ftype == "json_schema":
         schema = fmt.get("schema")
@@ -147,22 +158,165 @@ def _structured_run_options(request: ResponsesRequest, agent_registry: AgentRegi
     return {}
 
 
+#: Fixed texts (English, PRP-0256).
+STORAGE_MISMATCH = "previous_response_id belongs to a saved conversation; a temporary request cannot continue it."
+
+
+@dataclass
+class RunPlan:
+    """What one admitted request runs (PRP-0256): which agent, which instructions, and the
+    grounding retrieval when the bound agent is strict. ``agent`` is None for a no-match
+    answer, which calls no model (UDR-0237 D6)."""
+
+    agent: Any
+    #: The model the structured-output fragment is built for (None = from request.model).
+    model: str | None
+    instructions: str | None
+    temporary: bool
+    retrieval: grounding.Retrieval | None = None
+
+    @property
+    def no_match(self) -> bool:
+        return self.retrieval is not None and not self.retrieval.found
+
+
+def _api_error(status: int, code: str, message: str, error_type: str = "invalid_request_error") -> JSONResponse:
+    """A refusal in the OpenAI error shape (the PRP-0254 429 shape)."""
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"message": message, "type": error_type, "code": code, "param": None}},
+    )
+
+
+def _user_text(request: ResponsesRequest) -> str:
+    user_text = request.input if isinstance(request.input, str) else ""
+    if not user_text and isinstance(request.input, list):
+        for item in request.input:
+            if item.get("role") == "user":
+                user_text = item.get("content", "") if isinstance(item.get("content"), str) else ""
+                break
+    return user_text
+
+
+def _grounding_metadata(plan: RunPlan, answer: str) -> dict[str, Any]:
+    """``{"metadata": {"grounding": ...}}`` for a strict run, else {} (byte-identical default)."""
+    if plan.retrieval is None:
+        return {}
+    return {"metadata": {"grounding": grounding.final_status(plan.retrieval, answer)}}
+
+
+def _citation_items(plan: RunPlan) -> list[dict[str, Any]]:
+    return grounding.citation_items(plan.retrieval) if plan.retrieval is not None else []
+
+
+_api_sweep_tasks: set[asyncio.Task[int]] = set()
+
+
+def _maybe_sweep_api_sessions() -> None:
+    """Opportunistic retention sweep, at most hourly, off the loop (UDR-0237 D10)."""
+    if not api_session.sweep_due():
+        return
+    task = asyncio.create_task(asyncio.to_thread(api_session.sweep_now))
+    _api_sweep_tasks.add(task)
+    task.add_done_callback(_api_sweep_tasks.discard)
+
+
+def _sse(event: dict[str, Any]) -> str:
+    return f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
+
+
+def _no_match_text_part() -> dict[str, Any]:
+    text_part: dict[str, Any] = {"type": "output_text", "text": grounding.NO_MATCH_ANSWER}
+    if controls.tool_output_mode() == "sources":
+        text_part["annotations"] = []
+    return text_part
+
+
+async def _stream_no_match(
+    request: ResponsesRequest,
+    thread_id: str,
+    response_id: str,
+    plan: RunPlan,
+    ticket: quota.Ticket | None = None,
+) -> AsyncGenerator[str, None]:
+    """The fixed no-match answer as a Responses SSE stream; no model call (UDR-0237 D6)."""
+    answer = grounding.NO_MATCH_ANSWER
+    base = {"id": response_id, "object": "response", "model": request.model}
+    yield _sse({"type": "response.created", "response": base | {"output": [], "status": "in_progress"}})
+    yield _sse(
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"type": "message", "role": "assistant", "content": []},
+        }
+    )
+    yield _sse(
+        {
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": ""},
+        }
+    )
+    yield _sse({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": answer})
+    text_part = _no_match_text_part()
+    yield _sse({"type": "response.content_part.done", "output_index": 0, "content_index": 0, "part": text_part})
+    msg_item = {"type": "message", "role": "assistant", "content": [text_part]}
+    yield _sse({"type": "response.output_item.done", "output_index": 0, "item": msg_item})
+    update_api_session(
+        thread_id,
+        response_id,
+        _build_session_message("user", _user_text(request)),
+        _build_session_message("assistant", answer),
+    )
+    if ticket is not None:
+        ticket.finish(None)  # no model call: no tokens, no ledger record
+    usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    completed = base | {"output": [msg_item], "usage": usage, "status": "completed"} | _grounding_metadata(plan, answer)
+    yield _sse({"type": "response.completed", "response": completed})
+
+
+def _no_match_response(
+    request: ResponsesRequest, thread_id: str, response_id: str, plan: RunPlan, ticket: quota.Ticket
+) -> dict[str, Any]:
+    """The fixed no-match answer, non-streaming; no model call (UDR-0237 D6)."""
+    answer = grounding.NO_MATCH_ANSWER
+    update_api_session(
+        thread_id,
+        response_id,
+        _build_session_message("user", _user_text(request)),
+        _build_session_message("assistant", answer),
+    )
+    ticket.finish(None)
+    output_items = [{"type": "message", "role": "assistant", "content": [_no_match_text_part()]}]
+    return (
+        ResponsesResponse(id=response_id, model=request.model, output=[], usage=UsageInfo()).model_dump()
+        | {"output": output_items}
+        | _grounding_metadata(plan, answer)
+    )
+
+
 async def _stream_responses(
     agent_registry: AgentRegistry,
     request: ResponsesRequest,
     thread_id: str,
     response_id: str,
     ticket: quota.Ticket | None = None,
+    plan: RunPlan | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream OpenAI Responses API SSE events.
 
     ``ticket`` is the CTR-0285 admission; it sees each turn total and is finished before
     the ledger append (UDR-0235 D7). The caller also finishes it on every other path.
+    ``plan`` (PRP-0256) names the agent and instructions; None means the registry agent
+    for ``request.model``, as before.
     """
     # Temporary Chat (CTR-0057 / CTR-0106, UDR-0052): set inside the generator so
     # the contextvar is active in the same context that runs agent.run (the
     # memory tool reads it to no-op). request.temporary defaults false.
-    temporary = bool(getattr(request, "temporary", False))
+    if plan is None:
+        plan = _registry_plan(agent_registry, request, bool(getattr(request, "temporary", False)))
+    temporary = plan.temporary
     set_temporary_run(temporary)
     # Emit response.created
     created_event = {
@@ -177,8 +331,9 @@ async def _stream_responses(
     }
     yield f"event: response.created\ndata: {json.dumps(created_event)}\n\n"
 
-    # Select agent from registry based on model parameter (CTR-0070, PRP-0035)
-    agent = agent_registry.get(request.model if request.model != "chatwalaau" else None)
+    # The agent of the plan: the registry agent for request.model (CTR-0070) or the
+    # key-bound agent (CTR-0286).
+    agent = plan.agent
 
     # Token Usage Ledger accumulation (CTR-0200, PRP-0158) over every model call of the
     # run below, so the total spans the whole turn. Folded by CTR-0266 (PRP-0229,
@@ -209,19 +364,16 @@ async def _stream_responses(
     if max_output_tokens is not None:
         run_options["max_output_tokens"] = max_output_tokens
     # Structured output passthrough (CTR-0057 v3, PRP-0082, UDR-0058 D8).
-    providers.merge_generation_options(run_options, _structured_run_options(request, agent_registry))
+    providers.merge_generation_options(run_options, _structured_run_options(request, agent_registry, plan.model))
 
     # User Preference Memory (PRP-0075, CTR-0105): the registry agents bake only
     # the Identity, so supply the capability remainder per run. The frozen User
     # Profile snapshot is the AG-UI session path and is NOT injected here
     # (UDR-0051 D10) -> user_profile_block omitted. For a Temporary Chat run the
-    # remainder is empty (Identity-only, UDR-0052 D6).
-    extra_instructions = agent_registry.run_instructions(
-        request.model if request.model != "chatwalaau" else None,
-        temporary=temporary,
-    )
-    if extra_instructions:
-        run_options["instructions"] = extra_instructions
+    # remainder is empty (Identity-only, UDR-0052 D6). The plan also carries the
+    # grounding excerpts of a strict bound agent (CTR-0287).
+    if plan.instructions:
+        run_options["instructions"] = plan.instructions
 
     _image_gen_thread_id.set(thread_id)
 
@@ -229,7 +381,9 @@ async def _stream_responses(
     # Tool output mode (PRP-0252, UDR-0233 D3): every tool item is kept here for the
     # citations; it reaches output_items and the wire only in `full`.
     tool_mode = controls.tool_output_mode()
-    tool_items: list[dict[str, Any]] = []
+    # Server grounding hits feed the sources-mode citations like rag_search results
+    # (CTR-0287); they never become output items.
+    tool_items: list[dict[str, Any]] = list(_citation_items(plan))
     text_parts: list[str] = []
     usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     msg_started = False
@@ -401,16 +555,10 @@ async def _stream_responses(
         output_items.append(msg_item)
 
     # Save session
-    user_text = request.input if isinstance(request.input, str) else ""
-    if not user_text and isinstance(request.input, list):
-        for item in request.input:
-            if item.get("role") == "user":
-                user_text = item.get("content", "") if isinstance(item.get("content"), str) else ""
-                break
     update_api_session(
         thread_id,
         response_id,
-        _build_session_message("user", user_text),
+        _build_session_message("user", _user_text(request)),
         _build_session_message("assistant", full_text),
     )
 
@@ -432,9 +580,42 @@ async def _stream_responses(
             "output": output_items,
             "usage": usage,
             "status": "completed",
-        },
+        }
+        | _grounding_metadata(plan, full_text),
     }
     yield f"event: response.completed\ndata: {json.dumps(completed)}\n\n"
+
+
+def _registry_plan(agent_registry: AgentRegistry, request: ResponsesRequest, temporary: bool) -> RunPlan:
+    """The plan of an unbound request: the registry agent for request.model, as before."""
+    model = request.model if request.model != "chatwalaau" else None
+    return RunPlan(
+        agent=agent_registry.get(model),
+        model=None,
+        instructions=agent_registry.run_instructions(model, temporary=temporary),
+        temporary=temporary,
+    )
+
+
+async def _bound_plan(
+    agent_registry: AgentRegistry, spec: Any, request: ResponsesRequest, temporary: bool, prior_thread_id: str | None
+) -> RunPlan:
+    """The plan of a key-bound request (CTR-0286), with the strict retrieval (CTR-0287)."""
+    bound = bound_agent.get_bound_agent(spec, getattr(agent_registry, "generation", 0))
+    # A temporary run stays de-personalized: no capability remainder (UDR-0052 D6).
+    instructions = None if temporary else (bound.capabilities or None)
+    retrieval = None
+    if bound.knowledge is not None and bound.knowledge.strict:
+        query = grounding.retrieval_query(request.input, prior_thread_id)
+        retrieval = await run_in_threadpool(grounding.retrieve, bound.knowledge, query)
+        if not retrieval.found:
+            logger.info("Grounding: no match for agent %s; answered without a model call", bound.agent_id)
+            return RunPlan(agent=None, model=bound.model, instructions=None, temporary=temporary, retrieval=retrieval)
+        block = grounding.excerpts_instruction(retrieval)
+        instructions = f"{instructions}\n\n{block}" if instructions else block
+    return RunPlan(
+        agent=bound.agent, model=bound.model, instructions=instructions, temporary=temporary, retrieval=retrieval
+    )
 
 
 async def _guarded_stream(inner: AsyncGenerator[str, None], ticket: quota.Ticket) -> AsyncGenerator[str, None]:
@@ -470,19 +651,34 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
     Uses the AgentRegistry for model-based routing (CTR-0070).
     """
 
+    def _known_model(model: str) -> bool:
+        return model == bound_agent.GENERIC_MODEL or model in agent_registry.available_models
+
     @app.post("/v1/responses", tags=["OpenAI API"])
     async def create_response(request: ResponsesRequest, identity: Identity = Depends(verify_api_key_strict)):
         """OpenAI Responses API-compatible endpoint."""
         # Input role policy (PRP-0252, UDR-0233 D5): reject before any session exists.
         controls.check_input_roles(request.input)
-        temporary = bool(request.temporary)
-        # Temporary Chat (CTR-0057 / CTR-0106, UDR-0052 D5): no continuity. A
-        # temporary response cannot be chained, so reject previous_response_id.
-        if temporary and request.previous_response_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Temporary responses cannot be chained: do not send previous_response_id with temporary=true.",
-            )
+
+        # Key-bound agent (CTR-0286, PRP-0256, UDR-0237 D1): resolved before admission, so
+        # a refusal consumes nothing. An unbound key keeps the registry routing; it may
+        # refuse an unknown model when the operator turned that on (D2).
+        record = _key_record(identity)
+        bound_id = getattr(record, "agent", None)
+        spec = None
+        try:
+            if bound_id:
+                bound_agent.check_model(request.model, bound_id)
+                spec = bound_agent.resolve_spec_for_key(bound_id)
+            elif controls.reject_unknown_model() and not _known_model(request.model):
+                return _api_error(400, "model_not_found", f"Unknown model {request.model!r}.")
+        except bound_agent.BoundAgentError as exc:
+            return JSONResponse(status_code=exc.status, content=exc.body())
+
+        # Storage (UDR-0237 D8): a temporary key forces temporary; a thread's storage is
+        # fixed by its first turn, so a temporary thread continues temporary and a
+        # temporary request cannot continue a saved thread.
+        temporary = bool(request.temporary) or getattr(record, "storage", "saved") == "temporary"
 
         # Resolve session
         response_id = generate_response_id()
@@ -493,6 +689,10 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
                 raise HTTPException(
                     status_code=404, detail=f"Previous response not found: {request.previous_response_id}"
                 )
+            if is_temporary(thread_id):
+                temporary = True
+            elif temporary:
+                return _api_error(400, "storage_mismatch", STORAGE_MISMATCH)
 
         # Admission (CTR-0285, PRP-0254, UDR-0235): input size, then the limits. A refusal
         # runs nothing and creates no session.
@@ -504,7 +704,7 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
 
         try:
             prior = thread_id if request.previous_response_id else None
-            return await _run_admitted(request, ticket, response_id, temporary, prior)
+            return await _run_admitted(request, ticket, response_id, temporary, prior, spec)
         except BaseException:
             ticket.finish()
             raise
@@ -515,8 +715,20 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
         response_id: str,
         temporary: bool,
         prior_thread_id: str | None,
+        spec: Any = None,
     ) -> Any:
         """Everything after admission. The ticket is finished on every path."""
+        # The plan first: a bound agent that cannot be built refuses before a session exists.
+        if spec is not None:
+            try:
+                plan = await _bound_plan(agent_registry, spec, request, temporary, prior_thread_id)
+            except bound_agent.BoundAgentError as exc:
+                ticket.finish()
+                return JSONResponse(status_code=exc.status, content=exc.body())
+        else:
+            plan = None
+        _maybe_sweep_api_sessions()
+
         if prior_thread_id:
             thread_id = prior_thread_id
         else:
@@ -539,9 +751,25 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
                 # Opportunistic retention sweep (UDR-0052 D4); fire-and-forget.
                 schedule_sweep()
 
+        if plan is not None and plan.no_match:
+            # Strict grounding found nothing: the fixed answer, no model call (UDR-0237 D6).
+            if request.stream:
+                return StreamingResponse(
+                    _guarded_stream(_stream_no_match(request, thread_id, response_id, plan, ticket), ticket),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+                    background=BackgroundTask(ticket.finish),
+                )
+            return _no_match_response(request, thread_id, response_id, plan, ticket)
+
+        if plan is None:
+            plan = _registry_plan(agent_registry, request, temporary)
+
         if request.stream:
             return StreamingResponse(
-                _guarded_stream(_stream_responses(agent_registry, request, thread_id, response_id, ticket), ticket),
+                _guarded_stream(
+                    _stream_responses(agent_registry, request, thread_id, response_id, ticket, plan), ticket
+                ),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -552,8 +780,8 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
                 background=BackgroundTask(ticket.finish),
             )
 
-        # Non-streaming response
-        agent = agent_registry.get(request.model if request.model != "chatwalaau" else None)
+        # Non-streaming response: the plan's agent (registry or key-bound).
+        agent = plan.agent
 
         messages_raw = openai_input_to_maf_messages(request.input)
         messages, _ = normalize_agui_input_messages(messages_raw)
@@ -574,20 +802,17 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
         if max_output_tokens is not None:
             run_options["max_output_tokens"] = max_output_tokens
         # Structured output passthrough (CTR-0057 v3, PRP-0082, UDR-0058 D8).
-        providers.merge_generation_options(run_options, _structured_run_options(request, agent_registry))
+        providers.merge_generation_options(run_options, _structured_run_options(request, agent_registry, plan.model))
 
         # User Preference Memory (PRP-0075, CTR-0105): supply the capability
         # remainder per run under Identity-only baking; no frozen snapshot here
         # (AG-UI session path only, UDR-0051 D10). For a Temporary Chat run the
         # remainder is empty (Identity-only, UDR-0052 D6) and the memory tool
-        # no-ops via the contextvar set below.
+        # no-ops via the contextvar set below. The plan carries it (and the grounding
+        # excerpts of a strict bound agent, CTR-0287).
         set_temporary_run(temporary)
-        extra_instructions = agent_registry.run_instructions(
-            request.model if request.model != "chatwalaau" else None,
-            temporary=temporary,
-        )
-        if extra_instructions:
-            run_options["instructions"] = extra_instructions
+        if plan.instructions:
+            run_options["instructions"] = plan.instructions
 
         _image_gen_thread_id.set(thread_id)
 
@@ -653,28 +878,30 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
                         full_text = c.get("text", "")
                         break
 
-        user_text = request.input if isinstance(request.input, str) else ""
-        if not user_text and isinstance(request.input, list):
-            for item in request.input:
-                if item.get("role") == "user":
-                    user_text = item.get("content", "") if isinstance(item.get("content"), str) else ""
-                    break
         update_api_session(
             thread_id,
             response_id,
-            _build_session_message("user", user_text),
+            _build_session_message("user", _user_text(request)),
             _build_session_message("assistant", full_text),
         )
 
         # Tool output mode (PRP-0252, UDR-0233 D3/D4): shapes the RESPONSE only; the
-        # session and the ledger above already saw the full turn.
-        output_items = controls.shape_output(output_items, controls.tool_output_mode())
+        # session and the ledger above already saw the full turn. In sources mode the
+        # server grounding hits become citations like rag_search results (CTR-0287).
+        mode = controls.tool_output_mode()
+        if mode == "sources":
+            output_items = _citation_items(plan) + output_items
+        output_items = controls.shape_output(output_items, mode)
 
-        return ResponsesResponse(
-            id=response_id,
-            model=request.model,
-            output=[],  # Simplified: use raw dict for flexibility
-            usage=UsageInfo(**usage),
-        ).model_dump() | {"output": output_items}
+        return (
+            ResponsesResponse(
+                id=response_id,
+                model=request.model,
+                output=[],  # Simplified: use raw dict for flexibility
+                usage=UsageInfo(**usage),
+            ).model_dump()
+            | {"output": output_items}
+            | _grounding_metadata(plan, full_text)
+        )
 
     logger.info("OpenAI Responses API registered at /v1/responses")

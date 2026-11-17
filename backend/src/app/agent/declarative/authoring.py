@@ -21,6 +21,7 @@ from typing import Any
 
 import yaml
 
+from app.agent.declarative.knowledge import document_knowledge, knowledge_yaml
 from app.agent.declarative.loader import resolve_spec
 from app.agent.declarative.mapping import map_document
 from app.agent.declarative.spec import CORE_AGENT_ID, DeclarativeAgentError
@@ -199,6 +200,11 @@ def build_agent_yaml(document: dict[str, Any]) -> str:
             if props_out:
                 doc["outputSchema"] = {"properties": props_out}
 
+    # PRP-0256 / UDR-0237 D3: the knowledge scope, under metadata.chatwalaau.
+    knowledge = knowledge_yaml(document.get("knowledge"))
+    if knowledge is not None:
+        doc["metadata"] = {"chatwalaau": {"knowledge": knowledge}}
+
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, default_flow_style=False)
 
 
@@ -263,6 +269,7 @@ def document_from_yaml(text: str) -> dict[str, Any]:
         "model": model_out,
         "tools": tools_out,
         "outputSchema": schema_out,
+        "knowledge": document_knowledge(data),
     }
 
 
@@ -302,10 +309,15 @@ def validate_document(body: dict[str, Any]) -> dict[str, Any]:
         return {"valid": False, "error": str(exc), "warnings": [], "notes": [], "yaml": text}
 
     # Live-state warnings (unconfigured model / unrecognized tool) mirror the loader.
-    from app.agent.declarative.loader import _annotate_model_warnings, _annotate_tool_warnings
+    from app.agent.declarative.loader import (
+        _annotate_knowledge_warnings,
+        _annotate_model_warnings,
+        _annotate_tool_warnings,
+    )
 
     _annotate_model_warnings(spec)
     _annotate_tool_warnings(spec)
+    _annotate_knowledge_warnings(spec)
 
     return {
         "valid": True,
@@ -321,8 +333,30 @@ def validate_document(body: dict[str, Any]) -> dict[str, Any]:
             "model_options": spec.model_options_override,
             "tool_allowlist": spec.tool_allowlist,
             "structured_output": bool(spec.structured_output),
+            "knowledge": spec.knowledge.to_dict() if spec.knowledge is not None else None,
         },
     }
+
+
+def knowledge_sources() -> dict[str, Any]:
+    """Names a knowledge scope can use (PRP-0256): live collections and ontologies, or None."""
+    collections: list[str] | None = None
+    ontologies: list[dict[str, str]] | None = None
+    try:
+        from app.rag import tools as rag_tools
+
+        names = rag_tools.collection_names()
+        collections = sorted(names) if names is not None else None
+    except Exception:
+        collections = None
+    if settings.ontology_enabled:
+        try:
+            from app.ontology import store as ontology_store
+
+            ontologies = [{"id": e["id"], "name": e["name"]} for e in ontology_store.read_catalog()]
+        except Exception:
+            ontologies = None
+    return {"rag_collections": collections, "ontologies": ontologies}
 
 
 def read_source(agent_id: str) -> str:

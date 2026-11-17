@@ -1764,6 +1764,33 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
             "instructions or plant a history. Continue a conversation with previous_response_id."
         ),
     ),
+    # PRP-0256 / UDR-0237 D2, D10: both off by default (prior behavior).
+    SettingDescriptor(
+        "responses_reject_unknown_model",
+        "Refuse unknown models",
+        "openai_api",
+        "bool",
+        SCOPE_RUNTIME,
+        help=(
+            "When on, a request whose model is not chatwalaau and not a configured model gets 400 "
+            "model_not_found instead of running the default model. A key bound to an agent always "
+            "accepts only chatwalaau or that agent's id."
+        ),
+    ),
+    SettingDescriptor(
+        "responses_session_retention_days",
+        "Keep API conversations (days)",
+        "openai_api",
+        "int",
+        SCOPE_RUNTIME,
+        min=0,
+        max=3650,
+        help=(
+            "Saved /v1/responses conversations not updated for this many days are deleted. 0 = keep "
+            "them forever. Chats from the app are never touched. Temporary conversations follow "
+            "TEMPORARY_CHAT_RETENTION_DAYS."
+        ),
+    ),
     # ---- OpenAI-compatible API limits (runtime; PRP-0254, UDR-0235) ------------
     # Read per request by app.openai_api.quota; /v1/responses only (D1). 0 = no limit,
     # so every default keeps the behavior before PRP-0254 (D4).

@@ -21,6 +21,8 @@ import { cn } from '@/lib/utils'
  * - PRP-0254 (UDR-0235 D5): each key may carry /v1/responses limits (requests per minute, day,
  *   month; total tokens per day, month), edited with the other fields and saved by Save. The
  *   left pane shows today's and this month's global usage against the App Settings limits.
+ * - PRP-0256 (UDR-0237 D1/D8): a key may be bound to a custom agent (its tools, knowledge scope
+ *   and grounding) and may store its conversations as temporary. Both are saved by Save.
  */
 
 type Scope = 'responses' | 'api' | 'admin'
@@ -39,6 +41,17 @@ interface ApiKey {
   expired: boolean
   limits: KeyLimits | null
   usage?: KeyUsage
+  agent?: string | null
+  storage?: Storage
+}
+
+type Storage = 'saved' | 'temporary'
+
+interface BindableAgent {
+  id: string
+  name: string
+  ready: boolean
+  grounding: string
 }
 
 const LIMIT_FIELDS = [
@@ -78,6 +91,7 @@ interface ListResponse {
   auth: AuthStatus
   caller: { source: string; scope: Scope; key_id: string | null }
   responses_limits?: ResponsesLimits
+  agents?: BindableAgent[]
 }
 
 type Pending = 'issue' | 'save' | 'reissue' | 'toggle' | 'delete' | null
@@ -188,6 +202,8 @@ export function ApiKeysManager() {
   const [expiry, setExpiry] = useState<ExpiryChoice>('none')
   const [expiryDate, setExpiryDate] = useState('')
   const [limitForm, setLimitForm] = useState<LimitForm>(EMPTY_LIMITS)
+  const [agent, setAgent] = useState('')
+  const [storage, setStorage] = useState<Storage>('saved')
   const [pending, setPending] = useState<Pending>(null)
   const [confirm, setConfirm] = useState<Confirm>(null)
   const [error, setError] = useState<string | null>(null)
@@ -219,6 +235,8 @@ export function ApiKeysManager() {
     setExpiry(key ? 'keep' : 'none')
     setExpiryDate('')
     setLimitForm(limitsToForm(key?.limits))
+    setAgent(key?.agent ?? '')
+    setStorage(key?.storage ?? 'saved')
     setConfirm(null)
     setError(null)
   }, [])
@@ -290,7 +308,14 @@ export function ApiKeysManager() {
         fetch('/api/api-keys', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, scope, expires_at: expires ?? null, limits: formToLimits(limitForm) }),
+          body: JSON.stringify({
+            name,
+            scope,
+            expires_at: expires ?? null,
+            limits: formToLimits(limitForm),
+            agent: agent || null,
+            storage,
+          }),
         }),
       (body) => {
         const b = body as { key: ApiKey; secret: string }
@@ -310,6 +335,8 @@ export function ApiKeysManager() {
     if (expires !== undefined) patch.expires_at = expires
     const limits = formToLimits(limitForm)
     if (!sameLimits(limits, current.limits)) patch.limits = limits
+    if (agent !== (current.agent ?? '')) patch.agent = agent || null
+    if (storage !== (current.storage ?? 'saved')) patch.storage = storage
     void run(
       'save',
       () =>
@@ -387,8 +414,12 @@ export function ApiKeysManager() {
     (name !== current.name ||
       scope !== current.scope ||
       expiryToIso(expiry, expiryDate) !== undefined ||
-      !sameLimits(formToLimits(limitForm), current.limits))
+      !sameLimits(formToLimits(limitForm), current.limits) ||
+      agent !== (current.agent ?? '') ||
+      storage !== (current.storage ?? 'saved'))
   const globalLimits = data?.responses_limits
+  const agents = data?.agents ?? []
+  const boundAgent = agents.find((a) => a.id === agent)
 
   const actionButton = (
     kind: Exclude<Pending, null>,
@@ -669,6 +700,52 @@ export function ApiKeysManager() {
                         </p>
                       )}
                       {!limitsOk && <p className="text-xs text-destructive">Use whole numbers only.</p>}
+                    </fieldset>
+
+                    <fieldset className="space-y-3" disabled={busy} data-testid="api-key-binding">
+                      <legend className="text-sm font-medium">Agent and conversations for /v1/responses</legend>
+                      <div className="space-y-1">
+                        <label htmlFor="api-key-agent" className="text-xs text-muted-foreground">
+                          Agent
+                        </label>
+                        <select
+                          id="api-key-agent"
+                          className="h-9 w-full max-w-md rounded-md border bg-background px-2 text-sm"
+                          value={agent}
+                          onChange={(e) => setAgent(e.target.value)}>
+                          <option value="">None (the request chooses the model)</option>
+                          {agents.map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.name}
+                              {a.grounding === 'strict' ? ' (documents only)' : ''}
+                              {a.ready ? '' : ' (has problems)'}
+                            </option>
+                          ))}
+                          {agent && !boundAgent && <option value={agent}>{agent} (not found)</option>}
+                        </select>
+                        <p className="text-xs text-muted-foreground">
+                          A key bound to an agent runs only that agent, with its tools and documents. Send model
+                          &quot;chatwalaau&quot;.
+                        </p>
+                        {boundAgent && !boundAgent.ready && (
+                          <p className="text-xs text-destructive">
+                            This agent has problems. Requests get 503 until it is fixed.
+                          </p>
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <label htmlFor="api-key-storage" className="text-xs text-muted-foreground">
+                          Conversations
+                        </label>
+                        <select
+                          id="api-key-storage"
+                          className="h-9 w-full max-w-md rounded-md border bg-background px-2 text-sm"
+                          value={storage}
+                          onChange={(e) => setStorage(e.target.value as Storage)}>
+                          <option value="saved">Saved (listed in the chat history)</option>
+                          <option value="temporary">Temporary (not listed, deleted after the retention period)</option>
+                        </select>
+                      </div>
                     </fieldset>
 
                     {error && (

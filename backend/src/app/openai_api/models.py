@@ -27,7 +27,7 @@ class ResponsesRequest(BaseModel):
     # false (a normal API call is non-temporary). When true the run is
     # de-personalized (Identity-only system prompt, no User Preference Memory
     # read/write), the session is quarantine-routed and excluded from listing,
-    # and previous_response_id chaining is rejected (no continuity).
+    # and a temporary thread chains with previous_response_id (PRP-0256, UDR-0237 D8).
     temporary: bool = False
 
 

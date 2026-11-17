@@ -7,6 +7,10 @@ ever returns a hash. A caller cannot grant a scope above its own (D2). Responses
 
 PRP-0254 (UDR-0235 D5): a key may carry per-key ``/v1/responses`` limits, and the list
 reports each key's usage plus the global limits and usage (CTR-0285).
+
+PRP-0256 (UDR-0237 D1/D8): a key may be bound to a custom declarative ``agent`` and carry
+a ``storage`` mode. A bound agent must resolve at save time (400 otherwise); the list
+reports the agents that can be bound.
 """
 
 from __future__ import annotations
@@ -44,6 +48,8 @@ class CreateKeyRequest(BaseModel):
     scope: str
     expires_at: str | None = None
     limits: KeyLimits | None = None
+    agent: str | None = None
+    storage: str | None = None
 
 
 class UpdateKeyRequest(BaseModel):
@@ -54,6 +60,8 @@ class UpdateKeyRequest(BaseModel):
     expires_at: str | None = None
     enabled: bool | None = None
     limits: KeyLimits | None = None
+    agent: str | None = None
+    storage: str | None = None
 
 
 def _actor(identity: Identity) -> str:
@@ -88,6 +96,44 @@ def _limits_payload(limits: KeyLimits | None) -> dict[str, int] | None:
     return None if limits is None else limits.model_dump(exclude_none=True)
 
 
+def _check_agent(agent: str | None) -> None:
+    """A bound agent must be a custom declarative agent that resolves (UDR-0237 D1)."""
+    clean = (agent or "").strip()
+    if not clean:
+        return
+    from app.agent.declarative.loader import resolve_spec
+    from app.agent.declarative.spec import CORE_AGENT_ID, DeclarativeAgentError
+
+    if clean == CORE_AGENT_ID:
+        raise HTTPException(
+            status_code=400, detail="A key can be bound to a custom agent only, not the Built-in agent."
+        )
+    try:
+        resolve_spec(clean)
+    except DeclarativeAgentError:
+        raise HTTPException(status_code=400, detail=f"No custom agent has the id {clean!r}.") from None
+
+
+def _bindable_agents() -> list[dict[str, Any]]:
+    """The custom declarative agents a key can be bound to (for the API Keys screen)."""
+    try:
+        from app.agent.declarative.loader import load_inventory
+
+        inventory = load_inventory("")
+    except Exception:
+        return []
+    return [
+        {
+            "id": entry["id"],
+            "name": entry.get("display_name") or entry.get("name") or entry["id"],
+            "ready": bool(entry.get("loaded")) and not entry.get("warnings"),
+            "grounding": (entry.get("knowledge") or {}).get("grounding", "off"),
+        }
+        for entry in inventory.get("agents", [])
+        if entry.get("source") == "custom"
+    ]
+
+
 @router.get("")
 async def list_keys(response: Response, identity: Identity = Depends(verify_key_admin)) -> dict[str, Any]:
     response.headers.update(_NO_STORE)
@@ -109,6 +155,7 @@ async def list_keys(response: Response, identity: Identity = Depends(verify_key_
         "keys": keys,
         "auth": _auth_status(),
         "caller": {"source": identity.source, "scope": identity.scope, "key_id": identity.key_id},
+        "agents": _bindable_agents(),
         "responses_limits": {
             "limits": quota.global_limit_settings(),
             "usage": snapshot["usage"],
@@ -124,6 +171,7 @@ async def create_key(
 ) -> dict[str, Any]:
     response.headers.update(_NO_STORE)
     _check_grant(identity, body.scope)
+    _check_agent(body.agent)
     try:
         record, secret = key_store.get_store().create(
             name=body.name,
@@ -131,6 +179,8 @@ async def create_key(
             expires_at=body.expires_at,
             actor=_actor(identity),
             limits=_limits_payload(body.limits),
+            agent=body.agent,
+            storage=body.storage,
         )
     except key_store.KeyStoreError as exc:
         raise _translate(exc) from exc
@@ -146,6 +196,8 @@ async def update_key(
     sent = body.model_dump(exclude_unset=True)
     if "limits" in sent:
         sent["limits"] = _limits_payload(body.limits)
+    if "agent" in sent:
+        _check_agent(body.agent)
     store = key_store.get_store()
     try:
         current = store.get(key_id)

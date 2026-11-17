@@ -23,6 +23,7 @@ from typing import Any
 
 import yaml
 
+from app.agent.declarative.knowledge import check_tools, map_knowledge
 from app.agent.declarative.spec import (
     IDENTITY_SENTINEL,
     DeclarativeAgentError,
@@ -321,6 +322,9 @@ def map_document(
     model_filter, model_options_override = _map_model(data, warnings, notes)
     structured_output = _map_output_schema(data, warnings)
     tool_allowlist = _map_tools(data, warnings)
+    # PRP-0256 / UDR-0237 D3: the knowledge scope (metadata.chatwalaau.knowledge).
+    knowledge = map_knowledge(data, warnings)
+    check_tools(knowledge, tool_allowlist, warnings)
 
     return DeclarativeAgentSpec(
         id=agent_id,
@@ -334,6 +338,7 @@ def map_document(
         model_options_override=model_options_override,
         structured_output=structured_output,
         tool_allowlist=tool_allowlist,
+        knowledge=knowledge,
         warnings=warnings,
         notes=notes,
     )

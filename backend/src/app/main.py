@@ -427,6 +427,11 @@ async def lifespan(_app: FastAPI):
     from app.agent.temporary import sweep_temporary
 
     await _asyncio.to_thread(sweep_temporary)
+    # Saved /v1/responses session retention + response id index pruning (PRP-0256,
+    # UDR-0237 D9/D10). responses_session_retention_days 0 (default) deletes nothing.
+    from app.openai_api.session import sweep_now as _sweep_api_sessions
+
+    await _asyncio.to_thread(_sweep_api_sessions)
     # Demo Mode bootstrap (PRP-0066, UDR-0041 D6): auto-seed the bundled
     # demo RAG corpus into ChromaDB when the collection is empty. The
     # helper is non-failing and idempotent.

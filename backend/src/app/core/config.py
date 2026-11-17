@@ -812,6 +812,10 @@ class Settings(BaseSettings):
     responses_max_output_tokens: int = 0
     responses_tool_output: str = "full"
     responses_input_roles: str = "passthrough"
+    # PRP-0256 / UDR-0237: refuse an unknown model for an unbound key (D2), and delete
+    # saved API sessions older than N days (D10). Defaults keep the prior behavior.
+    responses_reject_unknown_model: bool = False
+    responses_session_retention_days: int = 0
 
     # /v1/responses admission limits (CTR-0285, CTR-0198, PRP-0254, UDR-0235).
     # Runtime App Settings (group openai_api_limits). 0 = no limit, so every default
