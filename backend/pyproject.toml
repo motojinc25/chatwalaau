@@ -1,6 +1,6 @@
 [project]
 name = "chatwalaau"
-version = "0.218.0"
+version = "0.219.0"
 description = "ChatWalaʻau -- The localhost AI Agent. Named in Hawaiian, built in Hawaiʻi."
 readme = "README.md"
 license = "Apache-2.0"
@@ -32,7 +32,7 @@ dependencies = [
     # Lab removed from core[all], 1.19.0 per-request Anthropic parsing state passed
     # POSITIONALLY to `_prepare_options` + hosted/local shell-call separation,
     # 1.20.0 core[all] bound to the release cohort (a transitive PRE-RELEASE uv will
-    # not take unasked, see [tool.uv] below) + stricter stateless reasoning replay +
+    # not take unasked; that [tool.uv] constraint left with PRP-0257) + stricter stateless reasoning replay +
     # a required `context` on SkillsProvider._run_skill_script,
     # 1.21.0 the Anthropic SDK MAJOR move 0.80 -> 1.x on httpx2 forced by the cohort
     # bound + upstream drop of temperature / top_p / top_k on the Claude lane,
@@ -94,7 +94,14 @@ dependencies = [
     # 2.54.0 and mcp 2.3.0 do not move.
     # 1.25.0 is the newest wave, so no pull-back: 37 moves (PRP-0248 M1). core[all] forces
     # pydantic-monty 1.x and foundry-local-sdk 2.3.1 (not imported by app/).
-    "agent-framework==1.25.0",
+    #
+    # PRP-0257 / UDR-0238 D1: the CORE is declared, never the umbrella `agent-framework`
+    # (= agent-framework-core[all], every connector and its SDK). The runtime closure's
+    # agent-framework-* set equals the declared set below; a connector enters it only
+    # when app/ imports it, and is then declared and exactly pinned (UDR-0109 D2). The
+    # switch removed 114 packages from the closure (claude-agent-sdk, foundry-local-sdk,
+    # hyperlight-sandbox, botocore, ...) and moved none (UDR-0238 D2).
+    "agent-framework-core==1.25.0",
     "agent-framework-ag-ui==1.8.0",
     # NOTE (PRP-0183, UDR-0165 D4): `agent-framework-devui` is deliberately NOT
     # declared. The DevUI integration is removed from the product, so nothing in
@@ -338,17 +345,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 app = ["_frontend_dist/**/*", "_frontend_dist/*", "templates/.env.template"]
-
-[tool.uv]
-# PRP-0215 / UDR-0197 D3: agent-framework-core[all]==1.20.0 requires
-# agent-framework-azure-contentunderstanding>=1.0.0b261002, which requires the
-# PRE-RELEASE azure-ai-contentunderstanding>=1.2.0b2 while a stable 1.1.0 exists. uv
-# does not take a transitive pre-release it was not asked for ("No solution found");
-# pip does (the specifier names a pre-release, PEP 440). This admits exactly that one
-# pre-release for uv; it is NOT a published dependency (nothing in app imports it).
-# Remove it when azure-ai-contentunderstanding ships a stable release that satisfies
-# the connector. Never use `prerelease = "allow"`.
-constraint-dependencies = ["azure-ai-contentunderstanding>=1.2.0b2"]
 
 [dependency-groups]
 dev = [

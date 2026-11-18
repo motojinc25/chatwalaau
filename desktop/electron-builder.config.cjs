@@ -27,6 +27,9 @@ module.exports = {
   directories: { output: 'dist', buildResources: 'build-resources' },
   files: ['build/**/*', 'package.json', '!**/*.map'],
   asar: true,
+  // Chromium-owned text only (the product UI has its own strings); any other system language falls
+  // back to en-US (PRP-0257, UDR-0238 D4).
+  electronLanguages: ['en-US', 'ja'],
   // The payload is executed from disk, never from app.asar (RES-0004 section 5.1).
   extraResources: [{ from: 'resources/generated/desktop-payload', to: 'desktop-payload' }],
   win,

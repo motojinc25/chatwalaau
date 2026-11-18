@@ -26,12 +26,12 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { budgetReport, formatLargest, listFiles } from './payload-size.mjs'
 import { PINS, RUNTIME_ID } from './pins.mjs'
 
 const DESKTOP = resolve(import.meta.dirname, '..')
@@ -238,14 +238,7 @@ if (!args.has('--skip-trial')) {
   console.log(`trial install OK (chatwalaau ${v})`)
 }
 
-let total = 0
-const walk = (d) => {
-  for (const f of readdirSync(d)) {
-    const full = join(d, f)
-    const s = statSync(full)
-    if (s.isDirectory()) walk(full)
-    else total += s.size
-  }
-}
-walk(OUT)
-console.log(`\npayload ready: ${OUT}\n  ${wheels.length} wheels, ${(total / 1024 ** 2).toFixed(0)} MB total`)
+const size = budgetReport(listFiles(OUT))
+console.log(`\npayload ready: ${OUT}\n  ${wheels.length} wheels, ${size.totalMiB.toFixed(0)} MiB total (budget ${size.budgetMiB} MiB)`)
+console.log(`largest wheels:\n${formatLargest(size)}`)
+if (!size.withinBudget) console.warn('payload:build WARNING: the payload is over its size budget; payload:verify will fail (UDR-0238 D5)')

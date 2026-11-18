@@ -1,13 +1,15 @@
 /**
  * Verify a built payload before packaging (CTR-0213): every file exists and matches its
  * hash, the lock and the wheelhouse agree, the product wheel carries the SPA and the .env
- * template, versions are in lockstep, and the launcher in the payload is the current one.
+ * template, versions are in lockstep, the launcher in the payload is the current one, and the
+ * payload is within its size budget (UDR-0238 D5).
  */
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { budgetReport, formatLargest, listFiles } from './payload-size.mjs'
 
 const DESKTOP = resolve(import.meta.dirname, '..')
 const OUT = join(DESKTOP, 'resources', 'generated', 'desktop-payload')
@@ -83,8 +85,15 @@ if (productWheel) {
   check(listing.includes('app/templates/.env.template'), 'the chatwalaau wheel does not contain app/templates/.env.template')
 }
 
+// UDR-0238 D5: the payload has a size budget; the message names the largest wheels.
+const size = budgetReport(listFiles(OUT))
+check(
+  size.withinBudget,
+  `the payload is ${size.totalMiB.toFixed(0)} MiB, over its ${size.budgetMiB} MiB budget (UDR-0238 D5). Largest wheels:\n${formatLargest(size)}`,
+)
+
 if (errors.length) {
   console.error(`payload:verify FAILED (${errors.length}):\n  - ${errors.join('\n  - ')}`)
   process.exit(1)
 }
-console.log(`payload:verify OK -- ${m.backendVersion}, ${m.wheels.length} wheels, ${requirements} requirements, runtime ${m.runtimeId}`)
+console.log(`payload:verify OK -- ${m.backendVersion}, ${m.wheels.length} wheels, ${requirements} requirements, runtime ${m.runtimeId}, ${size.totalMiB.toFixed(0)}/${size.budgetMiB} MiB`)
