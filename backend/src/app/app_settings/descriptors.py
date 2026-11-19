@@ -1791,6 +1791,34 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
             "TEMPORARY_CHAT_RETENTION_DAYS."
         ),
     ),
+    # PRP-0258 / UDR-0239 D6, D7: decision routing of route "auto" (bound agents only).
+    SettingDescriptor(
+        "responses_route_timeout_seconds",
+        "Routing timeout (seconds)",
+        "openai_api",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=30,
+        help=(
+            'How long a request with route "auto" waits for the decision model before it gives up '
+            "(no retry). On timeout the agent's on_error setting decides: search everything, or 503."
+        ),
+    ),
+    SettingDescriptor(
+        "responses_route_min_probability_percent",
+        "Routing minimum probability (%)",
+        "openai_api",
+        "int",
+        SCOPE_RUNTIME,
+        min=1,
+        max=100,
+        help=(
+            'A request with route "auto" uses the chosen route only when the decision model gives it at '
+            "least this probability; below it, the agent's low_confidence setting decides. An agent's "
+            "routing.min_probability overrides this default."
+        ),
+    ),
     # ---- OpenAI-compatible API limits (runtime; PRP-0254, UDR-0235) ------------
     # Read per request by app.openai_api.quota; /v1/responses only (D1). 0 = no limit,
     # so every default keeps the behavior before PRP-0254 (D4).

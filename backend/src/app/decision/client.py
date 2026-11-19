@@ -152,8 +152,15 @@ async def evaluate(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     sleep: Any = asyncio.sleep,
+    timeout: float | None = None,
+    retry: bool = True,
 ) -> dict[str, Any]:
-    """POST one evaluation and return the parsed JSON body (raises DecisionError)."""
+    """POST one evaluation and return the parsed JSON body (raises DecisionError).
+
+    ``timeout`` (seconds) replaces :data:`REQUEST_TIMEOUT_SEC` and ``retry=False`` turns
+    the 429 backoff off: the /v1/responses routing call (PRP-0258, UDR-0239 D7) must not
+    hold a desk answer for 30 s plus backoff. The tool path keeps both defaults.
+    """
     if not target.endpoint:
         raise DecisionError(
             "decision_unavailable",
@@ -164,7 +171,9 @@ async def evaluate(
     name, value = await auth_header(target.api_key)
     headers = {name: value, "Content-Type": "application/json", "Accept": "application/json"}
 
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SEC, transport=transport) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout if timeout is not None else REQUEST_TIMEOUT_SEC, transport=transport
+    ) as client:
         attempt = 0
         while True:
             try:
@@ -175,7 +184,7 @@ async def evaluate(
                 raise DecisionError(
                     "decision_unreachable", f"could not reach the decision service ({type(exc).__name__})"
                 ) from exc
-            if response.status_code == 429 and attempt < MAX_RETRIES_429:
+            if retry and response.status_code == 429 and attempt < MAX_RETRIES_429:
                 wait = retry_wait(response, attempt)
                 logger.info("decision call rate limited; retrying in %.1fs (attempt %d)", wait, attempt + 1)
                 await sleep(wait)

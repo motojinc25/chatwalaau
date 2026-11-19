@@ -11,6 +11,10 @@ PRP-0256 / UDR-0237: a key bound to a declarative agent runs that agent
 (app.openai_api.bound_agent, CTR-0286) and never the registry fallback; its strict
 grounding retrieves before any model call (app.openai_api.grounding, CTR-0287); a key may
 force temporary storage, temporary threads chain, and an unknown model can be refused.
+
+PRP-0258 / UDR-0239: route "auto" classifies a bound request with the decision model first
+(app.openai_api.routing, CTR-0288) and narrows the agent's knowledge scope to the matched
+route for that run; a request without route is unchanged.
 """
 
 import asyncio
@@ -31,12 +35,13 @@ from openai import NotFoundError as OpenAINotFoundError
 from starlette.background import BackgroundTask
 
 from app import providers
+from app.agent import knowledge_narrowing
 from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, fold_contents, is_refusal, merge_mode
 from app.agent.temporary import is_temporary, new_temporary_thread_id, schedule_sweep, set_temporary_run
 from app.agui.agent_registry import AgentRegistry
 from app.auth import Identity, verify_api_key_strict
 from app.image_gen.tools import current_thread_id as _image_gen_thread_id
-from app.openai_api import bound_agent, controls, grounding, quota
+from app.openai_api import bound_agent, controls, grounding, quota, routing
 from app.openai_api import session as api_session
 from app.openai_api.converter import api_usage, maf_contents_to_openai_output, openai_input_to_maf_messages
 from app.openai_api.models import ResponsesRequest, ResponsesResponse, UsageInfo
@@ -174,10 +179,29 @@ class RunPlan:
     instructions: str | None
     temporary: bool
     retrieval: grounding.Retrieval | None = None
+    #: The decision routing outcome of a route "auto" request (CTR-0288), else None.
+    route_outcome: routing.RoutingOutcome | None = None
 
     @property
     def no_match(self) -> bool:
+        """The run answers a fixed sentence and calls no model: nothing found, or clarify."""
+        if self.route_outcome is not None and self.route_outcome.clarify:
+            return True
         return self.retrieval is not None and not self.retrieval.found
+
+    @property
+    def fixed_answer(self) -> str:
+        """The sentence of a no-model run (UDR-0237 D6, UDR-0239 D6)."""
+        if self.route_outcome is not None and self.route_outcome.clarify:
+            return routing.CLARIFY_ANSWER
+        return grounding.NO_MATCH_ANSWER
+
+    @property
+    def narrowing(self) -> knowledge_narrowing.Narrowing | None:
+        return self.route_outcome.narrowing if self.route_outcome is not None else None
+
+    def route_record(self) -> dict[str, str] | None:
+        return self.route_outcome.metadata() if self.route_outcome is not None else None
 
 
 def _api_error(status: int, code: str, message: str, error_type: str = "invalid_request_error") -> JSONResponse:
@@ -199,10 +223,17 @@ def _user_text(request: ResponsesRequest) -> str:
 
 
 def _grounding_metadata(plan: RunPlan, answer: str) -> dict[str, Any]:
-    """``{"metadata": {"grounding": ...}}`` for a strict run, else {} (byte-identical default)."""
-    if plan.retrieval is None:
-        return {}
-    return {"metadata": {"grounding": grounding.final_status(plan.retrieval, answer)}}
+    """``{"metadata": {...}}`` for a strict or routed run, else {} (byte-identical default).
+
+    ``grounding`` for a strict run (CTR-0287); ``route``, ``route_reason`` and
+    ``route_probability`` for a route "auto" run (CTR-0288, UDR-0239 D8).
+    """
+    metadata: dict[str, Any] = {}
+    if plan.retrieval is not None:
+        metadata["grounding"] = grounding.final_status(plan.retrieval, answer)
+    if plan.route_outcome is not None:
+        metadata.update(plan.route_outcome.metadata())
+    return {"metadata": metadata} if metadata else {}
 
 
 def _citation_items(plan: RunPlan) -> list[dict[str, Any]]:
@@ -225,8 +256,8 @@ def _sse(event: dict[str, Any]) -> str:
     return f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
 
 
-def _no_match_text_part() -> dict[str, Any]:
-    text_part: dict[str, Any] = {"type": "output_text", "text": grounding.NO_MATCH_ANSWER}
+def _no_match_text_part(answer: str = grounding.NO_MATCH_ANSWER) -> dict[str, Any]:
+    text_part: dict[str, Any] = {"type": "output_text", "text": answer}
     if controls.tool_output_mode() == "sources":
         text_part["annotations"] = []
     return text_part
@@ -239,8 +270,9 @@ async def _stream_no_match(
     plan: RunPlan,
     ticket: quota.Ticket | None = None,
 ) -> AsyncGenerator[str, None]:
-    """The fixed no-match answer as a Responses SSE stream; no model call (UDR-0237 D6)."""
-    answer = grounding.NO_MATCH_ANSWER
+    """The fixed no-match (or clarify) answer as a Responses SSE stream; no model call
+    (UDR-0237 D6, UDR-0239 D6)."""
+    answer = plan.fixed_answer
     base = {"id": response_id, "object": "response", "model": request.model}
     yield _sse({"type": "response.created", "response": base | {"output": [], "status": "in_progress"}})
     yield _sse(
@@ -259,7 +291,7 @@ async def _stream_no_match(
         }
     )
     yield _sse({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": answer})
-    text_part = _no_match_text_part()
+    text_part = _no_match_text_part(answer)
     yield _sse({"type": "response.content_part.done", "output_index": 0, "content_index": 0, "part": text_part})
     msg_item = {"type": "message", "role": "assistant", "content": [text_part]}
     yield _sse({"type": "response.output_item.done", "output_index": 0, "item": msg_item})
@@ -268,6 +300,7 @@ async def _stream_no_match(
         response_id,
         _build_session_message("user", _user_text(request)),
         _build_session_message("assistant", answer),
+        route=plan.route_record(),
     )
     if ticket is not None:
         ticket.finish(None)  # no model call: no tokens, no ledger record
@@ -279,16 +312,18 @@ async def _stream_no_match(
 def _no_match_response(
     request: ResponsesRequest, thread_id: str, response_id: str, plan: RunPlan, ticket: quota.Ticket
 ) -> dict[str, Any]:
-    """The fixed no-match answer, non-streaming; no model call (UDR-0237 D6)."""
-    answer = grounding.NO_MATCH_ANSWER
+    """The fixed no-match (or clarify) answer, non-streaming; no model call (UDR-0237 D6,
+    UDR-0239 D6)."""
+    answer = plan.fixed_answer
     update_api_session(
         thread_id,
         response_id,
         _build_session_message("user", _user_text(request)),
         _build_session_message("assistant", answer),
+        route=plan.route_record(),
     )
     ticket.finish(None)
-    output_items = [{"type": "message", "role": "assistant", "content": [_no_match_text_part()]}]
+    output_items = [{"type": "message", "role": "assistant", "content": [_no_match_text_part(answer)]}]
     return (
         ResponsesResponse(id=response_id, model=request.model, output=[], usage=UsageInfo()).model_dump()
         | {"output": output_items}
@@ -318,6 +353,9 @@ async def _stream_responses(
         plan = _registry_plan(agent_registry, request, bool(getattr(request, "temporary", False)))
     temporary = plan.temporary
     set_temporary_run(temporary)
+    # Decision routing (CTR-0288, UDR-0239 D5): the scoped tools see the matched route for
+    # this run only; None (every unrouted run) leaves them as PRP-0256 built them.
+    knowledge_narrowing.set_for_run(plan.narrowing)
     # Emit response.created
     created_event = {
         "type": "response.created",
@@ -560,6 +598,7 @@ async def _stream_responses(
         response_id,
         _build_session_message("user", _user_text(request)),
         _build_session_message("assistant", full_text),
+        route=plan.route_record(),
     )
 
     # CTR-0200 append (PRP-0158, UDR-0136 D5). This lane writes no chat the operator
@@ -598,23 +637,62 @@ def _registry_plan(agent_registry: AgentRegistry, request: ResponsesRequest, tem
 
 
 async def _bound_plan(
-    agent_registry: AgentRegistry, spec: Any, request: ResponsesRequest, temporary: bool, prior_thread_id: str | None
+    agent_registry: AgentRegistry,
+    spec: Any,
+    request: ResponsesRequest,
+    temporary: bool,
+    prior_thread_id: str | None,
+    ticket: quota.Ticket | None = None,
 ) -> RunPlan:
-    """The plan of a key-bound request (CTR-0286), with the strict retrieval (CTR-0287)."""
+    """The plan of a key-bound request (CTR-0286): decision routing first when the request
+    says route "auto" (CTR-0288), then the strict retrieval (CTR-0287) over the run scope."""
     bound = bound_agent.get_bound_agent(spec, getattr(agent_registry, "generation", 0))
     # A temporary run stays de-personalized: no capability remainder (UDR-0052 D6).
     instructions = None if temporary else (bound.capabilities or None)
-    retrieval = None
-    if bound.knowledge is not None and bound.knowledge.strict:
+    knowledge = bound.knowledge
+    query: str | None = None
+    outcome: routing.RoutingOutcome | None = None
+    if request.route == routing.ROUTE_AUTO and knowledge is not None and knowledge.routing is not None:
+        # The routing state is the strict-grounding query (UDR-0239 D4).
         query = grounding.retrieval_query(request.input, prior_thread_id)
-        retrieval = await run_in_threadpool(grounding.retrieve, bound.knowledge, query)
+        outcome = await routing.route_question(bound.agent_id, knowledge, query, ticket)
+        if outcome.clarify:
+            # Low confidence with clarify: the fixed sentence, no retrieval, no model call. A
+            # strict agent still reports grounding no_match (one signal for the BFF).
+            retrieval = grounding.Retrieval(query, ()) if knowledge.strict else None
+            return RunPlan(
+                agent=None,
+                model=bound.model,
+                instructions=None,
+                temporary=temporary,
+                retrieval=retrieval,
+                route_outcome=outcome,
+            )
+        knowledge = outcome.scope
+    retrieval = None
+    if knowledge is not None and knowledge.strict:
+        if query is None:
+            query = grounding.retrieval_query(request.input, prior_thread_id)
+        retrieval = await run_in_threadpool(grounding.retrieve, knowledge, query)
         if not retrieval.found:
             logger.info("Grounding: no match for agent %s; answered without a model call", bound.agent_id)
-            return RunPlan(agent=None, model=bound.model, instructions=None, temporary=temporary, retrieval=retrieval)
+            return RunPlan(
+                agent=None,
+                model=bound.model,
+                instructions=None,
+                temporary=temporary,
+                retrieval=retrieval,
+                route_outcome=outcome,
+            )
         block = grounding.excerpts_instruction(retrieval)
         instructions = f"{instructions}\n\n{block}" if instructions else block
     return RunPlan(
-        agent=bound.agent, model=bound.model, instructions=instructions, temporary=temporary, retrieval=retrieval
+        agent=bound.agent,
+        model=bound.model,
+        instructions=instructions,
+        temporary=temporary,
+        retrieval=retrieval,
+        route_outcome=outcome,
     )
 
 
@@ -675,6 +753,12 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
         except bound_agent.BoundAgentError as exc:
             return JSONResponse(status_code=exc.status, content=exc.body())
 
+        # Decision routing (CTR-0288, PRP-0258, UDR-0239 D1/D2): an unknown value, or "auto"
+        # without a bound agent that has routes, is refused before admission.
+        refused = routing.check_request(request.route, spec)
+        if refused is not None:
+            return _api_error(*refused)
+
         # Storage (UDR-0237 D8): a temporary key forces temporary; a thread's storage is
         # fixed by its first turn, so a temporary thread continues temporary and a
         # temporary request cannot continue a saved thread.
@@ -721,10 +805,14 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
         # The plan first: a bound agent that cannot be built refuses before a session exists.
         if spec is not None:
             try:
-                plan = await _bound_plan(agent_registry, spec, request, temporary, prior_thread_id)
+                plan = await _bound_plan(agent_registry, spec, request, temporary, prior_thread_id, ticket)
             except bound_agent.BoundAgentError as exc:
                 ticket.finish()
                 return JSONResponse(status_code=exc.status, content=exc.body())
+            except routing.RoutingUnavailable:
+                # on_error: fail (UDR-0239 D6): a plain HTTP error, before any session or stream.
+                ticket.finish()
+                return _api_error(503, "routing_unavailable", routing.ROUTING_UNAVAILABLE, "server_error")
         else:
             plan = None
         _maybe_sweep_api_sessions()
@@ -811,6 +899,8 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
         # no-ops via the contextvar set below. The plan carries it (and the grounding
         # excerpts of a strict bound agent, CTR-0287).
         set_temporary_run(temporary)
+        # Decision routing (CTR-0288, UDR-0239 D5): the matched route narrows the scoped tools.
+        knowledge_narrowing.set_for_run(plan.narrowing)
         if plan.instructions:
             run_options["instructions"] = plan.instructions
 
@@ -883,6 +973,7 @@ def register_openai_api(app: FastAPI, *, agent_registry: AgentRegistry) -> None:
             response_id,
             _build_session_message("user", _user_text(request)),
             _build_session_message("assistant", full_text),
+            route=plan.route_record(),
         )
 
         # Tool output mode (PRP-0252, UDR-0233 D3/D4): shapes the RESPONSE only; the

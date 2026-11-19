@@ -238,12 +238,19 @@ def make_scoped_rag_search(collections: tuple[str, ...]):
 
     Installed only by the tool-assembly chokepoint for a spec with a knowledge scope. The
     first collection is the default; any other name answers ``COLLECTION_NOT_AVAILABLE``.
+
+    A routed /v1/responses run narrows the list further for that run only (PRP-0258,
+    UDR-0239 D5): the route's first allowed collection becomes the default, and a
+    collection outside the route answers the same refusal. Unset, nothing changes.
     """
+    from app.agent.knowledge_narrowing import narrow_collections
+
     allowed = tuple(collections)
 
     def rag_search(query: str, collection: str = "", n_results: int = 0) -> str:
-        name = collection or allowed[0]
-        if name not in allowed:
+        run_allowed = narrow_collections(allowed)
+        name = collection or (run_allowed[0] if run_allowed else "")
+        if not name or name not in run_allowed:
             return json.dumps({"error": COLLECTION_NOT_AVAILABLE, "results": [], "query": query})
         top_k = n_results if n_results > 0 else _default_top_k
         return json.dumps(search_collection(query, name, top_k))

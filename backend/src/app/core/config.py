@@ -816,6 +816,10 @@ class Settings(BaseSettings):
     # saved API sessions older than N days (D10). Defaults keep the prior behavior.
     responses_reject_unknown_model: bool = False
     responses_session_retention_days: int = 0
+    # PRP-0258 / UDR-0239 D6, D7: the decision routing call of route "auto" -- its timeout
+    # (no retry) and the default bar a route's probability must reach (an agent may set its own).
+    responses_route_timeout_seconds: int = 5
+    responses_route_min_probability_percent: int = 60
 
     # /v1/responses admission limits (CTR-0285, CTR-0198, PRP-0254, UDR-0235).
     # Runtime App Settings (group openai_api_limits). 0 = no limit, so every default

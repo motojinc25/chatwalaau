@@ -29,6 +29,11 @@ class ResponsesRequest(BaseModel):
     # read/write), the session is quarantine-routed and excluded from listing,
     # and a temporary thread chains with previous_response_id (PRP-0256, UDR-0237 D8).
     temporary: bool = False
+    # Decision routing (CTR-0057 v9 / CTR-0288, PRP-0258, UDR-0239 D1). A ChatWalaau
+    # field like `temporary` (OpenAI SDK: extra_body). Absent -> today's behavior; "auto" ->
+    # classify the question with the decision model and narrow a bound agent's knowledge
+    # scope to the matched route. Any other value is 400 invalid_route.
+    route: str | None = None
 
 
 class ResponseOutput(BaseModel):

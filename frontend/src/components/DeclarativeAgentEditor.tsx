@@ -25,6 +25,8 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import '@/lib/monaco-setup'
 import {
   type AgentDocument,
+  type KnowledgeRoute,
+  type KnowledgeRouting,
   type KnowledgeScope,
   type KnowledgeSources,
   type ToolEntry,
@@ -808,6 +810,20 @@ const EMPTY_KNOWLEDGE: KnowledgeScope = {
   grounding: 'off',
   max_distance: null,
   web_search: false,
+  routing: null,
+}
+
+/** Drop route sources the scope no longer lists: a route can only narrow (UDR-0239 D3). */
+function pruneRouting(routing: KnowledgeRouting | null | undefined, scope: KnowledgeScope): KnowledgeRouting | null {
+  if (!routing) return null
+  return {
+    ...routing,
+    routes: routing.routes.map((r) => ({
+      ...r,
+      rag_collections: r.rag_collections.filter((c) => scope.rag_collections.includes(c)),
+      ontologies: r.ontologies.filter((o) => scope.ontologies.includes(o)),
+    })),
+  }
 }
 
 /**
@@ -827,6 +843,7 @@ function KnowledgeEditor({
   const k = doc.knowledge ?? EMPTY_KNOWLEDGE
   const set = (next: Partial<KnowledgeScope>) => {
     const merged = { ...k, ...next }
+    merged.routing = pruneRouting(merged.routing, merged)
     patch({ knowledge: merged.rag_collections.length || merged.ontologies.length ? merged : null })
   }
   const toggle = (list: string[], value: string) =>
@@ -908,10 +925,176 @@ function KnowledgeEditor({
                 question finds its nearest passages.
               </p>
             )}
+            <RoutingEditor scope={k} sources={sources} onChange={(routing) => set({ routing })} />
           </>
         )}
       </div>
     </Field>
+  )
+}
+
+const newRoute = (): KnowledgeRoute => ({ id: '', description: '', rag_collections: [], ontologies: [] })
+
+/**
+ * Decision routing (PRP-0258, UDR-0239). With route "auto", /v1/responses first asks the decision
+ * model which route a question belongs to and searches only that route's sources. Each route can
+ * only pick from the agent's own scope above.
+ */
+function RoutingEditor({
+  scope,
+  sources,
+  onChange,
+}: {
+  scope: KnowledgeScope
+  sources: KnowledgeSources
+  onChange: (routing: KnowledgeRouting | null) => void
+}) {
+  const routing = scope.routing ?? null
+  const ontologyName = (value: string) =>
+    sources.ontologies?.find((o) => o.id === value || o.name === value)?.name ?? value
+  const update = (next: Partial<KnowledgeRouting>) => {
+    if (routing) onChange({ ...routing, ...next })
+  }
+  const updateRoute = (index: number, next: Partial<KnowledgeRoute>) => {
+    if (!routing) return
+    update({ routes: routing.routes.map((r, i) => (i === index ? { ...r, ...next } : r)) })
+  }
+  const toggle = (list: string[], value: string) =>
+    list.includes(value) ? list.filter((v) => v !== value) : [...list, value]
+  return (
+    <div className="space-y-2 border-t pt-2" data-testid="agent-routing">
+      <label className="flex items-center gap-1.5 text-xs">
+        <input
+          type="checkbox"
+          checked={routing !== null}
+          onChange={(e) =>
+            onChange(
+              e.target.checked
+                ? {
+                    instructions: '',
+                    min_probability: null,
+                    low_confidence: 'all',
+                    on_error: 'all',
+                    routes: [newRoute(), newRoute()],
+                  }
+                : null,
+            )
+          }
+        />
+        Route questions with the decision model
+      </label>
+      {routing && (
+        <>
+          <p className="text-[10px] text-muted-foreground">
+            Applies to /v1/responses requests that send route &quot;auto&quot; with a key bound to this agent. The
+            decision model picks one route from its description; only that route&apos;s sources are searched.
+          </p>
+          {routing.routes.map((route, index) => (
+            <div
+              // biome-ignore lint/suspicious/noArrayIndexKey: routes have no stable id while being typed
+              key={index}
+              className="space-y-1 rounded-md border p-2"
+              data-testid="agent-route">
+              <div className="flex items-center gap-1.5">
+                <input
+                  className={cn(CONTROL, 'text-xs')}
+                  value={route.id}
+                  placeholder="route id (e.g. leave)"
+                  aria-label="Route id"
+                  onChange={(e) => updateRoute(index, { id: e.target.value })}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-label="Remove route"
+                  onClick={() => update({ routes: routing.routes.filter((_, i) => i !== index) })}>
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              <textarea
+                className={cn(CONTROL, 'text-xs')}
+                rows={2}
+                value={route.description}
+                placeholder="What questions belong here (the decision model reads this)"
+                aria-label="Route description"
+                onChange={(e) => updateRoute(index, { description: e.target.value })}
+              />
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {scope.rag_collections.map((name) => (
+                  <label key={`c-${name}`} className="flex items-center gap-1 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={route.rag_collections.includes(name)}
+                      onChange={() => updateRoute(index, { rag_collections: toggle(route.rag_collections, name) })}
+                    />
+                    {name}
+                  </label>
+                ))}
+                {scope.ontologies.map((value) => (
+                  <label key={`o-${value}`} className="flex items-center gap-1 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={route.ontologies.includes(value)}
+                      onChange={() => updateRoute(index, { ontologies: toggle(route.ontologies, value) })}
+                    />
+                    {ontologyName(value)} (ontology)
+                  </label>
+                ))}
+              </div>
+            </div>
+          ))}
+          <Button variant="outline" size="sm" onClick={() => update({ routes: [...routing.routes, newRoute()] })}>
+            + Add route
+          </Button>
+          <label className="block text-[11px] text-muted-foreground">
+            Minimum probability (optional, 0 to 1)
+            <input
+              className={cn(CONTROL, 'mt-0.5 text-xs')}
+              inputMode="decimal"
+              value={routing.min_probability ?? ''}
+              placeholder="App Settings default (0.6)"
+              aria-label="Minimum probability"
+              onChange={(e) => {
+                const value = Number.parseFloat(e.target.value)
+                update({ min_probability: Number.isFinite(value) && value > 0 && value <= 1 ? value : null })
+              }}
+            />
+          </label>
+          <label className="block text-[11px] text-muted-foreground">
+            When the probability is lower
+            <select
+              className={cn(CONTROL, 'mt-0.5 text-xs')}
+              value={routing.low_confidence}
+              aria-label="When the probability is lower"
+              onChange={(e) => update({ low_confidence: e.target.value as KnowledgeRouting['low_confidence'] })}>
+              <option value="all">Search all of this agent&apos;s sources</option>
+              <option value="clarify">Ask the user for details (no model call)</option>
+            </select>
+          </label>
+          <label className="block text-[11px] text-muted-foreground">
+            When the decision model fails
+            <select
+              className={cn(CONTROL, 'mt-0.5 text-xs')}
+              value={routing.on_error}
+              aria-label="When the decision model fails"
+              onChange={(e) => update({ on_error: e.target.value as KnowledgeRouting['on_error'] })}>
+              <option value="all">Search all of this agent&apos;s sources</option>
+              <option value="fail">Refuse the request (503)</option>
+            </select>
+          </label>
+          <label className="block text-[11px] text-muted-foreground">
+            Extra instructions for the decision model (optional)
+            <textarea
+              className={cn(CONTROL, 'mt-0.5 text-xs')}
+              rows={2}
+              value={routing.instructions}
+              aria-label="Routing instructions"
+              onChange={(e) => update({ instructions: e.target.value })}
+            />
+          </label>
+        </>
+      )}
+    </div>
   )
 }
 

@@ -28,6 +28,25 @@ export interface KnowledgeScope {
   grounding: 'off' | 'strict'
   max_distance: number | null
   web_search: boolean
+  /** Decision routing (PRP-0258, UDR-0239): /v1/responses route "auto" narrows to one route. */
+  routing?: KnowledgeRouting | null
+}
+
+/** One route: a business category and the subset of the agent's sources it searches. */
+export interface KnowledgeRoute {
+  id: string
+  description: string
+  rag_collections: string[]
+  ontologies: string[]
+}
+
+export interface KnowledgeRouting {
+  instructions: string
+  /** null = the App Setting responses_route_min_probability_percent (default 60 %). */
+  min_probability: number | null
+  low_confidence: 'all' | 'clarify'
+  on_error: 'all' | 'fail'
+  routes: KnowledgeRoute[]
 }
 
 /** Names a knowledge scope can use; null = that source is not configured on this server. */

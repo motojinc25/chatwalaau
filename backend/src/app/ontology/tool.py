@@ -524,12 +524,17 @@ def make_scoped_ontology_query(ontologies: tuple[str, ...]):
 
     Installed only by the tool-assembly chokepoint for a spec with a knowledge scope. Same
     name, parameters and description as the shared tool.
+
+    A routed /v1/responses run narrows the list further for that run only (PRP-0258,
+    UDR-0239 D5); an empty narrowing hides every ontology. Unset, nothing changes.
     """
+    from app.agent.knowledge_narrowing import narrow_ontologies
+
     allowed = tuple(ontologies)
 
     @functools.wraps(ontology_query)
     async def scoped(*args: Any, **kwargs: Any) -> str:
-        token = _scope.set(allowed)
+        token = _scope.set(narrow_ontologies(allowed))
         try:
             return await ontology_query(*args, **kwargs)
         finally:

@@ -270,6 +270,24 @@ def _annotate_knowledge_warnings(spec: DeclarativeAgentSpec) -> DeclarativeAgent
         note = "grounding: strict applies only to /v1/responses through an API key bound to this agent."
         if note not in spec.notes:
             spec.notes.append(note)
+    if scope.routing is not None:
+        # PRP-0258 / UDR-0239: routing is read only on /v1/responses with route "auto", and a
+        # missing decision offering is a note, never a warning: the catalog may change at run
+        # time and on_error covers it.
+        notes = ['routing applies only to /v1/responses requests with route "auto" through a bound API key.']
+        try:
+            from app.decision.client import resolve_target
+
+            if resolve_target() is None:
+                notes.append(
+                    "routing: no decision offering is registered in the Model Offering Catalog, so every "
+                    "routed request takes the on_error path."
+                )
+        except Exception:
+            logger.debug("Decision offering read failed during routing validation", exc_info=True)
+        for note in notes:
+            if note not in spec.notes:
+                spec.notes.append(note)
     return spec
 
 

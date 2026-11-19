@@ -6,7 +6,7 @@ else. User documentation: <https://www.chatwalaau.com/docs/getting-started/deskt
 
 One artifact, the **x64** installer, serves both x64 and Windows on ARM devices -- the
 latter through Windows' x64 emulation (not yet validated on ARM hardware). There is no
-native arm64 build: 13 locked dependencies publish no `win_arm64` wheel, and the
+native arm64 build: 12 locked dependencies publish no `win_arm64` wheel (v0.219.0), and the
 environment must be installed offline from hash-locked wheels. Check with
 `pnpm arm64:readiness`.
 

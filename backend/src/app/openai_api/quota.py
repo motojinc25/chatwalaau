@@ -289,11 +289,20 @@ class Ticket:
     counted: bool
     turn: dict[str, Any] | None = None
     done: bool = False
+    #: Tokens of helper calls made for this request (the PRP-0258 routing call), added to
+    #: the counters with the turn at finish (UDR-0239 D9). Never a request of their own.
+    extra_input: int = 0
+    extra_output: int = 0
 
     def observe(self, turn: Mapping[str, Any] | None) -> None:
         """Remember the latest turn total (a ledger-shaped summary)."""
         if turn:
             self.turn = dict(turn)
+
+    def add_tokens(self, input_tokens: int | None, output_tokens: int | None) -> None:
+        """Count a helper call's tokens with this request (before ``finish``)."""
+        self.extra_input += max(int(input_tokens or 0), 0)
+        self.extra_output += max(int(output_tokens or 0), 0)
 
     def finish(self, turn: Mapping[str, Any] | None = None) -> None:
         if turn:
@@ -380,12 +389,15 @@ class QuotaGuard:
                     counters = fresh_keys[key_id] = _Counters()
                     counters.roll(day_key, month_key, moment.timestamp())
                 targets.append(counters)
+            # A helper record (the PRP-0258 routing call) adds tokens to its request's
+            # totals but is not a request of its own (UDR-0239 D9).
+            request = 0 if record.get("kind") == "helper" else 1
             for counters in targets:
-                counters.month.requests += 1
+                counters.month.requests += request
                 counters.month.input += input_tokens
                 counters.month.output += output_tokens
                 if same_day:
-                    counters.day.requests += 1
+                    counters.day.requests += request
                     counters.day.input += input_tokens
                     counters.day.output += output_tokens
         self._global, self._keys = fresh_global, fresh_keys
@@ -464,6 +476,8 @@ class QuotaGuard:
         if not ticket.counted:
             return
         input_tokens, output_tokens = tokens_of(ticket.turn, cache_reads=count_cache_reads())
+        input_tokens += ticket.extra_input
+        output_tokens += ticket.extra_output
         moment = now()
         with self._lock:
             self._in_flight = max(0, self._in_flight - 1)

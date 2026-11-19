@@ -93,8 +93,13 @@ def update_api_session(
     new_response_id: str,
     user_message: dict[str, Any],
     assistant_message: dict[str, Any],
+    route: dict[str, str] | None = None,
 ) -> None:
-    """Update an existing API session with new messages and response_id."""
+    """Update an existing API session with new messages and response_id.
+
+    ``route`` is the decision routing outcome of the turn (PRP-0258, UDR-0239 D8), kept for
+    the operator under ``routes[response_id]``; never sent back to a model.
+    """
 
     def append(data: dict[str, Any]) -> None:
         messages = data.get("messages", [])
@@ -109,6 +114,10 @@ def update_api_session(
         chain.append(new_response_id)
         data["response_chain"] = chain
         data["latest_response_id"] = new_response_id
+        if route:
+            routes = data.get("routes") if isinstance(data.get("routes"), dict) else {}
+            routes[new_response_id] = dict(route)
+            data["routes"] = routes
 
         # Update title if empty
         if not data.get("title"):

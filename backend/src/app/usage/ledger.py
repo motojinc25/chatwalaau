@@ -387,8 +387,15 @@ def append_decision_usage(
     input_tokens: int | None,
     output_tokens: int | None,
     thread_id: str | None = None,
+    lane: str = "helper",
+    purpose: str = "decision_evaluate",
+    key_id: str | None = None,
 ) -> None:
     """Record one ``decision_evaluate`` call (PRP-0219, UDR-0201 D9).
+
+    The /v1/responses routing call (PRP-0258, UDR-0239 D9) records with ``lane="openai-api"``,
+    ``purpose="responses_route"`` and the caller's ``key_id``, still as kind ``helper``: it is
+    part of that key's API usage, and the quota guard counts its tokens but never as a request.
 
     A helper record -- lane ``helper``, kind ``helper``, purpose ``decision_evaluate`` --
     because a decision model is not a chat model: its call is a separate frame from the
@@ -407,14 +414,15 @@ def append_decision_usage(
         if output_tokens is not None:
             usage["output_token_count"] = int(output_tokens)
         record = build_record(
-            lane="helper",
+            lane=lane,
             kind="helper",
-            purpose="decision_evaluate",
+            purpose=purpose,
             model=offering_id,
             provider="azure-openai",
             turn=usage,
             thread_id=thread_id,
             temporary=temporary,
+            key_id=key_id,
         )
     except Exception:
         logger.warning("usage ledger decision record build failed", exc_info=True)
