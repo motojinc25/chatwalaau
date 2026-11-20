@@ -236,10 +236,10 @@ interface OpenChatFolder {
  * Fetch a chat's history. `not_found` means a fresh chat; `failed` means the history
  * exists (or may exist) but could not be read, and must NOT be shown as an empty chat.
  */
-export async function fetchSessionMessages(threadId: string): Promise<SessionLoadResult> {
+export async function fetchSessionMessages(threadId: string, signal?: AbortSignal): Promise<SessionLoadResult> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await fetch(`/api/sessions/${threadId}`)
+      const res = await fetch(`/api/sessions/${threadId}`, signal ? { signal } : undefined)
       if (res.ok) {
         const data = await res.json()
         // Keep the record's folder (PRP-0196, UDR-0178 D1): the sidebar list may not hold
@@ -251,11 +251,38 @@ export async function fetchSessionMessages(threadId: string): Promise<SessionLoa
       }
       if (res.status === 404) return { status: 'not_found' }
     } catch {
-      // network error -> retry once
+      // network error -> retry once; an aborted load (PRP-0259 Cancel) never retries
+      if (signal?.aborted) return { status: 'failed' }
     }
+    if (signal?.aborted) return { status: 'failed' }
     if (attempt === 0) await new Promise((resolve) => window.setTimeout(resolve, LOAD_RETRY_DELAY_MS))
   }
   return { status: 'failed' }
+}
+
+/** A running or failed chat export (PRP-0259, UDR-0240 D4). */
+export interface ExportState {
+  threadId: string
+  title: string
+  /** 0..100 when the response has a Content-Length, else null (indeterminate). */
+  progress: number | null
+  /** The reason the export failed, shown until dismissed; null while running. */
+  error: string | null
+}
+
+/** The server's reason for a failed export: a string detail, an object's message, or the status. */
+async function exportFailureReason(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { detail?: unknown }
+    const detail = body?.detail
+    if (typeof detail === 'string' && detail) return detail
+    if (detail && typeof detail === 'object' && typeof (detail as { message?: unknown }).message === 'string') {
+      return (detail as { message: string }).message
+    }
+  } catch {
+    // not JSON: fall back to the status
+  }
+  return `HTTP ${res.status}`
 }
 
 export function useSession() {
@@ -274,6 +301,15 @@ export function useSession() {
   const [folders, setFolders] = useState<SessionFolder[]>([])
   const [initialMessages, setInitialMessages] = useState<ChatMessage[]>([])
   const [isSwitching, setIsSwitching] = useState(false)
+  // A chat opened by its link (?session= on page load) is loading (PRP-0259, UDR-0240 D6).
+  // Set in the INITIAL state so the first render already shows the loading view, never the
+  // empty start screen with a live message box over a chat whose history is not loaded.
+  const [openingLink, setOpeningLink] = useState<boolean>(() => Boolean(sessionParam))
+  const initialLinkRef = useRef<string | null>(sessionParam)
+  const linkAbortRef = useRef<AbortController | null>(null)
+  // The running export (PRP-0259, UDR-0240 D4/D5): one at a time, cancellable.
+  const [exportState, setExportState] = useState<ExportState | null>(null)
+  const exportAbortRef = useRef<AbortController | null>(null)
   // The chat whose history could not be loaded (PRP-0174, UDR-0156 D8), or null.
   const [loadFailedThreadId, setLoadFailedThreadId] = useState<string | null>(null)
   const [openFolder, setOpenFolder] = useState<OpenChatFolder | null>(null)
@@ -547,8 +583,10 @@ export function useSession() {
       return
     }
     let cancelled = false
+    const controller = new AbortController()
+    if (sessionParam === initialLinkRef.current) linkAbortRef.current = controller
     async function load(id: string) {
-      const result = await fetchSessionMessages(id)
+      const result = await fetchSessionMessages(id, controller.signal)
       if (cancelled) return
       if (result.status === 'ok') {
         setLoadFailedThreadId(null)
@@ -558,10 +596,17 @@ export function useSession() {
       } else if (result.status === 'failed') {
         setLoadFailedThreadId(id)
       }
+      // The link's own load ended (loaded, failed or not found): leave the loading view.
+      if (id === initialLinkRef.current) {
+        initialLinkRef.current = null
+        linkAbortRef.current = null
+        setOpeningLink(false)
+      }
     }
     load(sessionParam)
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [sessionParam])
 
@@ -595,6 +640,11 @@ export function useSession() {
   const createSession = useCallback(
     (folderId?: string | null) => {
       abortRef.current?.()
+      // A new chat ends a still-loading link (PRP-0259).
+      linkAbortRef.current?.abort()
+      linkAbortRef.current = null
+      initialLinkRef.current = null
+      setOpeningLink(false)
       const newId = crypto.randomUUID()
       setLoadFailedThreadId(null)
       setInitialMessages([])
@@ -605,6 +655,14 @@ export function useSession() {
     },
     [navigate],
   )
+
+  /**
+   * Cancel while a chat opened by its link is loading (PRP-0259, UDR-0240 D7): the fetch and
+   * its retry are aborted, a late response is ignored, and a new chat starts (operator Q1).
+   */
+  const cancelLinkLoad = useCallback(() => {
+    createSession()
+  }, [createSession])
 
   /**
    * The init call created the record (PRP-0196). `folderId` is the folder the server
@@ -631,6 +689,11 @@ export function useSession() {
       }
 
       abortRef.current?.()
+      // Opening another chat ends a still-loading link (PRP-0259).
+      linkAbortRef.current?.abort()
+      linkAbortRef.current = null
+      initialLinkRef.current = null
+      setOpeningLink(false)
       setIsSwitching(true)
 
       const result = await fetchSessionMessages(targetThreadId)
@@ -1025,26 +1088,73 @@ export function useSession() {
 
   // Session Export (PRP-0084, CTR-0015 v1.15 / CTR-0016 v4). Downloads the chat
   // as a self-contained ZIP bundle (session JSON + its uploads). Read-only GET.
-  const exportSession = useCallback(async (targetThreadId: string) => {
-    try {
-      const res = await fetch(`/api/sessions/${targetThreadId}/export`)
-      if (!res.ok) return
-      const blob = await res.blob()
-      const disposition = res.headers.get('Content-Disposition') ?? ''
-      const match = disposition.match(/filename="?([^"]+)"?/)
-      const filename = match ? match[1] : `chatwalaau-chat-${targetThreadId}.zip`
-      const url = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = filename
-      document.body.appendChild(anchor)
-      anchor.click()
-      anchor.remove()
-      URL.revokeObjectURL(url)
-    } catch {
-      // ignore download errors
-    }
+  // PRP-0259 (UDR-0240 D4/D5): a page-level status with progress (Content-Length) and Cancel;
+  // one export at a time; a failure is shown with its reason, never swallowed.
+  const exportSession = useCallback(
+    async (targetThreadId: string) => {
+      if (exportAbortRef.current) return
+      const controller = new AbortController()
+      exportAbortRef.current = controller
+      const title = sessions.find((s) => s.thread_id === targetThreadId)?.title || 'this chat'
+      setExportState({ threadId: targetThreadId, title, progress: null, error: null })
+      const fail = (error: string) => setExportState((s) => (s ? { ...s, progress: null, error } : s))
+      try {
+        const res = await fetch(`/api/sessions/${targetThreadId}/export`, { signal: controller.signal })
+        if (!res.ok) {
+          fail(await exportFailureReason(res))
+          return
+        }
+        const total = Number(res.headers.get('Content-Length')) || 0
+        const chunks: BlobPart[] = []
+        if (res.body) {
+          const reader = res.body.getReader()
+          let received = 0
+          let shown = -1
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            chunks.push(value as BlobPart)
+            received += value.byteLength
+            if (total > 0) {
+              const percent = Math.min(100, Math.floor((received * 100) / total))
+              if (percent !== shown) {
+                shown = percent
+                setExportState((s) => (s ? { ...s, progress: percent } : s))
+              }
+            }
+          }
+        } else {
+          chunks.push(await res.blob())
+        }
+        const blob = new Blob(chunks, { type: 'application/zip' })
+        const disposition = res.headers.get('Content-Disposition') ?? ''
+        const match = disposition.match(/filename="?([^"]+)"?/)
+        const filename = match ? match[1] : `chatwalaau-chat-${targetThreadId}.zip`
+        const url = URL.createObjectURL(blob)
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = filename
+        document.body.appendChild(anchor)
+        anchor.click()
+        anchor.remove()
+        URL.revokeObjectURL(url)
+        setExportState(null)
+      } catch (err) {
+        if (controller.signal.aborted) setExportState(null)
+        else fail(err instanceof Error && err.message ? err.message : 'Network error')
+      } finally {
+        exportAbortRef.current = null
+      }
+    },
+    [sessions],
+  )
+
+  /** Stop the running export: the download is aborted and nothing is saved (UDR-0240 D5). */
+  const cancelExport = useCallback(() => {
+    exportAbortRef.current?.abort()
   }, [])
+
+  const dismissExportError = useCallback(() => setExportState(null), [])
 
   // Session Import (PRP-0084, CTR-0015 v1.15 / CTR-0016 v4). Uploads a ZIP
   // bundle; the server validates it and creates a NEW session. On success the
@@ -1088,6 +1198,11 @@ export function useSession() {
     folders,
     initialMessages,
     isSwitching,
+    openingLink,
+    cancelLinkLoad,
+    exportState,
+    cancelExport,
+    dismissExportError,
     /** The open chat's history could not be loaded (UDR-0156 D8). */
     loadFailed: loadFailedThreadId !== null && loadFailedThreadId === threadId,
     retryLoadSession,

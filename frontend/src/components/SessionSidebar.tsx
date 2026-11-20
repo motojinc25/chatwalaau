@@ -132,6 +132,8 @@ interface SessionSidebarProps {
   deletingFolderId: string | null
   updatingFolderId: string | null
   movingSessionId: string | null
+  /** The chat being exported, or null (PRP-0259, UDR-0240 D4: one export at a time). */
+  exportingThreadId: string | null
   importing: boolean
   onSwitch: (threadId: string) => void
   onDelete: (threadId: string) => void
@@ -336,6 +338,10 @@ interface SessionRowProps {
   nested: boolean
   isActive: boolean
   isMoving: boolean
+  /** This row is being exported. */
+  isExporting: boolean
+  /** Some export is running: Export is disabled on every row. */
+  exportBusy: boolean
   folders: SessionFolder[]
   /** Present only while THIS row is being renamed (see RenameEditor). */
   rename?: RenameEditor
@@ -361,6 +367,8 @@ const SessionRow = memo(function SessionRow({
   nested,
   isActive,
   isMoving,
+  isExporting,
+  exportBusy,
   folders,
   rename,
   onSwitch,
@@ -459,6 +467,9 @@ const SessionRow = memo(function SessionRow({
                 <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
               )}
               {isMoving && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
+              {isExporting && (
+                <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-label="Exporting" data-testid="row-exporting" />
+              )}
             </p>
             {/*
               The meta line is REVEALED ON HOVER (CTR-0016 v7, UDR-0091 D14, v0.106.1).
@@ -638,7 +649,7 @@ const SessionRow = memo(function SessionRow({
             </DropdownMenuItem>
             {/* Session Export (PRP-0084, CTR-0016 v4): download this chat as
                 a self-contained ZIP bundle (session JSON + its uploads). */}
-            <DropdownMenuItem onClick={() => onExport(session.thread_id)}>
+            <DropdownMenuItem disabled={exportBusy} onClick={() => onExport(session.thread_id)}>
               <Download className="mr-2 h-3.5 w-3.5" />
               Export
             </DropdownMenuItem>
@@ -907,6 +918,7 @@ export function SessionSidebar({
   deletingFolderId,
   updatingFolderId,
   movingSessionId,
+  exportingThreadId,
   importing,
   onSwitch,
   onDelete,
@@ -1385,6 +1397,8 @@ export function SessionSidebar({
         nested={nested}
         isActive={session.thread_id === currentThreadId}
         isMoving={movingSessionId === session.thread_id}
+        isExporting={exportingThreadId === session.thread_id}
+        exportBusy={exportingThreadId !== null}
         folders={folders}
         rename={renamingId === session.thread_id ? renameEditor : undefined}
         onSwitch={onSwitch}
@@ -1405,6 +1419,7 @@ export function SessionSidebar({
       handleSessionDragEnd,
       handleSessionDragStart,
       movingSessionId,
+      exportingThreadId,
       handleArchive,
       onExport,
       onMoveToFolder,

@@ -5,6 +5,7 @@ import { ChatPanel } from '@/components/ChatPanel'
 import { CronManager } from '@/components/CronManager'
 import { DeclarativeAgentManager } from '@/components/DeclarativeAgentManager'
 import { DiscussionSetupDialog } from '@/components/DiscussionSetupDialog'
+import { ExportStatus } from '@/components/ExportStatus'
 import { FolderBadge, FolderGlow } from '@/components/FolderCue'
 import { PipelineManager } from '@/components/PipelineManager'
 import { PrivacyScreenToggle } from '@/components/PrivacyScreenToggle'
@@ -20,6 +21,7 @@ import { useFileExplorerProbe } from '@/hooks/useFileExplorerAvailable'
 import { useFolderCueSettings } from '@/hooks/useFolderCueSettings'
 import { useOntologyAvailable } from '@/hooks/useOntologyAvailable'
 import { usePipelineAvailable } from '@/hooks/usePipelineAvailable'
+import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
 import { useSession } from '@/hooks/useSession'
 import { useTemporaryChat } from '@/hooks/useTemporaryChat'
 import { useViewportTier, useVisibleViewportHeight } from '@/hooks/useViewportTier'
@@ -62,6 +64,11 @@ export function ChatPage() {
     folders,
     initialMessages,
     isSwitching,
+    openingLink,
+    cancelLinkLoad,
+    exportState,
+    cancelExport,
+    dismissExportError,
     loadFailed,
     retryLoadSession,
     sidebarOpen,
@@ -100,6 +107,9 @@ export function ChatPage() {
     confirmSessionFolder,
     clearPendingFolder,
   } = useSession()
+  // A sidebar switch or a chat opened by its link (PRP-0259) shows the loading view.
+  const loadingChat = isSwitching || openingLink
+  const { redact } = usePrivacyScreen()
 
   // Temporary Chat (CTR-0107, PRP-0076). When active, the panel runs against a
   // fresh temp_ thread held in React state only; entering never modifies an
@@ -221,7 +231,7 @@ export function ChatPage() {
   }, [cueFolder, setSidebarOpen])
   const clearRevealRequest = useCallback(() => setRevealFolderRequest(null), [])
   const folderBadge =
-    folderCue.badge && cueFolder && !isSwitching ? <FolderBadge folder={cueFolder} onReveal={revealCueFolder} /> : null
+    folderCue.badge && cueFolder && !loadingChat ? <FolderBadge folder={cueFolder} onReveal={revealCueFolder} /> : null
 
   const handleBranch = useCallback(
     (messageIndex: number) => {
@@ -271,6 +281,7 @@ export function ChatPage() {
       deletingFolderId={deletingFolderId}
       updatingFolderId={updatingFolderId}
       movingSessionId={movingSessionId}
+      exportingThreadId={exportState && !exportState.error ? exportState.threadId : null}
       importing={isImporting}
       onSwitch={handleSwitch}
       onDelete={deleteSession}
@@ -420,12 +431,24 @@ export function ChatPage() {
             )}
 
             {/* Folder glow (PRP-0196, UDR-0178 D3): edge-only, pointer-events-none. */}
-            {folderCue.glow && <FolderGlow folder={isSwitching ? null : cueFolder} />}
+            {folderCue.glow && <FolderGlow folder={loadingChat ? null : cueFolder} />}
 
-            {isSwitching ? (
-              <div className="flex flex-1 items-center justify-center">
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                <span className="ml-2 text-sm text-muted-foreground">Loading session...</span>
+            {loadingChat ? (
+              // PRP-0259 (UDR-0240 D6/D7): a chat opened by its link shows this view from the
+              // first render -- never the empty start screen -- and offers Cancel (a new chat).
+              <div
+                className="flex flex-1 flex-col items-center justify-center gap-3"
+                role="status"
+                data-testid="chat-loading">
+                <div className="flex items-center">
+                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  <span className="ml-2 text-sm text-muted-foreground">Loading session...</span>
+                </div>
+                {openingLink && (
+                  <Button variant="outline" size="sm" onClick={cancelLinkLoad}>
+                    Cancel
+                  </Button>
+                )}
               </div>
             ) : loadFailed && !temp.isTemporary ? (
               // PRP-0174 / UDR-0156 D8: never render an unreadable chat as an empty one --
@@ -478,6 +501,16 @@ export function ChatPage() {
             onOpenChange={setDiscussionSetupOpen}
             onCreated={(id) => void handleDiscussionCreated(id)}
           />
+          {/* Chat export status (PRP-0259, UDR-0240 D4): page-level, so it shows with the
+            sidebar closed (operator Q2). */}
+          {exportState && (
+            <ExportStatus
+              state={exportState}
+              onCancel={cancelExport}
+              onDismiss={dismissExportError}
+              redactTitle={(title) => redact(title, `session:${exportState.threadId}`)}
+            />
+          )}
         </div>
       </WorkspaceLinkProvider>
     </ChatSurfaceTierContext.Provider>

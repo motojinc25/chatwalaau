@@ -8,21 +8,24 @@ Session files are stored in the .sessions/ directory.
 from datetime import UTC, datetime
 import json
 import logging
+import os
 from pathlib import Path
 import shutil
+import tempfile
 from typing import Any
 from urllib.parse import quote
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from app.auth import verify_api_key
 from app.core.config import settings
 from app.image_gen.names import IMAGE_RESULT_TOOL_NAMES
 from app.session import index_store
-from app.session.bundle import BundleValidationError, build_export_bundle, import_bundle
+from app.session.bundle import BundleValidationError, import_bundle, write_export_bundle
 from app.session.storage import (
     DEFAULT_FOLDER_COLOR,
     FOLDER_COLORS,
@@ -637,26 +640,67 @@ async def get_session(thread_id: str) -> dict[str, Any]:
     return _read_session_or_404(thread_id)
 
 
+#: Prefix of the export temp files in the system temp directory (PRP-0259, UDR-0240 D3).
+EXPORT_TEMP_PREFIX = "chatwalaau-export-"
+
+
+def _discard_file(path: str) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not delete the export temp file %s", path, exc_info=True)
+
+
+class _TempFileResponse(FileResponse):
+    """A FileResponse whose file is deleted when the response ends, however it ends
+    (sent, client disconnect, error) -- UDR-0240 D3."""
+
+    async def __call__(self, scope, receive, send) -> None:  # type: ignore[no-untyped-def]
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            _discard_file(str(self.path))
+
+
+def _export_to_temp_file(thread_id: str) -> tuple[str, str, str]:
+    """Check and build the bundle into a temp file; runs in a worker thread (UDR-0240 D1).
+
+    The file lives in the system temp directory, never under SESSIONS_DIR or UPLOAD_DIR, and
+    is deleted here when the build fails.
+    """
+    _refuse_open_discussion(_read_session_or_404(thread_id))
+    fd, path = tempfile.mkstemp(prefix=EXPORT_TEMP_PREFIX, suffix=".zip")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            filename, filename_utf8 = write_export_bundle(thread_id, handle)
+    except FileNotFoundError as exc:
+        _discard_file(path)
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except SessionUnavailableError as exc:
+        _discard_file(path)
+        raise _unavailable(exc) from exc
+    except BaseException:
+        _discard_file(path)
+        raise
+    return path, filename, filename_utf8
+
+
 @router.get("/{thread_id}/export")
 async def export_session(thread_id: str) -> Response:
-    """Export a chat as a self-contained ZIP bundle (CTR-0015 v1.15).
+    """Export a chat as a self-contained ZIP bundle (CTR-0015 v4, PRP-0084, PRP-0259).
 
     Read-only GET following the existing GET-session convention (loopback
     friendly, not behind the write gate). The bundle carries the session JSON
-    plus its whole upload directory so images round-trip across instances.
+    plus its whole upload directory so images round-trip across instances. It is
+    built in a worker thread into a temp file (UDR-0240 D1/D3), so the event loop
+    keeps serving and the response carries Content-Length for progress.
     """
-    _refuse_open_discussion(_read_session_or_404(thread_id))
-    try:
-        zip_bytes, filename, filename_utf8 = build_export_bundle(thread_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Session not found") from exc
-    except SessionUnavailableError as exc:
-        raise _unavailable(exc) from exc
+    path, filename, filename_utf8 = await run_in_threadpool(_export_to_temp_file, thread_id)
     # `filename` is latin-1-safe (header-encodable); `filename*` carries the full
     # possibly-non-ASCII name per RFC 5987 so browsers show the real title.
     disposition = f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename_utf8)}"
-    return Response(
-        content=zip_bytes,
+    return _TempFileResponse(
+        path,
         media_type="application/zip",
         headers={"Content-Disposition": disposition},
     )

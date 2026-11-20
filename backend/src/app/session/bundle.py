@@ -105,13 +105,38 @@ class BundleValidationError(ValueError):
 # --------------------------------------------------------------------------- #
 
 
+#: Upload extensions whose content is already compressed (PRP-0259, UDR-0240 D2). They are
+#: written with ZIP_STORED: deflating them costs CPU and saves almost nothing. Everything else
+#: (manifest, session JSON, text, PDF) stays ZIP_DEFLATED. Defined ONLY here.
+STORED_EXTENSIONS: frozenset[str] = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".zip", ".mp3", ".m4a", ".mp4", ".webm", ".ogg"}
+)
+
+
+def entry_compression(name: str) -> int:
+    """The ZIP method for an upload entry: stored for compressed formats, else deflated."""
+    return zipfile.ZIP_STORED if Path(name).suffix.lower() in STORED_EXTENSIONS else zipfile.ZIP_DEFLATED
+
+
 def build_export_bundle(thread_id: str) -> tuple[bytes, str, str]:
-    """Build a ZIP bundle for a session.
+    """Build a ZIP bundle for a session in memory.
 
     Returns ``(zip_bytes, ascii_filename, utf8_filename)``: the latin-1-safe
     download name for the Content-Disposition ``filename=`` field and the full
     (possibly non-ASCII) display name for the RFC 5987 ``filename*`` field.
-    Raises ``FileNotFoundError`` if the session does not exist.
+    Raises ``FileNotFoundError`` if the session does not exist. The HTTP endpoint uses
+    :func:`write_export_bundle` into a temp file instead (PRP-0259, UDR-0240 D3).
+    """
+    buffer = io.BytesIO()
+    filename, filename_utf8 = write_export_bundle(thread_id, buffer)
+    return buffer.getvalue(), filename, filename_utf8
+
+
+def write_export_bundle(thread_id: str, target: Any) -> tuple[str, str]:
+    """Write the ZIP bundle of a session into ``target`` (a path or a binary file object).
+
+    Returns ``(ascii_filename, utf8_filename)``. Raises ``FileNotFoundError`` if the session
+    does not exist. Upload entries of already-compressed formats are stored (UDR-0240 D2).
     """
     data = read_session_json(thread_id)
     if data is None:
@@ -128,8 +153,7 @@ def build_export_bundle(thread_id: str) -> tuple[bytes, str, str]:
         "title": title,
     }
 
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2))
         archive.writestr(SESSION_NAME, json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -137,9 +161,9 @@ def build_export_bundle(thread_id: str) -> tuple[bytes, str, str]:
         if upload_dir.is_dir():
             for file in sorted(upload_dir.iterdir()):
                 if file.is_file():
-                    archive.write(file, f"{UPLOADS_PREFIX}{file.name}")
+                    archive.write(file, f"{UPLOADS_PREFIX}{file.name}", compress_type=entry_compression(file.name))
 
-    return buffer.getvalue(), _suggested_filename(thread_id, title), _utf8_filename(thread_id, title)
+    return _suggested_filename(thread_id, title), _utf8_filename(thread_id, title)
 
 
 def _utf8_filename(thread_id: str, title: str) -> str:
