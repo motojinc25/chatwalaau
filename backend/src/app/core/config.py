@@ -299,6 +299,10 @@ class Settings(BaseSettings):
     # CODING_FILE_READ_MAX_BYTES precedent).
     pdf_inline_max_chars: int = 20000
 
+    # PRP-0260 / UDR-0241 D3: after a Prompt-agent attempt that searched the web with the
+    # hosted tool and was refused, answer once more without web search (Q1: on by default).
+    web_search_refusal_fallback: bool = True
+
     # Session Export/Import (CTR-0015, CTR-0006, PRP-0084 / UDR-0062 D5).
     # Maximum accepted size (bytes) of an uploaded chat import bundle (.zip).
     # Bounds the compressed upload; the import path additionally enforces an

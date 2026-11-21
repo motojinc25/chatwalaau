@@ -874,8 +874,8 @@ export function ChatPanel({
 
   // PRP-0231 / UDR-0214 D4: re-send a turn whose reply was lost after it committed.
   const handleRetryLostTurn = useCallback(
-    (messageId: string) => {
-      void retryLostTurn(messageId)
+    (messageId: string, opts?: { withoutWebSearch?: boolean }) => {
+      void retryLostTurn(messageId, opts)
       scrollToBottom()
     },
     [retryLostTurn, scrollToBottom],

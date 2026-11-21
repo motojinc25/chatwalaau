@@ -375,6 +375,17 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         help="Cap on TEXT-extracted PDF content; beyond it the text is truncated with a marker.",
     ),
     SettingDescriptor(
+        "web_search_refusal_fallback",
+        "Answer without web search after a refusal",
+        "chat",
+        "bool",
+        SCOPE_RUNTIME,
+        help=(
+            "When the model refuses right after its hosted web search and the turn used only "
+            "read-only tools, answer once more without web search (PRP-0260)."
+        ),
+    ),
+    SettingDescriptor(
         "session_import_max_bytes",
         "Chat import size cap (bytes)",
         "chat",

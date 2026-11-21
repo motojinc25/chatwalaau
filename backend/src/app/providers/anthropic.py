@@ -40,6 +40,7 @@ import re
 from typing import Any
 
 from app import models_catalog
+from app.agent.web_search_gate import web_search_withheld
 from app.core.config import settings
 from app.providers.base import (
     EFFORT_DEFAULT,
@@ -338,7 +339,9 @@ class _PromptCacheMixin:
         # PRP-0185 step 2 (UDR-0167 D18): one shared shape predicate for both lanes,
         # so the tool surface report explains the drop on the SAME condition that
         # performs it.
-        if has_structured_format(run_options):
+        # PRP-0260 (UDR-0241 D5): a run with hosted web search withheld (Retry without web
+        # search) drops it here too.
+        if has_structured_format(run_options) or web_search_withheld():
             strip_web_search(run_options)
         # UDR-0141 amendment (v0.189.0): a compacted history replays thinking blocks
         # whose creation prefix is gone; Opus 5.5 rejects those unless told to drop them.

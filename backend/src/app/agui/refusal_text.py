@@ -33,4 +33,44 @@ def text_refusal(final_message: str) -> str | None:
     return text if TEXT_REFUSAL_PATTERN.fullmatch(text) else None
 
 
-__all__ = ["TEXT_REFUSAL_MAX_CHARS", "TEXT_REFUSAL_PATTERN", "text_refusal"]
+# PRP-0260 (UDR-0241 D2): the same sentence at the END of the final message, after a
+# preamble the model wrote first ("... I'll also check the links.I'm sorry, but I cannot
+# assist with that request."). The text before it must end a sentence or a line.
+_TAIL_PATTERN = re.compile(r"(?:" + TEXT_REFUSAL_PATTERN.pattern + r")\s*\Z", re.IGNORECASE)
+_PREAMBLE_ENDINGS = (".", "!", "?", ":", "\n", "。", "！", "？", "：")
+
+
+def split_text_refusal(final_message: str) -> tuple[str, str] | None:
+    """``(preamble, sentence)`` when the final message is, or ends with, the refusal sentence.
+
+    The whole-message case returns an empty preamble (UDR-0236 D6). The tail case
+    (UDR-0241 D2) needs all of:
+    - nothing but whitespace after the sentence;
+    - the preamble, without trailing spaces, ends a sentence or a line;
+    - the sentence is not inside an open code fence (an odd number of fences before it).
+
+    A sentence quoted in the middle of an answer, or followed by a closing quote mark,
+    never matches. The returned preamble is the original text up to the sentence.
+    """
+    text = final_message or ""
+    whole = text_refusal(text)
+    if whole is not None:
+        return "", whole
+    match = _TAIL_PATTERN.search(text)
+    if match is None:
+        return None
+    sentence = match.group(0).strip()
+    if len(sentence) > TEXT_REFUSAL_MAX_CHARS:
+        return None
+    preamble = text[: match.start()]
+    before = preamble.rstrip(" \t")
+    if not before.strip():
+        return None
+    if not before.endswith(_PREAMBLE_ENDINGS):
+        return None
+    if preamble.count("```") % 2 == 1:
+        return None
+    return preamble, sentence
+
+
+__all__ = ["TEXT_REFUSAL_MAX_CHARS", "TEXT_REFUSAL_PATTERN", "split_text_refusal", "text_refusal"]

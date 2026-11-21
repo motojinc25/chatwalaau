@@ -61,8 +61,17 @@ from app.agent.prompt_dump import dump_prompt
 from app.agent.stream_merge import ArgumentFold, TextFold, UsageFold, is_refusal, merge_mode
 from app.agent.temporary import schedule_sweep, set_temporary_run, temporary_path
 from app.agent.user_memory import session_user_profile_snapshot
+from app.agent.web_search_gate import (
+    FALLBACK_INSTRUCTION,
+    HOSTED_WEB_SEARCH_TOOL,
+    is_read_only_tool,
+    release,
+    search_action,
+    search_log_fields,
+    withhold_for_run,
+)
 from app.agui.agent_registry import AgentRegistry
-from app.agui.refusal_text import text_refusal
+from app.agui.refusal_text import split_text_refusal
 from app.agui.sanitize import TextSanitizer
 from app.agui.token_usage import context_base_tokens, turn_summary
 from app.auth import is_client_loopback, verify_api_key
@@ -81,6 +90,8 @@ CITATION_MARKER_REPORT_LIMIT = 10
 
 # The model's own refusal, reported once per turn after the run (CTR-0009, UDR-0220 D2).
 MODEL_REFUSAL_EVENT = "model_refusal"
+# PRP-0260 (UDR-0241 D3): the turn is answered again without hosted web search.
+WEB_SEARCH_FALLBACK_EVENT = "web_search_fallback"
 
 # ag-ui-protocol changed ReasoningMessageStartEvent.role from
 # Literal["assistant"] (<= 0.1.13) to Literal["reasoning"] (newer releases).
@@ -1347,6 +1358,14 @@ async def _stream_with_reasoning(
     # task list or the mode (parallel calls make `tc_name_current` unreliable).
     harness_tool_names: dict[str, str] = {}
 
+    # Hosted web search and the fallback after a refusal (PRP-0260, UDR-0241). Declared
+    # before the try so the refusal block after it can read them on every path.
+    fallback_ran = False
+    turn_hosted_searches = 0
+    turn_tools: list[str] = []
+    last_attempt_hosted = 0
+    web_search_tokens: list[Any] = []
+
     try:
         # Pre-process: strip PDF image_url entries from messages before normalization.
         # normalize_agui_input_messages converts image_url content to MAF Content,
@@ -1411,6 +1430,10 @@ async def _stream_with_reasoning(
             # .temporary/ quarantine (CTR-0014); below we skip the Memory snapshot
             # and no-op the memory tool for a de-personalized, Identity-only run.
             temporary = bool(request_body.state.get("temporary", False))
+            # PRP-0260 (UDR-0241 D5): Retry without web search sends web_search: false,
+            # which withholds the hosted tool for this one run. Any other value is ignored.
+            if request_body.state.get("web_search") is False:
+                web_search_tokens.append(withhold_for_run(True))
 
         # Select agent: the harness run-target's cached agent (CTR-0193, UDR-0119
         # D3) or the registry's DEFAULT agent (CTR-0070). Since PRP-0184 there is no
@@ -1700,449 +1723,608 @@ async def _stream_with_reasoning(
                     },
                 )
             )
-        async for update in _resilient_run(agent, messages, session, run_options, stats=run_stats):
-            # v0.77.1: a transient upstream 5xx before any output triggers an
-            # automatic retry. The helper yields a _RetryNotice so we can tell
-            # the SPA a retry is happening (the run continues; no RUN_ERROR).
-            if isinstance(update, _RetryNotice):
-                # A retry is a fresh run: its usage starts a new segment (UDR-0212 D3.3).
-                usage_fold.new_segment()
-                yield encoder.encode(
-                    CustomEvent(
-                        type=EventType.CUSTOM,
-                        name="run_retry",
-                        value={
-                            "attempt": update.attempt,
-                            "max_attempts": update.max_attempts,
-                            "delay_ms": update.delay_ms,
-                            "reason": "transient_upstream_error",
-                        },
-                    )
-                )
-                continue
-
-            # UDR-0163 D3: a message MAF's loop injected between iterations ("Progress
-            # so far: ...", "Continue working on the task ...") is NOT answer text. It
-            # ends the open text message -- the next iteration starts a new paragraph --
-            # and becomes a harness_progress event. The model's history keeps it.
-            if harness_tracker is not None and harness_tracker.observe(update):
-                # The next loop iteration is a new function-invocation loop, whose
-                # cumulative usage restarts: close the segment (UDR-0212 D3.3).
-                usage_fold.new_segment()
-                text_fold.reset()
-                if msg_id is not None:
-                    yield encoder.encode(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
-                    msg_id = None
-                progress_value = await harness_tracker.snapshot()
-                if progress_value is not None:
-                    yield encoder.encode(
-                        CustomEvent(type=EventType.CUSTOM, name=HARNESS_PROGRESS_EVENT, value=progress_value)
-                    )
-                continue
-
-            contents = getattr(update, "contents", None) or []
-            for content in contents:
-                content_type = getattr(content, "type", None)
-
-                if content_type == "text_reasoning":
-                    # UDR-0212 D3.1: a `replace` re-send of the summary emits only
-                    # what was not streamed yet (usually nothing).
-                    if reasoning_msg_id is None:
-                        reasoning_fold.reset()
-                    text = reasoning_fold.feed(getattr(content, "text", None), merge_mode(content))
-                    if not text:
-                        continue
-                    if reasoning_msg_id is None:
-                        reasoning_msg_id = _generate_id()
-                        yield encoder.encode(
-                            ReasoningMessageStartEvent(
-                                type=EventType.REASONING_MESSAGE_START,
-                                message_id=reasoning_msg_id,
-                                role=_REASONING_MESSAGE_ROLE,
-                            )
-                        )
-                    yield encoder.encode(
-                        ReasoningMessageContentEvent(
-                            type=EventType.REASONING_MESSAGE_CONTENT,
-                            message_id=reasoning_msg_id,
-                            delta=text,
-                        )
-                    )
-
-                elif content_type == "text":
-                    text = getattr(content, "text", None)
-                    if not text:
-                        # MAF delivers url_citation annotations as a text content with
-                        # an EMPTY text. Stage 1 does not consume them (UDR-0160 D5);
-                        # it only records that they arrived.
-                        if getattr(content, "annotations", None):
-                            annotations_seen = True
-                        continue
-                    # PRP-0237 (UDR-0220 D2): the model's refusal part is NOT answer text. It
-                    # folds in its own run (D1) and reaches the SPA once, after the run, as
-                    # the model_refusal event -- never as TEXT_MESSAGE_CONTENT, so it is not
-                    # shown, saved or replayed as if the model had answered with it.
-                    if is_refusal(content):
-                        text_fold.feed(text, merge_mode(content), refusal=True)
-                        continue
-                    # UDR-0212 D3.1: fold BEFORE the sanitizer, whose state must only
-                    # ever see each character once. A new message starts a new run.
-                    if msg_id is None:
-                        text_fold.reset()
-                    text = text_fold.feed(text, merge_mode(content))
-                    if not text:
-                        continue
-                    # UDR-0160 D1/D2: the markup never leaves the backend, so the SPA,
-                    # the session file, the search index, the export and the title /
-                    # memory tasks are all clean without touching their own code.
-                    text, _stripped = text_sanitizer.feed(text)
-                    if not text:
-                        continue
-                    # Accumulate visible assistant text for Auto Session
-                    # Title (PRP-0077, CTR-0109).
-                    assistant_text_parts.append(text)
-                    if msg_id is None:
-                        final_text_parts.clear()
-                    final_text_parts.append(text)
-                    # Close any open reasoning block before text
-                    if reasoning_msg_id is not None:
-                        yield encoder.encode(
-                            ReasoningMessageEndEvent(
-                                type=EventType.REASONING_MESSAGE_END,
-                                message_id=reasoning_msg_id,
-                            )
-                        )
-                        reasoning_msg_id = None
-                    if msg_id is None:
-                        msg_id = _generate_id()
-                        yield encoder.encode(
-                            TextMessageStartEvent(
-                                type=EventType.TEXT_MESSAGE_START,
-                                message_id=msg_id,
-                                role="assistant",
-                            )
-                        )
-                    yield encoder.encode(
-                        TextMessageContentEvent(
-                            type=EventType.TEXT_MESSAGE_CONTENT,
-                            message_id=msg_id,
-                            delta=text,
-                        )
-                    )
-
-                elif content_type == "function_call":
-                    # A tool call ends the text run: the next call's text is a new run
-                    # for the `replace` comparison (UDR-0212 D3.1), even inside one
-                    # AG-UI message.
-                    text_fold.reset()
-                    # Close reasoning block before tool call
-                    if reasoning_msg_id is not None:
-                        yield encoder.encode(
-                            ReasoningMessageEndEvent(
-                                type=EventType.REASONING_MESSAGE_END,
-                                message_id=reasoning_msg_id,
-                            )
-                        )
-                        reasoning_msg_id = None
-
-                    tc_id = getattr(content, "call_id", None) or _generate_id()
-                    tc_name = getattr(content, "name", None)
-                    if harness_tracker is not None and tc_name:
-                        harness_tool_names[tc_id] = tc_name
-                    if tc_name and tc_id != tool_call_id:
-                        tool_call_id = tc_id
-                        tc_name_current = tc_name
-                        yield encoder.encode(
-                            ToolCallStartEvent(
-                                type=EventType.TOOL_CALL_START,
-                                tool_call_id=tc_id,
-                                tool_call_name=tc_name,
-                                parent_message_id=msg_id,
-                            )
-                        )
-                    # UDR-0212 D3.2: the full-argument `replace` the OpenAI connector
-                    # sends after the deltas adds nothing to the card.
-                    delta = argument_fold.feed(tc_id, getattr(content, "arguments", None), merge_mode(content))
-                    if delta:
-                        yield encoder.encode(
-                            ToolCallArgsEvent(
-                                type=EventType.TOOL_CALL_ARGS,
-                                tool_call_id=tc_id,
-                                delta=delta,
-                            )
-                        )
-
-                elif content_type == "shell_tool_call":
-                    # UDR-0164 D5 (PRP-0182): since MAF 1.19.0 (#8294) the OpenAI
-                    # connector keeps a Responses `shell_call` LOCAL only when the item
-                    # says environment.type == "local"; anything else arrives here as a
-                    # HOSTED shell call. ChatWalaʻau never executes a hosted call, but it
-                    # must never be invisible either: render it as the harness shell's
-                    # tool call ("Ran command") and say that it was not run locally.
-                    if reasoning_msg_id is not None:
-                        yield encoder.encode(
-                            ReasoningMessageEndEvent(
-                                type=EventType.REASONING_MESSAGE_END,
-                                message_id=reasoning_msg_id,
-                            )
-                        )
-                        reasoning_msg_id = None
-                    tc_id = getattr(content, "call_id", None) or _generate_id()
-                    commands = [c for c in (getattr(content, "commands", None) or []) if isinstance(c, str)]
-                    logger.warning(
-                        "Hosted shell call reached the AG-UI stream (call_id=%s, thread=%s); it is "
-                        "NOT executed by ChatWalaʻau. A local harness shell call should arrive as "
-                        "a function_call (UDR-0164 D5).",
-                        tc_id,
-                        thread_id,
-                    )
-                    if tc_id != tool_call_id:
-                        tool_call_id = tc_id
-                        tc_name_current = "run_shell"
-                        yield encoder.encode(
-                            ToolCallStartEvent(
-                                type=EventType.TOOL_CALL_START,
-                                tool_call_id=tc_id,
-                                tool_call_name="run_shell",
-                                parent_message_id=msg_id,
-                            )
-                        )
-                        yield encoder.encode(
-                            ToolCallArgsEvent(
-                                type=EventType.TOOL_CALL_ARGS,
-                                tool_call_id=tc_id,
-                                delta=json.dumps({"command": "\n".join(commands)}),
-                            )
-                        )
-
-                elif content_type == "shell_tool_result":
-                    tc_id = getattr(content, "call_id", None)
-                    if tc_id:
-                        yield encoder.encode(ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=tc_id))
-                        outputs = getattr(content, "outputs", None) or []
-                        result_str = "\n".join(
-                            part
-                            for out in outputs
-                            for part in (getattr(out, "stdout", None), getattr(out, "stderr", None))
-                            if isinstance(part, str) and part
-                        )
-                        yield encoder.encode(
-                            ToolCallResultEvent(
-                                type=EventType.TOOL_CALL_RESULT,
-                                message_id=_generate_id(),
-                                tool_call_id=tc_id,
-                                content=result_str,
-                                role="tool",
-                            )
-                        )
-
-                elif content_type == "function_approval_request":
-                    # UDR-0161 D3: no tool is built approval-gated (D1), so a request
-                    # reaching here is a construction defect -- an upstream default
-                    # that changed, or a tool added with the framework default. It is
-                    # NOT parked, auto-approved, denied or dropped: the turn ends with
-                    # an error that names the tool.
-                    fn_call = getattr(content, "function_call", None)
-                    unexpected_approval_tool = getattr(fn_call, "name", "") or "<unknown>"
-                    logger.error(
-                        "Tool %r asked for approval (call_id=%s, thread=%s), but no tool is "
-                        "approval-gated since PRP-0179; ending the turn (UDR-0161 D3).",
-                        unexpected_approval_tool,
-                        getattr(fn_call, "call_id", None),
-                        thread_id,
-                    )
-                    break
-
-                elif content_type == "function_result":
-                    # The model call that asked for this tool is over (UDR-0212 D3.4).
-                    usage_fold.call_boundary()
-                    text_fold.reset()
-                    tc_id = getattr(content, "call_id", None)
-                    if tc_id:
-                        yield encoder.encode(
-                            ToolCallEndEvent(
-                                type=EventType.TOOL_CALL_END,
-                                tool_call_id=tc_id,
-                            )
-                        )
-                        raw_result = getattr(content, "result", "") or ""
-                        result_str = raw_result if isinstance(raw_result, str) else json.dumps(raw_result)
-                        yield encoder.encode(
-                            ToolCallResultEvent(
-                                type=EventType.TOOL_CALL_RESULT,
-                                message_id=_generate_id(),
-                                tool_call_id=tc_id,
-                                content=result_str,
-                                role="tool",
-                            )
-                        )
-                        # MCP Apps: check if this tool has UI resource (CTR-0067, PRP-0034)
-                        from app.mcp_apps.manager import (
-                            fetch_ui_resource,
-                            get_ui_tool_metadata,
-                            host_payload,
-                            store_app_html,
-                        )
-
-                        ui_meta = get_ui_tool_metadata(tc_name_current)
-                        if ui_meta:
-                            try:
-                                # Find the MCP tool instance
-                                from app.mcp.lifecycle import _mcp_server_status, _mcp_tools
-
-                                mcp_tool = None
-                                for idx, status in enumerate(_mcp_server_status):
-                                    if status["name"] == ui_meta.server_name and idx < len(_mcp_tools):
-                                        mcp_tool = _mcp_tools[idx]
-                                        break
-
-                                if mcp_tool:
-                                    ui_resource = await fetch_ui_resource(
-                                        mcp_tool, ui_meta.resource_uri, ui_meta.server_name
-                                    )
-                                    if ui_resource:
-                                        ref_id = tc_id or _generate_id()
-                                        html_filename = store_app_html(thread_id, ref_id, ui_resource.html)
-                                        yield encoder.encode(
-                                            CustomEvent(
-                                                type=EventType.CUSTOM,
-                                                name="mcp_app",
-                                                value={
-                                                    "server_name": ui_meta.server_name,
-                                                    "tool_name": ui_meta.tool_name,
-                                                    "resource_uri": ui_meta.resource_uri,
-                                                    "html_ref": f"/api/mcp-apps/html/{thread_id}/{html_filename}",
-                                                    "csp": ui_resource.csp,
-                                                    "permissions": ui_resource.permissions,
-                                                    "call_id": ref_id,
-                                                    # The full CallToolResult for the View
-                                                    # (UDR-0019 D12); absent -> the SPA sends
-                                                    # the text result instead.
-                                                    "tool_result": host_payload(content),
-                                                },
-                                            )
-                                        )
-                            except Exception:
-                                logger.warning("Failed to fetch MCP App UI for %s", tc_name_current, exc_info=True)
-
-                        # A todo / mode tool changed the picture: send a fresh snapshot
-                        # (CTR-0219, UDR-0163 D4).
-                        if harness_tracker is not None and is_progress_tool(harness_tool_names.get(tc_id)):
-                            progress_value = await harness_tracker.snapshot()
-                            if progress_value is not None:
-                                yield encoder.encode(
-                                    CustomEvent(
-                                        type=EventType.CUSTOM, name=HARNESS_PROGRESS_EVENT, value=progress_value
-                                    )
-                                )
-
-                        tool_call_id = None
-                        # Reset text message after tool result (allows new text block)
-                        if msg_id is not None:
-                            yield encoder.encode(
-                                TextMessageEndEvent(
-                                    type=EventType.TEXT_MESSAGE_END,
-                                    message_id=msg_id,
-                                )
-                            )
-                            msg_id = None
-
-                elif content_type == "usage":
-                    usage_fold.observe(getattr(content, "usage_details", None), merge_mode(content))
-                    turn_usage = usage_fold.turn
-                    last_usage = usage_fold.last_call
-                    model_calls = usage_fold.calls
-                    usage_value = dict(last_usage or {})
-                    # Two-axis accumulation (PRP-0157, UDR-0135 D1/D2), folded by
-                    # CTR-0266 (PRP-0229, UDR-0212 D3.3-D3.5): the billing axis is
-                    # the turn total (segment totals summed, `replace` setting a
-                    # segment's cumulative), the context axis -- and every base key
-                    # of this event -- is the LAST model call, and `model_calls`
-                    # counts calls, not usage contents. Equal to what
-                    # `AgentResponse.from_updates` reports for one segment, without
-                    # the finalizer's stream-draining behaviour.
-                    # PRP-0144 / UDR-0125 D5: attribute usage to the offering
-                    # that actually SERVED the turn. `effective_model` resolves to
-                    # the harness run-target's bound offering for a harness run and
-                    # to the active Prompt agent's model otherwise -- since PRP-0184
-                    # there is no other candidate, because the model is the
-                    # run-target's (UDR-0166 D1).
-                    model_name = effective_model
-                    # Catalog context window (CTR-0069, PRP-0113): an offering's
-                    # declared context_window wins, else DEFAULT_CONTEXT_WINDOW.
-                    usage_value["max_context_tokens"] = providers.get_max_context_tokens(model_name)
-                    usage_value["model"] = model_name
-                    # The turn's generation options (PRP-0071 / PRP-0081,
-                    # CTR-0030), sourced since PRP-0184 from the RUN-TARGET's
-                    # resolved selection rather than from the request
-                    # (UDR-0166 D13). The effort keeps its back-compat field
-                    # name `reasoning`; effort is the only advertised option
-                    # now, so no extra key appears. Emitted for every provider
-                    # (incl. demo) so the SPA can label and persist it next to
-                    # the model name. None = the model advertises no effort
-                    # axis (a `family: bare` offering, UDR-0166 D3, or a harness
-                    # run, whose effort the CTR-0192 policy summary reports);
-                    # omit the key rather than echo null.
-                    if resolved_reasoning is not None:
-                        usage_value["reasoning"] = resolved_reasoning
-                    usage_value.update({k: v for k, v in resolved_options.items() if k != "effort"})
-                    # Structured output status (PRP-0082, CTR-0009 v14, UDR-0058
-                    # D4/D9). Soft, non-blocking: parse the accumulated answer and
-                    # surface a status; never reject / regenerate. Persisted by the
-                    # SPA inside the usage object so the structured flag survives
-                    # reload. Skipped in DEMO_MODE (no structured resolution).
-                    if structured_active and not is_demo_mode():
-                        usage_value["structured"] = True
-                        usage_value["output_status"] = soft_validate("".join(assistant_text_parts))
-                    # Provider-agnostic prompt-cache metrics (PRP-0080,
-                    # CTR-0009 / FEAT-0038 / UDR-0056 D6). Normalize the
-                    # provider-specific cache token keys to a stable
-                    # cache_read_input_tokens / cache_write_input_tokens pair
-                    # so the SPA / operator can see the savings regardless of
-                    # provider. Anthropic reports anthropic.cache_read /
-                    # cache_creation; OpenAI reports a *cached_tokens detail.
-                    # Additive: absent when the provider reports no cache use.
-                    cache_read = usage_value.get("anthropic.cache_read_input_tokens")
-                    cache_write = usage_value.get("anthropic.cache_creation_input_tokens")
-                    if cache_read is None:
-                        cache_read = next(
-                            (v for k, v in usage_value.items() if isinstance(k, str) and k.endswith("cached_tokens")),
-                            None,
-                        )
-                    if cache_read is not None:
-                        usage_value["cache_read_input_tokens"] = cache_read
-                    if cache_write is not None:
-                        usage_value["cache_write_input_tokens"] = cache_write
-                    # Two-axis publication (PRP-0157, UDR-0135 D3/D4/D6/D7).
-                    # ADDITIVE: every key above keeps the meaning it has always
-                    # had -- the most recent model call -- because sessions
-                    # persisted since v0.18.0 store them under that meaning and
-                    # a stored key cannot be re-measured. `context_base_tokens`
-                    # is the context axis, normalized here because the
-                    # correction depends on the provider's reporting convention
-                    # (CTR-0102), which does not belong in a React component.
-                    # `turn` is the billing axis. Both are omitted when nothing
-                    # was measured; zero never stands in for unknown.
-                    includes_cache_read = providers.input_tokens_include_cache_read(model_name)
-                    base_tokens = context_base_tokens(last_usage, includes_cache_read=includes_cache_read)
-                    if base_tokens is not None:
-                        usage_value["context_base_tokens"] = base_tokens
-                    turn_value = turn_summary(
-                        turn_usage,
-                        model_calls=model_calls,
-                        includes_cache_read=includes_cache_read,
-                    )
-                    if turn_value is not None:
-                        usage_value["turn"] = turn_value
+        # PRP-0260 (UDR-0241 D3): at most two attempts. The second runs only after a refused
+        # Prompt-agent attempt that used the hosted web search and read-only tools, with the
+        # hosted tool withheld and one extra instruction.
+        while True:
+            attempt_hosted = 0
+            attempt_tools: list[str] = []
+            hosted_started: dict[str, bool] = {}
+            hosted_ended: set[str] = set()
+            async for update in _resilient_run(agent, messages, session, run_options, stats=run_stats):
+                # v0.77.1: a transient upstream 5xx before any output triggers an
+                # automatic retry. The helper yields a _RetryNotice so we can tell
+                # the SPA a retry is happening (the run continues; no RUN_ERROR).
+                if isinstance(update, _RetryNotice):
+                    # A retry is a fresh run: its usage starts a new segment (UDR-0212 D3.3).
+                    usage_fold.new_segment()
                     yield encoder.encode(
                         CustomEvent(
                             type=EventType.CUSTOM,
-                            name="usage",
-                            value=usage_value,
+                            name="run_retry",
+                            value={
+                                "attempt": update.attempt,
+                                "max_attempts": update.max_attempts,
+                                "delay_ms": update.delay_ms,
+                                "reason": "transient_upstream_error",
+                            },
                         )
                     )
-            if unexpected_approval_tool is not None:
+                    continue
+
+                # UDR-0163 D3: a message MAF's loop injected between iterations ("Progress
+                # so far: ...", "Continue working on the task ...") is NOT answer text. It
+                # ends the open text message -- the next iteration starts a new paragraph --
+                # and becomes a harness_progress event. The model's history keeps it.
+                if harness_tracker is not None and harness_tracker.observe(update):
+                    # The next loop iteration is a new function-invocation loop, whose
+                    # cumulative usage restarts: close the segment (UDR-0212 D3.3).
+                    usage_fold.new_segment()
+                    text_fold.reset()
+                    if msg_id is not None:
+                        yield encoder.encode(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
+                        msg_id = None
+                    progress_value = await harness_tracker.snapshot()
+                    if progress_value is not None:
+                        yield encoder.encode(
+                            CustomEvent(type=EventType.CUSTOM, name=HARNESS_PROGRESS_EVENT, value=progress_value)
+                        )
+                    continue
+
+                contents = getattr(update, "contents", None) or []
+                for content in contents:
+                    content_type = getattr(content, "type", None)
+
+                    if content_type == "text_reasoning":
+                        # UDR-0212 D3.1: a `replace` re-send of the summary emits only
+                        # what was not streamed yet (usually nothing).
+                        if reasoning_msg_id is None:
+                            reasoning_fold.reset()
+                        text = reasoning_fold.feed(getattr(content, "text", None), merge_mode(content))
+                        if not text:
+                            continue
+                        if reasoning_msg_id is None:
+                            reasoning_msg_id = _generate_id()
+                            yield encoder.encode(
+                                ReasoningMessageStartEvent(
+                                    type=EventType.REASONING_MESSAGE_START,
+                                    message_id=reasoning_msg_id,
+                                    role=_REASONING_MESSAGE_ROLE,
+                                )
+                            )
+                        yield encoder.encode(
+                            ReasoningMessageContentEvent(
+                                type=EventType.REASONING_MESSAGE_CONTENT,
+                                message_id=reasoning_msg_id,
+                                delta=text,
+                            )
+                        )
+
+                    elif content_type == "text":
+                        text = getattr(content, "text", None)
+                        if not text:
+                            # MAF delivers url_citation annotations as a text content with
+                            # an EMPTY text. Stage 1 does not consume them (UDR-0160 D5);
+                            # it only records that they arrived.
+                            if getattr(content, "annotations", None):
+                                annotations_seen = True
+                            continue
+                        # PRP-0237 (UDR-0220 D2): the model's refusal part is NOT answer text. It
+                        # folds in its own run (D1) and reaches the SPA once, after the run, as
+                        # the model_refusal event -- never as TEXT_MESSAGE_CONTENT, so it is not
+                        # shown, saved or replayed as if the model had answered with it.
+                        if is_refusal(content):
+                            text_fold.feed(text, merge_mode(content), refusal=True)
+                            continue
+                        # UDR-0212 D3.1: fold BEFORE the sanitizer, whose state must only
+                        # ever see each character once. A new message starts a new run.
+                        if msg_id is None:
+                            text_fold.reset()
+                        text = text_fold.feed(text, merge_mode(content))
+                        if not text:
+                            continue
+                        # UDR-0160 D1/D2: the markup never leaves the backend, so the SPA,
+                        # the session file, the search index, the export and the title /
+                        # memory tasks are all clean without touching their own code.
+                        text, _stripped = text_sanitizer.feed(text)
+                        if not text:
+                            continue
+                        # Accumulate visible assistant text for Auto Session
+                        # Title (PRP-0077, CTR-0109).
+                        assistant_text_parts.append(text)
+                        if msg_id is None:
+                            final_text_parts.clear()
+                        final_text_parts.append(text)
+                        # Close any open reasoning block before text
+                        if reasoning_msg_id is not None:
+                            yield encoder.encode(
+                                ReasoningMessageEndEvent(
+                                    type=EventType.REASONING_MESSAGE_END,
+                                    message_id=reasoning_msg_id,
+                                )
+                            )
+                            reasoning_msg_id = None
+                        if msg_id is None:
+                            msg_id = _generate_id()
+                            yield encoder.encode(
+                                TextMessageStartEvent(
+                                    type=EventType.TEXT_MESSAGE_START,
+                                    message_id=msg_id,
+                                    role="assistant",
+                                )
+                            )
+                        yield encoder.encode(
+                            TextMessageContentEvent(
+                                type=EventType.TEXT_MESSAGE_CONTENT,
+                                message_id=msg_id,
+                                delta=text,
+                            )
+                        )
+
+                    elif content_type == "function_call":
+                        # A tool call ends the text run: the next call's text is a new run
+                        # for the `replace` comparison (UDR-0212 D3.1), even inside one
+                        # AG-UI message.
+                        text_fold.reset()
+                        # Close reasoning block before tool call
+                        if reasoning_msg_id is not None:
+                            yield encoder.encode(
+                                ReasoningMessageEndEvent(
+                                    type=EventType.REASONING_MESSAGE_END,
+                                    message_id=reasoning_msg_id,
+                                )
+                            )
+                            reasoning_msg_id = None
+
+                        tc_id = getattr(content, "call_id", None) or _generate_id()
+                        tc_name = getattr(content, "name", None)
+                        if harness_tracker is not None and tc_name:
+                            harness_tool_names[tc_id] = tc_name
+                        if tc_name and tc_id != tool_call_id:
+                            # PRP-0260 (UDR-0241 D3): what this attempt called, for the fallback
+                            # gate. A hosted call (Anthropic's server web_search) is not local.
+                            if getattr(content, "hosted", False) or getattr(content, "informational_only", False):
+                                if tc_name == HOSTED_WEB_SEARCH_TOOL:
+                                    attempt_hosted += 1
+                            else:
+                                attempt_tools.append(tc_name)
+                            tool_call_id = tc_id
+                            tc_name_current = tc_name
+                            yield encoder.encode(
+                                ToolCallStartEvent(
+                                    type=EventType.TOOL_CALL_START,
+                                    tool_call_id=tc_id,
+                                    tool_call_name=tc_name,
+                                    parent_message_id=msg_id,
+                                )
+                            )
+                        # UDR-0212 D3.2: the full-argument `replace` the OpenAI connector
+                        # sends after the deltas adds nothing to the card.
+                        delta = argument_fold.feed(tc_id, getattr(content, "arguments", None), merge_mode(content))
+                        if delta:
+                            yield encoder.encode(
+                                ToolCallArgsEvent(
+                                    type=EventType.TOOL_CALL_ARGS,
+                                    tool_call_id=tc_id,
+                                    delta=delta,
+                                )
+                            )
+
+                    elif (
+                        content_type in ("search_tool_call", "search_tool_result")
+                        and getattr(content, "tool_name", None) == HOSTED_WEB_SEARCH_TOOL
+                    ):
+                        # PRP-0260 (UDR-0241 D1): the provider's own web search is never
+                        # invisible. One tool call per search, display only (nothing is added
+                        # to the model's history), and one log line without query text.
+                        if reasoning_msg_id is not None:
+                            yield encoder.encode(
+                                ReasoningMessageEndEvent(
+                                    type=EventType.REASONING_MESSAGE_END,
+                                    message_id=reasoning_msg_id,
+                                )
+                            )
+                            reasoning_msg_id = None
+                        hs_id = getattr(content, "call_id", None) or _generate_id()
+                        payload = (
+                            getattr(content, "arguments", None)
+                            if content_type == "search_tool_call"
+                            else getattr(content, "result", None)
+                        )
+                        action = search_action(payload)
+                        if hs_id not in hosted_started:
+                            hosted_started[hs_id] = False
+                            attempt_hosted += 1
+                            yield encoder.encode(
+                                ToolCallStartEvent(
+                                    type=EventType.TOOL_CALL_START,
+                                    tool_call_id=hs_id,
+                                    tool_call_name=HOSTED_WEB_SEARCH_TOOL,
+                                    parent_message_id=msg_id,
+                                )
+                            )
+                        if action and not hosted_started[hs_id]:
+                            hosted_started[hs_id] = True
+                            yield encoder.encode(
+                                ToolCallArgsEvent(
+                                    type=EventType.TOOL_CALL_ARGS,
+                                    tool_call_id=hs_id,
+                                    delta=json.dumps(action, ensure_ascii=False, default=str),
+                                )
+                            )
+                        if content_type == "search_tool_result" and hs_id not in hosted_ended:
+                            hosted_ended.add(hs_id)
+                            status = str(getattr(content, "status", None) or "completed")
+                            kind, n_queries, host = search_log_fields(payload)
+                            logger.info(
+                                "Hosted web search: thread=%s run=%s model=%s action=%s queries=%d host=%s "
+                                "status=%s (UDR-0241 D1)",
+                                thread_id,
+                                run_id,
+                                effective_model,
+                                kind,
+                                n_queries,
+                                host,
+                                status,
+                            )
+                            yield encoder.encode(ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=hs_id))
+                            yield encoder.encode(
+                                ToolCallResultEvent(
+                                    type=EventType.TOOL_CALL_RESULT,
+                                    message_id=_generate_id(),
+                                    tool_call_id=hs_id,
+                                    content=json.dumps({"status": status}),
+                                    role="tool",
+                                )
+                            )
+                            # Like a tool result: the text after the search is a new message
+                            # and a new run for the `replace` comparison (UDR-0212 D3.1).
+                            text_fold.reset()
+                            if msg_id is not None:
+                                yield encoder.encode(
+                                    TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id)
+                                )
+                                msg_id = None
+
+                    elif content_type == "shell_tool_call":
+                        # UDR-0164 D5 (PRP-0182): since MAF 1.19.0 (#8294) the OpenAI
+                        # connector keeps a Responses `shell_call` LOCAL only when the item
+                        # says environment.type == "local"; anything else arrives here as a
+                        # HOSTED shell call. ChatWalaʻau never executes a hosted call, but it
+                        # must never be invisible either: render it as the harness shell's
+                        # tool call ("Ran command") and say that it was not run locally.
+                        if reasoning_msg_id is not None:
+                            yield encoder.encode(
+                                ReasoningMessageEndEvent(
+                                    type=EventType.REASONING_MESSAGE_END,
+                                    message_id=reasoning_msg_id,
+                                )
+                            )
+                            reasoning_msg_id = None
+                        tc_id = getattr(content, "call_id", None) or _generate_id()
+                        commands = [c for c in (getattr(content, "commands", None) or []) if isinstance(c, str)]
+                        logger.warning(
+                            "Hosted shell call reached the AG-UI stream (call_id=%s, thread=%s); it is "
+                            "NOT executed by ChatWalaʻau. A local harness shell call should arrive as "
+                            "a function_call (UDR-0164 D5).",
+                            tc_id,
+                            thread_id,
+                        )
+                        if tc_id != tool_call_id:
+                            tool_call_id = tc_id
+                            tc_name_current = "run_shell"
+                            yield encoder.encode(
+                                ToolCallStartEvent(
+                                    type=EventType.TOOL_CALL_START,
+                                    tool_call_id=tc_id,
+                                    tool_call_name="run_shell",
+                                    parent_message_id=msg_id,
+                                )
+                            )
+                            yield encoder.encode(
+                                ToolCallArgsEvent(
+                                    type=EventType.TOOL_CALL_ARGS,
+                                    tool_call_id=tc_id,
+                                    delta=json.dumps({"command": "\n".join(commands)}),
+                                )
+                            )
+
+                    elif content_type == "shell_tool_result":
+                        tc_id = getattr(content, "call_id", None)
+                        if tc_id:
+                            yield encoder.encode(ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=tc_id))
+                            outputs = getattr(content, "outputs", None) or []
+                            result_str = "\n".join(
+                                part
+                                for out in outputs
+                                for part in (getattr(out, "stdout", None), getattr(out, "stderr", None))
+                                if isinstance(part, str) and part
+                            )
+                            yield encoder.encode(
+                                ToolCallResultEvent(
+                                    type=EventType.TOOL_CALL_RESULT,
+                                    message_id=_generate_id(),
+                                    tool_call_id=tc_id,
+                                    content=result_str,
+                                    role="tool",
+                                )
+                            )
+
+                    elif content_type == "function_approval_request":
+                        # UDR-0161 D3: no tool is built approval-gated (D1), so a request
+                        # reaching here is a construction defect -- an upstream default
+                        # that changed, or a tool added with the framework default. It is
+                        # NOT parked, auto-approved, denied or dropped: the turn ends with
+                        # an error that names the tool.
+                        fn_call = getattr(content, "function_call", None)
+                        unexpected_approval_tool = getattr(fn_call, "name", "") or "<unknown>"
+                        logger.error(
+                            "Tool %r asked for approval (call_id=%s, thread=%s), but no tool is "
+                            "approval-gated since PRP-0179; ending the turn (UDR-0161 D3).",
+                            unexpected_approval_tool,
+                            getattr(fn_call, "call_id", None),
+                            thread_id,
+                        )
+                        break
+
+                    elif content_type == "function_result":
+                        # The model call that asked for this tool is over (UDR-0212 D3.4).
+                        usage_fold.call_boundary()
+                        text_fold.reset()
+                        tc_id = getattr(content, "call_id", None)
+                        if tc_id:
+                            yield encoder.encode(
+                                ToolCallEndEvent(
+                                    type=EventType.TOOL_CALL_END,
+                                    tool_call_id=tc_id,
+                                )
+                            )
+                            raw_result = getattr(content, "result", "") or ""
+                            result_str = raw_result if isinstance(raw_result, str) else json.dumps(raw_result)
+                            yield encoder.encode(
+                                ToolCallResultEvent(
+                                    type=EventType.TOOL_CALL_RESULT,
+                                    message_id=_generate_id(),
+                                    tool_call_id=tc_id,
+                                    content=result_str,
+                                    role="tool",
+                                )
+                            )
+                            # MCP Apps: check if this tool has UI resource (CTR-0067, PRP-0034)
+                            from app.mcp_apps.manager import (
+                                fetch_ui_resource,
+                                get_ui_tool_metadata,
+                                host_payload,
+                                store_app_html,
+                            )
+
+                            ui_meta = get_ui_tool_metadata(tc_name_current)
+                            if ui_meta:
+                                try:
+                                    # Find the MCP tool instance
+                                    from app.mcp.lifecycle import _mcp_server_status, _mcp_tools
+
+                                    mcp_tool = None
+                                    for idx, status in enumerate(_mcp_server_status):
+                                        if status["name"] == ui_meta.server_name and idx < len(_mcp_tools):
+                                            mcp_tool = _mcp_tools[idx]
+                                            break
+
+                                    if mcp_tool:
+                                        ui_resource = await fetch_ui_resource(
+                                            mcp_tool, ui_meta.resource_uri, ui_meta.server_name
+                                        )
+                                        if ui_resource:
+                                            ref_id = tc_id or _generate_id()
+                                            html_filename = store_app_html(thread_id, ref_id, ui_resource.html)
+                                            yield encoder.encode(
+                                                CustomEvent(
+                                                    type=EventType.CUSTOM,
+                                                    name="mcp_app",
+                                                    value={
+                                                        "server_name": ui_meta.server_name,
+                                                        "tool_name": ui_meta.tool_name,
+                                                        "resource_uri": ui_meta.resource_uri,
+                                                        "html_ref": f"/api/mcp-apps/html/{thread_id}/{html_filename}",
+                                                        "csp": ui_resource.csp,
+                                                        "permissions": ui_resource.permissions,
+                                                        "call_id": ref_id,
+                                                        # The full CallToolResult for the View
+                                                        # (UDR-0019 D12); absent -> the SPA sends
+                                                        # the text result instead.
+                                                        "tool_result": host_payload(content),
+                                                    },
+                                                )
+                                            )
+                                except Exception:
+                                    logger.warning("Failed to fetch MCP App UI for %s", tc_name_current, exc_info=True)
+
+                            # A todo / mode tool changed the picture: send a fresh snapshot
+                            # (CTR-0219, UDR-0163 D4).
+                            if harness_tracker is not None and is_progress_tool(harness_tool_names.get(tc_id)):
+                                progress_value = await harness_tracker.snapshot()
+                                if progress_value is not None:
+                                    yield encoder.encode(
+                                        CustomEvent(
+                                            type=EventType.CUSTOM, name=HARNESS_PROGRESS_EVENT, value=progress_value
+                                        )
+                                    )
+
+                            tool_call_id = None
+                            # Reset text message after tool result (allows new text block)
+                            if msg_id is not None:
+                                yield encoder.encode(
+                                    TextMessageEndEvent(
+                                        type=EventType.TEXT_MESSAGE_END,
+                                        message_id=msg_id,
+                                    )
+                                )
+                                msg_id = None
+
+                    elif content_type == "usage":
+                        usage_fold.observe(getattr(content, "usage_details", None), merge_mode(content))
+                        turn_usage = usage_fold.turn
+                        last_usage = usage_fold.last_call
+                        model_calls = usage_fold.calls
+                        usage_value = dict(last_usage or {})
+                        # Two-axis accumulation (PRP-0157, UDR-0135 D1/D2), folded by
+                        # CTR-0266 (PRP-0229, UDR-0212 D3.3-D3.5): the billing axis is
+                        # the turn total (segment totals summed, `replace` setting a
+                        # segment's cumulative), the context axis -- and every base key
+                        # of this event -- is the LAST model call, and `model_calls`
+                        # counts calls, not usage contents. Equal to what
+                        # `AgentResponse.from_updates` reports for one segment, without
+                        # the finalizer's stream-draining behaviour.
+                        # PRP-0144 / UDR-0125 D5: attribute usage to the offering
+                        # that actually SERVED the turn. `effective_model` resolves to
+                        # the harness run-target's bound offering for a harness run and
+                        # to the active Prompt agent's model otherwise -- since PRP-0184
+                        # there is no other candidate, because the model is the
+                        # run-target's (UDR-0166 D1).
+                        model_name = effective_model
+                        # Catalog context window (CTR-0069, PRP-0113): an offering's
+                        # declared context_window wins, else DEFAULT_CONTEXT_WINDOW.
+                        usage_value["max_context_tokens"] = providers.get_max_context_tokens(model_name)
+                        usage_value["model"] = model_name
+                        # The turn's generation options (PRP-0071 / PRP-0081,
+                        # CTR-0030), sourced since PRP-0184 from the RUN-TARGET's
+                        # resolved selection rather than from the request
+                        # (UDR-0166 D13). The effort keeps its back-compat field
+                        # name `reasoning`; effort is the only advertised option
+                        # now, so no extra key appears. Emitted for every provider
+                        # (incl. demo) so the SPA can label and persist it next to
+                        # the model name. None = the model advertises no effort
+                        # axis (a `family: bare` offering, UDR-0166 D3, or a harness
+                        # run, whose effort the CTR-0192 policy summary reports);
+                        # omit the key rather than echo null.
+                        if resolved_reasoning is not None:
+                            usage_value["reasoning"] = resolved_reasoning
+                        usage_value.update({k: v for k, v in resolved_options.items() if k != "effort"})
+                        # Structured output status (PRP-0082, CTR-0009 v14, UDR-0058
+                        # D4/D9). Soft, non-blocking: parse the accumulated answer and
+                        # surface a status; never reject / regenerate. Persisted by the
+                        # SPA inside the usage object so the structured flag survives
+                        # reload. Skipped in DEMO_MODE (no structured resolution).
+                        if structured_active and not is_demo_mode():
+                            usage_value["structured"] = True
+                            usage_value["output_status"] = soft_validate("".join(assistant_text_parts))
+                        # Provider-agnostic prompt-cache metrics (PRP-0080,
+                        # CTR-0009 / FEAT-0038 / UDR-0056 D6). Normalize the
+                        # provider-specific cache token keys to a stable
+                        # cache_read_input_tokens / cache_write_input_tokens pair
+                        # so the SPA / operator can see the savings regardless of
+                        # provider. Anthropic reports anthropic.cache_read /
+                        # cache_creation; OpenAI reports a *cached_tokens detail.
+                        # Additive: absent when the provider reports no cache use.
+                        cache_read = usage_value.get("anthropic.cache_read_input_tokens")
+                        cache_write = usage_value.get("anthropic.cache_creation_input_tokens")
+                        if cache_read is None:
+                            cache_read = next(
+                                (
+                                    v
+                                    for k, v in usage_value.items()
+                                    if isinstance(k, str) and k.endswith("cached_tokens")
+                                ),
+                                None,
+                            )
+                        if cache_read is not None:
+                            usage_value["cache_read_input_tokens"] = cache_read
+                        if cache_write is not None:
+                            usage_value["cache_write_input_tokens"] = cache_write
+                        # Two-axis publication (PRP-0157, UDR-0135 D3/D4/D6/D7).
+                        # ADDITIVE: every key above keeps the meaning it has always
+                        # had -- the most recent model call -- because sessions
+                        # persisted since v0.18.0 store them under that meaning and
+                        # a stored key cannot be re-measured. `context_base_tokens`
+                        # is the context axis, normalized here because the
+                        # correction depends on the provider's reporting convention
+                        # (CTR-0102), which does not belong in a React component.
+                        # `turn` is the billing axis. Both are omitted when nothing
+                        # was measured; zero never stands in for unknown.
+                        # PRP-0260 (UDR-0241 D4): saved with the turn, so the note survives a reload.
+                        if fallback_ran:
+                            usage_value["web_search_fallback"] = True
+                        includes_cache_read = providers.input_tokens_include_cache_read(model_name)
+                        base_tokens = context_base_tokens(last_usage, includes_cache_read=includes_cache_read)
+                        if base_tokens is not None:
+                            usage_value["context_base_tokens"] = base_tokens
+                        turn_value = turn_summary(
+                            turn_usage,
+                            model_calls=model_calls,
+                            includes_cache_read=includes_cache_read,
+                        )
+                        if turn_value is not None:
+                            usage_value["turn"] = turn_value
+                        yield encoder.encode(
+                            CustomEvent(
+                                type=EventType.CUSTOM,
+                                name="usage",
+                                value=usage_value,
+                            )
+                        )
+                if unexpected_approval_tool is not None:
+                    break
+
+            last_attempt_hosted = attempt_hosted
+            turn_hosted_searches += attempt_hosted
+            turn_tools.extend(attempt_tools)
+            if unexpected_approval_tool is not None or fallback_ran or harness_run:
                 break
+            if not (settings.web_search_refusal_fallback and attempt_hosted > 0):
+                break
+            if not all(is_read_only_tool(name) for name in attempt_tools):
+                break
+            attempt_refusal = text_fold.refusal or ((split_text_refusal("".join(final_text_parts)) or ("", ""))[1])
+            if not attempt_refusal:
+                break
+            logger.warning(
+                "Model refusal: thread=%s run=%s model=%s refusal_chars=%d answer_chars=%d "
+                "hosted_searches=%d tools=%s; falling back to an answer without web search (UDR-0241 D3)",
+                thread_id,
+                run_id,
+                effective_model,
+                len(attempt_refusal),
+                len("".join(assistant_text_parts)),
+                attempt_hosted,
+                sorted(set(attempt_tools)),
+            )
+            if reasoning_msg_id is not None:
+                yield encoder.encode(
+                    ReasoningMessageEndEvent(type=EventType.REASONING_MESSAGE_END, message_id=reasoning_msg_id)
+                )
+                reasoning_msg_id = None
+            if msg_id is not None:
+                yield encoder.encode(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
+                msg_id = None
+            yield encoder.encode(
+                CustomEvent(
+                    type=EventType.CUSTOM,
+                    name=WEB_SEARCH_FALLBACK_EVENT,
+                    value={"run_id": run_id, "hosted_searches": attempt_hosted},
+                )
+            )
+            # The refused attempt leaves nothing behind: no answer text, no refusal, a new
+            # usage segment (UDR-0212 D3.3) and a fresh session object (the history comes
+            # from the session file, which the refused attempt never wrote).
+            fallback_ran = True
+            assistant_text_parts.clear()
+            final_text_parts.clear()
+            text_fold = TextFold("text")
+            reasoning_fold = TextFold("reasoning")
+            argument_fold = ArgumentFold()
+            text_sanitizer = TextSanitizer()
+            tool_call_id = None
+            usage_fold.new_segment()
+            web_search_tokens.append(withhold_for_run(True))
+            run_options = {
+                **run_options,
+                "instructions": "\n\n".join(
+                    part for part in (run_options.get("instructions"), FALLBACK_INSTRUCTION) if part
+                ),
+            }
+            if not harness_run:
+                session = AgentSession()
+                session.metadata = {"ag_ui_thread_id": thread_id, "ag_ui_run_id": run_id}
 
         if unexpected_approval_tool is not None:
             run_error = True
@@ -2196,6 +2378,10 @@ async def _stream_with_reasoning(
         # Computer Use (PRP-0192, UDR-0174 D4): the run is over on EVERY exit, so the glow
         # around the window it controlled goes away. Fire-and-forget; never yields.
         end_computer_use_run()
+
+        # PRP-0260 (UDR-0241 D3/D5): the per-run web search flag never outlives the run.
+        for _token in reversed(web_search_tokens):
+            release(_token)
 
         # Harness session snapshot (CTR-0279, PRP-0243, UDR-0224 D2): saved on EVERY exit
         # -- completed, failed or stopped -- so it mirrors the cached session and a
@@ -2302,28 +2488,47 @@ async def _stream_with_reasoning(
     # template is the same refusal written as text. It was already streamed, so the
     # event tells the SPA to take it back out; it leaves the title / memory text here.
     # A refusal part wins: a turn sends at most one model_refusal.
+    # PRP-0260 (UDR-0241 D2): the sentence also counts at the END of the final message,
+    # after a preamble. Only the sentence leaves the title / memory text; the preamble stays.
     refusal_text, refusal_source = text_fold.refusal, "part"
     if not refusal_text and not run_error:
-        sentence = text_refusal("".join(final_text_parts))
-        if sentence is not None:
-            del assistant_text_parts[len(assistant_text_parts) - len(final_text_parts) :]
+        final_joined = "".join(final_text_parts)
+        split = split_text_refusal(final_joined)
+        if split is not None:
+            preamble, sentence = split
+            cut = len(final_joined) - len(preamble)
+            answer_joined = "".join(assistant_text_parts)
+            kept = answer_joined[: max(0, len(answer_joined) - cut)]
+            assistant_text_parts[:] = [kept] if kept else []
             refusal_text, refusal_source = sentence, "text"
     if refusal_text:
         logger.warning(
-            "Model refusal: thread=%s run=%s model=%s source=%s refusal_chars=%d answer_chars=%d; "
-            "sent as model_refusal, not as answer text (UDR-0220 D2, UDR-0236 D6)",
+            "Model refusal: thread=%s run=%s model=%s source=%s refusal_chars=%d answer_chars=%d "
+            "hosted_searches=%d tools=%s fallback=%s; sent as model_refusal, not as answer text "
+            "(UDR-0220 D2, UDR-0236 D6, UDR-0241 D1)",
             thread_id,
             run_id,
             effective_model,
             refusal_source,
             len(refusal_text),
             len("".join(assistant_text_parts)),
+            turn_hosted_searches,
+            sorted(set(turn_tools)),
+            fallback_ran,
         )
         yield encoder.encode(
             CustomEvent(
                 type=EventType.CUSTOM,
                 name=MODEL_REFUSAL_EVENT,
-                value={"text": refusal_text, "run_id": run_id, "source": refusal_source},
+                # PRP-0260 (UDR-0241 D5): web_search tells the SPA to offer Retry without
+                # web search -- true only when the refused attempt searched (a fallback
+                # attempt never does, so a refused fallback offers plain Retry).
+                value={
+                    "text": refusal_text,
+                    "run_id": run_id,
+                    "source": refusal_source,
+                    "web_search": last_attempt_hosted > 0,
+                },
             )
         )
 

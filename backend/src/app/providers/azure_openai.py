@@ -14,6 +14,7 @@ from typing import Any
 from agent_framework_openai import OpenAIChatClient
 
 from app import models_catalog
+from app.agent.web_search_gate import web_search_withheld
 from app.agent.wire_trace import describe_wire_input_full, log_wire_request, wire_pairing_report
 from app.azure_credential import get_chat_client_credential_kwargs
 from app.core.config import settings
@@ -107,7 +108,10 @@ class _StructuredOutputMixin:
         # PRP-0185 step 2 (UDR-0167 D18): the shape test is DERIVED from
         # `has_structured_format` so the tool surface report, which explains the drop
         # to an operator, cannot test a different condition than the request applies.
-        if has_structured_format(run_options):
+        # PRP-0260 (UDR-0241 D3/D5): the AG-UI endpoint can withhold hosted web search for
+        # ONE run (the fallback after a refusal, or Retry without web search). Read here, at
+        # the chokepoint that already drops it for JSON mode; agents are not rebuilt.
+        if has_structured_format(run_options) or web_search_withheld():
             strip_web_search(run_options)
         # Wire tracing (PRP-0141 follow-up; app.agent.wire_trace since PRP-0179): the
         # request as it will go on the wire, ids only.

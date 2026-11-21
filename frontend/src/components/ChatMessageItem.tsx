@@ -10,6 +10,7 @@ import {
   Download,
   FileText as FileTextIcon,
   GitBranch,
+  GlobeLock,
   Loader2,
   Pencil,
   RefreshCw,
@@ -104,7 +105,7 @@ interface ChatMessageItemProps {
   /** Re-send a user turn whose send failed before committing (CTR-0004 v2, PRP-0110). */
   onRetryTurn?: (messageId: string) => void
   /** Re-send a turn whose reply was lost after committing (CTR-0004, PRP-0231, UDR-0214 D4). */
-  onRetryLostTurn?: (messageId: string) => void
+  onRetryLostTurn?: (messageId: string, opts?: { withoutWebSearch?: boolean }) => void
   onEditAssistant?: (messageId: string, newContent: string) => void
   onRegenerateAssistant?: (messageId: string) => void
   onDelete?: (messageId: string) => void
@@ -803,6 +804,29 @@ function ChatMessageItemImpl({
                     Retry
                   </Button>
                 )}
+                {/* PRP-0260 (UDR-0241 D5): the refused attempt searched the web and no
+                    automatic fallback ran -- offer the same Retry with web search withheld. */}
+                {onRetryLostTurn && message.modelRefusal.retry && message.modelRefusal.webSearch && !isLoading && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    data-testid="retry-without-web-search"
+                    onClick={() => onRetryLostTurn(message.id, { withoutWebSearch: true })}>
+                    <GlobeLock className="mr-1 h-3 w-3" />
+                    Retry without web search
+                  </Button>
+                )}
+              </div>
+            )}
+            {/* PRP-0260 (UDR-0241 D4): answered again without web search after a refusal
+                that followed the hosted web search. Saved in usage, so it survives a reload. */}
+            {!isUser && message.usage?.web_search_fallback && (
+              <div
+                className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground"
+                data-testid="web-search-fallback-note">
+                <GlobeLock className="h-3.5 w-3.5 shrink-0" />
+                <span>Web search results could not be used for this answer, so it was written without web search.</span>
               </div>
             )}
             {/* Unified in-progress indicator (PRP-0118 follow-up): while the turn is

@@ -75,6 +75,11 @@ export interface UsageInfo {
    * persisted before v0.144.0 -- CTR-0041 then falls back to input + output.
    */
   context_base_tokens?: number
+  /**
+   * PRP-0260 (UDR-0241 D4): the answer was written without web search after the model
+   * refused following its hosted web search. Saved with the turn; shown as a note.
+   */
+  web_search_fallback?: boolean
   /** Cumulative consumption of the whole turn (PRP-0157). Absent on legacy messages. */
   turn?: TurnUsage
   /** Model that produced this turn (CTR-0009 usage event). */
@@ -285,7 +290,12 @@ export interface ChatMessage {
    * stays, the refusal is shown as a notice -- never as answer text -- with the same Retry
    * as a lost reply, and the turn is not saved. Ephemeral: never written to the session file.
    */
-  modelRefusal?: { message: string; retry: LostReplyRetry }
+  modelRefusal?: {
+    message: string
+    retry: LostReplyRetry
+    /** PRP-0260 (UDR-0241 D5): the refused attempt searched the web -> offer Retry without web search. */
+    webSearch?: boolean
+  }
   /**
    * Live voice conversation (CTR-0227, PRP-0188). `source: 'live'` marks a message that
    * came from a GPT-Live session: a transcribed user / assistant turn, or the full

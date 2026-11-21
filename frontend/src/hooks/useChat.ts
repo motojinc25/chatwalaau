@@ -478,6 +478,11 @@ export function useChat(options?: UseChatOptions) {
         workflowResume?: Record<string, unknown>
         /** Tool name of the MCP App View whose `ui/message` sent this turn (PRP-0240). */
         mcpAppSource?: string
+        /**
+         * Retry without web search (PRP-0260, UDR-0241 D5): sends AG-UI `state.web_search: false`,
+         * which withholds the hosted web search tool for this one run.
+         */
+        withoutWebSearch?: boolean
       },
       // `committed` is true once the AG-UI stream emitted its first event (the turn
       // is live server-side); `success` is the pre-PRP-0110 stream-completed flag.
@@ -613,6 +618,7 @@ export function useChat(options?: UseChatOptions) {
         // ignores the key, so nothing here has to keep sending it for compatibility.
         const aguiState: Record<string, unknown> = {}
         if (temporaryRef.current) aguiState.temporary = true
+        if (options?.withoutWebSearch) aguiState.web_search = false
         // Declarative Workflow run-target (PRP-0118, CTR-0009, UDR-0101 D5). When set,
         // the backend streams the compiled workflow instead of the active agent; each
         // node's model + options come from its referenced Prompt agent (UDR-0101 D7).
@@ -703,6 +709,8 @@ export function useChat(options?: UseChatOptions) {
         // not saved.
         let refusalText = ''
         let refusalFromText = false
+        // PRP-0260 (UDR-0241 D5): the refused attempt used the hosted web search.
+        let refusalWebSearch = false
         // The turn's MCP App View (CTR-0068 v2): saved with the message so a reload rebuilds it.
         let completedMcpApp: McpAppEvent | undefined
         while (true) {
@@ -967,6 +975,17 @@ export function useChat(options?: UseChatOptions) {
                     // PRP-0255 (UDR-0236 D6): a refusal written as answer text was already
                     // streamed. An event without `source` is a refusal part (older backend).
                     refusalFromText = value.source === 'text'
+                    refusalWebSearch = value.web_search === true
+                  }
+                  if (event.name === 'web_search_fallback') {
+                    // PRP-0260 (UDR-0241 D4): the backend answers again without web search.
+                    // The refused attempt's text is dropped; its tool calls stay. The note
+                    // comes with the next usage event (usage.web_search_fallback).
+                    const base = continued?.content ?? ''
+                    assistantContent = base
+                    refusalText = ''
+                    refusalFromText = false
+                    setMessages((prev) => prev.map((msg) => (msg.id === assistantId ? { ...msg, content: base } : msg)))
                   }
                   if (event.name === 'workflow_completed') {
                     workflowCompleted = true
@@ -1069,7 +1088,11 @@ export function useChat(options?: UseChatOptions) {
                     // A text refusal (UDR-0236 D6) is taken back out of the answer: it is
                     // shown once, in the notice, never as the model's answer.
                     content: refusalFromText ? withoutTrailing(msg.content, refusalText) : msg.content,
-                    modelRefusal: { message: `${notice} ${refusalText}`, retry: retryMode },
+                    modelRefusal: {
+                      message: `${notice} ${refusalText}`,
+                      retry: retryMode,
+                      ...(refusalWebSearch ? { webSearch: true } : {}),
+                    },
                   }
                 : msg,
             ),
@@ -1354,7 +1377,7 @@ export function useChat(options?: UseChatOptions) {
   )
 
   const regenerateAssistantMessage = useCallback(
-    async (messageId: string) => {
+    async (messageId: string, opts?: { withoutWebSearch?: boolean }) => {
       if (savingRef.current) return
       const current = messagesRef.current
       const idx = current.findIndex((m) => m.id === messageId)
@@ -1382,7 +1405,10 @@ export function useChat(options?: UseChatOptions) {
       if (!(await truncateSaved(idx))) return
 
       // Re-stream without adding a new user message (user message already in truncated)
-      await streamResponse(userContent, truncated, { skipUserMessage: true })
+      await streamResponse(userContent, truncated, {
+        skipUserMessage: true,
+        ...(opts?.withoutWebSearch ? { withoutWebSearch: true } : {}),
+      })
     },
     [streamResponse, truncateSaved],
   )
@@ -1396,18 +1422,21 @@ export function useChat(options?: UseChatOptions) {
    * refused is not saved either and takes the same Retry (PRP-0237, UDR-0220 D4).
    */
   const retryLostTurn = useCallback(
-    async (assistantId: string) => {
+    async (assistantId: string, opts?: { withoutWebSearch?: boolean }) => {
       if (savingRef.current) return
       const current = messagesRef.current
       const idx = current.findIndex((m) => m.id === assistantId)
       const retry = idx === -1 ? null : (current[idx].streamLost?.retry ?? current[idx].modelRefusal?.retry ?? null)
       if (retry === 'regenerate') {
-        await regenerateAssistantMessage(assistantId)
+        await regenerateAssistantMessage(assistantId, opts)
         return
       }
       const user = current[idx - 1]
       if (retry !== 'send' || user?.role !== 'user') return
-      await streamResponse(user.content, current.slice(0, idx - 1), { images: user.images })
+      await streamResponse(user.content, current.slice(0, idx - 1), {
+        images: user.images,
+        ...(opts?.withoutWebSearch ? { withoutWebSearch: true } : {}),
+      })
     },
     [streamResponse, regenerateAssistantMessage],
   )
