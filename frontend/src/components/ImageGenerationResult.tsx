@@ -11,6 +11,8 @@ interface GeneratedImage {
   filename: string
   revised_prompt?: string
   size?: string
+  /** PRP-0261: the 0-based prompts entry this picture was made from (prompts calls only). */
+  prompt_index?: number
 }
 
 interface ImageGenResult {
@@ -36,6 +38,8 @@ function ImageResultCard({ toolCall, onMaskEdit }: { toolCall: ToolCall; onMaskE
   if (!parsed || parsed.error || !parsed.images?.length) return null
 
   const isSingle = parsed.images.length === 1
+  // PRP-0261 (UDR-0242 D5): different pictures (more than one prompts entry) get one caption each.
+  const perImageCaption = new Set(parsed.images.map((img) => img.prompt_index ?? 0)).size > 1
 
   return (
     <div className="my-2 flex flex-col gap-2">
@@ -68,10 +72,15 @@ function ImageResultCard({ toolCall, onMaskEdit }: { toolCall: ToolCall; onMaskE
                 Edit
               </Button>
             )}
+            {perImageCaption && img.revised_prompt && (
+              <p data-testid="image-caption" className="mt-1 text-xs text-muted-foreground/70 italic">
+                {img.revised_prompt}
+              </p>
+            )}
           </div>
         ))}
       </div>
-      {parsed.images[0]?.revised_prompt && (
+      {!perImageCaption && parsed.images[0]?.revised_prompt && (
         <p className="text-xs text-muted-foreground/70 italic">{parsed.images[0].revised_prompt}</p>
       )}
     </div>

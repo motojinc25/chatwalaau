@@ -28,11 +28,13 @@ FastAPI async event loop during API calls.
 
 import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import contextvars
 from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
+import threading
 from typing import Annotated
 import uuid
 
@@ -368,12 +370,117 @@ def clamp_n(n: int | None) -> int:
     return max(1, min(value, capabilities.MAX_IMAGES_PER_REQUEST))
 
 
+# PRP-0261 / UDR-0242 D4: a `prompts` call sends one Images API request per entry, at most
+# this many at a time (a module constant, not a setting).
+MAX_CONCURRENT_PROMPTS = 4
+
+SET_FAILURE_GUIDANCE = (
+    " Some pictures could not be made: each failures entry names its 0-based position in prompts "
+    "and the reason. Tell the user which pictures are missing."
+)
+
+
+def plan_pictures(prompt: str | None, prompts: list[str] | None, n: int) -> tuple[list[str], str | None]:
+    """The prompt of every picture to make, or a problem (PRP-0261 / UDR-0242 D2/D3).
+
+    ``prompt`` alone is one picture. With ``prompts``, each non-empty entry is one
+    picture whose prompt is ``prompt + "\\n\\n" + entry`` (just the entry when ``prompt``
+    is empty). A single entry counts as a plain call. A set's ceiling is the whole call:
+    ``len(prompts) * n <= MAX_IMAGES_PER_REQUEST``. ``n`` must already be clamped.
+    """
+    shared = str(prompt or "").strip()
+    entries = [str(entry).strip() for entry in (prompts or []) if str(entry or "").strip()]
+    pictures = [f"{shared}\n\n{entry}" if shared else entry for entry in entries]
+    limit = capabilities.MAX_IMAGES_PER_REQUEST
+    if not pictures:
+        if not shared:
+            return [], "a prompt is required: pass prompt, or prompts with one entry per picture"
+        return [shared], None
+    if len(pictures) > limit:
+        return [], f"prompts has {len(pictures)} entries; at most {limit} pictures per call"
+    if len(pictures) > 1 and len(pictures) * n > limit:
+        return [], (
+            f"{len(pictures)} prompts x n={n} is {len(pictures) * n} images; at most {limit} per call. "
+            "Lower n (n makes variations of each picture) or split the set"
+        )
+    return pictures, None
+
+
+def _generate_set_sync(
+    thread_id: str,
+    client: object,
+    deployment: str,
+    pictures: list[str],
+    n: int,
+    params: dict,
+) -> str:
+    """One Images API request per picture, concurrently, with partial results (UDR-0242 D4).
+
+    Every request starts from the shared ``params``. An option one request learns to drop
+    (``call_with_capability_retry``) is removed from the shared dict, so later requests
+    skip it, and its warning is reported once.
+    """
+    shared = dict(params)
+    lock = threading.Lock()
+    warnings: list[str] = []
+
+    def _one(text: str) -> object:
+        with lock:
+            local = dict(shared)
+        result, learned = call_with_capability_retry(
+            lambda **kw: client.images.generate(model=deployment, prompt=text, n=n, **kw),
+            local,
+            deployment,
+            "generation",
+        )
+        with lock:
+            for key in [key for key in shared if key not in local]:
+                shared.pop(key)
+            warnings.extend(w for w in learned if w not in warnings)
+        return result
+
+    with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_PROMPTS, len(pictures))) as pool:
+        futures = [pool.submit(_one, text) for text in pictures]
+
+    images: list[dict] = []
+    failures: list[dict] = []
+    first_error: Exception | None = None
+    for index, future in enumerate(futures):
+        try:
+            result = future.result()
+        except Exception as exc:
+            logger.warning("Image generation failed for prompts[%d]", index, exc_info=True)
+            first_error = first_error or exc
+            failures.append({"index": index, "error": json.loads(image_error("generation", exc))["error"]})
+            continue
+        for image in _collect_images(thread_id, result, shared, pictures[index]):
+            image["prompt_index"] = index
+            images.append(image)
+
+    if first_error is not None and not images:
+        return image_error("generation", first_error)
+    payload: dict = {
+        "images": images,
+        "count": len(images),
+        "prompts": len(pictures),
+        "tool": IMAGE_GENERATE_TOOL,
+        "parameters": _used_parameters(shared),
+        "guidance": DELIVERED_GUIDANCE + (SET_FAILURE_GUIDANCE if failures else ""),
+    }
+    if warnings:
+        payload["warnings"] = warnings
+    if failures:
+        payload["failures"] = failures
+    return json.dumps(payload)
+
+
 def _generate_image_sync(
     prompt: str,
     size: str | None,
     quality: str | None,
     background: str | None,
     n: int,
+    prompts: list[str] | None = None,
 ) -> str:
     """Synchronous image generation implementation."""
     thread_id = current_thread_id.get("")
@@ -381,6 +488,11 @@ def _generate_image_sync(
         return json.dumps({"error": "No active session (thread_id not set)"})
 
     n = clamp_n(n)
+    pictures, problem = plan_pictures(prompt, prompts, n)
+    if problem:
+        return _invalid_result("generation", [problem])
+    if pictures[0] != str(prompt or "").strip():
+        prompt = pictures[0]  # a single prompts entry; a plain prompt is sent exactly as given
     params = resolve_image_params(size, quality, background)
     # v0.117.6 / PRP-0187 F1: reject a value the API cannot accept BEFORE calling out.
     invalid = validate_params(params)
@@ -389,7 +501,10 @@ def _generate_image_sync(
 
     client = _get_client()
     deployment = _image_deployment()
-    logger.info("Image generation: deployment=%s n=%d params=%s", deployment, n, params)
+    # PRP-0261: the entry count and n, never prompt text.
+    logger.info("Image generation: deployment=%s prompts=%d n=%d params=%s", deployment, len(pictures), n, params)
+    if len(pictures) > 1:
+        return _generate_set_sync(thread_id, client, deployment, pictures, n, params)
     try:
         result, warnings = call_with_capability_retry(
             lambda **kw: client.images.generate(model=deployment, prompt=prompt, n=n, **kw),
@@ -572,7 +687,15 @@ def _edit_image_sync(
 
 
 async def image_generate(
-    prompt: Annotated[str, Field(description="Detailed description of the image to generate")],
+    prompt: Annotated[
+        str,
+        Field(
+            description=(
+                "Detailed description of the image to generate. With prompts, put here ONLY what every "
+                "picture shares (style, palette, layout rules, language) -- do not list the pictures here."
+            )
+        ),
+    ] = "",
     size: Annotated[str | None, Field(description=_option_help("size"))] = None,
     quality: Annotated[str | None, Field(description=_option_help("quality"))] = None,
     background: Annotated[str | None, Field(description=_option_help("background"))] = None,
@@ -580,20 +703,32 @@ async def image_generate(
         int,
         Field(
             description=(
-                "How many images to produce from THIS prompt (1-10). To make several, call ONCE "
-                "with n set -- do not call the tool repeatedly."
+                "How many variations of the SAME picture to make (1-10). Never use n for different "
+                "pictures: the image model draws every image from the same prompt and cannot assign "
+                "them in order. With prompts, n is the variations per picture."
             )
         ),
     ] = 1,
+    prompts: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "For DIFFERENT pictures in one request (screens, scenes, products): 2-10 entries, one "
+                "complete description per picture; each makes its own image. prompt, when given, is "
+                "prefixed to every entry. Omit for a single picture."
+            )
+        ),
+    ] = None,
 ) -> str:
-    """Generate an image from a text description using AI. Output is always PNG.
+    """Generate images from text descriptions using AI. Output is always PNG.
 
     Omit size/quality/background to use the configured defaults; pass one only when the
     user asked for a specific value.
 
-    For SEVERAL images of the same subject, make ONE call with n=<count>. Calling this
-    tool repeatedly produces separate requests, is slower, and shows the user one
-    indicator per call.
+    - Several variations of ONE picture: one call with n=<count>.
+    - Several DIFFERENT pictures (e.g. a dashboard, a list and a report): one call with
+      prompts, one entry per picture. Never describe several pictures in one prompt.
+    - One set of images is one call, not one call per image.
     """
     # PRP-0066 / UDR-0041 D3: demo lane returns bundled placeholder PNGs.
     from app.demo import is_demo_mode
@@ -604,9 +739,12 @@ async def image_generate(
         thread_id = current_thread_id.get("")
         if not thread_id:
             return json.dumps({"error": "No active session (thread_id not set)"})
-        return await demo_generate_image(prompt=prompt, n=clamp_n(n), thread_id=thread_id)
+        pictures, problem = plan_pictures(prompt, prompts, clamp_n(n))
+        if problem:
+            return _invalid_result("generation", [problem])
+        return await demo_generate_image(prompt=pictures[0], n=clamp_n(n), thread_id=thread_id, pictures=pictures)
 
-    return await asyncio.to_thread(_generate_image_sync, prompt, size, quality, background, n)
+    return await asyncio.to_thread(_generate_image_sync, prompt, size, quality, background, n, prompts)
 
 
 async def image_edit(
@@ -644,7 +782,10 @@ async def image_edit(
     ] = None,
     quality: Annotated[str | None, Field(description=_option_help("quality"))] = None,
     background: Annotated[str | None, Field(description=_option_help("background"))] = None,
-    n: Annotated[int, Field(description="Number of edited images to produce (1-10).")] = 1,
+    n: Annotated[
+        int,
+        Field(description="How many variations of the SAME edit to make (1-10); never use n for different edits."),
+    ] = 1,
 ) -> str:
     """Edit an existing image, optionally using reference images and a mask. Output is PNG.
 

@@ -208,6 +208,7 @@ function imageParameterSummary(toolCall: ToolCall): string | null {
       if (parsed && typeof parsed === 'object') {
         const {
           prompt: _prompt,
+          prompts: _prompts,
           image_filename: _image,
           image_filenames: _images,
           mask_filename: _mask,

@@ -103,9 +103,30 @@ def _build_payload(thread_id: str, prompt: str, n: int, *, tool: str, generate: 
     )
 
 
-async def demo_generate_image(*, prompt: str, n: int, thread_id: str) -> str:
+def _build_set_payload(thread_id: str, pictures: list[str], n: int) -> str:
+    """A `prompts` call (PRP-0261): one placeholder per picture (times n), with prompt_index."""
+    images: list[dict[str, Any]] = []
+    for index, text in enumerate(pictures):
+        for image in json.loads(_build_payload(thread_id, text, n, tool=IMAGE_GENERATE_TOOL, generate=True))["images"]:
+            image["prompt_index"] = index
+            images.append(image)
+    return json.dumps(
+        {
+            "images": images,
+            "count": len(images),
+            "prompts": len(pictures),
+            "tool": IMAGE_GENERATE_TOOL,
+            "demo": True,
+            "guidance": DELIVERED_GUIDANCE,
+        }
+    )
+
+
+async def demo_generate_image(*, prompt: str, n: int, thread_id: str, pictures: list[str] | None = None) -> str:
     """Return a JSON payload with bundled placeholder PNG URIs."""
     await asyncio.sleep(0)  # cooperative yield
+    if pictures and len(pictures) > 1:
+        return await asyncio.to_thread(_build_set_payload, thread_id, list(pictures), n)
     return await asyncio.to_thread(_build_payload, thread_id, prompt, n, tool=IMAGE_GENERATE_TOOL, generate=True)
 
 

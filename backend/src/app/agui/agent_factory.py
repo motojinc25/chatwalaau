@@ -300,6 +300,9 @@ def _build_tools_and_instructions(
                 ToolGuidance(
                     "image",
                     "You can generate images from text descriptions using image_generate. "
+                    # PRP-0261 / UDR-0242 D1: n is variations, prompts is one picture each.
+                    "Its n makes variations of ONE picture; for different pictures in one request "
+                    "pass prompts, one complete description per picture, in one call. "
                     "You can also edit existing images using image_edit: pass the filename of the "
                     "uploaded or previously generated image FIRST in image_filenames, then any "
                     "reference images. Write the edit prompt as two parts -- 'Change:' what must be "
