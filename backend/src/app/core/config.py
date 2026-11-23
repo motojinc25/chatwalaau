@@ -451,6 +451,9 @@ class Settings(BaseSettings):
     discussion_code_map_summary_tokens: int = 2_000
     discussion_code_map_max_files: int = 5_000
     discussion_code_read_max_chars: int = 200_000
+    # PRP-0262 (UDR-0243 D1), operator Q1: the longest input the person may send to a waiting
+    # discussion (answer or ask), in characters; frozen into a run's budget as input_max_chars.
+    discussion_input_max_chars: int = 32_000
 
     # File Explorer (CTR-0006, CTR-0136/0137, PRP-0091, UDR-0069)
     # Human-facing file browse/edit over the coding workspace. OFF unless

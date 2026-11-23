@@ -138,6 +138,8 @@ def budget_from_settings() -> dict[str, int]:
         "code_map_summary_tokens": int(settings.discussion_code_map_summary_tokens),
         "code_map_max_files": int(settings.discussion_code_map_max_files),
         "code_read_max_chars": int(settings.discussion_code_read_max_chars),
+        # PRP-0262 (UDR-0243 D1): the longest input the person may send to the run.
+        "input_max_chars": int(settings.discussion_input_max_chars),
     }
 
 
@@ -467,6 +469,14 @@ def phase_running(thread_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def input_max_chars(run: dict[str, Any]) -> int:
+    """The run's input limit (UDR-0243 D1): frozen at creation; a run made before it has the current setting."""
+    from app.core.config import settings
+
+    frozen = (run.get("budget") or {}).get("input_max_chars")
+    return int(frozen) if frozen else int(settings.discussion_input_max_chars)
+
+
 def apply_input(
     thread_id: str,
     run_id: str,
@@ -494,6 +504,15 @@ def apply_input(
         pending = run.get("pending_request")
         if run.get("status") != schema.WAITING_HUMAN or not pending or pending.get("id") != request_id:
             raise DiscussionError("stale_request", "this question is no longer open")
+        limit = input_max_chars(run)
+        if len(text) > limit:
+            # PRP-0262 (UDR-0243 D1/D2): refused, never trimmed; the message names both numbers.
+            raise DiscussionError(
+                "input_too_long",
+                f"Your input is too long: {len(text):,} characters; at most {limit:,}. "
+                "Shorten it or split it into several inputs.",
+                422,
+            )
         if action == schema.ACTION_ASK:
             if not text:
                 raise DiscussionError("invalid_request", "a question needs text", 422)

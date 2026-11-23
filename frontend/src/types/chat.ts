@@ -433,6 +433,8 @@ export interface DiscussionRun {
     used_tokens: number
     /** PRP-0236: characters the Code tool may return in the run. */
     code_read_max_chars?: number
+    /** PRP-0262 (UDR-0243 D1): the longest input the person may send; absent in a run made before. */
+    input_max_chars?: number
   }
   state: DiscussionState | null
   advisory: { suggest?: boolean; reason?: string; source?: string } | null

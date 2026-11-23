@@ -168,6 +168,14 @@ interface ChatInputProps {
    * AI discussion waiting for the person's input (CTR-0276, PRP-0232). Absent: the default.
    */
   placeholder?: string
+  /**
+   * PRP-0262 (CTR-0276 v3, UDR-0243 D3): the longest text this composer may send, given only
+   * while an AI discussion waits for the person. From 80 % of it the count shows; over it the
+   * reason shows and Send / Enter do nothing. Absent: no limit and no count (the main chat).
+   */
+  maxChars?: number
+  /** What `maxChars` limits, for the over-limit sentence (e.g. "discussion input"). */
+  maxCharsLabel?: string
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
@@ -190,6 +198,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     onSlashCron,
     onSlashFiles,
     placeholder,
+    maxChars,
+    maxCharsLabel,
     temporary = false,
     runTarget,
     project,
@@ -495,6 +505,11 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     [onSlashHelp, onSlashModel, onSlashCron, onSlashFiles, resize, setValueAndResize],
   )
 
+  // PRP-0262 (UDR-0243 D3): the server counts the trimmed text, so the composer does too.
+  const charCount = maxChars ? value.trim().length : 0
+  const overLimit = maxChars !== undefined && charCount > maxChars
+  const showCharCount = maxChars !== undefined && charCount >= maxChars * 0.8
+
   const handleSend = async () => {
     // Step 3 (UDR-0170 D13): during Live, typed text joins the Live conversation. No
     // slash commands and no attachments there -- text only.
@@ -508,6 +523,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
       return
     }
     if ((!value.trim() && attachments.length === 0) || isLoading || isUploading) return
+    if (overLimit) return
     // Slash command dispatch (UDR-0066 D1/D3): only when the head token resolves
     // in the inventory; otherwise the input is sent as a normal message.
     const parsed = parseCommandInput(value)
@@ -998,7 +1014,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                           size="icon"
                           className={controlSize}
                           onClick={() => void handleSend()}
-                          disabled={(!value.trim() && attachments.length === 0) || isTranscribing || isUploading}
+                          disabled={
+                            (!value.trim() && attachments.length === 0) || isTranscribing || isUploading || overLimit
+                          }
                           aria-label="Send message"
                           title="Send message">
                           <SendHorizontal className="h-4 w-4" />
@@ -1011,6 +1029,14 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
             </div>
           </div>
         }
+        {showCharCount && maxChars !== undefined && (
+          <p
+            data-testid="composer-char-count"
+            className={cn('mt-1 text-right text-xs', overLimit ? 'text-destructive' : 'text-muted-foreground')}>
+            {charCount.toLocaleString('en-US')} / {maxChars.toLocaleString('en-US')}
+            {overLimit && ` -- Too long for a ${maxCharsLabel ?? 'message'}: shorten it or split it.`}
+          </p>
+        )}
         {voiceError && <p className="mt-1 text-xs text-destructive">{voiceError}</p>}
         {live?.error && <p className="mt-1 text-xs text-destructive">{live.error}</p>}
         {live?.notice && <p className="mt-1 text-xs text-muted-foreground">{live.notice}</p>}

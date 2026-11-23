@@ -61,7 +61,8 @@ class CreateBody(BaseModel):
 class InputBody(BaseModel):
     request_id: str = Field(..., min_length=1, max_length=64)
     action: str = Field(..., max_length=16)
-    text: str = Field("", max_length=8000)
+    # PRP-0262 (UDR-0243 D1): the hard ceiling; the run's own limit is checked by the controller.
+    text: str = Field("", max_length=schema.INPUT_TEXT_HARD_MAX_CHARS)
     speaker_id: str | None = Field(None, max_length=128)
     # PRP-0235 (UDR-0218 D4): the person's choice of the next round's speakers (decision mode).
     speakers: list[str] | None = Field(None, min_length=1, max_length=6)

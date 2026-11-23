@@ -43,6 +43,7 @@ import { useTTS } from '@/hooks/useTTS'
 import { useWorkflowRunCanvas } from '@/hooks/useWorkflowRunCanvas'
 import { isComputerUseTool } from '@/lib/computerUse'
 import { resolveContextOccupancy } from '@/lib/contextOccupancy'
+import { DISCUSSION_INPUT_DEFAULT_MAX_CHARS } from '@/lib/discussionApi'
 import { harnessProjectApi, projectLabel } from '@/lib/harnessProject'
 import { IMAGE_EDIT_TOOL } from '@/lib/imageTools'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
@@ -849,6 +850,10 @@ export function ChatPanel({
   )
   const composerStop = discussionPhaseRunning ? () => void discussion.pause() : stopGeneration
   const composerPlaceholder = discussionWaiting ? 'Add your input to the discussion...' : undefined
+  // PRP-0262 (CTR-0276 v3, UDR-0243 D3): the waiting run's own input limit, counted before sending.
+  const composerMaxChars = discussionWaiting
+    ? (discussion.latest?.budget.input_max_chars ?? DISCUSSION_INPUT_DEFAULT_MAX_CHARS)
+    : undefined
 
   // Human-in-the-loop answers (CTR-0187 -> CTR-0009 v19, UDR-0106 D5). The paused run
   // continues on a NEW turn carrying state.workflow_resume and no user message; the
@@ -1111,6 +1116,8 @@ export function ChatPanel({
               context={contextOccupancy ?? undefined}
               live={composerLive}
               placeholder={composerPlaceholder}
+              maxChars={composerMaxChars}
+              maxCharsLabel="discussion input"
             />
           </div>
         </div>

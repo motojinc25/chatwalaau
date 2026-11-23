@@ -31,6 +31,8 @@ export interface DiscussionOptions {
     tool_calls_per_turn?: number
     tool_result_max_chars?: number
     report_max_output_tokens?: number
+    /** PRP-0262 (UDR-0243 D1): the longest input the person may send to a new run. */
+    input_max_chars?: number
   }
   /** Research tools a seat may have (PRP-0234); web search depends on the seat's model. */
   tools?: { id: DiscussionToolId; label: string; available: boolean }[]
@@ -127,6 +129,35 @@ export interface StoredDiscussionMessage {
   discussion: DiscussionMessageMeta
 }
 
+/**
+ * PRP-0262 (UDR-0243 D1/D3): the App Setting discussion_input_max_chars's default, used for a run
+ * stored before its budget carried input_max_chars. Pinned equal to the backend default.
+ */
+export const DISCUSSION_INPUT_DEFAULT_MAX_CHARS = 32000
+
+interface ValidationIssue {
+  type?: string
+  loc?: unknown[]
+  msg?: string
+  ctx?: { max_length?: number }
+}
+
+/**
+ * PRP-0262 (UDR-0243 D2): FastAPI's validation 422 carries `detail` as an ARRAY, which used to fall
+ * into the object branch and show a bare "HTTP 422". Read the first issue as a sentence instead.
+ */
+export function validationMessage(issues: unknown[]): string {
+  const first = (issues[0] ?? {}) as ValidationIssue
+  const loc = (Array.isArray(first.loc) ? first.loc : []).filter((part) => part !== 'body')
+  const field = loc.map(String).join('.')
+  if (first.type === 'string_too_long' && field === 'text') {
+    const max = first.ctx?.max_length
+    return `Your input is too long: at most ${typeof max === 'number' ? max.toLocaleString('en-US') : 'the allowed number of'} characters. Shorten it or split it into several inputs.`
+  }
+  const what = first.msg ? `${field ? `${field}: ` : ''}${first.msg}` : field
+  return what ? `The discussion request was not valid: ${what}` : 'The discussion request was not valid.'
+}
+
 export class DiscussionApiError extends Error {
   constructor(
     message: string,
@@ -148,13 +179,15 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     try {
       const body = await res.json()
       const detail = body?.detail
-      if (detail && typeof detail === 'object') {
+      // PRP-0262 (UDR-0243 D2): an array is an object too, so it is checked first.
+      if (Array.isArray(detail)) {
+        message = validationMessage(detail)
+        code = 'invalid_request'
+      } else if (detail && typeof detail === 'object') {
         message = String(detail.message ?? message)
         code = typeof detail.error === 'string' ? detail.error : undefined
       } else if (typeof detail === 'string') {
         message = detail
-      } else if (Array.isArray(body?.detail)) {
-        message = 'The discussion request was not valid.'
       }
     } catch {
       // keep the status text

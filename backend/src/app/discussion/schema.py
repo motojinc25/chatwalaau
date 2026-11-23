@@ -83,6 +83,11 @@ ACTION_FINISH = "finish"
 ACTION_AUTO = "auto"
 ACTIONS: tuple[str, ...] = (ACTION_ANSWER, ACTION_CONTINUE, ACTION_ASK, ACTION_FINISH, ACTION_AUTO)
 
+# PRP-0262 (UDR-0243 D1): the request schema's hard ceiling for one input, the largest value the
+# App Setting discussion_input_max_chars accepts. The run's own limit (budget.input_max_chars) is
+# checked by the controller.
+INPUT_TEXT_HARD_MAX_CHARS = 200_000
+
 # ---- auto mode stop (Pause) and report skips (UDR-0217 D4 / D5) --------------------------------
 AUTO_STOPPED_PAUSED = "paused"
 REPORT_SKIPPED_BUDGET = "budget"

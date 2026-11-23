@@ -1731,6 +1731,20 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
             "tool says so and the participants answer with what they have."
         ),
     ),
+    # PRP-0262 (UDR-0243 D1): the longest input the person may send to a waiting discussion.
+    SettingDescriptor(
+        "discussion_input_max_chars",
+        "Input length per answer (characters)",
+        "discussion",
+        "int",
+        SCOPE_RUNTIME,
+        min=1_000,
+        max=200_000,
+        help=(
+            "The longest text the person may send to a waiting discussion in one answer or question. "
+            "Every input is repeated in each later turn, so long inputs use the token budget faster."
+        ),
+    ),
     # ---- OpenAI-compatible API (runtime; PRP-0252, UDR-0233) -------------------
     # Read per request by app.openai_api.router; /v1/responses only (D6). Every default
     # reproduces the behavior before PRP-0252 (D7).
