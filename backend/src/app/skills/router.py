@@ -37,20 +37,35 @@ PRP-0165 adds two things to this router.
    the same place a selection apply does: a registry rebuild plus a harness cache
    clear. Their WRITE half is refused in demo mode and when SKILL_INSTALL_ENABLED
    is off; the read half stays available so the screen is never blank.
+
+PRP-0266 (UDR-0247) changes who may write and what can be written:
+
+- Every write of the install surface -- refresh, install, uninstall, the source
+  routes, the manifest import, the preview and diff downloads and every authoring
+  write -- depends on ``verify_key_admin`` (a signed-in session, this machine or an
+  ``admin`` key). The enable / disable selection and Reload above stay on
+  ``verify_api_key``: they install nothing (UDR-0247 D2).
+- Sources can be added by URL (``/sources``), updates are reviewed with a diff and
+  applied with ``expected_revision``, skills can be written in group ``local``
+  (``/local``, CTR-0289) and manifests imported and exported (``/manifest``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
-from app.auth import verify_api_key
+from app.auth import Identity, verify_api_key, verify_key_admin
+from app.skills import authoring as authoring_mod
 from app.skills import catalog as catalog_mod
+from app.skills import manifest as manifest_mod
 from app.skills import state as state_mod
-from app.skills.install import InstallError, install_skill, uninstall_skill
+from app.skills import user_sources as sources_mod
+from app.skills.install import InstallError, diff_skill, install_skill, uninstall_skill
 from app.skills.inventory import get_skills_inventory
 from app.skills.overrides import get_skills_override_store
 
@@ -108,6 +123,54 @@ class InstallRequest(BaseModel):
 
     id: str = Field(..., min_length=1, max_length=512)
     force: bool = False
+    # PRP-0266: the revision the update diff showed; a moved catalog answers 409.
+    expected_revision: str | None = Field(default=None, max_length=256)
+
+
+class SourceUrl(BaseModel):
+    """A source typed by an administrator (PRP-0266 C1)."""
+
+    url: str = Field(..., min_length=1, max_length=2048)
+
+
+class SourceAdd(SourceUrl):
+    id: str = Field(default="", max_length=64)
+    display_name: str = Field(default="", max_length=128)
+    group: str = Field(default="", max_length=64)
+
+
+class SourcePatch(BaseModel):
+    ref: str = Field(default="", max_length=256)
+
+
+class LocalCreate(BaseModel):
+    """Create a skill in group local, or duplicate one (``from_id``)."""
+
+    name: str = Field(..., min_length=1, max_length=64)
+    description: str = Field(default="", max_length=1024)
+    body: str = Field(default="", max_length=1_000_000)
+    from_id: str = Field(default="", max_length=512)
+
+
+class LocalSave(BaseModel):
+    """One change set: text files written and paths deleted (CTR-0289)."""
+
+    files: dict[str, str] = Field(default_factory=dict)
+    deleted: list[str] = Field(default_factory=list)
+
+
+class ManifestImport(BaseModel):
+    document: dict[str, Any]
+    apply: bool = False
+    select: list[str] | None = None
+
+
+def _raise(exc: InstallError) -> None:
+    raise HTTPException(status_code=exc.status, detail=exc.payload()) from None
+
+
+def _who(identity: Identity) -> str:
+    return f"{identity.source}:{identity.subject}"
 
 
 def register_skills_management(app: FastAPI, *, agent_registry) -> None:
@@ -253,9 +316,9 @@ def register_skills_management(app: FastAPI, *, agent_registry) -> None:
         """
         return await asyncio.to_thread(catalog_mod.build_view)
 
-    @router.post("/catalog/refresh", dependencies=[Depends(verify_api_key)])
-    async def refresh_catalog_endpoint() -> dict:
-        """Rebuild the catalog snapshot from every configured source.
+    @router.post("/catalog/refresh", dependencies=[Depends(verify_key_admin)])
+    async def refresh_catalog_endpoint(source: str | None = None) -> dict:
+        """Rebuild the catalog snapshot from every configured source, or from one.
 
         Per-source atomic: a source that fails keeps its previous entries, marked
         stale with the error attached (UDR-0147 D3), so one rate-limited repository
@@ -263,20 +326,33 @@ def register_skills_management(app: FastAPI, *, agent_registry) -> None:
         """
         if not catalog_mod.install_available():
             raise HTTPException(status_code=403, detail={"error": "install_disabled"})
-        await catalog_mod.refresh_catalog()
+        try:
+            await catalog_mod.refresh_catalog(source or None)
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail={"error": "unknown_source", "message": f"{source} is not an active source."}
+            ) from None
         return await asyncio.to_thread(catalog_mod.build_view)
 
-    @router.post("/install", dependencies=[Depends(verify_api_key)])
+    @router.post("/install", dependencies=[Depends(verify_key_admin)])
     async def install_endpoint(body: InstallRequest) -> dict:
         """Install or reinstall one catalog skill, then rebuild the agents."""
         try:
-            await install_skill(body.id, force=body.force)
+            await install_skill(body.id, force=body.force, expected_revision=body.expected_revision)
         except InstallError as exc:
             raise HTTPException(status_code=exc.status, detail=exc.payload()) from None
         await _apply_install_change(reason="skill_install")
         return await asyncio.to_thread(catalog_mod.build_view)
 
-    @router.delete("/install/{skill_id:path}", dependencies=[Depends(verify_api_key)])
+    @router.get("/install/{skill_id:path}/diff", dependencies=[Depends(verify_key_admin)])
+    async def diff_endpoint(skill_id: str) -> dict:
+        """Compare the catalog commit of one skill with what is installed (no write)."""
+        try:
+            return await diff_skill(skill_id)
+        except InstallError as exc:
+            _raise(exc)
+
+    @router.delete("/install/{skill_id:path}", dependencies=[Depends(verify_key_admin)])
     async def uninstall_endpoint(skill_id: str) -> dict:
         """Remove one installed skill and its ledger row, then rebuild the agents."""
         try:
@@ -285,6 +361,139 @@ def register_skills_management(app: FastAPI, *, agent_registry) -> None:
             raise HTTPException(status_code=exc.status, detail=exc.payload()) from None
         await _apply_install_change(reason="skill_uninstall")
         return await asyncio.to_thread(catalog_mod.build_view)
+
+    # ------------------------------------------------------------------
+    # Sources added by URL (PRP-0266 C1)
+    # ------------------------------------------------------------------
+
+    @router.post("/sources/preview", dependencies=[Depends(verify_key_admin)])
+    async def preview_source_endpoint(body: SourceUrl) -> dict:
+        """Resolve a URL and list the skills it would publish (writes nothing)."""
+        try:
+            return await sources_mod.preview_source(body.url)
+        except InstallError as exc:
+            _raise(exc)
+
+    @router.post("/sources")
+    async def add_source_endpoint(body: SourceAdd, identity: Identity = Depends(verify_key_admin)) -> dict:
+        """Add a source (unverified) and list it into the catalog."""
+        try:
+            await sources_mod.add_source(
+                body.url, source_id=body.id, display_name=body.display_name, group=body.group, added_by=_who(identity)
+            )
+        except InstallError as exc:
+            _raise(exc)
+        return await asyncio.to_thread(catalog_mod.build_view)
+
+    @router.patch("/sources/{source_id}", dependencies=[Depends(verify_key_admin)])
+    async def patch_source_endpoint(source_id: str, body: SourcePatch) -> dict:
+        """Pin an added source to a ref, or track its default branch (empty ref)."""
+        try:
+            await sources_mod.update_source_ref(source_id, body.ref)
+        except InstallError as exc:
+            _raise(exc)
+        return await asyncio.to_thread(catalog_mod.build_view)
+
+    @router.delete("/sources/{source_id}", dependencies=[Depends(verify_key_admin)])
+    async def remove_source_endpoint(source_id: str) -> dict:
+        """Remove an added source and its catalog block; installed skills stay."""
+        try:
+            sources_mod.remove_source(source_id)
+        except InstallError as exc:
+            _raise(exc)
+        return await asyncio.to_thread(catalog_mod.build_view)
+
+    # ------------------------------------------------------------------
+    # Manifests (PRP-0266 C6)
+    # ------------------------------------------------------------------
+
+    @router.get("/manifest", dependencies=[Depends(verify_api_key)])
+    async def export_manifest_endpoint() -> dict:
+        """The ChatWalaau manifest (chatwalaau-skills.json) of this deployment."""
+        return await asyncio.to_thread(manifest_mod.export_manifest)
+
+    @router.post("/manifest/import")
+    async def import_manifest_endpoint(body: ManifestImport, identity: Identity = Depends(verify_key_admin)) -> dict:
+        """Preview, or with ``apply`` perform, a skills-lock.json or manifest import."""
+        try:
+            plan = await manifest_mod.import_manifest(
+                body.document, apply=body.apply, select=body.select, added_by=_who(identity)
+            )
+        except InstallError as exc:
+            _raise(exc)
+        if body.apply and any(r.get("status") == "installed" for r in plan.get("results", [])):
+            await _apply_install_change(reason="skill_manifest_import")
+        plan["catalog"] = await asyncio.to_thread(catalog_mod.build_view)
+        return plan
+
+    # ------------------------------------------------------------------
+    # Skills written in the product (CTR-0289, PRP-0266 C5)
+    # ------------------------------------------------------------------
+
+    @router.post("/local", dependencies=[Depends(verify_key_admin)])
+    async def create_local_endpoint(body: LocalCreate) -> dict:
+        """Create local/<name>, or duplicate ``from_id`` into it."""
+        try:
+            if body.from_id:
+                record = await authoring_mod.duplicate(body.from_id, body.name)
+            else:
+                record = await authoring_mod.create_local(body.name, body.description, body.body)
+        except InstallError as exc:
+            _raise(exc)
+        await _apply_install_change(reason="skill_local_create")
+        return {"skill": record.to_json(), "catalog": await asyncio.to_thread(catalog_mod.build_view)}
+
+    @router.post("/local/import", dependencies=[Depends(verify_key_admin)])
+    async def import_local_endpoint(file: UploadFile = File(...), name: str = Form(default="")) -> dict:
+        """Create local/<name> from a ZIP holding one skill."""
+        data = await file.read()
+        try:
+            record = await authoring_mod.import_zip(data, name)
+        except InstallError as exc:
+            _raise(exc)
+        await _apply_install_change(reason="skill_local_import")
+        return {"skill": record.to_json(), "catalog": await asyncio.to_thread(catalog_mod.build_view)}
+
+    @router.get("/local/{name}", dependencies=[Depends(verify_api_key)])
+    async def get_local_endpoint(name: str) -> dict:
+        """The files of local/<name> (text files with their content)."""
+        try:
+            return await asyncio.to_thread(authoring_mod.get_local, name)
+        except InstallError as exc:
+            _raise(exc)
+
+    @router.put("/local/{name}", dependencies=[Depends(verify_key_admin)])
+    async def save_local_endpoint(name: str, body: LocalSave) -> dict:
+        """Save one change set to local/<name>: one write, one rebuild."""
+        try:
+            record = await authoring_mod.save_local(name, body.files, body.deleted)
+        except InstallError as exc:
+            _raise(exc)
+        await _apply_install_change(reason="skill_local_save")
+        return {"skill": record.to_json(), "catalog": await asyncio.to_thread(catalog_mod.build_view)}
+
+    @router.delete("/local/{name}", dependencies=[Depends(verify_key_admin)])
+    async def delete_local_endpoint(name: str) -> dict:
+        """Delete local/<name> and its ledger row."""
+        try:
+            await authoring_mod.delete_local(name)
+        except InstallError as exc:
+            _raise(exc)
+        await _apply_install_change(reason="skill_local_delete")
+        return await asyncio.to_thread(catalog_mod.build_view)
+
+    @router.get("/{group}/{name}/export.zip", dependencies=[Depends(verify_api_key)])
+    async def export_zip_endpoint(group: str, name: str) -> Response:
+        """Download one skill on disk as a ZIP."""
+        try:
+            filename, data = await asyncio.to_thread(authoring_mod.export_zip, group, name)
+        except InstallError as exc:
+            _raise(exc)
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     app.include_router(router)
 

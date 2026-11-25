@@ -5,10 +5,14 @@
 
     <SKILLS_DIR>/.skills-state.json
     {
-      "schema_version": 1,
+      "schema_version": 2,
       "disabled": ["pdf"],                     # gating selection (UDR-0148)
-      "installed": [ {...ledger entry...} ]    # install ledger  (CTR-0206)
+      "installed": [ {...ledger entry...} ],   # install ledger  (CTR-0206)
+      "sources": [ {...added source...} ]      # sources added by URL (PRP-0266)
     }
+
+A schema_version 1 file reads as before: no added sources, every ledger row
+``curated``. The next write upgrades it to version 2.
 
 Two decisions are load-bearing here.
 
@@ -48,7 +52,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STAGING_DIR_NAME = ".skills-staging"
 
 _lock = threading.Lock()
@@ -70,6 +74,10 @@ class InstalledSkill:
     files: list[str] = field(default_factory=list)
     license: dict[str, Any] | None = None
     installed_at: str = ""
+    # PRP-0266: the trust label that applied at install time ("curated",
+    # "unverified" or "local") and the source's ref ("" = tracking).
+    trust: str = "curated"
+    ref: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -85,6 +93,8 @@ class InstalledSkill:
             "files": list(self.files),
             "license": self.license,
             "installed_at": self.installed_at,
+            "trust": self.trust,
+            "ref": self.ref,
         }
 
     @classmethod
@@ -112,6 +122,66 @@ class InstalledSkill:
             files=[str(f) for f in (raw.get("files") or []) if isinstance(f, str)],
             license=license_raw if isinstance(license_raw, dict) else None,
             installed_at=str(raw.get("installed_at") or ""),
+            trust=str(raw.get("trust") or "curated"),
+            ref=str(raw.get("ref") or ""),
+        )
+
+
+@dataclass
+class AddedSource:
+    """A source an administrator added by URL (PRP-0266 C1, UDR-0247 D1)."""
+
+    id: str
+    display_name: str
+    repo: str
+    paths: list[str] = field(default_factory=lambda: [""])
+    group: str = ""
+    ref: str = ""
+    added_by: str = ""
+    added_at: str = ""
+
+    def to_def(self):
+        """The CTR-0203 definition of this source, always ``unverified``."""
+        from app.skills.sources.base import TRUST_UNVERIFIED, SourceDef
+
+        return SourceDef(
+            id=self.id,
+            display_name=self.display_name or self.id,
+            repo=self.repo,
+            paths=tuple(self.paths or [""]),
+            group=self.group or self.id,
+            ref=self.ref,
+            trust=TRUST_UNVERIFIED,
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "display_name": self.display_name,
+            "repo": self.repo,
+            "paths": list(self.paths),
+            "group": self.group,
+            "ref": self.ref,
+            "added_by": self.added_by,
+            "added_at": self.added_at,
+        }
+
+    @classmethod
+    def from_json(cls, raw: dict[str, Any]) -> AddedSource | None:
+        source_id = str(raw.get("id") or "").strip()
+        repo = str(raw.get("repo") or "").strip()
+        if not source_id or not repo:
+            return None
+        paths = [str(p).strip("/") for p in (raw.get("paths") or [""]) if isinstance(p, str)] or [""]
+        return cls(
+            id=source_id,
+            display_name=str(raw.get("display_name") or source_id),
+            repo=repo,
+            paths=paths,
+            group=str(raw.get("group") or source_id),
+            ref=str(raw.get("ref") or ""),
+            added_by=str(raw.get("added_by") or ""),
+            added_at=str(raw.get("added_at") or ""),
         )
 
 
@@ -121,6 +191,7 @@ class SkillsState:
 
     disabled: set[str] = field(default_factory=set)
     installed: dict[str, InstalledSkill] = field(default_factory=dict)
+    sources: dict[str, AddedSource] = field(default_factory=dict)
     present: bool = False
 
     def to_json(self) -> dict[str, Any]:
@@ -128,6 +199,7 @@ class SkillsState:
             "schema_version": SCHEMA_VERSION,
             "disabled": sorted(self.disabled),
             "installed": [entry.to_json() for entry in sorted(self.installed.values(), key=lambda e: e.id)],
+            "sources": [src.to_json() for src in sorted(self.sources.values(), key=lambda s: s.id)],
         }
 
 
@@ -217,7 +289,14 @@ def read_state() -> SkillsState:
         entry = InstalledSkill.from_json(row)
         if entry is not None:
             installed[entry.id] = entry
-    return SkillsState(disabled=disabled, installed=installed, present=True)
+    sources: dict[str, AddedSource] = {}
+    for row in raw.get("sources") or []:
+        if not isinstance(row, dict):
+            continue
+        source = AddedSource.from_json(row)
+        if source is not None:
+            sources[source.id] = source
+    return SkillsState(disabled=disabled, installed=installed, sources=sources, present=True)
 
 
 def write_state(state: SkillsState) -> None:
@@ -280,6 +359,24 @@ def drop_install(skill_id: str, *, name: str | None = None) -> None:
         state.installed.pop(skill_id, None)
         if name:
             state.disabled.discard(name)
+
+    mutate(_apply)
+
+
+def save_source(source: AddedSource) -> None:
+    """Add or replace one added source (PRP-0266)."""
+
+    def _apply(state: SkillsState) -> None:
+        state.sources[source.id] = source
+
+    mutate(_apply)
+
+
+def drop_source(source_id: str) -> None:
+    """Remove one added source. Skills installed from it stay in the ledger."""
+
+    def _apply(state: SkillsState) -> None:
+        state.sources.pop(source_id, None)
 
     mutate(_apply)
 
@@ -347,11 +444,13 @@ def load_state_into_stores() -> None:
 __all__ = [
     "SCHEMA_VERSION",
     "STAGING_DIR_NAME",
+    "AddedSource",
     "InstalledSkill",
     "SkillsState",
     "catalog_path",
     "cleanup_staging",
     "drop_install",
+    "drop_source",
     "installed_entries",
     "load_state_into_stores",
     "mutate",
@@ -359,6 +458,7 @@ __all__ = [
     "read_state",
     "record_install",
     "save_disabled",
+    "save_source",
     "skill_install_dir",
     "skills_root",
     "staging_root",

@@ -146,6 +146,12 @@ def _run_skill_script_sync(skill: Any, script: Any, args: dict[str, Any] | list[
     skill_dir = Path(getattr(skill, "path", "") or script_path.parent)
 
     cmd = _command_for(script_path) + _script_args(args)
+    # PRP-0266 C7: say which interpreter is missing instead of a raw [Errno 2].
+    from app.skills.runtimes import missing_interpreter_message
+
+    missing = missing_interpreter_message(cmd[0], getattr(script, "name", script_path.name))
+    if missing:
+        return missing
     timeout = settings.coding_bash_timeout
     max_output = settings.coding_max_output_chars
     # Force UTF-8 in the child so scripts that print non-ASCII (very common in

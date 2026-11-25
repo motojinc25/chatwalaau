@@ -4,7 +4,8 @@ Implements CTR-0203 against a public GitHub repository. Three API requests per
 repository, then one download:
 
     GET /repos/{repo}                      -- default branch + repository license
-    GET /repos/{repo}/git/ref/heads/{br}   -- the head commit SHA (small payload)
+    GET /repos/{repo}/git/ref/heads/{br}   -- the head commit SHA (small payload), or
+    GET /repos/{repo}/commits/{ref}        -- the commit of a pinned ref (PRP-0266)
     GET /repos/{repo}/git/trees/{sha}?recursive=1
                                            -- every path, every directory tree SHA
     codeload.github.com/{repo}/tar.gz/{sha} -- the bytes
@@ -37,7 +38,7 @@ import httpx
 
 from app.core.config import settings
 from app.skills.frontmatter import parse_frontmatter
-from app.skills.sources.base import CatalogEntry, FetchedSkill, SourceDef, SourceError
+from app.skills.sources.base import SKIPPED_DIR_NAMES, CatalogEntry, FetchedSkill, SourceDef, SourceError
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,9 @@ _SKILL_FILE = "SKILL.md"
 # Script extensions mirror the provider's discovery filter so `has_scripts` means
 # "MAF will advertise run_skill_script for this skill", not "there is a file here".
 _SCRIPT_SUFFIXES = (".py", ".sh", ".bash", ".js", ".mjs", ".cjs")
+# Dependency manifests inside a skill folder: the product never installs them
+# (UDR-0247 D7), so the catalog warns instead.
+DEPENDENCY_FILES = frozenset({"package.json", "requirements.txt", "pyproject.toml"})
 # A repository tarball is not a skill payload, so it is bounded separately and
 # generously: the per-skill caps (SKILL_INSTALL_MAX_BYTES / _FILES) still decide
 # what may be written to disk.
@@ -120,6 +124,27 @@ class GitHubSkillSource:
         self._archive_commit = commit
         return self._archive
 
+    async def _resolve_commit(self, client: httpx.AsyncClient, branch: str) -> str:
+        """The commit to list: the default branch's head, or the pinned ref's commit.
+
+        A pinned ref (branch, tag or commit SHA) goes through the commits endpoint,
+        which resolves all three and dereferences an annotated tag to its commit.
+        """
+        pinned = (self._def.ref or "").strip()
+        if pinned:
+            data = await self._get_json(client, f"{_API}/repos/{self._def.repo}/commits/{pinned}")
+            commit = str(data.get("sha") or "") if isinstance(data, dict) else ""
+            if not commit:
+                raise SourceError(f"{self._def.repo}: could not resolve {pinned!r} to a commit")
+            return commit
+        ref = await self._get_json(client, f"{_API}/repos/{self._def.repo}/git/ref/heads/{branch}")
+        commit = ""
+        if isinstance(ref, dict) and isinstance(ref.get("object"), dict):
+            commit = str(ref["object"].get("sha") or "")
+        if not commit:
+            raise SourceError(f"{self._def.repo}: could not resolve the head commit of {branch}")
+        return commit
+
     # -- Archive helpers --------------------------------------------------
 
     @staticmethod
@@ -163,12 +188,7 @@ class GitHubSkillSource:
             branch = str(meta.get("default_branch") or "main")
             repo_license = _license_from_repo(meta)
 
-            ref = await self._get_json(client, f"{_API}/repos/{self._def.repo}/git/ref/heads/{branch}")
-            commit = ""
-            if isinstance(ref, dict) and isinstance(ref.get("object"), dict):
-                commit = str(ref["object"].get("sha") or "")
-            if not commit:
-                raise SourceError(f"{self._def.repo}: could not resolve the head commit of {branch}")
+            commit = await self._resolve_commit(client, branch)
 
             tree = await self._get_json(client, f"{_API}/repos/{self._def.repo}/git/trees/{commit}?recursive=1")
             if not isinstance(tree, dict) or not isinstance(tree.get("tree"), list):
@@ -217,13 +237,16 @@ class GitHubSkillSource:
                 continue  # a SKILL.md at the repository root has no name to install under
             if not self._under_configured_path(skill_dir):
                 continue
+            if self._def.skips_hidden and _hidden(skill_dir):
+                continue
             candidates.add(skill_dir)
 
         # Parent absorption (MAF 1.11 #6849): everything beneath a skill root
         # belongs to that skill, so a nested candidate is not an independent skill.
-        skill_dirs = sorted(
+        absorbed = sorted(
             d for d in candidates if not any(d.startswith(other + "/") for other in candidates if other != d)
         )
+        skill_dirs, duplicates = _one_per_name(absorbed)
 
         members = self._archive_members(archive, "") if skill_dirs else {}
         entries: list[CatalogEntry] = []
@@ -247,6 +270,9 @@ class GitHubSkillSource:
             declared = front.get("name", "")
             if declared and declared != name:
                 warnings.append("name_mismatch")
+            warnings.extend(f"duplicate_name:{other}" for other in duplicates.get(skill_dir, []))
+            if any(PurePosixPath(path).name in DEPENDENCY_FILES for path in blobs if path.startswith(skill_dir + "/")):
+                warnings.append("declares_dependencies")
 
             entries.append(
                 CatalogEntry(
@@ -264,6 +290,8 @@ class GitHubSkillSource:
                     total_bytes=total_bytes,
                     has_scripts=has_scripts,
                     warnings=warnings,
+                    trust=self._def.trust,
+                    ref=self._def.ref,
                 )
             )
         return entries
@@ -291,6 +319,30 @@ class GitHubSkillSource:
         if not members:
             raise SourceError(f"{entry.id}: nothing found at {entry.repo_path} in {entry.repo}")
         return FetchedSkill(members=members, revision=entry.revision, source_commit=entry.source_commit)
+
+
+def _hidden(skill_dir: str) -> bool:
+    """True when a path crosses a dot-folder or node_modules (PRP-0266 C1)."""
+    return any(part.startswith(".") or part in SKIPPED_DIR_NAMES for part in skill_dir.split("/"))
+
+
+def _one_per_name(skill_dirs: list[str]) -> tuple[list[str], dict[str, list[str]]]:
+    """Keep one folder per skill name: the shallowest, then the alphabetically first.
+
+    One source yielding the same name twice would produce two catalog rows with the
+    same id. The kept folder records the others so the row can say where they were.
+    """
+    by_name: dict[str, list[str]] = {}
+    for skill_dir in skill_dirs:
+        by_name.setdefault(PurePosixPath(skill_dir).name, []).append(skill_dir)
+    kept: list[str] = []
+    duplicates: dict[str, list[str]] = {}
+    for dirs in by_name.values():
+        ordered = sorted(dirs, key=lambda d: (d.count("/"), d))
+        kept.append(ordered[0])
+        if len(ordered) > 1:
+            duplicates[ordered[0]] = ordered[1:]
+    return sorted(kept), duplicates
 
 
 def _license_from_repo(meta: dict[str, Any]) -> dict[str, Any] | None:

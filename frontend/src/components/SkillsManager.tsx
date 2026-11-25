@@ -1,5 +1,31 @@
-import { BookOpen, CircleAlert, Download, Loader2, PackageCheck, RefreshCw, Trash2, TriangleAlert } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  BookOpen,
+  CircleAlert,
+  Copy,
+  Download,
+  FileArchive,
+  FileJson,
+  Loader2,
+  PackageCheck,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Trash2,
+  TriangleAlert,
+  Upload,
+} from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  AddSourcePanel,
+  api,
+  apiError,
+  EditorPanel,
+  ManifestPanel,
+  NewSkillPanel,
+  ReviewPanel,
+  type SkillDiff,
+  UNVERIFIED_WARNING,
+} from '@/components/SkillsPanels'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
@@ -24,6 +50,12 @@ import { cn } from '@/lib/utils'
  * whose folder is gone says "Missing on disk" (an ephemeral SKILLS_DIR, UDR-0143),
  * and one with no catalog row says "Not in the current catalog", never "deleted
  * upstream", because a snapshot cannot tell those apart (UDR-0147 D5).
+ *
+ * PRP-0266 (CTR-0124 v3, UDR-0247): administrators add sources by URL (labelled
+ * Unverified), an update or an unverified install is reviewed first (a diff plus
+ * the start of SKILL.md; a warning, never a block), skills can be written in the
+ * `local` group, duplicated to edit, moved by ZIP, and whole setups moved by
+ * manifest. The panels live in SkillsPanels.tsx.
  */
 
 interface Skill {
@@ -67,6 +99,10 @@ interface CatalogSkill {
   locally_modified: boolean
   missing: boolean
   enabled: boolean
+  trust?: string
+  installed_trust?: string
+  ref?: string
+  local?: boolean
 }
 
 interface CatalogSource {
@@ -76,6 +112,14 @@ interface CatalogSource {
   error?: string | null
   stale?: boolean
   skill_count?: number
+  trust?: string
+  ref?: string
+  added?: boolean
+}
+
+interface RuntimeInfo {
+  found: boolean
+  version?: string
 }
 
 interface CatalogView {
@@ -83,9 +127,23 @@ interface CatalogView {
   install_enabled?: boolean
   demo_mode?: boolean
   available?: boolean
+  url_sources_enabled?: boolean
   skills_dir?: string
+  runtimes?: { python?: RuntimeInfo; node?: RuntimeInfo; bash?: RuntimeInfo; coding_enabled?: boolean }
   sources?: CatalogSource[]
   skills?: CatalogSkill[]
+}
+
+type Panel =
+  | { kind: 'add-source' }
+  | { kind: 'review'; skill: CatalogSkill }
+  | { kind: 'new-skill'; fromId?: string }
+  | { kind: 'edit'; name: string }
+  | { kind: 'manifest' }
+  | null
+
+function isUnverified(row: CatalogSkill | undefined): boolean {
+  return (row?.installed_trust ?? row?.trust) === 'unverified'
 }
 
 type ConfirmMode = 'save' | 'close' | 'reload' | null
@@ -166,6 +224,8 @@ export function SkillsManager() {
   const [confirmMode, setConfirmMode] = useState<ConfirmMode>(null)
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [catalog, setCatalog] = useState<CatalogView | null>(null)
+  const [panel, setPanel] = useState<Panel>(null)
+  const zipInput = useRef<HTMLInputElement>(null)
 
   const dirty = groups.length > 0 && selectionKey(groups) !== baseline
   const catalogSources = catalog?.sources ?? []
@@ -359,16 +419,28 @@ export function SkillsManager() {
     }
   }, [])
 
+  // After any write that changed what is on disk: adopt the catalog the route
+  // returned and re-read the inventory (the enable toggles depend on it).
+  const afterChange = useCallback(
+    async (nextCatalog: unknown) => {
+      if (nextCatalog) setCatalog(nextCatalog as CatalogView)
+      const inv = await fetch('/api/skills')
+      if (inv.ok) adopt(await inv.json())
+    },
+    [adopt],
+  )
+
   const runInstall = useCallback(
-    async (skill: CatalogSkill, force: boolean) => {
+    async (skill: CatalogSkill, force: boolean, expectedRevision?: string) => {
       setPending(null)
+      setPanel(null)
       setBusyId(skill.id)
       setError(null)
       try {
         const res = await fetch('/api/skills/install', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: skill.id, force }),
+          body: JSON.stringify({ id: skill.id, force, expected_revision: expectedRevision ?? null }),
         })
         const body = await res.json().catch(() => null)
         if (!res.ok) {
@@ -414,15 +486,96 @@ export function SkillsManager() {
     [adopt],
   )
 
+  // An update, and any install from an unverified source, is reviewed first
+  // (UDR-0247 D3 / D4). A curated first install keeps the short confirmation.
+  const requestInstall = useCallback((row: CatalogSkill) => {
+    if (row.update_available || isUnverified(row)) setPanel({ kind: 'review', skill: row })
+    else setPending({ kind: 'install', skill: row })
+  }, [])
+
+  const runSourceAction = useCallback(
+    async (path: string, init: RequestInit, label: string) => {
+      setRefreshing(true)
+      setError(null)
+      try {
+        const r = await api(path, init)
+        if (!r.ok) throw new Error(apiError(r.body, label))
+        await afterChange(r.body)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : label)
+      } finally {
+        setRefreshing(false)
+      }
+    },
+    [afterChange],
+  )
+
+  const runLocalDelete = useCallback(
+    async (name: string) => {
+      setBusyId(`local/${name}`)
+      setError(null)
+      try {
+        const r = await api(`/api/skills/local/${encodeURIComponent(name)}`, { method: 'DELETE' })
+        if (!r.ok) throw new Error(apiError(r.body, `Failed to delete ${name}`))
+        await afterChange(r.body)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : `Failed to delete ${name}`)
+      } finally {
+        setBusyId(null)
+      }
+    },
+    [afterChange],
+  )
+
+  const importZip = useCallback(
+    async (file: File) => {
+      setSaving(true)
+      setError(null)
+      try {
+        const form = new FormData()
+        form.append('file', file)
+        const r = await api<{ catalog: unknown }>('/api/skills/local/import', { method: 'POST', body: form })
+        if (!r.ok) throw new Error(apiError(r.body, 'The ZIP could not be imported'))
+        await afterChange(r.body.catalog)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'The ZIP could not be imported')
+      } finally {
+        setSaving(false)
+      }
+    },
+    [afterChange],
+  )
+
+  const exportManifest = useCallback(async () => {
+    setError(null)
+    try {
+      const r = await api('/api/skills/manifest')
+      if (!r.ok) throw new Error(apiError(r.body, 'The manifest could not be exported'))
+      const blob = new Blob([`${JSON.stringify(r.body, null, 2)}\n`], { type: 'application/json' })
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = 'chatwalaau-skills.json'
+      link.click()
+      URL.revokeObjectURL(link.href)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The manifest could not be exported')
+    }
+  }, [])
+
   if (!available) return null
 
   const busy = saving || refreshing || busyId !== null
+  const urlSourcesEnabled = installEnabled && catalog?.url_sources_enabled !== false
+  const runtimes = catalog?.runtimes
+  const selectedSource = catalogSources.find((s) => s.id === selected)
   const sourceRows = catalogSkills.filter((s) => s.source_id === selected && (s.in_catalog || s.installed))
 
   const renderChips = (row: CatalogSkill | undefined, enabled: boolean) => (
     <>
+      {isUnverified(row) && <Chip tone="warn">Unverified</Chip>}
+      {row?.local && <Chip tone="info">Written here</Chip>}
       {row?.missing && <Chip tone="warn">Missing on disk</Chip>}
-      {row?.installed && !row.in_catalog && <Chip tone="warn">Not in the current catalog</Chip>}
+      {row?.installed && !row.in_catalog && !row.local && <Chip tone="warn">Not in the current catalog</Chip>}
       {row?.installed && !row.missing && <Chip tone="ok">Installed</Chip>}
       {row?.update_available && <Chip tone="info">Update available</Chip>}
       {row?.locally_modified && <Chip tone="warn">Locally modified</Chip>}
@@ -461,9 +614,20 @@ export function SkillsManager() {
           <DialogHeader className="border-b px-6 py-4">
             <DialogTitle>Skills</DialogTitle>
             <DialogDescription>
-              Install Agent Skills from a catalog source, and enable or disable what is installed. Installing writes
-              into the skills directory; enabling controls what each message advertises to the agent.
+              Install Agent Skills from a catalog source or a source you add by URL, write your own, and enable or
+              disable what is installed. Installing writes into the skills directory; enabling controls what each
+              message advertises to the agent.
             </DialogDescription>
+            {runtimes && runtimes.coding_enabled === false && (
+              <p className="mt-1 text-[11px] text-muted-foreground" data-testid="skills-runtime-note">
+                Skill scripts do not run in this deployment (CODING_ENABLED is off); instructions still work.
+              </p>
+            )}
+            {runtimes?.node && !runtimes.node.found && (
+              <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-500" data-testid="skills-node-missing">
+                Node.js is not installed on this server, so .js skill scripts cannot run.
+              </p>
+            )}
             {collisions.length > 0 && (
               <p className="mt-1 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-500">
                 <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
@@ -509,9 +673,13 @@ export function SkillsManager() {
                           'flex w-full flex-col items-start border-b px-3 py-2 text-left',
                           selected === s.id && 'bg-accent',
                         )}>
-                        <span className="truncate text-sm font-medium">{s.display_name || s.id}</span>
+                        <span className="flex w-full items-center gap-1.5">
+                          <span className="truncate text-sm font-medium">{s.display_name || s.id}</span>
+                          {s.trust === 'unverified' && <Chip tone="warn">Unverified</Chip>}
+                        </span>
                         <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
                           {s.skill_count ?? 0} skills
+                          {s.ref ? ` @ ${s.ref}` : ''}
                           {s.stale && (
                             <span className="text-amber-600 dark:text-amber-500" title={s.error ?? undefined}>
                               (stale)
@@ -526,6 +694,24 @@ export function SkillsManager() {
                       No catalog yet. Use "Refresh catalog" to fetch what the configured sources publish.
                     </p>
                   )}
+                  {catalog && (
+                    <div className="p-3">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        data-testid="skills-add-source-button"
+                        disabled={busy || !urlSourcesEnabled}
+                        title={
+                          urlSourcesEnabled
+                            ? 'Add a GitHub repository as a skill source'
+                            : 'Adding sources by URL is turned off in this deployment'
+                        }
+                        onClick={() => setPanel({ kind: 'add-source' })}>
+                        <Plus className="mr-1 h-3.5 w-3.5" /> Add source
+                      </Button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Right: the selected source */}
@@ -533,18 +719,95 @@ export function SkillsManager() {
                   <div className="mb-3 flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <h3 className="truncate text-sm font-semibold">
-                        {selected === INSTALLED_SOURCE_ID
-                          ? 'Installed'
-                          : (catalogSources.find((s) => s.id === selected)?.display_name ?? selected)}
+                        {selected === INSTALLED_SOURCE_ID ? 'Installed' : (selectedSource?.display_name ?? selected)}
                       </h3>
                       <p className="text-[11px] text-muted-foreground">
                         {selected === INSTALLED_SOURCE_ID
                           ? skillsDir
                             ? `Skills directory: ${skillsDir}`
                             : 'Skills directory not configured'
-                          : `Catalog as of ${formatStamp(catalog?.generated_at)}`}
+                          : `${selectedSource?.repo ?? ''}${selectedSource?.ref ? ` @ ${selectedSource.ref}` : ''} - catalog as of ${formatStamp(catalog?.generated_at)}`}
                       </p>
                     </div>
+                    {selected === INSTALLED_SOURCE_ID && catalog && (
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={busy || !installEnabled}
+                          onClick={() => setPanel({ kind: 'new-skill' })}>
+                          <Plus className="mr-1 h-3.5 w-3.5" /> New skill
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={busy || !installEnabled}
+                          title="Import one skill from a ZIP"
+                          onClick={() => zipInput.current?.click()}>
+                          <Upload className="mr-1 h-3.5 w-3.5" /> ZIP
+                        </Button>
+                        <input
+                          ref={zipInput}
+                          type="file"
+                          accept=".zip,application/zip"
+                          className="hidden"
+                          aria-label="Skill ZIP file"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0]
+                            e.target.value = ''
+                            if (file) void importZip(file)
+                          }}
+                        />
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={busy || !urlSourcesEnabled}
+                          title="Import a skills-lock.json or a chatwalaau-skills.json"
+                          onClick={() => setPanel({ kind: 'manifest' })}>
+                          <FileJson className="mr-1 h-3.5 w-3.5" /> Import manifest
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy}
+                          title="Download chatwalaau-skills.json"
+                          onClick={exportManifest}>
+                          <Download className="mr-1 h-3.5 w-3.5" /> Export
+                        </Button>
+                      </div>
+                    )}
+                    {selectedSource?.added && (
+                      <AddedSourceActions
+                        source={selectedSource}
+                        disabled={busy || !urlSourcesEnabled}
+                        onRefresh={() =>
+                          runSourceAction(
+                            `/api/skills/catalog/refresh?source=${encodeURIComponent(selectedSource.id)}`,
+                            { method: 'POST' },
+                            'Failed to refresh the source',
+                          )
+                        }
+                        onSetRef={(ref) =>
+                          runSourceAction(
+                            `/api/skills/sources/${encodeURIComponent(selectedSource.id)}`,
+                            {
+                              method: 'PATCH',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ ref }),
+                            },
+                            'Failed to change the ref',
+                          )
+                        }
+                        onRemove={() => {
+                          setSelected(INSTALLED_SOURCE_ID)
+                          void runSourceAction(
+                            `/api/skills/sources/${encodeURIComponent(selectedSource.id)}`,
+                            { method: 'DELETE' },
+                            'Failed to remove the source',
+                          )
+                        }}
+                      />
+                    )}
                     {catalog && (
                       <Button
                         variant="outline"
@@ -582,17 +845,21 @@ export function SkillsManager() {
                       onToggleGroup={toggleGroup}
                       onToggleSkill={toggleSkill}
                       onReload={() => setConfirmMode('reload')}
-                      onReinstall={(row) => setPending({ kind: 'install', skill: row })}
+                      onReinstall={requestInstall}
                       onUninstall={(row) => setPending({ kind: 'uninstall', skill: row })}
+                      onEdit={(name) => setPanel({ kind: 'edit', name })}
+                      onDuplicate={(id) => setPanel({ kind: 'new-skill', fromId: id })}
+                      onDeleteLocal={runLocalDelete}
                     />
                   ) : (
                     <SourcePane
                       rows={sourceRows}
-                      source={catalogSources.find((s) => s.id === selected)}
+                      source={selectedSource}
                       busyId={busyId}
                       installEnabled={installEnabled}
+                      nodeMissing={runtimes?.node?.found === false}
                       renderChips={renderChips}
-                      onInstall={(row) => setPending({ kind: 'install', skill: row })}
+                      onInstall={requestInstall}
                       onUninstall={(row) => setPending({ kind: 'uninstall', skill: row })}
                     />
                   )}
@@ -601,13 +868,54 @@ export function SkillsManager() {
             )}
 
             {/* Blocking indicators + confirmations */}
-            {(saving || refreshing || confirmMode || pending) && (
+            {(saving || refreshing || confirmMode || pending || panel) && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/80">
                 {saving || refreshing ? (
                   <div className="flex items-center gap-2 text-sm">
                     <Loader2 className="h-5 w-5 animate-spin" />
                     {refreshing ? 'Refreshing the catalog...' : 'Rebuilding agents...'}
                   </div>
+                ) : panel?.kind === 'add-source' ? (
+                  <AddSourcePanel
+                    onCancel={() => setPanel(null)}
+                    onDone={(next) => {
+                      setPanel(null)
+                      void afterChange(next)
+                    }}
+                  />
+                ) : panel?.kind === 'review' ? (
+                  <ReviewPanel
+                    skillId={panel.skill.id}
+                    licenseText={licenseLabel(panel.skill.license)}
+                    onCancel={() => setPanel(null)}
+                    onApply={(diff: SkillDiff) => runInstall(panel.skill, diff.locally_modified, diff.revision)}
+                  />
+                ) : panel?.kind === 'new-skill' ? (
+                  <NewSkillPanel
+                    fromId={panel.fromId}
+                    onCancel={() => setPanel(null)}
+                    onDone={(next, name) => {
+                      void afterChange(next)
+                      setPanel({ kind: 'edit', name })
+                    }}
+                  />
+                ) : panel?.kind === 'edit' ? (
+                  <EditorPanel
+                    name={panel.name}
+                    readOnly={!installEnabled}
+                    onCancel={() => setPanel(null)}
+                    onSaved={(next) => {
+                      setPanel(null)
+                      void afterChange(next)
+                    }}
+                  />
+                ) : panel?.kind === 'manifest' ? (
+                  <ManifestPanel
+                    onCancel={() => setPanel(null)}
+                    onDone={(next) => {
+                      void afterChange(next)
+                    }}
+                  />
                 ) : pending ? (
                   <div className="w-[380px] rounded-lg border bg-background p-4 shadow-lg">
                     <p className="text-sm font-medium">
@@ -640,6 +948,9 @@ export function SkillsManager() {
                           <p className="text-amber-600 dark:text-amber-500">
                             This skill ships executable scripts, which the agent can run once installed.
                           </p>
+                        )}
+                        {isUnverified(pending.skill) && (
+                          <p className="text-amber-600 dark:text-amber-500">{UNVERIFIED_WARNING}</p>
                         )}
                       </div>
                     )}
@@ -727,6 +1038,57 @@ interface PaneCommon {
   renderChips: (row: CatalogSkill | undefined, enabled: boolean) => React.ReactNode
 }
 
+function AddedSourceActions({
+  source,
+  disabled,
+  onRefresh,
+  onSetRef,
+  onRemove,
+}: {
+  source: CatalogSource
+  disabled: boolean
+  onRefresh: () => void
+  onSetRef: (ref: string) => void
+  onRemove: () => void
+}) {
+  const [ref, setRef] = useState(source.ref ?? '')
+  useEffect(() => setRef(source.ref ?? ''), [source.ref])
+  return (
+    <div className="flex flex-wrap items-center gap-1" data-testid="skills-added-source-actions">
+      <input
+        value={ref}
+        onChange={(e) => setRef(e.target.value)}
+        placeholder="default branch"
+        aria-label="Pinned ref (tag, branch or commit; empty tracks the default branch)"
+        title="Pin to a tag, branch or commit. Empty tracks the default branch."
+        className="w-36 rounded-md border bg-background px-2 py-1 font-mono text-[11px]"
+      />
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={disabled || ref === (source.ref ?? '')}
+        onClick={() => onSetRef(ref)}>
+        {ref ? 'Pin' : 'Track'}
+      </Button>
+      <Button variant="outline" size="sm" disabled={disabled} onClick={onRefresh} title="Refresh this source only">
+        <RefreshCw className="h-3.5 w-3.5" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={disabled}
+        onClick={onRemove}
+        title="Remove this source (installed skills stay)">
+        <Trash2 className="h-3.5 w-3.5" />
+      </Button>
+    </div>
+  )
+}
+
+function exportHref(row: CatalogSkill): string {
+  return `/api/skills/${encodeURIComponent(row.group)}/${encodeURIComponent(row.name)}/export.zip`
+}
+
 function InstalledPane({
   groups,
   byName,
@@ -740,6 +1102,9 @@ function InstalledPane({
   onReload,
   onReinstall,
   onUninstall,
+  onEdit,
+  onDuplicate,
+  onDeleteLocal,
 }: PaneCommon & {
   groups: SkillGroup[]
   byName: Map<string, CatalogSkill>
@@ -750,6 +1115,9 @@ function InstalledPane({
   onReload: () => void
   onReinstall: (row: CatalogSkill) => void
   onUninstall: (row: CatalogSkill) => void
+  onEdit: (name: string) => void
+  onDuplicate: (id: string) => void
+  onDeleteLocal: (name: string) => void
 }) {
   if (groups.length === 0 && missingRows.length === 0) {
     /* Empty state (UDR-0068 D5): nothing installed and nothing on disk yet. */
@@ -866,15 +1234,57 @@ function InstalledPane({
                           Not loaded yet -- Reload to apply.
                         </div>
                       )}
-                      {row?.installed && !row.in_catalog && (
+                      {row?.installed && !row.in_catalog && !row.local && (
                         <div className="text-[11px] text-muted-foreground">
                           Not in the current catalog, so it will not receive updates.
                         </div>
                       )}
                       {s.description && <div className="text-[11px] text-muted-foreground">{s.description}</div>}
                     </div>
-                    {row?.installed && (
+                    {row?.local && (
                       <div className="flex shrink-0 gap-1">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busyId !== null}
+                          onClick={() => onEdit(row.name)}
+                          title={installEnabled ? 'Edit this skill' : 'View this skill'}>
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button size="sm" variant="ghost" asChild title="Download as ZIP">
+                          <a href={exportHref(row)} download>
+                            <FileArchive className="h-3.5 w-3.5" />
+                          </a>
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={!installEnabled || busyId !== null}
+                          onClick={() => onDeleteLocal(row.name)}
+                          title="Delete this skill">
+                          {busyId === row.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                      </div>
+                    )}
+                    {row?.installed && !row.local && (
+                      <div className="flex shrink-0 gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={!installEnabled || busyId !== null}
+                          onClick={() => onDuplicate(row.id)}
+                          title="Duplicate to edit (copies it into the local group)">
+                          <Copy className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button size="sm" variant="ghost" asChild title="Download as ZIP">
+                          <a href={exportHref(row)} download>
+                            <FileArchive className="h-3.5 w-3.5" />
+                          </a>
+                        </Button>
                         {row.in_catalog && (
                           <Button
                             size="sm"
@@ -915,12 +1325,14 @@ function SourcePane({
   source,
   busyId,
   installEnabled,
+  nodeMissing,
   renderChips,
   onInstall,
   onUninstall,
 }: PaneCommon & {
   rows: CatalogSkill[]
   source?: CatalogSource
+  nodeMissing: boolean
   onInstall: (row: CatalogSkill) => void
   onUninstall: (row: CatalogSkill) => void
 }) {
@@ -935,6 +1347,7 @@ function SourcePane({
           rows={rows}
           busyId={busyId}
           installEnabled={installEnabled}
+          nodeMissing={nodeMissing}
           renderChips={renderChips}
           onInstall={onInstall}
           onUninstall={onUninstall}
@@ -950,6 +1363,7 @@ function SourcePane({
       rows={rows}
       busyId={busyId}
       installEnabled={installEnabled}
+      nodeMissing={nodeMissing}
       renderChips={renderChips}
       onInstall={onInstall}
       onUninstall={onUninstall}
@@ -961,11 +1375,13 @@ function SourceRows({
   rows,
   busyId,
   installEnabled,
+  nodeMissing,
   renderChips,
   onInstall,
   onUninstall,
 }: PaneCommon & {
   rows: CatalogSkill[]
+  nodeMissing: boolean
   onInstall: (row: CatalogSkill) => void
   onUninstall: (row: CatalogSkill) => void
 }) {
@@ -983,6 +1399,24 @@ function SourceRows({
             {row.warnings?.includes('name_mismatch') && (
               <div className="text-[11px] text-amber-600 dark:text-amber-500">
                 Its declared name does not match its folder, so it may fail to load.
+              </div>
+            )}
+            {row.warnings
+              ?.filter((w) => w.startsWith('duplicate_name:'))
+              .map((w) => (
+                <div key={w} className="text-[11px] text-muted-foreground">
+                  The same skill is also at {w.slice('duplicate_name:'.length)}; the copy shown here is used.
+                </div>
+              ))}
+            {row.warnings?.includes('declares_dependencies') && (
+              <div className="text-[11px] text-amber-600 dark:text-amber-500">
+                It declares its own dependencies (package.json, requirements.txt or pyproject.toml). ChatWalaau does not
+                install them.
+              </div>
+            )}
+            {row.has_scripts && nodeMissing && (
+              <div className="text-[11px] text-amber-600 dark:text-amber-500">
+                It ships scripts; any .js script cannot run here because Node.js is not installed.
               </div>
             )}
           </div>

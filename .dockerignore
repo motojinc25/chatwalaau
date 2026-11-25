@@ -123,6 +123,6 @@ desktop/
 computer-use/target/
 computer-use/dist/
 
-# ---- DEXPI toolkit outputs ----
+# ---- DEXPI / HAZOP toolkits: moved to WeDXTools (PRP-0264, PRP-0265); safety net for a stray copy ----
 dexpi/
 hazop/

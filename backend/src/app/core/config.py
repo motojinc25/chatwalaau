@@ -507,6 +507,8 @@ class Settings(BaseSettings):
     # SKILLS_DIR itself is NOT here: the two paths below resolve UNDER it, so the
     # root has to be readable before the store can be found (UDR-0149 D3).
     skill_install_enabled: bool = True
+    # PRP-0266: administrators may add skill sources by URL (child of the switch above).
+    skill_url_sources_enabled: bool = True
     # Catalog snapshot and install-ledger/gating file. A RELATIVE path resolves
     # under SKILLS_DIR (not the CWD), which is what makes the durable root a single
     # directory to mount. Both defaults start with "." so MAF discovery ignores

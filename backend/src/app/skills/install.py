@@ -5,8 +5,9 @@ scripts that ``run_skill_script`` will run on this server, so every refusal in
 this module is a deliberate one and none of them is a nuisance check:
 
 - The target is resolved in the CATALOG. An id that is not in a catalog built
-  from the closed source table cannot be installed; there is no path from a URL
-  to this function.
+  from the active source table (the curated table plus the sources an
+  administrator added, PRP-0266) cannot be installed; there is no path from a URL
+  to this function that skips adding the source first (UDR-0247 D1).
 - A NAME COLLISION across groups is refused outright, with no ``force``. MAF keeps
   the first of any duplicate skill name and silently drops the rest, so a forced
   install would write a folder that the agent never loads and leave the operator
@@ -20,12 +21,18 @@ Nothing destructive happens until the staged copy is complete and valid: files
 land in ``<SKILLS_DIR>/.skills-staging/<uuid>/``, and only then is the existing
 skill directory deleted and the staged one moved into place. The delete-then-move
 order is what keeps a file that upstream removed from surviving a reinstall.
+
+PRP-0266 adds the reviewed update: ``diff_skill`` compares the catalog commit with
+the installed folder, and ``install_skill(expected_revision=...)`` refuses with
+``409 revision_changed`` when the catalog moved after that diff was shown
+(UDR-0247 D4).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 from pathlib import Path, PurePosixPath
 import shutil
@@ -34,8 +41,11 @@ import uuid
 from app.core.config import settings
 from app.skills import catalog as catalog_mod
 from app.skills import state as state_mod
-from app.skills.hashing import hash_members, is_ignored_relpath
+from app.skills.hashing import hash_members, hash_skill_dir, is_ignored_relpath, iter_skill_files
 from app.skills.sources import CatalogEntry, SourceError, build_source, load_source_defs
+from app.skills.sources.github import DEPENDENCY_FILES
+
+_SCRIPT_SUFFIXES = (".py", ".sh", ".bash", ".js", ".mjs", ".cjs")
 
 logger = logging.getLogger(__name__)
 
@@ -68,15 +78,20 @@ def _require_root() -> Path:
 
 def _validate_members(entry: CatalogEntry, members: dict[str, bytes]) -> dict[str, bytes]:
     """Reject unsafe or over-cap payloads; drop generated artefacts."""
+    return validate_members(entry.id, members)
+
+
+def validate_members(label: str, members: dict[str, bytes]) -> dict[str, bytes]:
+    """The install payload checks, shared with skill authoring (CTR-0289)."""
     clean: dict[str, bytes] = {}
     total = 0
     for rel, data in members.items():
         posix = rel.replace("\\", "/")
         pure = PurePosixPath(posix)
-        if pure.is_absolute() or any(part in ("..", "") for part in pure.parts):
+        if pure.is_absolute() or any(part in ("..", "") for part in pure.parts) or ":" in posix:
             raise InstallError(
                 "unsafe_path",
-                f"{entry.id}: the upstream skill contains an unsafe path ({rel!r}).",
+                f"{label}: the skill contains an unsafe path ({rel!r}).",
             )
         if is_ignored_relpath(posix):
             continue
@@ -84,23 +99,28 @@ def _validate_members(entry: CatalogEntry, members: dict[str, bytes]) -> dict[st
         total += len(data)
 
     if not clean:
-        raise InstallError("empty_skill", f"{entry.id}: the upstream skill has no files.")
+        raise InstallError("empty_skill", f"{label}: the skill has no files.")
     if len(clean) > settings.skill_install_max_files:
         raise InstallError(
             "too_many_files",
-            f"{entry.id}: {len(clean)} files exceeds SKILL_INSTALL_MAX_FILES ({settings.skill_install_max_files}).",
+            f"{label}: {len(clean)} files exceeds SKILL_INSTALL_MAX_FILES ({settings.skill_install_max_files}).",
         )
     if total > settings.skill_install_max_bytes:
         raise InstallError(
             "too_large",
-            f"{entry.id}: {total} bytes exceeds SKILL_INSTALL_MAX_BYTES ({settings.skill_install_max_bytes}).",
+            f"{label}: {total} bytes exceeds SKILL_INSTALL_MAX_BYTES ({settings.skill_install_max_bytes}).",
         )
     if not (clean.get(_SKILL_FILE) or b"").strip():
         raise InstallError(
             "no_skill_md",
-            f"{entry.id}: the downloaded directory has no readable {_SKILL_FILE}.",
+            f"{label}: the skill has no readable {_SKILL_FILE}.",
         )
     return clean
+
+
+def collision(root: Path, name: str, target: Path) -> str | None:
+    """Public alias of the name-collision check, shared with skill authoring."""
+    return _collision(root, name, target)
 
 
 def _collision(root: Path, name: str, target: Path) -> str | None:
@@ -125,6 +145,22 @@ def _collision(root: Path, name: str, target: Path) -> str | None:
             pass
         return str(skill_dir)
     return None
+
+
+async def write_skill_dir(members: dict[str, bytes], target: Path) -> None:
+    """Stage ``members`` and swap them into ``target`` (the install write path)."""
+    staged: Path | None = None
+    try:
+        staged = await asyncio.to_thread(_stage, members)
+        await asyncio.to_thread(_swap, staged, target)
+        staged = None
+    finally:
+        if staged is not None and staged.exists():
+            shutil.rmtree(staged, ignore_errors=True)
+        staging = state_mod.staging_root()
+        if staging is not None and staging.is_dir() and not any(staging.iterdir()):
+            with contextlib.suppress(OSError):
+                staging.rmdir()
 
 
 def _stage(members: dict[str, bytes]) -> Path:
@@ -166,8 +202,14 @@ def _source_for(entry: CatalogEntry):
     )
 
 
-async def install_skill(skill_id: str, *, force: bool = False) -> state_mod.InstalledSkill:
-    """Install or reinstall one catalog skill. Raises InstallError on refusal."""
+async def install_skill(
+    skill_id: str, *, force: bool = False, expected_revision: str | None = None
+) -> state_mod.InstalledSkill:
+    """Install or reinstall one catalog skill. Raises InstallError on refusal.
+
+    ``expected_revision`` is the revision the update diff showed. When the catalog
+    has moved since, nothing is written (UDR-0247 D4).
+    """
     if not catalog_mod.install_available():
         raise InstallError(
             "install_disabled",
@@ -182,6 +224,13 @@ async def install_skill(skill_id: str, *, force: bool = False) -> state_mod.Inst
             "unknown_skill",
             f"{skill_id} is not in the current catalog. Refresh the catalog and try again.",
             status=404,
+        )
+    if expected_revision is not None and expected_revision != entry.revision:
+        raise InstallError(
+            "revision_changed",
+            f"{entry.id} changed in the catalog after the update was reviewed. Review it again.",
+            status=409,
+            detail={"revision": entry.revision},
         )
 
     target = state_mod.skill_install_dir(entry.group, entry.name)
@@ -202,8 +251,6 @@ async def install_skill(skill_id: str, *, force: bool = False) -> state_mod.Inst
     state = state_mod.read_state()
     previous = state.installed.get(skill_id)
     if previous is not None and target.is_dir() and not force:
-        from app.skills.hashing import hash_skill_dir
-
         current_hash, _files = hash_skill_dir(target)
         if previous.content_hash and current_hash and current_hash != previous.content_hash:
             raise InstallError(
@@ -221,18 +268,7 @@ async def install_skill(skill_id: str, *, force: bool = False) -> state_mod.Inst
 
     members = _validate_members(entry, fetched.members)
 
-    staged: Path | None = None
-    try:
-        staged = await asyncio.to_thread(_stage, members)
-        await asyncio.to_thread(_swap, staged, target)
-        staged = None
-    finally:
-        if staged is not None and staged.exists():
-            shutil.rmtree(staged, ignore_errors=True)
-        staging = state_mod.staging_root()
-        if staging is not None and staging.is_dir() and not any(staging.iterdir()):
-            with contextlib.suppress(OSError):
-                staging.rmdir()
+    await write_skill_dir(members, target)
 
     record = state_mod.InstalledSkill(
         id=entry.id,
@@ -247,6 +283,8 @@ async def install_skill(skill_id: str, *, force: bool = False) -> state_mod.Inst
         files=sorted(members),
         license=entry.license,
         installed_at=state_mod.now_iso(),
+        trust=entry.trust,
+        ref=entry.ref,
     )
     state_mod.record_install(record)
     logger.info(
@@ -257,6 +295,73 @@ async def install_skill(skill_id: str, *, force: bool = False) -> state_mod.Inst
         record.source_revision or "unknown",
     )
     return record
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _dependency_file(rel: str) -> bool:
+    return PurePosixPath(rel).name in DEPENDENCY_FILES
+
+
+async def diff_skill(skill_id: str) -> dict:
+    """Compare the catalog commit of one skill with what is installed (PRP-0266 C2).
+
+    Downloads the catalog commit (one archive) and reports ``added``, ``changed`` and
+    ``removed`` paths with sizes, ``scripts_added``, ``dependencies_changed`` and
+    ``locally_modified``. Nothing is written. A skill that is not installed yet
+    reports every file as added, so the same dialog reviews a first install.
+    """
+    entry = catalog_mod.catalog_entries().get(skill_id)
+    if entry is None:
+        raise InstallError(
+            "unknown_skill",
+            f"{skill_id} is not in the current catalog. Refresh the catalog and try again.",
+            status=404,
+        )
+    source = _source_for(entry)
+    try:
+        fetched = await source.fetch_skill(entry)
+    except SourceError as exc:
+        raise InstallError("fetch_failed", str(exc), status=502) from exc
+    incoming = _validate_members(entry, fetched.members)
+
+    record = state_mod.read_state().installed.get(skill_id)
+    target = state_mod.skill_install_dir(entry.group, entry.name)
+    current: dict[str, bytes] = {}
+    if target is not None and target.is_dir():
+        for rel in iter_skill_files(target):
+            try:
+                current[rel] = (target / rel).read_bytes()
+            except OSError:
+                continue
+
+    added = sorted(set(incoming) - set(current))
+    removed = sorted(set(current) - set(incoming))
+    changed = sorted(rel for rel in set(incoming) & set(current) if _digest(incoming[rel]) != _digest(current[rel]))
+    locally_modified = False
+    if record is not None and current and record.content_hash:
+        locally_modified = hash_members(current) != record.content_hash
+
+    return {
+        "id": entry.id,
+        "name": entry.name,
+        "installed": record is not None,
+        "trust": entry.trust,
+        "repo": entry.repo,
+        "ref": entry.ref,
+        "commit": fetched.source_commit or entry.source_commit,
+        "revision": entry.revision,
+        "installed_revision": record.source_revision if record else "",
+        "added": [{"path": rel, "size": len(incoming[rel])} for rel in added],
+        "changed": [{"path": rel, "size": len(incoming[rel])} for rel in changed],
+        "removed": [{"path": rel, "size": len(current[rel])} for rel in removed],
+        "scripts_added": [rel for rel in added if rel.lower().endswith(_SCRIPT_SUFFIXES)],
+        "dependencies_changed": [rel for rel in added + changed + removed if _dependency_file(rel)],
+        "locally_modified": locally_modified,
+        "skill_md": (incoming.get(_SKILL_FILE) or b"")[:4000].decode("utf-8", errors="replace"),
+    }
 
 
 async def uninstall_skill(skill_id: str) -> state_mod.InstalledSkill:
@@ -289,4 +394,12 @@ async def uninstall_skill(skill_id: str) -> state_mod.InstalledSkill:
     return record
 
 
-__all__ = ["InstallError", "install_skill", "uninstall_skill"]
+__all__ = [
+    "InstallError",
+    "collision",
+    "diff_skill",
+    "install_skill",
+    "uninstall_skill",
+    "validate_members",
+    "write_skill_dir",
+]

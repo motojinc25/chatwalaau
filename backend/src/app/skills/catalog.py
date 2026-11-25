@@ -15,6 +15,12 @@ described anywhere else:
   the UI must render as "not in the current catalog" and never as "deleted
   upstream". A snapshot cannot tell the difference between an upstream deletion, a
   stale refresh and a source that failed (UDR-0147 D5).
+
+PRP-0266 adds three things: the catalog lists the sources an administrator added
+by URL next to the curated table, each source block and skill row carries its
+``trust`` label and ``ref``, and one source can be refreshed alone. The merged view
+also reports which script interpreters exist (``runtimes``) and marks skills
+written in the product (``local``).
 """
 
 from __future__ import annotations
@@ -30,11 +36,21 @@ from app.core.config import settings
 from app.demo import is_demo_mode
 from app.skills import state as state_mod
 from app.skills.hashing import hash_skill_dir
-from app.skills.sources import CatalogEntry, SourceDef, SourceError, build_source, load_source_defs
+from app.skills.runtimes import runtime_report
+from app.skills.sources import (
+    LOCAL_GROUP,
+    TRUST_CURATED,
+    CatalogEntry,
+    SourceDef,
+    SourceError,
+    build_source,
+    load_source_defs,
+    url_sources_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 INSTALLED_SOURCE_ID = "installed"
 
@@ -122,9 +138,19 @@ async def _list_one(definition: SourceDef) -> tuple[SourceDef, list[CatalogEntry
         return (definition, None, f"{definition.repo}: {exc.__class__.__name__}")
 
 
-async def refresh_catalog() -> dict[str, Any]:
-    """Rebuild the catalog snapshot from every configured source."""
-    definitions = load_source_defs()
+async def refresh_catalog(source_id: str | None = None) -> dict[str, Any]:
+    """Rebuild the catalog snapshot from every configured source, or from one.
+
+    With ``source_id`` only that source is listed; every other active source keeps
+    its previous block and skills unchanged (PRP-0266 C1).
+    """
+    active = load_source_defs()
+    if source_id is not None:
+        definitions = [d for d in active if d.id == source_id]
+        if not definitions:
+            raise KeyError(source_id)
+    else:
+        definitions = active
     previous = read_catalog()
     prev_sources = {str(s.get("id")): s for s in (previous.get("sources") or []) if isinstance(s, dict) and s.get("id")}
     prev_skills: dict[str, list[dict[str, Any]]] = {}
@@ -139,7 +165,18 @@ async def refresh_catalog() -> dict[str, Any]:
     skills_out: list[dict[str, Any]] = []
     failures = 0
 
-    for definition, entries, error in results:
+    listed = {d.id for d in definitions}
+    by_id = {definition.id: (definition, entries, error) for definition, entries, error in results}
+    for definition in active:
+        if definition.id in listed:
+            continue
+        # Not part of this refresh: keep what the previous snapshot said, as is.
+        if definition.id in prev_sources:
+            sources_out.append(prev_sources[definition.id])
+            skills_out.extend(prev_skills.get(definition.id, []))
+
+    for definition in definitions:
+        definition, entries, error = by_id[definition.id]
         block = definition.to_json()
         if entries is None:
             failures += 1
@@ -173,6 +210,8 @@ async def refresh_catalog() -> dict[str, Any]:
             skills_out.extend(entry.to_json() for entry in entries)
         sources_out.append(block)
 
+    order = {d.id: i for i, d in enumerate(active)}
+    sources_out.sort(key=lambda s: order.get(str(s.get("id")), len(order)))
     document = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now,
@@ -187,6 +226,16 @@ async def refresh_catalog() -> dict[str, Any]:
         f", {failures} source(s) kept stale entries" if failures else "",
     )
     return document
+
+
+def drop_source_from_catalog(source_id: str) -> None:
+    """Remove one source's block and skills from the snapshot (PRP-0266 C1)."""
+    document = read_catalog()
+    document["sources"] = [s for s in document.get("sources") or [] if isinstance(s, dict) and s.get("id") != source_id]
+    document["skills"] = [
+        s for s in document.get("skills") or [] if isinstance(s, dict) and s.get("source_id") != source_id
+    ]
+    write_catalog(document)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +259,10 @@ def _skill_row(
     row["missing"] = False
     row["installed_at"] = installed.installed_at if installed else ""
     row["enabled"] = entry.name not in disabled
+    row["local"] = entry.group == LOCAL_GROUP and entry.source_id == LOCAL_GROUP
+    if installed is not None:
+        # The label that applied at install time (UDR-0247 D3).
+        row["installed_trust"] = installed.trust
 
     if installed is None:
         return row
@@ -246,6 +299,8 @@ def _entry_from_ledger(installed: state_mod.InstalledSkill) -> CatalogEntry:
         total_bytes=0,
         has_scripts=any(f.lower().endswith((".py", ".sh", ".bash", ".js", ".mjs", ".cjs")) for f in installed.files),
         warnings=[],
+        trust=installed.trust or TRUST_CURATED,
+        ref=installed.ref,
     )
 
 
@@ -294,9 +349,20 @@ def build_view() -> dict[str, Any]:
             "error": None,
             "stale": False,
             "skill_count": installed_count,
+            "ref": "",
+            "trust": TRUST_CURATED,
         }
     ]
-    sources.extend(block for block in (document.get("sources") or []) if isinstance(block, dict))
+    added = set(state.sources)
+    for block in document.get("sources") or []:
+        if not isinstance(block, dict):
+            continue
+        block = dict(block)
+        # A schema_version 1 snapshot has no trust: its sources were all curated.
+        block.setdefault("trust", TRUST_CURATED)
+        block.setdefault("ref", "")
+        block["added"] = block.get("id") in added
+        sources.append(block)
 
     root = state_mod.skills_root()
     return {
@@ -305,8 +371,11 @@ def build_view() -> dict[str, Any]:
         "install_enabled": bool(settings.skill_install_enabled),
         "demo_mode": is_demo_mode(),
         "available": install_available(),
+        "url_sources_enabled": url_sources_enabled(),
         "skills_dir": str(root) if root is not None else "",
+        "runtimes": runtime_report(),
         "sources": sources,
+        "added_sources": [src.to_json() for src in sorted(state.sources.values(), key=lambda s: s.id)],
         "skills": rows,
     }
 
@@ -316,6 +385,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "build_view",
     "catalog_entries",
+    "drop_source_from_catalog",
     "install_available",
     "read_catalog",
     "refresh_catalog",

@@ -1276,6 +1276,19 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         ),
     ),
     SettingDescriptor(
+        "skill_url_sources_enabled",
+        "Sources added by URL",
+        "skills",
+        "bool",
+        SCOPE_RUNTIME,
+        parent="skill_install_enabled",
+        help=(
+            "Lets administrators add skill sources by URL (GitHub). Off keeps only the "
+            "curated source table; sources already added are kept but neither refreshed "
+            "nor installed from."
+        ),
+    ),
+    SettingDescriptor(
         "skill_source_github_token",
         "GitHub token",
         "skills",
