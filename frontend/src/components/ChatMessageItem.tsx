@@ -58,6 +58,7 @@ import { usePrivacyScreen } from '@/hooks/usePrivacyScreen'
 import { lazyWithReload } from '@/lib/lazy-with-reload'
 import { useChatSurfaceTier } from '@/lib/narrowSurface'
 import { openUploadFullSize } from '@/lib/uploads'
+import { splitUserFences, tidyTextSegment } from '@/lib/userFences'
 import { cn } from '@/lib/utils'
 import type { ChatMessage } from '@/types/chat'
 
@@ -310,7 +311,57 @@ function TTSDownloadButton({
 // (not persisted). A ResizeObserver re-measures when the column width changes.
 const USER_MSG_COLLAPSED_MAX_PX = 120 // ~5 lines at text-sm leading-relaxed
 
-function CollapsibleUserText({ content }: { content: string }) {
+// Fenced code blocks in a sent message (PRP-0267, UDR-0248, CTR-0004 v15). Only a
+// CLOSED fence is shown as quiet code, without its fence lines; every other piece
+// of the text stays plain (the body is not Markdown, CTR-0012 v2: no
+// MarkdownRenderer here). Display only: Copy, Edit and saving use the stored text.
+// `plain` is set while Privacy Screen is on: the redacted body is shown exactly as
+// before, with no fence parsing and no blank-line rule (UDR-0248 D5).
+function UserMessageBody({ content, plain }: { content: string; plain: boolean }) {
+  if (plain) return <>{content}</>
+  const segments = splitUserFences(content)
+  return (
+    <>
+      {segments.map((segment, index) => {
+        if (segment.kind === 'code') {
+          return (
+            <div
+              // biome-ignore lint/suspicious/noArrayIndexKey: segments are positional and re-derived from content
+              key={index}
+              data-testid="user-code-block"
+              className="relative my-1.5 rounded-md border border-border/60 bg-foreground/5 first:mt-0 last:mb-0">
+              {segment.info && (
+                <span
+                  data-testid="user-code-label"
+                  className="pointer-events-none absolute top-0.5 right-2 select-none font-sans text-[10px] text-muted-foreground/80">
+                  {segment.info}
+                </span>
+              )}
+              <pre
+                className={cn(
+                  'overflow-x-auto whitespace-pre px-2.5 pb-1.5 font-mono text-[0.85em] leading-snug',
+                  // The label sits above the first line, so a long first line never runs under it.
+                  segment.info ? 'pt-4' : 'pt-1.5',
+                )}>
+                <code>{segment.value}</code>
+              </pre>
+            </div>
+          )
+        }
+        const value = tidyTextSegment(
+          segment.value,
+          segments[index + 1]?.kind === 'code',
+          segments[index - 1]?.kind === 'code',
+        )
+        if (value === '' && segments.length > 1) return null
+        // biome-ignore lint/suspicious/noArrayIndexKey: segments are positional and re-derived from content
+        return <span key={index}>{value}</span>
+      })}
+    </>
+  )
+}
+
+function CollapsibleUserText({ content, plain = false }: { content: string; plain?: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
   const [expanded, setExpanded] = useState(false)
   const [overflowing, setOverflowing] = useState(false)
@@ -337,7 +388,7 @@ function CollapsibleUserText({ content }: { content: string }) {
           ref={ref}
           className="overflow-hidden whitespace-pre-wrap"
           style={collapsed ? { maxHeight: USER_MSG_COLLAPSED_MAX_PX } : undefined}>
-          {content}
+          <UserMessageBody content={content} plain={plain} />
         </div>
         {collapsed && (
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background to-transparent" />
@@ -638,7 +689,7 @@ function ChatMessageItemImpl({
               Show less all behave identically on scrambled text.
             */}
             <div className={cn(message.live?.provisional && 'opacity-60')}>
-              <CollapsibleUserText content={redact(message.content, `msg:${message.id}`)} />
+              <CollapsibleUserText content={redact(message.content, `msg:${message.id}`)} plain={redacted} />
             </div>
             <LiveBadge message={message} />
             {/* A turn sent by an MCP App View's ui/message (PRP-0240, UDR-0019 D13). */}
