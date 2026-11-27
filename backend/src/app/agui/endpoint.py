@@ -92,6 +92,10 @@ CITATION_MARKER_REPORT_LIMIT = 10
 MODEL_REFUSAL_EVENT = "model_refusal"
 # PRP-0260 (UDR-0241 D3): the turn is answered again without hosted web search.
 WEB_SEARCH_FALLBACK_EVENT = "web_search_fallback"
+# PRP-0268 (UDR-0249 D2): the turn starts again once after the provider cut its stream.
+STREAM_RESTART_EVENT = "run_restart"
+# PRP-0268 (UDR-0249 D4): RUN_ERROR.code of a cut stream that was not started again.
+STREAM_INTERRUPTED_CODE = "stream_interrupted"
 
 # ag-ui-protocol changed ReasoningMessageStartEvent.role from
 # Literal["assistant"] (<= 0.1.13) to Literal["reasoning"] (newer releases).
@@ -246,10 +250,12 @@ _MSG_STREAM_INTERRUPTED = (
     "The request itself was accepted (the provider returned 200 and started "
     "streaming), so this is a network interruption rather than a problem with "
     "the conversation -- nothing was charged for a completed answer, and no tool "
-    "ran twice. It was retried automatically if it failed before any output "
-    "appeared. Please resend your message. If it keeps happening at roughly the "
-    "same point each time, ask the operator to check for an idle timeout on the "
-    "path to the provider."
+    "ran twice. A turn that only read things is started again once by itself; "
+    "this one could not be (for example because it changed something, or it was "
+    "already started again). Use Retry to send it again -- it repeats the turn as "
+    "it was sent, including any tool that changes something. If it keeps happening "
+    "at roughly the same point each time, ask the operator to check for an idle "
+    "timeout on the path to the provider."
 )
 _MSG_TRANSIENT = (
     "The model provider returned a temporary server error (HTTP 5xx) "
@@ -893,6 +899,56 @@ async def _resilient_run(
             await asyncio.sleep(delay)
 
 
+_STREAM_RESTART_DELAY_SEC = 1.0
+
+
+class _StreamCut:
+    """Where :func:`_stop_on_stream_cut` leaves a cut stream (PRP-0268, UDR-0249 D1)."""
+
+    __slots__ = ("exc",)
+
+    def __init__(self) -> None:
+        self.exc: BaseException | None = None
+
+
+async def _stop_on_stream_cut(stream: AsyncGenerator[Any, None], cut: _StreamCut) -> AsyncGenerator[Any, None]:
+    """Yield ``stream``; a cut stream AFTER output ends it quietly and lands in ``cut``.
+
+    UDR-0249 D1. ``_resilient_run`` already retries a cut before any output (UDR-0133 C2),
+    so only a cut after output is held here, for the attempt loop to decide: start the
+    turn again once, or re-raise it to the run-error classifier. Every other error, and a
+    cut before any output, propagates unchanged.
+    """
+    produced = False
+    try:
+        async for update in stream:
+            if not isinstance(update, _RetryNotice):
+                produced = True
+            yield update
+    except Exception as exc:
+        if produced and _is_stream_interrupted_error(exc):
+            cut.exc = exc
+            return
+        raise
+
+
+def _stream_restart_blocked(*, enabled: bool, harness_run: bool, restart_ran: bool, tools: list[str]) -> str | None:
+    """Why a cut turn must NOT start again (UDR-0249 D1), or None when it may.
+
+    The first condition that fails is named, for the INFO log line (D2).
+    """
+    if not enabled:
+        return "the App Setting stream_interrupted_restart is off"
+    if harness_run:
+        return "a harness turn is not started again"
+    if restart_ran:
+        return "the turn was already started again once"
+    for name in tools:
+        if not is_read_only_tool(name):
+            return f"tool={name} is not read-only"
+    return None
+
+
 def _strip_pdf_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Remove PDF image_url entries from message content arrays.
 
@@ -1280,6 +1336,7 @@ async def _stream_with_reasoning(
     tc_name_current: str | None = None
     run_error = False
     error_message = ""
+    run_error_code: str | None = None
     # Auto Session Title (PRP-0077, CTR-0109): accumulate the visible assistant
     # text so the post-turn background task can summarize it without re-reading
     # the (frontend-saved) session file. Pre-initialized here so they are always
@@ -1365,6 +1422,8 @@ async def _stream_with_reasoning(
     turn_tools: list[str] = []
     last_attempt_hosted = 0
     web_search_tokens: list[Any] = []
+    # PRP-0268 (UDR-0249 D1): at most one restart after a cut stream per turn.
+    restart_ran = False
 
     try:
         # Pre-process: strip PDF image_url entries from messages before normalization.
@@ -1731,7 +1790,10 @@ async def _stream_with_reasoning(
             attempt_tools: list[str] = []
             hosted_started: dict[str, bool] = {}
             hosted_ended: set[str] = set()
-            async for update in _resilient_run(agent, messages, session, run_options, stats=run_stats):
+            cut = _StreamCut()
+            async for update in _stop_on_stream_cut(
+                _resilient_run(agent, messages, session, run_options, stats=run_stats), cut
+            ):
                 # v0.77.1: a transient upstream 5xx before any output triggers an
                 # automatic retry. The helper yields a _RetryNotice so we can tell
                 # the SPA a retry is happening (the run continues; no RUN_ERROR).
@@ -2244,6 +2306,9 @@ async def _stream_with_reasoning(
                         # PRP-0260 (UDR-0241 D4): saved with the turn, so the note survives a reload.
                         if fallback_ran:
                             usage_value["web_search_fallback"] = True
+                        # PRP-0268 (UDR-0249 D2): the note "started again" survives a reload.
+                        if restart_ran:
+                            usage_value["stream_restart"] = True
                         includes_cache_read = providers.input_tokens_include_cache_read(model_name)
                         base_tokens = context_base_tokens(last_usage, includes_cache_read=includes_cache_read)
                         if base_tokens is not None:
@@ -2268,26 +2333,85 @@ async def _stream_with_reasoning(
             last_attempt_hosted = attempt_hosted
             turn_hosted_searches += attempt_hosted
             turn_tools.extend(attempt_tools)
-            if unexpected_approval_tool is not None or fallback_ran or harness_run:
-                break
-            if not (settings.web_search_refusal_fallback and attempt_hosted > 0):
-                break
-            if not all(is_read_only_tool(name) for name in attempt_tools):
-                break
-            attempt_refusal = text_fold.refusal or ((split_text_refusal("".join(final_text_parts)) or ("", ""))[1])
-            if not attempt_refusal:
-                break
-            logger.warning(
-                "Model refusal: thread=%s run=%s model=%s refusal_chars=%d answer_chars=%d "
-                "hosted_searches=%d tools=%s; falling back to an answer without web search (UDR-0241 D3)",
-                thread_id,
-                run_id,
-                effective_model,
-                len(attempt_refusal),
-                len("".join(assistant_text_parts)),
-                attempt_hosted,
-                sorted(set(attempt_tools)),
-            )
+            if cut.exc is not None:
+                # PRP-0268 (UDR-0249 D1): the provider cut the stream after output. Start the
+                # turn again once when that is safe; otherwise the classifier reports it.
+                blocked = _stream_restart_blocked(
+                    enabled=bool(getattr(settings, "stream_interrupted_restart", True)),
+                    harness_run=harness_run,
+                    restart_ran=restart_ran,
+                    tools=attempt_tools,
+                )
+                if blocked is not None:
+                    logger.info(
+                        "Stream interrupted: thread=%s run=%s; not started again: %s (UDR-0249 D1)",
+                        thread_id,
+                        run_id,
+                        blocked,
+                    )
+                    raise cut.exc
+                logger.warning(
+                    "Stream interrupted: thread=%s run=%s model=%s attempt_seconds=%.1f updates=%d "
+                    "hosted_searches=%d tools=%s; starting the turn again once (UDR-0249 D1)",
+                    thread_id,
+                    run_id,
+                    effective_model,
+                    run_stats.elapsed,
+                    run_stats.updates,
+                    attempt_hosted,
+                    sorted(set(attempt_tools)),
+                )
+                # A call the cut left open ends here, so no card keeps spinning (D2).
+                open_calls = [hs_id for hs_id in hosted_started if hs_id not in hosted_ended]
+                if tool_call_id is not None:
+                    open_calls.append(tool_call_id)
+                for open_id in open_calls:
+                    yield encoder.encode(ToolCallEndEvent(type=EventType.TOOL_CALL_END, tool_call_id=open_id))
+                restart_event = CustomEvent(
+                    type=EventType.CUSTOM,
+                    name=STREAM_RESTART_EVENT,
+                    value={
+                        "run_id": run_id,
+                        "reason": STREAM_INTERRUPTED_CODE,
+                        "attempt_seconds": round(run_stats.elapsed, 1),
+                        "attempt_updates": run_stats.updates,
+                    },
+                )
+                restart_ran = True
+            else:
+                if unexpected_approval_tool is not None or fallback_ran or harness_run:
+                    break
+                if not (settings.web_search_refusal_fallback and attempt_hosted > 0):
+                    break
+                if not all(is_read_only_tool(name) for name in attempt_tools):
+                    break
+                attempt_refusal = text_fold.refusal or ((split_text_refusal("".join(final_text_parts)) or ("", ""))[1])
+                if not attempt_refusal:
+                    break
+                logger.warning(
+                    "Model refusal: thread=%s run=%s model=%s refusal_chars=%d answer_chars=%d "
+                    "hosted_searches=%d tools=%s; falling back to an answer without web search (UDR-0241 D3)",
+                    thread_id,
+                    run_id,
+                    effective_model,
+                    len(attempt_refusal),
+                    len("".join(assistant_text_parts)),
+                    attempt_hosted,
+                    sorted(set(attempt_tools)),
+                )
+                restart_event = CustomEvent(
+                    type=EventType.CUSTOM,
+                    name=WEB_SEARCH_FALLBACK_EVENT,
+                    value={"run_id": run_id, "hosted_searches": attempt_hosted},
+                )
+                fallback_ran = True
+                web_search_tokens.append(withhold_for_run(True))
+                run_options = {
+                    **run_options,
+                    "instructions": "\n\n".join(
+                        part for part in (run_options.get("instructions"), FALLBACK_INSTRUCTION) if part
+                    ),
+                }
             if reasoning_msg_id is not None:
                 yield encoder.encode(
                     ReasoningMessageEndEvent(type=EventType.REASONING_MESSAGE_END, message_id=reasoning_msg_id)
@@ -2296,17 +2420,11 @@ async def _stream_with_reasoning(
             if msg_id is not None:
                 yield encoder.encode(TextMessageEndEvent(type=EventType.TEXT_MESSAGE_END, message_id=msg_id))
                 msg_id = None
-            yield encoder.encode(
-                CustomEvent(
-                    type=EventType.CUSTOM,
-                    name=WEB_SEARCH_FALLBACK_EVENT,
-                    value={"run_id": run_id, "hosted_searches": attempt_hosted},
-                )
-            )
-            # The refused attempt leaves nothing behind: no answer text, no refusal, a new
-            # usage segment (UDR-0212 D3.3) and a fresh session object (the history comes
-            # from the session file, which the refused attempt never wrote).
-            fallback_ran = True
+            yield encoder.encode(restart_event)
+            # The refused (UDR-0241 D3) or cut (UDR-0249 D2) attempt leaves nothing behind:
+            # no answer text, no refusal, a new usage segment (UDR-0212 D3.3) and a fresh
+            # session object (the history comes from the session file, which the attempt
+            # never wrote).
             assistant_text_parts.clear()
             final_text_parts.clear()
             text_fold = TextFold("text")
@@ -2315,16 +2433,11 @@ async def _stream_with_reasoning(
             text_sanitizer = TextSanitizer()
             tool_call_id = None
             usage_fold.new_segment()
-            web_search_tokens.append(withhold_for_run(True))
-            run_options = {
-                **run_options,
-                "instructions": "\n\n".join(
-                    part for part in (run_options.get("instructions"), FALLBACK_INSTRUCTION) if part
-                ),
-            }
             if not harness_run:
                 session = AgentSession()
                 session.metadata = {"ag_ui_thread_id": thread_id, "ag_ui_run_id": run_id}
+            if cut.exc is not None:
+                await asyncio.sleep(_STREAM_RESTART_DELAY_SEC)
 
         if unexpected_approval_tool is not None:
             run_error = True
@@ -2336,6 +2449,9 @@ async def _stream_with_reasoning(
     except (OpenAINotFoundError, ChatClientException, TypeError) as exc:
         run_error = True
         error_message, known = _classify_run_error(exc, harness_run=harness_run)
+        # PRP-0268 (UDR-0249 D4): the SPA offers Retry and does not save the turn.
+        if _is_stream_interrupted_error(exc):
+            run_error_code = STREAM_INTERRUPTED_CODE
         if known:
             logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:
@@ -2359,6 +2475,8 @@ async def _stream_with_reasoning(
         # not wrapped (UDR-0162 D4).
         run_error = True
         error_message, known = _classify_run_error(exc, harness_run=harness_run)
+        if _is_stream_interrupted_error(exc):
+            run_error_code = STREAM_INTERRUPTED_CODE
         if known:
             logger.warning("AG-UI run error for thread %s: %s", thread_id, exc)
         else:
@@ -2550,6 +2668,7 @@ async def _stream_with_reasoning(
             RunErrorEvent(
                 type=EventType.RUN_ERROR,
                 message=error_message,
+                code=run_error_code,
             )
         )
         # The generation task will not run on an errored turn, so clear the

@@ -386,6 +386,18 @@ DESCRIPTORS: tuple[SettingDescriptor, ...] = (
         ),
     ),
     SettingDescriptor(
+        "stream_interrupted_restart",
+        "Start a turn again after the model connection drops",
+        "chat",
+        "bool",
+        SCOPE_RUNTIME,
+        help=(
+            "When the model provider cuts the answer's stream part-way and the turn so far only "
+            "read things (skills, web search, read-only tools), start the turn again once. "
+            "Otherwise the chat offers Retry (PRP-0268)."
+        ),
+    ),
+    SettingDescriptor(
         "session_import_max_bytes",
         "Chat import size cap (bytes)",
         "chat",

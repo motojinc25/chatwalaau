@@ -302,6 +302,9 @@ class Settings(BaseSettings):
     # PRP-0260 / UDR-0241 D3: after a Prompt-agent attempt that searched the web with the
     # hosted tool and was refused, answer once more without web search (Q1: on by default).
     web_search_refusal_fallback: bool = True
+    # PRP-0268 / UDR-0249 D1: a Prompt-agent turn whose stream the provider cut after output
+    # starts again once when every local tool it called only read (Q1: on by default).
+    stream_interrupted_restart: bool = True
 
     # Session Export/Import (CTR-0015, CTR-0006, PRP-0084 / UDR-0062 D5).
     # Maximum accepted size (bytes) of an uploaded chat import bundle (.zip).

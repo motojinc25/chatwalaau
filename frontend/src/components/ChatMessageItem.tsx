@@ -880,6 +880,16 @@ function ChatMessageItemImpl({
                 <span>Web search results could not be used for this answer, so it was written without web search.</span>
               </div>
             )}
+            {/* PRP-0268 (UDR-0249 D2): the provider cut the stream and the turn was started
+                again once. Saved in usage, so it survives a reload. */}
+            {!isUser && message.usage?.stream_restart && (
+              <div
+                className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground"
+                data-testid="stream-restart-note">
+                <RefreshCw className="h-3.5 w-3.5 shrink-0" />
+                <span>Started again after the connection to the model dropped.</span>
+              </div>
+            )}
             {/* Unified in-progress indicator (PRP-0118 follow-up): while the turn is
                 still running -- and text has already arrived, so the top isWaiting
                 spinner is gone -- keep an animated "processing" cue at the tail until

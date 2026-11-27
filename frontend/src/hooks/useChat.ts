@@ -46,6 +46,8 @@ interface AguiEvent {
   toolCallName?: string
   name?: string
   value?: Record<string, unknown>
+  // RUN_ERROR.code (PRP-0268, CTR-0009 v28): `stream_interrupted` for a cut provider stream.
+  code?: string | null
   // Standard AG-UI workflow-run events (PRP-0123, CTR-0009 v19, UDR-0106 D2).
   stepName?: string
   activityType?: string
@@ -241,6 +243,14 @@ function withoutTrailing(content: string, tail: string): string {
   return trimmed.endsWith(tail) ? trimmed.slice(0, trimmed.length - tail.length).trimEnd() : content
 }
 const NOT_SAVED_SUFFIX = ' and this reply was not saved.'
+/**
+ * PRP-0268 (UDR-0249 D4): RUN_ERROR.code of a turn whose stream the model provider cut and
+ * that was not started again. Shown as the lost-reply notice with Retry; not saved.
+ */
+export const STREAM_INTERRUPTED_CODE = 'stream_interrupted'
+export const STREAM_INTERRUPTED_SUFFIX = ' This reply was not saved.'
+/** PRP-0268 (UDR-0249 D2): the status while the backend starts the turn again. */
+export const STREAM_RESTART_NOTICE = 'The connection to the model dropped -- starting this answer again...'
 const STREAM_ENDED_EARLY = 'the stream ended before the run finished'
 
 /** A save that is being retried: which retry is running, out of how many. */
@@ -711,6 +721,9 @@ export function useChat(options?: UseChatOptions) {
         let refusalFromText = false
         // PRP-0260 (UDR-0241 D5): the refused attempt used the hosted web search.
         let refusalWebSearch = false
+        // PRP-0268 (UDR-0249 D4): the provider cut the stream and the turn was not started
+        // again. Holds the run-error message; the turn is shown with Retry and not saved.
+        let streamInterrupted = ''
         // The turn's MCP App View (CTR-0068 v2): saved with the message so a reload rebuilds it.
         let completedMcpApp: McpAppEvent | undefined
         while (true) {
@@ -932,6 +945,11 @@ export function useChat(options?: UseChatOptions) {
                   streamSuccess = false
                   onWorkflowEventRef.current?.({ kind: 'run_error', message: event.message ?? 'An error occurred' })
                   const errorMsg = event.message ?? 'An error occurred'
+                  if (event.code === STREAM_INTERRUPTED_CODE) {
+                    // The text that arrived stays; the notice and Retry come after the stream.
+                    streamInterrupted = errorMsg
+                    break
+                  }
                   setMessages((prev) =>
                     prev.map((msg) =>
                       msg.id === assistantId
@@ -976,6 +994,17 @@ export function useChat(options?: UseChatOptions) {
                     // streamed. An event without `source` is a refusal part (older backend).
                     refusalFromText = value.source === 'text'
                     refusalWebSearch = value.web_search === true
+                  }
+                  if (event.name === 'run_restart') {
+                    // PRP-0268 (UDR-0249 D2): the provider cut the stream and the backend runs
+                    // the turn again once. The cut attempt's text is dropped; its reasoning and
+                    // tool calls stay. The note comes with the next usage event.
+                    const base = continued?.content ?? ''
+                    assistantContent = base
+                    refusalText = ''
+                    refusalFromText = false
+                    setMessages((prev) => prev.map((msg) => (msg.id === assistantId ? { ...msg, content: base } : msg)))
+                    onNoticeRef.current?.(STREAM_RESTART_NOTICE)
                   }
                   if (event.name === 'web_search_fallback') {
                     // PRP-0260 (UDR-0241 D4): the backend answers again without web search.
@@ -1072,6 +1101,24 @@ export function useChat(options?: UseChatOptions) {
         // the run's end event never came. That is the same lost connection on EVERY lane
         // (UDR-0177 D5, UDR-0214 D3): a cut reply must not be saved as if it were complete.
         if (committed && !runEnded) throw new Error(STREAM_ENDED_EARLY)
+
+        // A cut provider stream that was not started again (UDR-0249 D4): keep the text that
+        // arrived, show the lost-reply notice with Retry, and do NOT save the turn -- a cut
+        // answer saved as complete would be sent back to the model as if it had answered.
+        if (streamInterrupted) {
+          streamSuccess = false
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantId
+                ? {
+                    ...msg,
+                    streamLost: { message: `${streamInterrupted}${STREAM_INTERRUPTED_SUFFIX}`, retry: retryMode },
+                  }
+                : msg,
+            ),
+          )
+          return { committed, success: streamSuccess }
+        }
 
         // A refused turn (UDR-0220 D4) keeps the text answered before the refusal and shows
         // the refusal as a notice with the lost-reply Retry. It is NOT saved: a cut answer

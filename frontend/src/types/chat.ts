@@ -80,6 +80,11 @@ export interface UsageInfo {
    * refused following its hosted web search. Saved with the turn; shown as a note.
    */
   web_search_fallback?: boolean
+  /**
+   * PRP-0268 (UDR-0249 D2): the model provider cut the stream and the turn was started
+   * again once. Saved with the turn; shown as a note.
+   */
+  stream_restart?: boolean
   /** Cumulative consumption of the whole turn (PRP-0157). Absent on legacy messages. */
   turn?: TurnUsage
   /** Model that produced this turn (CTR-0009 usage event). */

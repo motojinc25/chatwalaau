@@ -21,8 +21,20 @@ _WITHHELD: ContextVar[bool] = ContextVar("chatwalaau_web_search_withheld", defau
 
 # UDR-0241 D3 (PRP-0260 Q2): a refused attempt runs again only when every LOCAL tool it
 # called is one of these. They read and never change anything, so repeating them has no
-# side effect. MCP tools are not listed: their effects are unknown here.
-READ_ONLY_TOOLS: frozenset[str] = frozenset({"rag_search", "ontology_query", "file_read", "file_glob", "file_grep"})
+# side effect. MCP tools are not listed: their effects are unknown here. The same list
+# decides the restart after a cut stream (PRP-0268, UDR-0249 D3), which added the two
+# skill tools; run_skill_script runs code and stays off.
+READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "rag_search",
+        "ontology_query",
+        "file_read",
+        "file_glob",
+        "file_grep",
+        "load_skill",
+        "read_skill_resource",
+    }
+)
 READ_ONLY_TOOL_PREFIXES: tuple[str, ...] = ("weather_",)
 
 # The extra instruction of the fallback attempt (UDR-0241 D3).
